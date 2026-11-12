@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Oak
+GenericName=Coding Agent
+Comment=A simple coding agent
+Exec=oak
+Icon=oak
+Terminal=false
+Categories=Development;
+StartupWMClass=oak

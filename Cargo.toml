@@ -1,0 +1,53 @@
+[package]
+name = "oak"
+version = "0.2.0"
+edition = "2024"
+
+[workspace]
+members = ["sdk", "plugins/hello"]
+exclude = ["vendor"]
+
+[dependencies]
+base64 = "0.23.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "7.0.0"
+ed25519-dalek = { version = "3.0", features = ["rand_core"] }
+eframe = "0.37"
+libloading = "0.8"
+parking_lot_core = "0.9"
+oak-sdk = { path = "sdk" }
+iana-time-zone = "0.1"
+memchr = "2.8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+open = "5.4.5"
+pulldown-cmark = { version = "0.13.5", default-features = false }
+rand = "0.10.3"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "gzip", "brotli", "deflate", "zstd"] }
+rfd = "0.17"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+sha2 = "0.11.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The monitors, to put the window back where it was (`src/geometry.rs`);
+# winit's own, so nothing new is built.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", default-features = false, features = ["allow-unsafe-code", "dl-libxcb", "randr"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+
+# Image decoding and scaling are very slow unoptimized; this keeps debug
+# builds and tests quick without slowing down compiling OAK itself.
+[profile.dev.package.image]
+opt-level = 3
+
+# Oak's plugins link their own copy of egui and work on the host's context:
+# these two keep state in statics that has to be shared or told apart
+# (`vendor/README.md`). A plugin's workspace needs the same two patches, at
+# the same paths.
+[patch.crates-io]
+parking_lot_core = { path = "vendor/parking_lot_core" }
+epaint = { path = "vendor/epaint" }

@@ -1,0 +1,4 @@
+# Linux scripts and the desktop entry must keep LF line endings.
+linux/* text eol=lf
+*.sh text eol=lf
+command/deploy/* text eol=lf

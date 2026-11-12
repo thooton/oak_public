@@ -1,0 +1,245 @@
+# The Oak app: build and test on every push and pull request, on Windows and
+# Linux, instead of doing it locally (the example plugin included). A push to main that passes is also
+# published as a release, v<version>, marked latest, which every Oak offers as
+# an update on its Home page (src/update.rs).
+#
+# The version is MAJOR.MINOR from Cargo.toml and the number of commits up to
+# the one built (build.rs), so each commit on main has its own and they only
+# go up. Bump MAJOR or MINOR in Cargo.toml for a bigger step.
+#
+# Release assets (src/update.rs looks for these names):
+#   oak-windows-x86_64.exe          the Windows app
+#   oak-linux-x86_64                the Linux binary, what the updater installs
+#   oak-linux-x86_64.tar.gz         the Linux bundle (linux/package.sh)
+# each with a .sha256 beside it.
+name: Oak app
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "src/**"
+      - "sdk/**"
+      - "plugins/**"
+      - "vendor/**"
+      - "assets/**"
+      - "prompts/**"
+      - "linux/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/client.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "sdk/**"
+      - "plugins/**"
+      - "vendor/**"
+      - "assets/**"
+      - "prompts/**"
+      - "linux/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/client.yml"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish a release from this run (main only)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# On main, runs go one after another so releases come out in order; elsewhere
+# a newer push cancels the run of the older one.
+concurrency:
+  group: oak-app-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Release builds are marked as such (no "-dev" in their version).
+  OAK_RELEASE: "1"
+  # Tests never look for updates.
+  OAK_NO_UPDATE: "1"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          # 22.04 so the binary needs no newer glibc than 2.35.
+          - name: Linux
+            os: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history: the version counts the commits.
+          fetch-depth: 0
+
+      - name: Version
+        id: version
+        run: |
+          major_minor=$(sed -n 's/^version = "\([0-9]*\)\.\([0-9]*\)\..*"/\1.\2/p' Cargo.toml | head -1)
+          version="$major_minor.$(git rev-list --count HEAD)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Oak $version" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-release
+          # Keep the compiled dependencies even when a test fails, so the
+          # next run doesn't start from nothing.
+          cache-on-failure: true
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libudev-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev \
+            libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev
+
+      - name: Test
+        env:
+          OAK_DIR: ${{ runner.temp }}/oak-test-profile
+        run: |
+          mkdir -p "$OAK_DIR"
+          cargo test --release --locked
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      # The example plugin, loaded into the whole app, headless: the plugin
+      # interface end to end (docs/PLUGINS.md). Alone in its process, since
+      # plugins load once.
+      - name: Test the example plugin
+        env:
+          OAK_DIR: ${{ runner.temp }}/oak-plugin-profile
+          OAK_PLUGINS: target/release
+        run: |
+          mkdir -p "$OAK_DIR"
+          cargo build --release --locked -p oak-hello
+          exe=target/release/oak
+          [ "$RUNNER_OS" = Windows ] && exe=target/release/oak.exe
+          "$exe" --plugins
+          cargo test --release --locked --lib the_example_plugin -- --ignored
+
+      - name: Check the version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          exe=target/release/oak
+          [ "$RUNNER_OS" = Windows ] && exe=target/release/oak.exe
+          got=$("$exe" --version | cut -d' ' -f2)
+          echo "built: $got, expected: $VERSION"
+          test "$got" = "$VERSION"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          bash linux/package.sh
+          mkdir -p dist
+          cp target/dist/oak-linux-x86_64.tar.gz dist/
+          cp target/dist/oak-linux-x86_64/oak dist/oak-linux-x86_64
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/release/oak.exe dist/oak-windows-x86_64.exe
+
+      - name: Checksums
+        run: |
+          cd dist
+          for f in *; do
+            if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi | sed 's/ \*/  /' > "$f.sha256"
+          done
+          cat *.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oak-${{ steps.version.outputs.version }}-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Notes
+        run: |
+          # The commits since the last release (their first lines, cut short).
+          prev=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname --merged HEAD | head -1)
+          {
+            echo "Oak $VERSION, built from ${GITHUB_SHA:0:10}."
+            echo
+            if [ -n "$prev" ]; then
+              echo "Since $prev:"
+              range="$prev..HEAD"
+            else
+              range="HEAD~10..HEAD"
+            fi
+            git log --no-merges --format='%h %s' "$range" -- src sdk plugins vendor assets prompts linux build.rs Cargo.toml Cargo.lock \
+              | head -40 | cut -c1-240 | sed 's/^/- /'
+            echo
+            echo "Oak installs this itself (Home, left of Duck.ai). By hand: Windows, oak-windows-x86_64.exe in place of oak.exe; Linux, unpack oak-linux-x86_64.tar.gz and run ./oak (./install.sh adds it to the launcher)."
+          } > notes.md
+          cat notes.md
+
+      - name: Publish v${{ needs.build.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          ls -l dist
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "$tag exists already: its assets are replaced."
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "Oak $VERSION" --notes-file notes.md --latest
+          fi
+
+      - name: Keep the 20 newest releases
+        run: |
+          gh release list --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(.createdAt) | reverse | .[20:] | .[].tagName' |
+          while read -r tag; do
+            echo "Removing $tag"
+            gh release delete "$tag" --yes --cleanup-tag || true
+          done

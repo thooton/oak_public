@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- OAK's app icon: an oak on jet black, in the app's oak green (#6aa84f). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1f1b"/>
+      <stop offset="1" stop-color="#060706"/>
+    </linearGradient>
+    <linearGradient id="crown" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8fcc6e"/>
+      <stop offset="1" stop-color="#5b9a42"/>
+    </linearGradient>
+    <linearGradient id="trunk" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4a7536"/>
+      <stop offset="1" stop-color="#2f4d22"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="53.5" fill="none" stroke="#ffffff" stroke-opacity="0.10"/>
+  <!-- Ground -->
+  <ellipse cx="128" cy="210" rx="70" ry="8" fill="#6aa84f" fill-opacity="0.25"/>
+  <!-- Trunk, flaring into roots -->
+  <path d="M110 211 C118 200 120 186 120 160 L120 140 L136 140 L136 160 C136 186 138 200 146 211 Z" fill="url(#trunk)"/>
+  <!-- Under the crown: a darker band of lobes for depth -->
+  <g fill="#3f6e2e">
+    <circle cx="74" cy="134" r="24"/>
+    <circle cx="182" cy="134" r="24"/>
+    <circle cx="106" cy="142" r="26"/>
+    <circle cx="150" cy="142" r="26"/>
+  </g>
+  <!-- Crown: overlapping round lobes, like an oak's -->
+  <g fill="url(#crown)">
+    <circle cx="128" cy="72" r="42"/>
+    <circle cx="82" cy="92" r="34"/>
+    <circle cx="174" cy="92" r="34"/>
+    <circle cx="58" cy="122" r="24"/>
+    <circle cx="198" cy="122" r="24"/>
+    <circle cx="100" cy="124" r="30"/>
+    <circle cx="156" cy="124" r="30"/>
+    <circle cx="128" cy="110" r="32"/>
+  </g>
+</svg>

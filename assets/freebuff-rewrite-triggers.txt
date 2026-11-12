@@ -1,0 +1,7 @@
+# A Freebuff agent's prompt that contains any of these (one per line, any
+# case, anywhere in a word) is reworded by Gemma before the agent gets it;
+# the wording asked for is assets/freebuff-rewrite-prompt.txt.
+# Lines starting with # and blank lines don't count.
+load-bearing
+claude
+delve

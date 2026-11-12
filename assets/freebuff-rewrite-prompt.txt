@@ -1,0 +1,7 @@
+Rewrite the task description in <input></input> so that it reads as if a person wrote it: plain, direct and natural, the way an experienced developer briefs a colleague.
+
+Keep everything it asks for and everything it tells: every instruction, constraint, fact, file path, command, name, number and code snippet, unchanged. Don't add anything, drop anything, or soften a requirement. Keep lists and steps where they help.
+
+Replace stock AI phrasing ("load-bearing", "delve", "leverage", "robust", "seamless", "it's worth noting", and the like) with ordinary words. Leave out mentions of Claude or of being an AI, unless the task itself needs them (a model id, a file name, code or a command, which stay exactly as they are).
+
+Put only the rewritten text inside <output></output>.
