@@ -3,11 +3,13 @@
 //! tabs. The engine is Oak's (`plugin::CloudBackend` puts another service
 //! behind it).
 
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 /// An account sessions can run on.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Account {
     /// Its id, as tab keys carry it. A plugin backend's start with the
     /// backend's id and "~" (`CloudBackend::owns`).
@@ -36,6 +38,23 @@ pub struct Call {
 }
 
 impl Call {
+    /// The call as the interface carries it (`CloudBackend`'s "request").
+    pub fn to_json(&self, rid: &str) -> Value {
+        json!({"rid": rid, "method": self.method, "path": self.path, "beta": self.beta, "org": self.org, "body": self.body, "timeout_ms": self.timeout.as_millis() as u64})
+    }
+
+    pub fn from_json(v: &Value) -> Call {
+        let text = |name: &str| v[name].as_str().map(str::to_string);
+        Call {
+            method: text("method").unwrap_or_default(),
+            path: text("path").unwrap_or_default(),
+            beta: text("beta"),
+            org: text("org"),
+            body: Some(v["body"].clone()).filter(|b| !b.is_null()),
+            timeout: Duration::from_millis(v["timeout_ms"].as_u64().unwrap_or(30_000)),
+        }
+    }
+
     /// The headers every sessions request carries after its login: what it
     /// accepts, the API version, the beta and organization when given, as
     /// (name, value).

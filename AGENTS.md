@@ -7,14 +7,16 @@ OpenRouter, NodeClub, Freebuff, or a llama.cpp server of your own. Cloud session
 in Anthropic's cloud on your Claude accounts.
 
 Oak is one executable. It loads plugins when it starts: dynamic libraries that add tabs, cloud
-backends, themes, fonts, system prompts and more ([docs/PLUGINS.md](docs/PLUGINS.md)).
+backends, themes, fonts, system prompts and more, through a stable C interface
+([docs/PLUGINS.md](docs/PLUGINS.md)).
 
 The repository:
 
 - `src/`: the app. Every file opens with a comment saying what it holds; `lib.rs` has the app's
   state, its screens and the frame loop (`main.rs` only calls it).
-- `sdk/`: `oak-sdk`, what plugins are written against. `plugins/hello`: an example plugin.
-  `vendor/`: two crates patched so that plugins can share the window (`vendor/README.md`).
+- `sdk/`: the plugin interface (`sdk/src/abi.rs`, and the C header written from it,
+  `sdk/include/oak_plugin.h`) and `oak-sdk`, its Rust wrapper. `plugins/hello` and
+  `plugins/hello-c`: example plugins in Rust and in C.
 - `prompts/`: the system prompt, compiled in. `assets/`: fonts, logos and pictures (with the
   scripts that make some of them). `linux/`: the self-contained Linux bundle. `scripts/`: checks.
 
@@ -52,9 +54,11 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
   `whole_app_pane_keeps_its_width`. `upgrade_real_conversations` loads a copy of real
   conversations (`OAK_UPGRADE_FROM`).
 - Plugins, headless, each alone (plugins load once per process):
-  `the_example_plugin_draws_in_the_window` (after `cargo build -p oak-hello`, with
-  `OAK_PLUGINS=target/debug`) and `every_plugin_draws` (whatever `OAK_PLUGINS` holds);
-  docs/PLUGINS.md has both.
+  `the_example_plugins_draw_in_the_window` (after `cargo build -p oak-hello`, with
+  `OAK_PLUGINS=target/debug`; it compiles the C example itself) and `every_plugin_draws`
+  (whatever `OAK_PLUGINS` holds); docs/PLUGINS.md has both. The interface's own tests are in
+  `sdk/src/abi.rs` (the header and the record of each version are current, and no version
+  breaks an earlier one) and `src/plugins/api.rs` (the SDK against Oak's table, in process).
 
 To use the app on a virtual display (Linux), with a scratch config folder:
 
@@ -86,11 +90,8 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
   then git's saved login). "Update available" downloads the build, checks its SHA-256 and swaps
   the executable; "Restart to update" restarts into it (pausing conversations at work to resume
   after). `OAK_NO_UPDATE=1` turns it off.
-- Plugins run only in the Oak they were built for, so an update also installs the release's
-  builds of the plugins running on the machine: assets named as their libraries are
-  (`liboak_hello.so`), each with a `.sha256`. A release that lacks one of them isn't offered, and
-  Home says which plugin holds it back. Whoever distributes plugins publishes them in the same
-  release as the Oak they were built with.
+- An update replaces Oak alone. Plugins aren't part of it and don't need rebuilding for it: the
+  plugin interface only grows.
 - `linux/package.sh` makes `target/dist/oak-linux-x86_64.tar.gz`: unpack it anywhere and run
   `./oak`, or `./install.sh` to add it to the launcher and `~/.local/bin` (`--uninstall` undoes
   it). It links only glibc and libgcc_s; fonts, prompts and TLS are built in, and OpenGL, X11 or
@@ -299,9 +300,11 @@ isn't loaded stays in its tab and says so.
 
 ## Plugins
 
-[docs/PLUGINS.md](docs/PLUGINS.md): what a plugin can add, how Oak finds and checks them, how to
-write, build and test one, and why a plugin has to be built together with the Oak it is loaded
-into. In short: `cdylib` crates in this workspace (or in one made of this source plus theirs),
-depending on `oak-sdk` and on `oak`, drawing straight into Oak's egui window; Oak refuses a
-library whose build differs from its own in any way that matters, and a plugin that panics is
-stopped without taking Oak down.
+[docs/PLUGINS.md](docs/PLUGINS.md): what a plugin can add, how Oak finds them, the interface and
+how it stays stable, and how to write, build and test one. In short: a plugin is a dynamic
+library that exports one C function, `oak_plugin`, and is handed a table of C functions
+(`OakApi`) to register its parts and to draw with; Oak draws everything, the plugin says what.
+The table only grows at its end and structs only at theirs, so a plugin built once runs in
+every later Oak, and it can be written in any language (`sdk/include/oak_plugin.h`); `oak-sdk`
+is the Rust wrapper, shaped like egui. Changing the interface: `sdk/src/abi.rs` only, at the
+ends, then `OAK_WRITE_HEADER=1 OAK_WRITE_ABI=1 cargo test -p oak-sdk` (docs/PLUGINS.md).

@@ -1,7 +1,8 @@
 //! A theme: colors only. Oak's own is built in; a plugin adds others
-//! (`plugin::ThemeDef`).
+//! (`plugin::ThemeDef`), and reads the one in use from `App::theme`.
 
-use crate::egui::Color32;
+use crate::abi::OakTheme;
+use crate::egui::{Color32, color_out};
 
 /// A theme is colors only.
 #[derive(Clone, Debug, PartialEq)]
@@ -51,6 +52,24 @@ pub struct Palette {
 }
 
 impl Theme {
+    /// The theme as the interface carries it.
+    pub fn from_raw(t: &OakTheme) -> Theme {
+        Theme {
+            bg: color_out(t.bg),
+            panel: color_out(t.panel),
+            panel2: color_out(t.panel2),
+            ink: color_out(t.ink),
+            ink2: color_out(t.ink2),
+            ink3: color_out(t.ink3),
+            ink4: color_out(t.ink4),
+            accent: color_out(t.accent),
+            line: color_out(t.line),
+            error: color_out(t.error),
+            tool_bg: color_out(t.tool_bg),
+            tool_hover: color_out(t.tool_hover),
+        }
+    }
+
     /// The theme of a palette: its colors, the line (the ink, faded), and
     /// the tool rows' backgrounds (the ink over the page).
     pub fn from_palette(p: Palette) -> Theme {

@@ -10,7 +10,7 @@
 //! minimap, their ink (`draw_long`).
 
 use crate::Theme;
-pub use oak_sdk::ui::{CODE, ICONS, code_font, icon_font};
+pub use crate::look::{CODE, ICONS, code_font, icon_font};
 use crate::highlight;
 use eframe::egui::{
     self, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Id, Label, Layout, Margin, RichText, ScrollArea,
@@ -408,7 +408,7 @@ pub fn faces() -> Vec<(String, String)> {
 }
 
 /// The plugin font with this id, when its plugin is loaded.
-pub fn plugin_face(id: &str) -> Option<&'static std::sync::Arc<dyn oak_sdk::FontDef>> {
+pub fn plugin_face(id: &str) -> Option<&'static std::sync::Arc<crate::plugins::FontDef>> {
     crate::plugins::parts().fonts.iter().find(|f| id != PLEX && f.id() == id)
 }
 

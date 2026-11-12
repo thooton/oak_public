@@ -5,7 +5,6 @@ edition = "2024"
 
 [workspace]
 members = ["sdk", "plugins/hello"]
-exclude = ["vendor"]
 
 [dependencies]
 base64 = "0.23.1"
@@ -14,7 +13,6 @@ dirs = "7.0.0"
 ed25519-dalek = { version = "3.0", features = ["rand_core"] }
 eframe = "0.37"
 libloading = "0.8"
-parking_lot_core = "0.9"
 oak-sdk = { path = "sdk" }
 iana-time-zone = "0.1"
 memchr = "2.8"
@@ -43,11 +41,3 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 # builds and tests quick without slowing down compiling OAK itself.
 [profile.dev.package.image]
 opt-level = 3
-
-# Oak's plugins link their own copy of egui and work on the host's context:
-# these two keep state in statics that has to be shared or told apart
-# (`vendor/README.md`). A plugin's workspace needs the same two patches, at
-# the same paths.
-[patch.crates-io]
-parking_lot_core = { path = "vendor/parking_lot_core" }
-epaint = { path = "vendor/epaint" }

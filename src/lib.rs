@@ -33,6 +33,7 @@ mod gateway;
 mod images;
 mod instructions;
 mod local;
+mod look;
 mod measure;
 mod nodeclub;
 mod oak;
@@ -519,6 +520,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.sync_zoom(ui.ctx());
         let t = theme::theme(&self.settings.theme);
+        plugins::begin_frame(ui.ctx(), &t);
         let plain = egui::Frame::new().fill(t.bg);
         // A clicked image, over everything but the title bar.
         let style = images::ViewerStyle { ink: t.ink, ink3: t.ink3, line: t.line, panel: t.panel };
@@ -695,11 +697,6 @@ fn append_crash(path: &std::path::Path, thread: &str, text: &str) {
         let _ = f.write_all(entry.as_bytes());
     }
 }
-
-/// What a plugin's crate names so that it depends on this one, and cargo
-/// builds its copies of the crates it shares with Oak exactly as Oak's
-/// (`oak_sdk::export_plugin!`, `docs/PLUGINS.md`).
-pub const PLUGIN_PIN: &str = env!("CARGO_PKG_VERSION");
 
 /// Oak, from its command line to its last save: what the binary runs.
 pub fn main() -> eframe::Result {

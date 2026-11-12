@@ -1,21 +1,14 @@
-//! The window as plugins see it (`oak_sdk::App`): what a plugin's tab, form
-//! or hook can do to the tabs, the message box and the New screen while it
-//! draws.
+//! The window as plugins reach it (`plugins::api`'s `app_` functions): what
+//! a plugin's tab, form or hook can do to the tabs, the message box and
+//! the New screen while it draws.
 
 use super::*;
 use oak_sdk::chat::Chat;
 use oak_sdk::host::NewConversation;
 
-impl oak_sdk::App for App {
-    fn theme(&self) -> Theme {
-        theme::theme(&self.settings.theme)
-    }
-
-    fn open(&mut self, key: &str) {
-        App::open(self, key.to_string());
-    }
-
-    fn close_tabs(&mut self, gone: &dyn Fn(&str) -> bool) {
+impl App {
+    /// Closes the tabs `gone` says to, and forgets them as tabs to reopen.
+    pub(crate) fn plugin_close_tabs(&mut self, gone: &dyn Fn(&str) -> bool) {
         while let Some(i) = self.settings.tabs.iter().rposition(|id| gone(id)) {
             App::close_tabs(self, i, tabs::TabClose::One);
         }
@@ -24,19 +17,21 @@ impl oak_sdk::App for App {
         self.plugin_chats.retain(|id, _| !gone(id));
     }
 
-    fn shown(&self) -> Option<String> {
+    /// The key of the tab shown, when one is.
+    pub(crate) fn plugin_shown(&self) -> Option<String> {
         match (&self.screen, self.page) {
             (Screen::Chat(id), Page::Chats) => Some(id.clone()),
             _ => None,
         }
     }
 
-    fn go_home(&mut self, tab: &str) {
+    pub(crate) fn plugin_go_home(&mut self, tab: &str) {
         self.page = Page::Home;
         self.home_list = tab.to_string();
     }
 
-    fn go_new(&mut self, kind: &str) {
+    /// Shows the New screen with `kind` picked.
+    pub(crate) fn plugin_go_new(&mut self, kind: &str) {
         self.screen = Screen::New;
         self.page = Page::Chats;
         self.hint = None;
@@ -49,19 +44,8 @@ impl oak_sdk::App for App {
         }
     }
 
-    fn hint(&mut self, text: Option<String>) {
-        self.hint = text;
-    }
-
-    fn input(&mut self) -> &mut String {
-        &mut self.input
-    }
-
-    fn attachments(&mut self) -> &mut Vec<Value> {
-        &mut self.attachments
-    }
-
-    fn conversations(&self) -> Vec<oak_sdk::host::Conversation> {
+    /// This machine's conversations (not side chats, not subagents).
+    pub(crate) fn plugin_conversations(&self) -> Vec<oak_sdk::host::Conversation> {
         let mut list: Vec<oak_sdk::host::Conversation> = self
             .sessions
             .iter()
@@ -85,8 +69,8 @@ impl oak_sdk::App for App {
         list
     }
 
-    fn start_conversation(&mut self, new: NewConversation) -> Result<String, String> {
-        let Some(ctx) = crate::plugins::host().context() else { return Err("Oak's window isn't up yet.".into()) };
+    pub(crate) fn plugin_start_conversation(&mut self, new: NewConversation) -> Result<String, String> {
+        let Some(ctx) = crate::plugins::context() else { return Err("Oak's window isn't up yet.".into()) };
         self.hint = None;
         let role = if new.role.is_empty() { self.settings.role.clone() } else { new.role };
         match self.start_conversation_as(new.text, new.files, None, Some((role, new.title)), &ctx) {
@@ -95,12 +79,8 @@ impl oak_sdk::App for App {
         }
     }
 
-    fn local_form(&mut self, ui: &mut Ui) {
-        let t = theme::theme(&self.settings.theme);
-        self.local_rows(ui, &t);
-    }
-
-    fn transcript(&mut self, ui: &mut Ui, key: &str, version: u64, make: &mut dyn FnMut() -> Chat, tail_sig: u64, tail: &mut dyn FnMut(&mut Ui)) {
+    /// Draws a transcript a plugin has, as a conversation's is drawn.
+    pub(crate) fn plugin_transcript(&mut self, ui: &mut Ui, key: &str, version: u64, make: &mut dyn FnMut() -> Chat, tail_sig: u64, tail: &mut dyn FnMut(&mut Ui)) {
         let t = theme::theme(&self.settings.theme);
         if self.plugin_chats.get(key).is_none_or(|(v, ..)| *v != version) {
             let (conv, live) = as_conversation(key, make());
@@ -111,7 +91,7 @@ impl oak_sdk::App for App {
         chat_view::read_only_view(ui, &t, conv, live, list, tail_sig, |ui| tail(ui));
     }
 
-    fn cloud_list(&mut self, ui: &mut Ui, backend: &str) {
+    pub(crate) fn plugin_cloud_list(&mut self, ui: &mut Ui, backend: &str) {
         let Some(provider) = cloud::Provider::from_id(backend) else { return };
         let t = theme::theme(&self.settings.theme);
         if let Some(key) = cloud_list_view(ui, &t, provider) {

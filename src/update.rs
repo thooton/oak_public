@@ -21,11 +21,8 @@
 //! from GitHub's storage, which the API redirects to (the token isn't sent
 //! there).
 //!
-//! Plugins run only in the Oak they were built for (`docs/PLUGINS.md`), so
-//! an update brings the release's builds of the plugins running here too
-//! (assets named as their libraries are, each with its `.sha256`), put in
-//! place of the libraries before Oak's own file is. A release without one
-//! of them isn't offered: Home says which plugin holds it back.
+//! Plugins aren't part of an update: their interface is stable
+//! (`docs/PLUGINS.md`), so the ones installed keep running in the new Oak.
 //!
 //! Replacing a running executable: Linux renames the new file over it (the
 //! running process keeps the old one open). Windows can't overwrite a
@@ -74,17 +71,6 @@ pub(crate) struct Release {
     pub(crate) url: String,
     asset: u64,
     sum: Option<u64>,
-    /// The release's builds of the plugins running here, installed with it.
-    plugins: Vec<PluginAsset>,
-}
-
-/// A plugin's library on this machine, and the release's build of it (the
-/// asset named as the file is, and its sum).
-#[derive(Clone, Debug, PartialEq)]
-struct PluginAsset {
-    path: PathBuf,
-    asset: u64,
-    sum: u64,
 }
 
 /// Where updating is.
@@ -139,9 +125,6 @@ fn exe() -> Option<&'static PathBuf> {
 pub(crate) fn start(ctx: &egui::Context) {
     let Some(exe) = exe() else { return };
     remove_leftovers(exe);
-    for plugin in crate::plugins::found() {
-        remove_leftovers(&plugin.path);
-    }
     if cfg!(test) || std::env::var_os("OAK_NO_UPDATE").is_some() || ASSET.is_none() || REPO.is_empty() {
         return;
     }
@@ -218,13 +201,7 @@ fn latest() -> Result<Option<Release>, String> {
         Err(e) if e.contains("HTTP 404") => return Err(NO_LOGIN.into()),
         Err(e) => return Err(e),
     };
-    release_from(&v, VERSION, &plugins_here())
-}
-
-/// The libraries of the plugins running here. (One that doesn't run holds
-/// no update back.)
-fn plugins_here() -> Vec<PathBuf> {
-    crate::plugins::found().into_iter().filter(|f| f.trouble.is_none()).map(|f| f.path).collect()
+    Ok(release_from(&v, VERSION))
 }
 
 const NO_LOGIN: &str = "GitHub shows no release, and this machine has no GitHub login for Oak to use (a private repository needs one). Sign in with `gh auth login` (or let git save its login for github.com, as a push does), or set GITHUB_TOKEN.";
@@ -291,44 +268,22 @@ fn quiet(cmd: &mut std::process::Command, input: Option<&str>) -> Option<String>
 
 /// The release GitHub describes as `v`, when it is newer than `current` and
 /// has this machine's asset.
-///
-/// A plugin runs only in the Oak it was built for (`docs/PLUGINS.md`), so
-/// the release must also have a build of every plugin running here
-/// (`plugins`, their libraries): an asset named as the library is, with its
-/// sum. Err: it lacks one, so installing it would stop that plugin.
-fn release_from(v: &serde_json::Value, current: &str, plugins: &[PathBuf]) -> Result<Option<Release>, String> {
-    let Some(tag) = v["tag_name"].as_str() else { return Ok(None) };
+fn release_from(v: &serde_json::Value, current: &str) -> Option<Release> {
+    let tag = v["tag_name"].as_str()?;
     let version = tag.trim_start_matches('v').to_string();
     if !newer(&version, current) {
-        return Ok(None);
+        return None;
     }
-    let (Some(name), Some(assets)) = (ASSET, v["assets"].as_array()) else { return Ok(None) };
+    let name = ASSET?;
+    let assets = v["assets"].as_array()?;
     let id = |n: &str| assets.iter().find(|a| a["name"] == n).and_then(|a| a["id"].as_u64());
-    let Some(asset) = id(name) else { return Ok(None) };
-    let (mut with, mut without) = (vec![], vec![]);
-    for path in plugins {
-        let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        match (id(&file), id(&format!("{file}.sha256"))) {
-            (Some(asset), Some(sum)) => with.push(PluginAsset { path: path.clone(), asset, sum }),
-            _ => without.push(file),
-        }
-    }
-    if !without.is_empty() {
-        return Err(format!(
-            "Oak {version} is out, but it has no build of {} (plugin{} running here, which only run in the Oak they were built for). Install an Oak and plugins built together, or remove {} to update.",
-            without.join(", "),
-            crate::plural(without.len()),
-            if without.len() == 1 { "it" } else { "them" },
-        ));
-    }
-    Ok(Some(Release {
+    Some(Release {
         version,
         notes: v["body"].as_str().unwrap_or_default().trim().to_string(),
         url: v["html_url"].as_str().unwrap_or_default().to_string(),
-        asset,
+        asset: id(name)?,
         sum: id(&format!("{name}.sha256")),
-        plugins: with,
-    }))
+    })
 }
 
 /// A version's numbers, "-dev" and the like left off: "0.1.276-dev" is
@@ -417,32 +372,13 @@ pub(crate) fn install(ctx: &egui::Context) {
 fn download_and_replace(r: &Release, progress: &dyn Fn(f32)) -> Result<(), String> {
     let exe = exe().ok_or("Oak's executable couldn't be found.")?;
     let sum_id = r.sum.ok_or("The release has no SHA-256 sum for this build.")?;
-    // Everything is downloaded and checked before anything is replaced:
-    // the plugins' builds (a small part of the progress), then Oak's.
-    let share = 1.0 / (r.plugins.len() + 1) as f32;
-    let mut plugins = vec![];
-    for (i, p) in r.plugins.iter().enumerate() {
-        let part = |f: f32| progress((i as f32 + f) * share);
-        plugins.push((&p.path, checked_download(p.asset, p.sum, &part)?));
-    }
-    let bytes = checked_download(r.asset, sum_id, &|f| progress(1.0 - share + f * share))?;
-    // The plugins first: should Oak's own file fail then, the old Oak
-    // starts without them and says why, and trying again finishes it.
-    for (path, bytes) in &plugins {
-        replace_exe(path, bytes).map_err(|e| format!("Couldn't put the new plugin in place of {}: {e}", path.display()))?;
-    }
-    replace_exe(exe, &bytes).map_err(|e| format!("Couldn't put the new version in place of {}: {e}", exe.display()))
-}
-
-/// Release asset `id`'s bytes, once they match the SHA-256 sum in asset `sum`.
-fn checked_download(id: u64, sum: u64, progress: &dyn Fn(f32)) -> Result<Vec<u8>, String> {
-    let sum = String::from_utf8_lossy(&download(sum, &|_| {})?).split_whitespace().next().unwrap_or_default().to_lowercase();
-    let bytes = download(id, progress)?;
+    let sum = String::from_utf8_lossy(&download(sum_id, &|_| {})?).split_whitespace().next().unwrap_or_default().to_lowercase();
+    let bytes = download(r.asset, progress)?;
     let got = api::hex(&Sha256::digest(&bytes));
     if sum.len() != 64 || got != sum {
         return Err(format!("The download doesn't match its SHA-256 sum (expected {sum}, got {got}); nothing was changed."));
     }
-    Ok(bytes)
+    replace_exe(exe, &bytes).map_err(|e| format!("Couldn't put the new version in place of {}: {e}", exe.display()))
 }
 
 /// Release asset `id`'s bytes, telling `progress` how far it is.
@@ -469,8 +405,7 @@ fn download(id: u64, progress: &dyn Fn(f32)) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Puts `bytes` in place of the executable (or the plugin's library) at
-/// `exe`, which may be running.
+/// Puts `bytes` in place of the executable at `exe`, which may be running.
 fn replace_exe(exe: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let name = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "oak".into());
     let new = exe.with_file_name(format!("{name}.new"));
@@ -573,44 +508,17 @@ mod tests {
                 {"id": 3, "name": "something-else"},
             ],
         });
-        let r = release_from(&v, "0.1.299", &[]).unwrap().expect("newer, with this machine's build");
+        let r = release_from(&v, "0.1.299").expect("newer, with this machine's build");
         assert_eq!((r.version.as_str(), r.asset, r.sum, r.notes.as_str()), ("0.1.300", 1, Some(2), "Notes"));
-        assert_eq!(release_from(&v, "0.1.300", &[]), Ok(None), "not newer");
+        assert_eq!(release_from(&v, "0.1.300"), None, "not newer");
         let mut other = v.clone();
         other["assets"] = serde_json::json!([{"id": 3, "name": "something-else"}]);
-        assert_eq!(release_from(&other, "0.1.1", &[]), Ok(None), "no build for this machine");
-    }
-
-    /// A plugin runs only in the Oak it was built for: a release is
-    /// installed with its builds of the plugins running here, and isn't
-    /// offered when it lacks one.
-    #[test]
-    fn a_release_brings_the_plugins_running_here() {
-        let Some(name) = ASSET else { return };
-        let lib = |n: &str| PathBuf::from("/plugins").join(format!("{n}.{}", std::env::consts::DLL_EXTENSION));
-        let (a, b) = (lib("liboak_a"), lib("liboak_b"));
-        let file = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
-        let v = serde_json::json!({
-            "tag_name": "v0.2.300",
-            "assets": [
-                {"id": 1, "name": name},
-                {"id": 2, "name": format!("{name}.sha256")},
-                {"id": 3, "name": file(&a)},
-                {"id": 4, "name": format!("{}.sha256", file(&a))},
-                {"id": 5, "name": file(&b)},
-            ],
-        });
-        let r = release_from(&v, "0.2.299", std::slice::from_ref(&a)).unwrap().unwrap();
-        assert_eq!(r.plugins, vec![PluginAsset { path: a.clone(), asset: 3, sum: 4 }]);
-        // (One without its sum counts as missing.)
-        let e = release_from(&v, "0.2.299", &[a, b.clone()]).unwrap_err();
-        assert!(e.contains(&file(&b)) && e.contains("0.2.300") && !e.contains("liboak_a"), "{e}");
-        assert_eq!(release_from(&v, "0.2.300", &[b]), Ok(None), "nothing to say when it isn't newer");
+        assert_eq!(release_from(&other, "0.1.1"), None, "no build for this machine");
     }
 
     #[test]
     fn a_new_look_keeps_what_is_under_way() {
-        let r = |v: &str| Release { version: v.into(), notes: String::new(), url: String::new(), asset: 1, sum: Some(2), plugins: vec![] };
+        let r = |v: &str| Release { version: v.into(), notes: String::new(), url: String::new(), asset: 1, sum: Some(2) };
         assert_eq!(next_phase(&Phase::None, Some(r("1.0.1"))), Phase::Available(r("1.0.1")));
         assert_eq!(next_phase(&Phase::Available(r("1.0.1")), None), Phase::None);
         assert_eq!(next_phase(&Phase::Ready(r("1.0.1")), Some(r("1.0.2"))), Phase::Ready(r("1.0.1")));

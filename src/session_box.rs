@@ -3,7 +3,7 @@
 //! boxes under it.
 
 use super::*;
-pub(crate) use oak_sdk::ui::{corner_area, corner_width, panel_box};
+pub(crate) use crate::look::{corner_area, corner_width, panel_box};
 use crate::widgets::{chevron_v, clip_width, enter_pressed, inset, is_open, left_with, sending_edit, paint_pause, set_open, state_dot};
 use crate::theme::mix;
 use crate::composer::GAP;

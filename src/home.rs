@@ -3,7 +3,7 @@
 //! Duck.ai) on the left and the accounts on the right.
 
 use super::*;
-pub(crate) use oak_sdk::ui::{BAR_ROOM, HOME_HEAD, list_rows, row_title_color};
+pub(crate) use crate::look::{BAR_ROOM, HOME_HEAD, list_rows, row_title_color};
 use crate::api::Provider;
 use crate::widgets::{add_field, clip_width, sign_in_heading, state_dot};
 
@@ -895,7 +895,7 @@ pub(crate) const LOCAL_TAB: &str = "local";
 pub(crate) const CLOUD_TAB: &str = "cloud";
 
 /// The plugin tab with this id, while it is there.
-fn plugin_tab(id: &str) -> Option<&'static Arc<dyn oak_sdk::HomeTab>> {
+fn plugin_tab(id: &str) -> Option<&'static Arc<crate::plugins::HomeTab>> {
     crate::plugins::parts().home_tabs.iter().find(|tab| tab.id() == id && tab.shown())
 }
 

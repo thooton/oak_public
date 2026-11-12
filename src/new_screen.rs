@@ -1,13 +1,13 @@
 //! The New screen: where a conversation starts (its folder, model, effort
 //! and system prompt), or a cloud session, or what a plugin adds
-//! (`oak_sdk::NewKind`).
+//! (a plugin's `NewKind`).
 
 use super::*;
 
 impl App {
     /// What a plugin adds that the New screen is set to start, if it is
     /// (and the plugin is loaded).
-    pub(crate) fn new_kind(&self) -> Option<&'static Arc<dyn oak_sdk::NewKind>> {
+    pub(crate) fn new_kind(&self) -> Option<&'static Arc<crate::plugins::NewKind>> {
         let id = self.new_kind.as_deref()?;
         crate::plugins::parts().new_kinds.iter().find(|k| k.id() == id)
     }

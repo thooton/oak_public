@@ -1,5 +1,5 @@
 # The Oak app: build and test on every push and pull request, on Windows and
-# Linux, instead of doing it locally (the example plugin included). A push to main that passes is also
+# Linux, instead of doing it locally (the example plugins included). A push to main that passes is also
 # published as a release, v<version>, marked latest, which every Oak offers as
 # an update on its Home page (src/update.rs).
 #
@@ -21,7 +21,6 @@ on:
       - "src/**"
       - "sdk/**"
       - "plugins/**"
-      - "vendor/**"
       - "assets/**"
       - "prompts/**"
       - "linux/**"
@@ -34,7 +33,6 @@ on:
       - "src/**"
       - "sdk/**"
       - "plugins/**"
-      - "vendor/**"
       - "assets/**"
       - "prompts/**"
       - "linux/**"
@@ -130,20 +128,22 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
-      # The example plugin, loaded into the whole app, headless: the plugin
-      # interface end to end (docs/PLUGINS.md). Alone in its process, since
-      # plugins load once.
-      - name: Test the example plugin
+      # The example plugins (one in Rust, one in C, which the test compiles
+      # itself), loaded into the whole app, headless: the plugin interface
+      # end to end (docs/PLUGINS.md). Alone in its process, since plugins
+      # load once.
+      - name: Test the example plugins
         env:
           OAK_DIR: ${{ runner.temp }}/oak-plugin-profile
           OAK_PLUGINS: target/release
+          CC: gcc
         run: |
           mkdir -p "$OAK_DIR"
           cargo build --release --locked -p oak-hello
           exe=target/release/oak
           [ "$RUNNER_OS" = Windows ] && exe=target/release/oak.exe
           "$exe" --plugins
-          cargo test --release --locked --lib the_example_plugin -- --ignored
+          cargo test --release --locked --lib the_example_plugins -- --ignored
 
       - name: Check the version
         env:

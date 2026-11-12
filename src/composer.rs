@@ -4,7 +4,7 @@
 //! smart context and the account's usage.
 
 use super::*;
-pub(crate) use oak_sdk::ui::{GAP, chat_column, kv, meter, paint_spinner, transcript_x};
+pub(crate) use crate::look::{GAP, chat_column, kv, meter, paint_spinner, transcript_x};
 use crate::widgets::{chevron_v, clip_width, draw_x, enter_pressed, icon_button, paint_pause, sending_edit, switch};
 use crate::theme::mix;
 

@@ -12,7 +12,7 @@
 // background.
 
 use crate::tools::Head;
-use oak_sdk::{CloudBackend, SessionKit, Tags};
+use crate::plugins::{CloudBackend, SessionKit, Tags};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -27,7 +27,7 @@ use cloud_carry::{carry_block, carry_text, history};
 
 pub use oak_sdk::cloud::{File, is_key, key, parse_key};
 /// An answer from the sessions API or a kit's server.
-type Response = oak_sdk::Response;
+type Response = crate::plugins::Response;
 
 const BETA: &str = "ccr-byoc-2025-07-29";
 const CLOUD_KIND: &str = "anthropic_cloud";
@@ -44,7 +44,7 @@ impl Provider {
     /// Oak's own: sessions on the Claude logins.
     pub const OWN: Provider = Provider(None);
 
-    fn backends() -> &'static [Arc<dyn CloudBackend>] {
+    fn backends() -> &'static [Arc<CloudBackend>] {
         &crate::plugins::parts().cloud_backends
     }
 
@@ -53,7 +53,7 @@ impl Provider {
         std::iter::once(Provider::OWN).chain((0..Self::backends().len()).map(|i| Provider(Some(i)))).collect()
     }
 
-    fn backend(self) -> Option<&'static Arc<dyn CloudBackend>> {
+    fn backend(self) -> Option<&'static Arc<CloudBackend>> {
         self.0.and_then(|i| Self::backends().get(i))
     }
 
@@ -112,7 +112,7 @@ impl Provider {
     }
 
     /// What its sessions are given, if a plugin brought that.
-    fn kit(self) -> Option<&'static Arc<dyn SessionKit>> {
+    fn kit(self) -> Option<&'static Arc<SessionKit>> {
         let id = self.id();
         if self.0.is_some() && self.backend().is_none() {
             return None;

@@ -1,12 +1,16 @@
 //! Oak's look beyond single widgets (`widgets`): the sizes its pages are
 //! laid out with, the boxes in a chat's corner, a list's rows, and the
 //! parts of Oak's own pages a plugin draws with (markdown, pictures, a
-//! chat's scrolling column), which run in Oak (`Host`).
+//! chat's scrolling column). Oak draws them (`abi`'s `oak_` functions);
+//! the theme arguments are kept for the code that passes them, and Oak
+//! uses the theme in use.
 
-use crate::egui::{self, Align, Color32, FontFamily, FontId, Id, Layout, Margin, Rangef, Rect, RichText, ScrollArea, Sense, Stroke, Ui, vec2};
+use crate::abi::*;
+use crate::egui::{self, Color32, FontFamily, FontId, Id, Rangef, Rect, Response, Ui, color_in, rect_in, rect_out, with_body, with_text_fn};
+use crate::rt::{api, carry, rethrow, s};
 use crate::theme::Theme;
-use crate::widgets::caption;
 use serde_json::Value;
+use std::ffi::c_void;
 
 /// The font family of Nerd Font icons.
 pub const ICONS: &str = "icons";
@@ -62,93 +66,55 @@ pub fn chat_column(area: Rangef) -> Rangef {
 /// How wide a box in a chat's top left corner is, in `area` (the chat's):
 /// None when the window is too narrow for one beside the transcript.
 pub fn corner_width(area: Rect) -> Option<f32> {
-    let room = chat_column(area.x_range()).min - 8.0 - (area.left() + GAP);
-    (room >= INFO_MIN_W).then(|| room.min(INFO_W))
+    let w = unsafe { (api().oak_corner_width)(&rect_in(area)) };
+    (w > 0.0).then_some(w)
 }
 
 /// The chat's top left corner, over the transcript: what `f` adds there,
 /// 8 points apart.
-pub fn corner_area(ctx: &egui::Context, name: &str, area: Rect, f: impl FnOnce(&mut Ui)) {
-    egui::Area::new(Id::unique(name)).order(egui::Order::Middle).fixed_pos(area.min + vec2(GAP, GAP)).show(ctx, |ui| {
-        ui.spacing_mut().item_spacing.y = 8.0;
-        f(ui);
-    });
+pub fn corner_area(_ctx: &egui::Context, name: &str, area: Rect, f: impl FnOnce(&mut Ui)) {
+    with_body(f, |body, user| unsafe { (api().oak_corner_area)(s(name), &rect_in(area), body, user) });
 }
 
 /// A box in the session column, `w` wide: `pad_y` above and below what
 /// `f` adds, `gap` between its rows.
-pub fn panel_box(ui: &mut Ui, t: &Theme, w: f32, pad_y: i8, gap: f32, f: impl FnOnce(&mut Ui)) {
-    egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.line)).inner_margin(Margin::symmetric(12, pad_y)).show(ui, |ui| {
-        ui.set_width(w - 26.0);
-        ui.spacing_mut().item_spacing.y = gap;
-        f(ui);
-    });
+pub fn panel_box(ui: &mut Ui, _t: &Theme, w: f32, pad_y: i8, gap: f32, f: impl FnOnce(&mut Ui)) {
+    let raw = ui.as_raw();
+    with_body(f, |body, user| unsafe { (api().oak_panel_box)(raw, w, pad_y as f32, gap, body, user) });
 }
 
 /// A caption and its value, at the row's two ends.
-pub fn kv(ui: &mut Ui, t: &Theme, key: &str, value: &str, color: Color32) -> egui::Response {
-    ui.horizontal(|ui| {
-        caption(ui, key, t.ink3);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(RichText::new(value).small().color(color)));
-    })
-    .response
+pub fn kv(ui: &mut Ui, _t: &Theme, key: &str, value: &str, color: Color32) -> Response {
+    let mut out = OakResponse::default();
+    unsafe { (api().oak_kv)(ui.as_raw(), s(key), s(value), color_in(color), &mut out) };
+    Response::of(out)
 }
 
 /// A thin bar `frac` full.
-pub fn meter(ui: &mut Ui, t: &Theme, w: f32, frac: f32, color: Color32) {
-    let (bar, _) = ui.allocate_exact_size(vec2(w, 3.0), Sense::hover());
-    ui.painter().rect_filled(bar, 0.0, t.panel2);
-    let fill = Rect::from_min_size(bar.min, vec2(bar.width() * frac.clamp(0.0, 1.0), bar.height()));
-    ui.painter().rect_filled(fill, 0.0, color);
+pub fn meter(ui: &mut Ui, _t: &Theme, w: f32, frac: f32, color: Color32) {
+    unsafe { (api().oak_meter)(ui.as_raw(), w, frac, color_in(color)) };
 }
 
-/// egui's spinner, with a painter: an arc going round, its length waxing
-/// and waning.
+/// A spinner in `rect`: an arc going round.
 pub fn paint_spinner(p: &egui::Painter, rect: Rect, color: Color32) {
-    p.ctx().request_repaint();
-    let radius = rect.width().min(rect.height()) * 0.5 - 1.5;
-    let time = p.ctx().input(|i| i.time);
-    let start = time * std::f64::consts::TAU;
-    let end = start + 240f64.to_radians() * time.sin();
-    let n = 24;
-    let points: Vec<egui::Pos2> = (0..n)
-        .map(|i| {
-            let a = start + (end - start) * i as f64 / n as f64;
-            rect.center() + radius * vec2(a.cos() as f32, a.sin() as f32)
-        })
-        .collect();
-    p.add(egui::Shape::line(points, Stroke::new(2.0, color)));
+    unsafe { (api().oak_spinner)(p.raw(), &rect_in(rect), color_in(color)) };
 }
 
-/// One of Home's lists (the conversations, a plugin's): `n` rows 58 points tall in a
-/// scroll area, a line between them, the one under the pointer lit. `row`
-/// draws row `i` in its rectangle, with its click.
-pub fn list_rows(ui: &mut Ui, t: &Theme, salt: &str, n: usize, empty: &str, mut row: impl FnMut(&mut Ui, usize, Rect, egui::Response)) {
-    if n == 0 {
-        crate::widgets::center_note(ui, t, ui.max_rect(), empty);
-        return;
+/// One of Home's lists: `n` rows 58 points tall in a scroll area, a line
+/// between them, the one under the pointer lit. `row` draws row `i` in
+/// its rectangle, with its click.
+pub fn list_rows(ui: &mut Ui, _t: &Theme, salt: &str, n: usize, empty: &str, mut row: impl FnMut(&mut Ui, usize, Rect, Response)) {
+    unsafe extern "C" fn draw<F: FnMut(&mut Ui, usize, Rect, Response)>(user: *mut c_void, ui: *mut OakUi, index: usize, rect: *const OakRect, row: *const OakResponse) {
+        let f = unsafe { &mut *(user as *mut F) };
+        let (rect, resp) = unsafe { (rect_out(*rect), Response::of(*row)) };
+        carry(|| f(&mut Ui::raw(ui), index, rect, resp));
     }
-    let soft = Color32::from_rgba_unmultiplied(t.ink.r(), t.ink.g(), t.ink.b(), 0x14);
-    // Only the rows in view are laid out (a long list cost a frame
-    // milliseconds); the rows touch, so the spacing `show_rows` steps by is
-    // none.
-    let spacing = ui.spacing().item_spacing.y;
-    ui.spacing_mut().item_spacing.y = 0.0;
-    ScrollArea::vertical().id_salt(salt).auto_shrink([false, false]).show_rows(ui, 58.0, n, |ui, shown| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let w = ui.available_width() - BAR_ROOM;
-        for i in shown {
-            let (rect, resp) = ui.allocate_exact_size(vec2(w, 58.0), Sense::click());
-            if resp.hovered() {
-                ui.painter().rect_filled(rect, 0.0, t.tool_hover);
-            }
-            if i + 1 < n {
-                ui.painter().hline(rect.left() + 12.0..=rect.right() - 12.0, rect.bottom() - 0.5, Stroke::new(1.0, soft));
-            }
-            row(ui, i, rect, resp.on_hover_cursor(egui::CursorIcon::PointingHand));
-        }
-    });
-    ui.spacing_mut().item_spacing.y = spacing;
+    fn tramp<F: FnMut(&mut Ui, usize, Rect, Response)>(_: &F) -> OakRow {
+        draw::<F>
+    }
+    let call = tramp(&row);
+    unsafe { (api().oak_list_rows)(ui.as_raw(), s(salt), n, s(empty), call, &mut row as *mut _ as *mut c_void) };
+    rethrow();
 }
 
 /// A `list_rows` row's title: brighter when hovered.
@@ -183,39 +149,50 @@ pub fn one_line(s: &str) -> String {
 
 /// Markdown, as a transcript shows it, selectable; `key` tells this text
 /// from the others on the page.
-pub fn markdown(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize)) {
-    crate::host().markdown(ui, t, text, key, false);
+pub fn markdown(ui: &mut Ui, _t: &Theme, text: &str, key: (usize, usize)) {
+    unsafe { (api().oak_markdown)(ui.as_raw(), s(text), key.0 as u64, key.1 as u64, 0) };
 }
 
 /// `markdown`, its code blocks colored for their language.
-pub fn markdown_highlighted(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize)) {
-    crate::host().markdown(ui, t, text, key, true);
+pub fn markdown_highlighted(ui: &mut Ui, _t: &Theme, text: &str, key: (usize, usize)) {
+    unsafe { (api().oak_markdown)(ui.as_raw(), s(text), key.0 as u64, key.1 as u64, OAK_MARKDOWN_HIGHLIGHT) };
 }
 
 /// The bar under a message (`msg`, its rectangle): Copy, and when it was sent.
-pub fn message_bar(ui: &mut Ui, t: &Theme, msg: Rect, id: Id, copy_text: impl Fn() -> String, at: Option<i64>) {
-    crate::host().message_bar(ui, t, msg, id, &copy_text, at);
+pub fn message_bar(ui: &mut Ui, _t: &Theme, msg: Rect, id: Id, copy_text: impl Fn() -> String, at: Option<i64>) {
+    let raw = ui.as_raw();
+    with_text_fn(&copy_text, |copy, user| unsafe { (api().oak_message_bar)(raw, &rect_in(msg), id.value(), copy, user, at.unwrap_or(0)) });
 }
 
-/// An image block, at most `max_h` tall; a click opens it large.
-pub fn image(ui: &mut Ui, block: &Value, max_h: f32) -> Option<egui::Response> {
-    crate::host().image(ui, block, max_h)
+/// An image block, at most `max_h` tall; a click opens it large. None:
+/// the block isn't a picture Oak can show.
+pub fn image(ui: &mut Ui, block: &Value, max_h: f32) -> Option<Response> {
+    let mut out = OakResponse::default();
+    let shown = unsafe { (api().oak_image)(ui.as_raw(), s(&block.to_string()), max_h, &mut out) };
+    shown.then(|| Response::of(out))
 }
 
 /// The right-click menu of a message in `rect`: Copy (the selection, or
 /// `message`), and what `extra` adds.
 pub fn copy_menu(ui: &mut Ui, id: Id, rect: Rect, message: Option<&dyn Fn() -> String>, extra: Option<&dyn Fn(&mut Ui)>) {
-    crate::host().copy_menu(ui, id, rect, message, extra);
+    let raw = ui.as_raw();
+    let rect = rect_in(rect);
+    let with_extra = |text: Option<OakTextFn>, text_user: *mut c_void| match extra {
+        Some(extra) => {
+            with_body(|ui| extra(ui), |body, user| unsafe { (api().oak_copy_menu)(raw, id.value(), &rect, text, text_user, Some(body), user) });
+        }
+        None => unsafe { (api().oak_copy_menu)(raw, id.value(), &rect, text, text_user, None, std::ptr::null_mut()) },
+    };
+    match message {
+        Some(message) => with_text_fn(message, |text, user| with_extra(Some(text), user)),
+        None => with_extra(None, std::ptr::null_mut()),
+    }
 }
 
 /// A chat drawn as widgets in the conversation's column of `ui`'s page,
 /// kept scrolled to the newest: `f` lays it out top down, its rows `gap`
 /// apart, under a 16-point margin.
-pub fn chat_scroll(ui: &mut Ui, t: &Theme, salt: impl std::hash::Hash + std::fmt::Debug, gap: f32, f: impl FnOnce(&mut Ui)) {
-    let mut f = Some(f);
-    crate::host().chat_scroll(ui, t, Id::unique(salt), gap, &mut |ui| {
-        if let Some(f) = f.take() {
-            f(ui);
-        }
-    });
+pub fn chat_scroll(ui: &mut Ui, _t: &Theme, salt: impl std::hash::Hash + std::fmt::Debug, gap: f32, f: impl FnOnce(&mut Ui)) {
+    let raw = ui.as_raw();
+    with_body(f, |body, user| unsafe { (api().oak_chat_scroll)(raw, Id::unique(salt).value(), gap, body, user) });
 }

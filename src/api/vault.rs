@@ -9,7 +9,7 @@ use super::*;
 use std::sync::Arc;
 
 /// The vault, when a plugin brought one and it is connected.
-pub(crate) fn vault() -> Option<&'static Arc<dyn oak_sdk::Vault>> {
+pub(crate) fn vault() -> Option<&'static Arc<crate::plugins::Vault>> {
     crate::plugins::vault().filter(|v| v.connected())
 }
 

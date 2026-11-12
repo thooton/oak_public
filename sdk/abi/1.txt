@@ -1,0 +1,595 @@
+abi 1
+api 1
+struct OakStr fixed
+  ptr: *constc_char
+  len: usize
+struct OakBytes fixed
+  ptr: *constu8
+  len: usize
+struct OakRect fixed
+  x0: f32
+  y0: f32
+  x1: f32
+  y1: f32
+struct OakResponse fixed
+  rect: OakRect
+  flags: u32
+  id: u32
+  drag_x: f32
+  drag_y: f32
+  pointer_x: f32
+  pointer_y: f32
+  widget: u64
+struct OakPlugin grows
+  size: u32
+  abi: u32
+  api: u32
+  reserved: u32
+  id: OakStr
+  name: OakStr
+  version: OakStr
+  about: OakStr
+  needs: OakStr
+  init: Option<OakInit>
+struct OakText grows
+  size: u32
+  flags: u32
+  text: OakStr
+  color: u32
+  points: f32
+  font: u32
+struct OakButton grows
+  size: u32
+  flags: u32
+  text: *constOakText
+  fill: u32
+  stroke_width: f32
+  stroke_color: u32
+  min_width: f32
+  min_height: f32
+  image: u64
+  image_width: f32
+  image_height: f32
+struct OakTextEdit grows
+  size: u32
+  flags: u32
+  id: u64
+  hint: OakStr
+  width: f32
+  rows: u32
+  char_limit: u32
+  font: u32
+  points: f32
+  text_color: u32
+struct OakLayout grows
+  size: u32
+  dir: u32
+  main_align: u32
+  cross_align: u32
+  flags: u32
+struct OakChild grows
+  size: u32
+  flags: u32
+  rect: OakRect
+  width: f32
+  height: f32
+  layout: *constOakLayout
+  id: u64
+struct OakScroll grows
+  size: u32
+  flags: u32
+  id: u64
+  max_height: f32
+  max_width: f32
+struct OakFrame grows
+  size: u32
+  flags: u32
+  fill: u32
+  stroke_width: f32
+  stroke_color: u32
+  radius: f32
+  pad_x: f32
+  pad_y: f32
+  margin_x: f32
+  margin_y: f32
+  radius_ne: f32
+  radius_sw: f32
+  radius_se: f32
+struct OakGrid grows
+  size: u32
+  flags: u32
+  id: u64
+  columns: u32
+  spacing_x: f32
+  spacing_y: f32
+  min_col_width: f32
+struct OakDrag grows
+  size: u32
+  flags: u32
+  min: f64
+  max: f64
+  speed: f64
+  prefix: OakStr
+  suffix: OakStr
+  decimals: u32
+  format: Option<OakNumberText>
+  user: *mutc_void
+struct OakWindow grows
+  size: u32
+  flags: u32
+  id: u64
+  title: OakStr
+  x: f32
+  y: f32
+  width: f32
+  height: f32
+  order: u32
+  pivot: u32
+struct OakImage grows
+  size: u32
+  sense: u32
+  texture: u64
+  width: f32
+  height: f32
+  tint: u32
+  radius: f32
+struct OakTheme grows
+  size: u32
+  bg: u32
+  panel: u32
+  panel2: u32
+  ink: u32
+  ink2: u32
+  ink3: u32
+  ink4: u32
+  accent: u32
+  line: u32
+  error: u32
+  tool_bg: u32
+  tool_hover: u32
+struct OakRequest grows
+  size: u32
+  flags: u32
+  method: OakStr
+  url: OakStr
+  headers: OakStr
+  body: OakBytes
+  timeout_ms: u64
+struct OakHomeTab grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  id: OakStr
+  label: OakStr
+  icon: OakStr
+  tip: OakStr
+  order: i32
+  shown: Option<OakAsk>
+  show: Option<OakBody>
+struct OakTabKind grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  owns: Option<OakAskKey>
+  show: Option<OakDrawKey>
+  corner: Option<OakCorner>
+  call: Option<OakCall>
+struct OakNewKind grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  id: OakStr
+  label: OakStr
+  icon: OakStr
+  tip: OakStr
+  heading: OakStr
+  form: Option<OakBody>
+  call: Option<OakCall>
+struct OakCloudBackend grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  id: OakStr
+  name: OakStr
+  icon: OakStr
+  tip: OakStr
+  about: OakStr
+  form: Option<OakBody>
+  call: Option<OakCall>
+struct OakSessionKit grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  backend: OakStr
+  call: Option<OakCall>
+struct OakThemeDef grows
+  size: u32
+  line_alpha: u32
+  id: OakStr
+  name: OakStr
+  bg: u32
+  panel: u32
+  panel2: u32
+  ink: u32
+  ink2: u32
+  ink3: u32
+  ink4: u32
+  accent: u32
+  error: u32
+struct OakFontDef grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  id: OakStr
+  name: OakStr
+  call: Option<OakCall>
+struct OakRole grows
+  size: u32
+  flags: u32
+  id: OakStr
+  name: OakStr
+  text: OakStr
+  icon: OakStr
+struct OakVault grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  call: Option<OakCall>
+struct OakSettings grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  title: OakStr
+  order: i32
+  show: Option<OakBody>
+struct OakGate grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  shut: Option<OakAsk>
+  show: Option<OakBody>
+struct OakHooks grows
+  size: u32
+  flags: u32
+  user: *mutc_void
+  started: Option<OakDo>
+  frame: Option<OakDo>
+  providers_top: Option<OakBody>
+  exiting: Option<OakDo>
+callback OakSink(user: *mutc_void, ptr: *constu8, len: usize)
+callback OakBody(user: *mutc_void, ui: *mutOakUi)
+callback OakAsk(user: *mutc_void) -> bool
+callback OakDo(user: *mutc_void)
+callback OakAskKey(user: *mutc_void, key: OakStr) -> bool
+callback OakDrawKey(user: *mutc_void, ui: *mutOakUi, key: OakStr)
+callback OakCorner(user: *mutc_void, key: OakStr, area: *constOakRect)
+callback OakTextFn(user: *mutc_void, out: OakSink, out_user: *mutc_void)
+callback OakNumberText(user: *mutc_void, value: f64, out: OakSink, out_user: *mutc_void)
+callback OakRow(user: *mutc_void, ui: *mutOakUi, index: usize, rect: *constOakRect, row: *constOakResponse)
+callback OakCall(user: *mutc_void, method: OakStr, args: OakStr, data: OakBytes, out: OakSink, out_user: *mutc_void) -> i64
+callback OakInit(api: *constOakApi) -> bool
+const OAK_HOVERED = 1
+const OAK_CLICKED = 2
+const OAK_SECONDARY_CLICKED = 4
+const OAK_DOUBLE_CLICKED = 8
+const OAK_MIDDLE_CLICKED = 16
+const OAK_CHANGED = 32
+const OAK_DRAGGED = 64
+const OAK_DRAG_STARTED = 128
+const OAK_DRAG_STOPPED = 256
+const OAK_HAS_FOCUS = 512
+const OAK_GAINED_FOCUS = 1024
+const OAK_LOST_FOCUS = 2048
+const OAK_ENABLED = 4096
+const OAK_CONTAINS_POINTER = 8192
+const OAK_POINTER_DOWN_ON = 16384
+const OAK_CLICKED_ELSEWHERE = 32768
+const OAK_HAS_POINTER = 65536
+const OAK_OPEN = 131072
+const OAK_CONFIRMED = 262144
+const OAK_CANCELLED = 524288
+const OAK_SENSE_HOVER = 0
+const OAK_SENSE_CLICK = 1
+const OAK_SENSE_DRAG = 2
+const OAK_SENSE_CLICK_AND_DRAG = 3
+const OAK_TEXT_STRONG = 1
+const OAK_TEXT_ITALIC = 2
+const OAK_TEXT_SMALL = 4
+const OAK_TEXT_WEAK = 8
+const OAK_TEXT_UNDERLINE = 16
+const OAK_TEXT_STRIKE = 32
+const OAK_TEXT_HEADING = 64
+const OAK_TEXT_WRAP = 128
+const OAK_TEXT_TRUNCATE = 256
+const OAK_TEXT_EXTEND = 512
+const OAK_TEXT_NO_SELECT = 1024
+const OAK_TEXT_CLICK = 2048
+const OAK_TEXT_MONOSPACE = 4096
+const OAK_TEXT_LEFT = 8192
+const OAK_TEXT_DISABLED = 16384
+const OAK_FONT_TEXT = 0
+const OAK_FONT_CODE = 1
+const OAK_FONT_ICONS = 2
+const OAK_BUTTON_SMALL = 1
+const OAK_BUTTON_SELECTED = 2
+const OAK_BUTTON_NO_FRAME = 4
+const OAK_BUTTON_DISABLED = 8
+const OAK_BUTTON_LINK = 16
+const OAK_BUTTON_WRAP = 32
+const OAK_BUTTON_SELECTABLE = 64
+const OAK_EDIT_MULTILINE = 1
+const OAK_EDIT_PASSWORD = 2
+const OAK_EDIT_MENU = 4
+const OAK_EDIT_SECRET = 8
+const OAK_EDIT_NO_FRAME = 16
+const OAK_EDIT_DISABLED = 32
+const OAK_EDIT_LOCK_FOCUS = 64
+const OAK_EDIT_FOCUS = 128
+const OAK_EDIT_SMALL = 256
+const OAK_EDIT_ENTER_SENDS = 512
+const OAK_DIR_RIGHT = 0
+const OAK_DIR_LEFT = 1
+const OAK_DIR_DOWN = 2
+const OAK_DIR_UP = 3
+const OAK_ALIGN_MIN = 0
+const OAK_ALIGN_CENTER = 1
+const OAK_ALIGN_MAX = 2
+const OAK_LAYOUT_WRAP = 1
+const OAK_LAYOUT_CROSS_JUSTIFY = 2
+const OAK_LAYOUT_MAIN_JUSTIFY = 4
+const OAK_ROW = 0
+const OAK_ROW_WRAPPED = 1
+const OAK_ROW_TOP = 2
+const OAK_COLUMN = 3
+const OAK_COLUMN_CENTERED = 4
+const OAK_SCOPE = 5
+const OAK_INDENT = 6
+const OAK_DISABLED = 7
+const OAK_COLUMN_CENTERED_JUSTIFIED = 8
+const OAK_CHILD_RECT = 1
+const OAK_CHILD_SIZE = 2
+const OAK_CHILD_LAYOUT = 4
+const OAK_SCROLL_HORIZONTAL = 1
+const OAK_SCROLL_BOTH = 2
+const OAK_SCROLL_SHRINK_X = 4
+const OAK_SCROLL_SHRINK_Y = 8
+const OAK_SCROLL_STICK_TO_END = 16
+const OAK_GRID_STRIPED = 1
+const OAK_DRAG_RANGE = 1
+const OAK_DRAG_DECIMALS = 2
+const OAK_DRAG_MAX_DECIMALS = 4
+const OAK_FRAME_CORNERS = 1
+const OAK_WINDOW_NO_TITLE = 1
+const OAK_WINDOW_AT = 2
+const OAK_WINDOW_SIZE = 4
+const OAK_WINDOW_FIXED = 8
+const OAK_WINDOW_CLOSABLE = 16
+const OAK_WINDOW_NO_COLLAPSE = 32
+const OAK_WINDOW_AREA = 64
+const OAK_WINDOW_PINNED = 128
+const OAK_WINDOW_PASSIVE = 256
+const OAK_ORDER_MIDDLE = 0
+const OAK_ORDER_BACKGROUND = 1
+const OAK_ORDER_FOREGROUND = 2
+const OAK_ORDER_TOOLTIP = 3
+const OAK_GET_AVAILABLE = 0
+const OAK_GET_MAX_RECT = 1
+const OAK_GET_MIN_RECT = 2
+const OAK_GET_CURSOR = 3
+const OAK_GET_CLIP_RECT = 4
+const OAK_GET_AVAILABLE_RECT = 5
+const OAK_GET_ITEM_SPACING = 6
+const OAK_GET_INTERACT_SIZE = 7
+const OAK_GET_BUTTON_PADDING = 8
+const OAK_GET_SCREEN = 9
+const OAK_GET_ROW_HEIGHT = 10
+const OAK_GET_INDENT = 11
+const OAK_GET_PIXELS_PER_POINT = 12
+const OAK_GET_NEXT_POSITION = 13
+const OAK_SET_WIDTH = 0
+const OAK_SET_MAX_WIDTH = 1
+const OAK_SET_MIN_WIDTH = 2
+const OAK_SET_HEIGHT = 3
+const OAK_SET_MAX_HEIGHT = 4
+const OAK_SET_MIN_HEIGHT = 5
+const OAK_SET_ITEM_SPACING = 6
+const OAK_SET_BUTTON_PADDING = 7
+const OAK_SET_INTERACT_SIZE = 8
+const OAK_SET_OPACITY = 9
+const OAK_SET_ENABLED = 10
+const OAK_SET_WRAP = 11
+const OAK_SET_CLIP_RECT = 12
+const OAK_SET_TEXT_COLOR = 13
+const OAK_SET_INDENT = 14
+const OAK_RESPONSE_HOVER_TEXT = 0
+const OAK_RESPONSE_HOVER_UI = 1
+const OAK_RESPONSE_CURSOR = 2
+const OAK_RESPONSE_CONTEXT_MENU = 3
+const OAK_RESPONSE_REQUEST_FOCUS = 4
+const OAK_RESPONSE_SCROLL_TO = 5
+const OAK_RESPONSE_HIGHLIGHT = 6
+const OAK_RESPONSE_DISABLED_HOVER_TEXT = 7
+const OAK_RESPONSE_SURRENDER_FOCUS = 8
+const OAK_CURSOR_DEFAULT = 0
+const OAK_CURSOR_POINTING_HAND = 1
+const OAK_CURSOR_TEXT = 2
+const OAK_CURSOR_GRAB = 3
+const OAK_CURSOR_GRABBING = 4
+const OAK_CURSOR_RESIZE_HORIZONTAL = 5
+const OAK_CURSOR_RESIZE_VERTICAL = 6
+const OAK_CURSOR_NOT_ALLOWED = 7
+const OAK_CURSOR_WAIT = 8
+const OAK_ANCHOR_LEFT_TOP = 0
+const OAK_ANCHOR_CENTER_TOP = 1
+const OAK_ANCHOR_RIGHT_TOP = 2
+const OAK_ANCHOR_LEFT_CENTER = 3
+const OAK_ANCHOR_CENTER_CENTER = 4
+const OAK_ANCHOR_RIGHT_CENTER = 5
+const OAK_ANCHOR_LEFT_BOTTOM = 6
+const OAK_ANCHOR_CENTER_BOTTOM = 7
+const OAK_ANCHOR_RIGHT_BOTTOM = 8
+const OAK_STROKE_INSIDE = 0
+const OAK_STROKE_MIDDLE = 1
+const OAK_STROKE_OUTSIDE = 2
+const OAK_KEY_ENTER = 256
+const OAK_KEY_ESCAPE = 257
+const OAK_KEY_TAB = 258
+const OAK_KEY_BACKSPACE = 259
+const OAK_KEY_DELETE = 260
+const OAK_KEY_SPACE = 261
+const OAK_KEY_LEFT = 262
+const OAK_KEY_RIGHT = 263
+const OAK_KEY_UP = 264
+const OAK_KEY_DOWN = 265
+const OAK_KEY_HOME = 266
+const OAK_KEY_END = 267
+const OAK_KEY_PAGE_UP = 268
+const OAK_KEY_PAGE_DOWN = 269
+const OAK_MOD_SHIFT = 1
+const OAK_MOD_CTRL = 2
+const OAK_MOD_ALT = 4
+const OAK_MOD_COMMAND = 8
+const OAK_KEY_ANY_MODS = 256
+const OAK_KEY_CONSUME = 512
+const OAK_INPUT_POINTER = 0
+const OAK_INPUT_POINTER_DOWN = 1
+const OAK_INPUT_MODIFIERS = 2
+const OAK_INPUT_SCROLL = 3
+const OAK_INPUT_PRESS_ORIGIN = 4
+const OAK_HTTP_NO_REDIRECTS = 1
+const OAK_HTTP_DIRECT = 2
+const OAK_ICON_IS_TEXT = 1
+const OAK_ROLE_OFFERED = 1
+const OAK_MARKDOWN_HIGHLIGHT = 1
+const OAK_TEXTURE_LINEAR = 1
+fn add_home_tab(part: *constOakHomeTab)
+fn add_tab_kind(part: *constOakTabKind)
+fn add_new_kind(part: *constOakNewKind)
+fn add_cloud_backend(part: *constOakCloudBackend)
+fn add_session_kit(part: *constOakSessionKit)
+fn add_theme(part: *constOakThemeDef)
+fn add_font(part: *constOakFontDef)
+fn add_role(part: *constOakRole)
+fn add_vault(part: *constOakVault)
+fn add_settings(part: *constOakSettings)
+fn add_gate(part: *constOakGate)
+fn add_hooks(part: *constOakHooks)
+fn version(out: OakSink, out_user: *mutc_void)
+fn dir(out: OakSink, out_user: *mutc_void)
+fn log_crash(text: OakStr)
+fn plugin_failed(id: OakStr, why: OakStr)
+fn repaint()
+fn repaint_after(ms: u64)
+fn now_ms() -> i64
+fn http_send(request: *constOakRequest, error: OakSink, error_user: *mutc_void) -> u64
+fn http_status(answer: u64) -> u32
+fn http_headers(answer: u64, out: OakSink, out_user: *mutc_void)
+fn http_read(answer: u64, buffer: *mutu8, capacity: usize) -> i64
+fn http_close(answer: u64)
+fn http_make(status: u32, headers: OakStr, body: OakBytes) -> u64
+fn write_private(path: OakStr, data: OakBytes, error: OakSink, error_user: *mutc_void) -> bool
+fn uuid(out: OakSink, out_user: *mutc_void)
+fn shared(name: OakStr, out: OakSink, out_user: *mutc_void) -> bool
+fn share(name: OakStr, json: OakStr)
+fn signed_in() -> bool
+fn vault_changed()
+fn usage_local(since: i64, out: OakSink, out_user: *mutc_void) -> bool
+fn usage_set_shared(source: OakStr, records: OakStr)
+fn usage_add_shared(source: OakStr, records: OakStr) -> bool
+fn usage_show(source: OakStr, label: OakStr, detail: OakStr)
+fn usage_discard_before(cutoff: i64, error: OakSink, error_user: *mutc_void) -> bool
+fn cloud_name(key: OakStr, title: OakStr)
+fn cloud_forget(backend: OakStr)
+fn cloud_starting() -> bool
+fn cloud_accounts(out: OakSink, out_user: *mutc_void)
+fn image_block(bytes: OakBytes, out: OakSink, out_user: *mutc_void) -> bool
+fn file_block(path: OakStr, bytes: OakBytes, out: OakSink, out_user: *mutc_void) -> bool
+fn app_theme(out: *mutOakTheme)
+fn app_open(key: OakStr)
+fn app_close_tabs(gone: OakAskKey, user: *mutc_void)
+fn app_shown(out: OakSink, out_user: *mutc_void) -> bool
+fn app_go_home(tab: OakStr)
+fn app_go_new(kind: OakStr)
+fn app_hint(text: OakStr)
+fn app_input(out: OakSink, out_user: *mutc_void)
+fn app_set_input(text: OakStr)
+fn app_attachments(out: OakSink, out_user: *mutc_void)
+fn app_set_attachments(json: OakStr)
+fn app_conversations(out: OakSink, out_user: *mutc_void)
+fn app_start_conversation(json: OakStr, out: OakSink, out_user: *mutc_void) -> bool
+fn app_local_form(ui: *mutOakUi)
+fn app_transcript(ui: *mutOakUi, key: OakStr, version: u64, make: OakTextFn, make_user: *mutc_void, tail_sig: u64, tail: Option<OakBody>, tail_user: *mutc_void)
+fn app_cloud_list(ui: *mutOakUi, backend: OakStr)
+fn ui_row(ui: *mutOakUi, kind: u32, body: OakBody, user: *mutc_void, out: *mutOakResponse)
+fn ui_layout(ui: *mutOakUi, layout: *constOakLayout, body: OakBody, user: *mutc_void, out: *mutOakResponse)
+fn ui_child(ui: *mutOakUi, child: *constOakChild, body: OakBody, user: *mutc_void, out: *mutOakResponse)
+fn ui_push_id(ui: *mutOakUi, id: u64, body: OakBody, user: *mutc_void, out: *mutOakResponse)
+fn ui_scroll(ui: *mutOakUi, scroll: *constOakScroll, body: OakBody, user: *mutc_void)
+fn ui_frame(ui: *mutOakUi, frame: *constOakFrame, body: OakBody, user: *mutc_void, out: *mutOakResponse)
+fn ui_grid(ui: *mutOakUi, grid: *constOakGrid, body: OakBody, user: *mutc_void, out: *mutOakResponse)
+fn ui_end_row(ui: *mutOakUi)
+fn ui_collapsing(ui: *mutOakUi, id: u64, title: *constOakText, default_open: bool, body: OakBody, user: *mutc_void, out: *mutOakResponse) -> u32
+fn ui_combo(ui: *mutOakUi, id: u64, selected: *constOakText, width: f32, body: OakBody, user: *mutc_void, out: *mutOakResponse) -> u32
+fn ui_menu_button(ui: *mutOakUi, text: *constOakText, body: OakBody, user: *mutc_void, out: *mutOakResponse) -> u32
+fn ui_close(ui: *mutOakUi)
+fn ui_add_space(ui: *mutOakUi, amount: f32)
+fn ui_separator(ui: *mutOakUi, out: *mutOakResponse)
+fn ui_get(ui: *mutOakUi, what: u32, out: *mutOakRect)
+fn ui_set(ui: *mutOakUi, what: u32, a: f32, b: f32, c: f32, d: f32)
+fn ui_id(ui: *mutOakUi) -> u64
+fn ui_allocate(ui: *mutOakUi, width: f32, height: f32, sense: u32, out: *mutOakResponse) -> u32
+fn ui_allocate_rect(ui: *mutOakUi, rect: *constOakRect, sense: u32, out: *mutOakResponse) -> u32
+fn ui_interact(ui: *mutOakUi, rect: *constOakRect, id: u64, sense: u32, out: *mutOakResponse) -> u32
+fn ui_response(response: u32, what: u32, value: u32, text: OakStr, body: Option<OakBody>, user: *mutc_void) -> u32
+fn ui_label(ui: *mutOakUi, text: *constOakText, out: *mutOakResponse) -> u32
+fn ui_button(ui: *mutOakUi, button: *constOakButton, out: *mutOakResponse) -> u32
+fn ui_hyperlink(ui: *mutOakUi, text: *constOakText, url: OakStr, out: *mutOakResponse) -> u32
+fn ui_checkbox(ui: *mutOakUi, value: *mutbool, text: *constOakText, out: *mutOakResponse) -> u32
+fn ui_spinner(ui: *mutOakUi, size: f32, color: u32, out: *mutOakResponse) -> u32
+fn ui_drag(ui: *mutOakUi, value: *mutf64, drag: *constOakDrag, out: *mutOakResponse) -> u32
+fn ui_text_edit(ui: *mutOakUi, edit: *constOakTextEdit, text: OakStr, changed: OakSink, user: *mutc_void, out: *mutOakResponse) -> u32
+fn ui_image(ui: *mutOakUi, image: *constOakImage, out: *mutOakResponse) -> u32
+fn paint_rect(ui: *mutOakUi, rect: *constOakRect, radius: f32, fill: u32, stroke_width: f32, stroke_color: u32, stroke_kind: u32, clip: *constOakRect)
+fn paint_rect_corners(ui: *mutOakUi, rect: *constOakRect, nw: f32, ne: f32, sw: f32, se: f32, fill: u32, stroke_width: f32, stroke_color: u32, stroke_kind: u32, clip: *constOakRect)
+fn paint_line(ui: *mutOakUi, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: u32, clip: *constOakRect)
+fn paint_circle(ui: *mutOakUi, x: f32, y: f32, radius: f32, fill: u32, stroke_width: f32, stroke_color: u32, clip: *constOakRect)
+fn paint_path(ui: *mutOakUi, points: *constf32, count: usize, width: f32, color: u32, fill: u32, closed: bool, clip: *constOakRect)
+fn paint_text(ui: *mutOakUi, x: f32, y: f32, anchor: u32, text: *constOakText, wrap_width: f32, out: *mutOakRect, clip: *constOakRect)
+fn paint_image(ui: *mutOakUi, texture: u64, rect: *constOakRect, uv: *constOakRect, tint: u32, radius: f32, clip: *constOakRect)
+fn text_size(ui: *mutOakUi, text: *constOakText, wrap_width: f32, out: *mutOakRect)
+fn text_clip(ui: *mutOakUi, text: *constOakText, width: f32, out: OakSink, out_user: *mutc_void)
+fn input_key(key: u32, flags: u32) -> bool
+fn input_get(what: u32, out: *mutOakRect) -> bool
+fn input_time() -> f64
+fn focus(id: u64, request: bool) -> bool
+fn animate(id: u64, on: bool) -> f32
+fn copy_text(text: OakStr)
+fn open_url(url: OakStr)
+fn window(window: *constOakWindow, body: OakBody, user: *mutc_void, out: *mutOakResponse) -> u32
+fn texture_new(name: OakStr, width: u32, height: u32, rgba: *constu8, flags: u32) -> u64
+fn texture_decode(name: OakStr, bytes: OakBytes, flags: u32, size: *mutOakRect) -> u64
+fn texture_free(texture: u64)
+fn oak_markdown(ui: *mutOakUi, text: OakStr, key_a: u64, key_b: u64, flags: u32)
+fn oak_message_bar(ui: *mutOakUi, message: *constOakRect, id: u64, copy: OakTextFn, copy_user: *mutc_void, at: i64)
+fn oak_image(ui: *mutOakUi, block: OakStr, max_height: f32, out: *mutOakResponse) -> bool
+fn oak_copy_menu(ui: *mutOakUi, id: u64, rect: *constOakRect, message: Option<OakTextFn>, message_user: *mutc_void, extra: Option<OakBody>, extra_user: *mutc_void)
+fn oak_chat_scroll(ui: *mutOakUi, id: u64, gap: f32, body: OakBody, user: *mutc_void)
+fn oak_list_rows(ui: *mutOakUi, id: OakStr, count: usize, empty: OakStr, row: OakRow, user: *mutc_void)
+fn oak_corner_width(area: *constOakRect) -> f32
+fn oak_corner_area(name: OakStr, area: *constOakRect, body: OakBody, user: *mutc_void)
+fn oak_panel_box(ui: *mutOakUi, width: f32, pad_y: f32, gap: f32, body: OakBody, user: *mutc_void)
+fn oak_kv(ui: *mutOakUi, key: OakStr, value: OakStr, color: u32, out: *mutOakResponse)
+fn oak_meter(ui: *mutOakUi, width: f32, fraction: f32, color: u32)
+fn oak_spinner(ui: *mutOakUi, rect: *constOakRect, color: u32)
+fn oak_caption(ui: *mutOakUi, text: OakStr, color: u32, out: *mutOakResponse) -> u32
+fn oak_center_note(ui: *mutOakUi, rect: *constOakRect, text: OakStr)
+fn oak_working(ui: *mutOakUi, what: OakStr)
+fn oak_loading(ui: *mutOakUi, error: OakStr)
+fn oak_error_note(ui: *mutOakUi, error: OakStr)
+fn oak_inset(ui: *mutOakUi, fill: u32, margin: f32, body: OakBody, user: *mutc_void, out: *mutOakResponse)
+fn oak_switch(ui: *mutOakUi, on: bool, width: f32, height: f32, out: *mutOakResponse) -> u32
+fn oak_state_dot(ui: *mutOakUi, x: f32, y: f32, paused: bool)
+fn oak_drop_head(ui: *mutOakUi, id: u64, height: f32, title: OakStr, count: OakStr, right: OakStr, right_color: u32, enabled: bool, open: bool, out: *mutOakResponse) -> u32
+fn oak_secret_edit(ui: *mutOakUi, id: OakStr, edit: *constOakTextEdit, text: OakStr, changed: OakSink, user: *mutc_void, out: *mutOakResponse) -> u32
+fn oak_dialog(id: OakStr, body: OakBody, user: *mutc_void) -> u32
+fn oak_confirm_dialog(id: OakStr, title: OakStr, body: Option<OakBody>, user: *mutc_void, error: OakStr, action: OakStr, running: bool) -> u32

@@ -2,7 +2,7 @@
 //! they are drawn, and the cards at its end (ASK, REQUEST_ASK, the queue).
 
 use super::*;
-pub(crate) use oak_sdk::ui::{ROW_H, size_text};
+pub(crate) use crate::look::{ROW_H, size_text};
 use crate::widgets::{chevron, clip_width, draw_pencil, draw_x, icon_button, paint_pause};
 use crate::theme::{hex, mix};
 

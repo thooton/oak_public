@@ -2,9 +2,12 @@
 //! system prompt. Build it with `cargo build -p oak-hello` and run Oak with
 //! `OAK_PLUGINS=target/debug` (or copy the library into the `plugins`
 //! folder of Oak's folder); `docs/PLUGINS.md` explains the rest.
+//!
+//! `oak_sdk::egui` has egui's names, but nothing of egui is in this
+//! library: each call goes to Oak, which draws.
 
 use oak_sdk::egui::{RichText, Ui};
-use oak_sdk::theme::{Palette, Theme};
+use oak_sdk::theme::Palette;
 use oak_sdk::widgets::{caption, column};
 use oak_sdk::{App, HomeTab, Info, Plugin, Registrar, Role, SettingsSection, ThemeDef, host};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -90,8 +93,8 @@ impl ThemeDef for Moss {
         "Moss".into()
     }
 
-    fn theme(&self) -> Theme {
-        Theme::from_palette(Palette {
+    fn palette(&self) -> Palette {
+        Palette {
             bg: 0x0d1410,
             panel: 0x141d17,
             panel2: 0x1c2820,
@@ -102,7 +105,7 @@ impl ThemeDef for Moss {
             accent: 0x9ccc65,
             error: 0xe5735f,
             line_alpha: 0x26,
-        })
+        }
     }
 }
 

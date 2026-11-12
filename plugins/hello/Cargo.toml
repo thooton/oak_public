@@ -1,4 +1,5 @@
-# The example plugin: the smallest crate Oak loads. Copy it to start one.
+# The example plugin: the smallest crate Oak loads. Copy it to start one
+# (plugins/hello-c is the same in C).
 [package]
 name = "oak-hello"
 version = "0.1.0"
@@ -10,8 +11,6 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# What a plugin is written against.
+# All a plugin is written against: Oak's interface (a C header underneath),
+# made comfortable in Rust.
 oak-sdk = { path = "../../sdk" }
-# Oak itself, for the dependency graph only: cargo then builds this crate's
-# copies of egui and the rest exactly as it builds Oak's (docs/PLUGINS.md).
-oak = { path = "../.." }

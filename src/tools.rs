@@ -2,7 +2,7 @@
 // result; Err means the result is marked is_error.
 
 use serde_json::{Value, json};
-pub use oak_sdk::ui::{Head, one_line};
+pub use crate::look::{Head, one_line};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};

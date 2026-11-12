@@ -1,14 +1,12 @@
 [package]
 name = "oak-sdk"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-description = "What an Oak plugin is built against: the plugin interface, the host's services, and Oak's look."
-build = "build.rs"
+description = "Oak's plugin interface (a C ABI: include/oak_plugin.h) and a Rust wrapper over it."
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-egui = "0.37"
-open = "5"
-parking_lot_core = "0.9"
+ecolor = "0.37"
+emath = "0.37"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
