@@ -18,7 +18,7 @@ The repository:
 - `prompts/`: the system prompt, compiled in. `assets/`: fonts, logos and pictures (with the
   scripts that make some of them). `linux/`: the self-contained Linux bundle. `scripts/`: checks.
 
-This README is the description of how Oak behaves that QA checks the app against: keep it true
+This file is the description of how Oak behaves that QA checks the app against: keep it true
 with every change, and put here the decisions the code alone doesn't explain. How a part works
 belongs in its file's opening comment.
 
@@ -167,7 +167,10 @@ can't read.
   its account is used up (the request is sent again through another, and the transcript says
   "account rotated"), or, once its cache is cold anyway, when its account is nearly used up and
   another has much more. A key the provider rejects is skipped the same way. With every account
-  used up, Oak waits for the first reset. Settings can turn rotation off. The model is never told.
+  used up, Oak waits for the first reset, or until an account is signed in or comes free early: an
+  account refused for its limit is usable again once a usage reading taken after the refusal shows
+  its 5-hour and weekly limits below 100% (a reset used here or anywhere else), and waiting
+  sessions try again then. Settings can turn rotation off. The model is never told.
 - Usage-limit resets (`src/api/resets.rs`, `src/resets_view.rs`): the resets Anthropic offers a
   Claude account ("Full reset", "Fable reset", "5-hour reset", "Weekly reset", as Claude Code's
   /limit-reset lists them) come in its usage report (`/api/oauth/usage?cedar_ember=1`, read at

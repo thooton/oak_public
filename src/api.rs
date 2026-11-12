@@ -82,6 +82,10 @@ pub struct Stored {
     /// Refused for its usage limit until then (ms since 1970); 0 when not.
     #[serde(default)]
     pub limited_until: i64,
+    /// When that refusal came (ms since 1970; 0 before Oak kept it): a usage
+    /// reading asked for after it that shows room clears it (`take_limits`).
+    #[serde(default)]
+    pub limited_at: i64,
     /// Its plan limits as last fetched, and why fetching failed (not saved).
     #[serde(skip)]
     pub limits: Vec<Limit>,
@@ -113,7 +117,7 @@ pub struct Stored {
 impl Stored {
     fn new(id: u64, auth: Auth) -> Stored {
         let none = String::new;
-        Stored { id, auth, email: none(), name: none(), plan: none(), limited_until: 0, limits: vec![], error: None, fetched: false, usage_at: 0, usage_fails: 0, usage_retry_at: 0, unreachable_until: 0, resets: None, resets_read: 0 }
+        Stored { id, auth, email: none(), name: none(), plan: none(), limited_until: 0, limited_at: 0, limits: vec![], error: None, fetched: false, usage_at: 0, usage_fails: 0, usage_retry_at: 0, unreachable_until: 0, resets: None, resets_read: 0 }
     }
 
     fn api_key(&self) -> bool {
@@ -156,6 +160,25 @@ impl Stored {
         let used_up = self.main_limits().filter(|l| l.percent >= 100.0).filter_map(|l| l.resets_at).filter(|&at| at > now).max();
         let at = used_up.unwrap_or(0).max(self.limited_until).max(self.unreachable_until);
         if at > now { at } else { 0 }
+    }
+
+    /// Takes a usage reading asked for at `asked_at`. A refusal for its
+    /// usage limit noted before then is over when the reading shows the
+    /// 5-hour and weekly limits below 100%: the limit was reset early (a
+    /// usage-limit reset used, here or anywhere else). A refusal for a
+    /// model's own weekly limit may come again then, which costs nothing.
+    /// Returns whether the refusal was cleared, and whether the account can
+    /// make requests now where it couldn't before (sessions waiting for a
+    /// reset try again then).
+    fn take_limits(&mut self, limits: Vec<Limit>, asked_at: i64, now: i64) -> (bool, bool) {
+        let blocked = self.blocked_until(now) > 0;
+        self.limits = limits;
+        let room = self.main_limits().count() == 2 && self.main_limits().all(|l| l.percent < 100.0);
+        let cleared = self.limited_until > now && asked_at > self.limited_at && room;
+        if cleared {
+            self.limited_until = 0;
+        }
+        (cleared, blocked && self.blocked_until(now) == 0)
     }
 
     /// How much usage it has left, in percent of its tightest limit. API
@@ -263,16 +286,23 @@ fn sync_other_logins() {
     crate::freebuff::sync();
 }
 
-/// Counts sign-ins (not token refreshes or sign-outs), so a session
-/// waiting out the usage limits can tell another account came in.
-static SIGN_INS: AtomicU64 = AtomicU64::new(0);
+/// Counts sign-ins (not token refreshes or sign-outs) and accounts that
+/// came free before the reset they were waiting for, so a session waiting
+/// out the usage limits can tell an account may take its request now.
+static FREED: AtomicU64 = AtomicU64::new(0);
 
-pub fn sign_ins() -> u64 {
-    SIGN_INS.load(Ordering::SeqCst)
+pub fn accounts_freed() -> u64 {
+    FREED.load(Ordering::SeqCst)
 }
 
 fn note_sign_in() {
-    SIGN_INS.fetch_add(1, Ordering::SeqCst);
+    FREED.fetch_add(1, Ordering::SeqCst);
+}
+
+/// An account came free early (its usage reading shows room): sessions
+/// waiting for a reset try again.
+fn note_freed() {
+    FREED.fetch_add(1, Ordering::SeqCst);
 }
 
 pub fn now_ms() -> i64 {
@@ -440,7 +470,7 @@ fn account_for(conv: &str, now: i64) -> Result<u64, Fail> {
 fn note_limited(id: u64, at: i64) {
     let mut a = ACCOUNTS.lock().unwrap();
     if let Some(s) = a.get_mut(id) {
-        s.limited_until = s.limited_until.max(at);
+        (s.limited_until, s.limited_at) = (s.limited_until.max(at), now_ms());
         a.save();
     }
 }
@@ -1176,6 +1206,7 @@ pub fn refresh_account(id: u64) {
         }
     };
     let profile = if profile_known { Ok(None) } else { send_as(id, reqwest::Method::GET, "/api/oauth/profile", &[], false, None).and_then(json_of).map(|p| Some(read_profile(&p))) };
+    let asked_at = now_ms();
     let limits = match &profile {
         Ok(_) => usage_report(id),
         Err(e) => Err((e.clone(), None)),
@@ -1189,9 +1220,12 @@ pub fn refresh_account(id: u64) {
         (s.name, s.email, s.plan) = (name, email, plan);
     }
     let polled = limits.is_ok();
+    let mut freed = false;
     match limits {
         Ok((limits, resets)) => {
-            (s.limits, s.error, s.usage_at, s.usage_fails, s.usage_retry_at) = (limits, None, now_ms(), 0, 0);
+            let cleared;
+            ((cleared, freed), s.error, s.usage_at, s.usage_fails, s.usage_retry_at) = (s.take_limits(limits, asked_at, now_ms()), None, now_ms(), 0, 0);
+            changed |= cleared;
             (s.resets, s.resets_read) = (resets, now_ms());
         }
         Err((e, after)) => {
@@ -1204,6 +1238,9 @@ pub fn refresh_account(id: u64) {
         a.save();
     }
     drop(a);
+    if freed {
+        note_freed();
+    }
     if polled {
         note_polled(id);
     }
@@ -1263,7 +1300,7 @@ pub fn note_cloud_limit(rid: &str, until: i64) {
     if let Some(s) = a.list.iter_mut().find(|s| cloud_rid(s).as_deref() == Some(rid))
         && until > s.limited_until
     {
-        s.limited_until = until;
+        (s.limited_until, s.limited_at) = (until, now_ms());
         a.save();
     }
 }
@@ -2021,6 +2058,48 @@ mod tests {
         s.limits[0].resets_at = Some(now - 1);
         assert_eq!(s.blocked_until(now), 0);
         assert_eq!(s.headroom(now), 100.0);
+    }
+
+    /// An account refused for its weekly limit whose limits were reset
+    /// early (a usage-limit reset used elsewhere) is usable again at the
+    /// next usage reading, and sessions waiting for a reset hear of it.
+    #[test]
+    fn a_limit_reset_early_frees_the_account() {
+        let now = 1_793_100_000_000;
+        let week = now + 4 * 86_400_000;
+        let fresh = |five, wk| vec![Limit { label: "5h", percent: five, resets_at: Some(now + 3_600_000) }, Limit { label: "Week", percent: wk, resets_at: Some(week) }];
+        let mut s = acct(0, "reset@gmail.com", 100.0, 100.0, now);
+        (s.limits, s.limited_until, s.limited_at) = (fresh(100.0, 100.0), week, now - 60_000);
+        assert_eq!(s.blocked_until(now), week);
+        // A reading asked for before the refusal doesn't clear it.
+        assert_eq!(s.take_limits(fresh(0.0, 0.0), now - 120_000, now), (false, false));
+        assert_eq!(s.blocked_until(now), week);
+        // One that still shows a limit used up doesn't either.
+        assert_eq!(s.take_limits(fresh(0.0, 100.0), now, now), (false, false));
+        assert_eq!(s.blocked_until(now), week);
+        // Without both limits it says nothing.
+        assert_eq!(s.take_limits(fresh(0.0, 0.0)[..1].to_vec(), now, now), (false, false));
+        // Reset: 0% now, after the refusal. Usable, and the wait is over.
+        s.limits = fresh(100.0, 100.0);
+        assert_eq!(s.take_limits(fresh(0.0, 0.0), now, now), (true, true));
+        assert_eq!((s.blocked_until(now), s.limited_until), (0, 0));
+        // A refusal kept from before Oak noted when it came (limited_at 0).
+        let mut old = acct(1, "old@gmail.com", 0.0, 0.0, now);
+        old.limited_until = week;
+        assert_eq!(old.take_limits(fresh(3.0, 1.0), now, now), (true, true));
+        // Rotation takes it, ahead of accounts at their 5-hour limit.
+        let mut list: Vec<Stored> = (1..6).map(|i| acct(i, "full@gmail.com", 100.0, 50.0, now)).collect();
+        list.push(s);
+        let c = candidates(&list, now);
+        assert_eq!(c.iter().filter(|c| c.usable).map(|c| c.id.as_str()).collect::<Vec<_>>(), ["0"]);
+        // A conversation seated on a used-up account moves to it; with
+        // rotation off it keeps waiting for its own.
+        crate::rotation::used(Provider::Claude, "reset-early-conv", "3", 0, now - 3_600_000);
+        assert_eq!(crate::rotation::pick(Provider::Claude, "reset-early-conv", &c, now, true).as_deref(), Some("3"));
+        assert_eq!(crate::rotation::pick(Provider::Claude, "reset-early-conv", &c, now, false).as_deref(), Some("0"));
+        // An account blocked only by its usage reading comes free too.
+        let mut u = acct(2, "u@gmail.com", 100.0, 20.0, now);
+        assert_eq!(u.take_limits(fresh(0.0, 20.0), now, now), (false, true));
     }
 
     /// The Claude Code request shape is what the gateway checks, so it is worth

@@ -14,10 +14,11 @@
 const LIMIT_SLACK_MS: i64 = 15_000;
 
 /// Whether to stop waiting for a usage limit: its reset (plus slack) is
-/// `left` ms away, or the user signed in since the wait began, so
-/// the request goes to another account.
-fn limit_over(left: i64, sign_ins_then: u64, sign_ins_now: u64) -> bool {
-    left <= 0 || sign_ins_now != sign_ins_then
+/// `left` ms away, or since the wait began an account was signed in or
+/// came free early (its limit was reset: `api::accounts_freed`), so the
+/// request may go through. Still limited, it waits again.
+fn limit_over(left: i64, freed_then: u64, freed_now: u64) -> bool {
+    left <= 0 || freed_now != freed_then
 }
 
 use crate::tools::Head;
@@ -1462,15 +1463,15 @@ impl Worker {
             l.blocks.clear();
             l.status = "Waiting for the usage limit to reset".into();
         });
-        let since = api::sign_ins();
+        let since = api::accounts_freed();
         let cleared = loop {
             if self.interrupted() {
                 break false;
             }
             let left = at + LIMIT_SLACK_MS - api::now_ms();
             // Done at the reset, or at once when the user signed in with
-            // another account.
-            if limit_over(left, since, api::sign_ins()) {
+            // another account or one came free early.
+            if limit_over(left, since, api::accounts_freed()) {
                 break true;
             }
             // (Paused meanwhile, nothing runs: the pause has taken hold.)

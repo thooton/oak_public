@@ -341,12 +341,22 @@ pub fn fresh(id: u64, max_age_ms: i64) -> Result<Resets, String> {
     {
         return Ok(r.clone());
     }
+    let asked_at = now;
     let (limits, resets) = usage_report(id).map_err(|(e, _)| e)?;
     let now = now_ms();
-    if let Some(s) = ACCOUNTS.lock().unwrap().get_mut(id) {
-        (s.limits, s.error, s.usage_at, s.usage_fails, s.usage_retry_at) = (limits, None, now, 0, 0);
+    let mut a = ACCOUNTS.lock().unwrap();
+    if let Some(s) = a.get_mut(id) {
+        let (cleared, freed) = s.take_limits(limits, asked_at, now);
+        (s.error, s.usage_at, s.usage_fails, s.usage_retry_at) = (None, now, 0, 0);
         (s.resets, s.resets_read) = (resets.clone(), now);
+        if cleared {
+            a.save();
+        }
+        if freed {
+            note_freed();
+        }
     }
+    drop(a);
     note_polled(id);
     resets.ok_or_else(|| "Anthropic lists no resets for this account.".to_string())
 }

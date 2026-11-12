@@ -702,3 +702,12 @@ fn live_rolling() {
     assert!(r.context < 20_000, "the rolled context is smaller: {}", r.context);
     assert!(answer.contains("PELICAN-42"), "the summary kept the instruction");
 }
+
+/// A session waiting for a usage limit's reset tries again at the reset, or
+/// as soon as an account is signed in or comes free early.
+#[test]
+fn a_limit_wait_ends_when_an_account_comes_free() {
+    assert!(!limit_over(60_000, 4, 4));
+    assert!(limit_over(0, 4, 4));
+    assert!(limit_over(60_000, 4, 5));
+}
