@@ -57,7 +57,10 @@ pub(crate) fn weight(a: &api::Account) -> f32 {
     let plan = a.plan.to_ascii_lowercase();
     match a.provider {
         // "Max 5x", "Max 20x", or "Max" from before OAK told them apart.
-        Kind::Claude if plan.starts_with("max") => if plan.ends_with("20x") { 20.0 } else { 5.0 },
+        // Not the advertised 5x and 20x: what they actually give over Pro,
+        // from Anthropic's own Sonnet 4 weekly hours (Table 1 of the class
+        // action complaint, Case 3:26-cv-05763, June 2026).
+        Kind::Claude if plan.starts_with("max") => if plan.ends_with("20x") { 6.0 } else { 3.5 },
         // Team seats: Premium 6.25x Pro, Standard 1.25x ("claude_team" from
         // before OAK told them apart counts as Standard).
         Kind::Claude if plan == "team premium" => 6.25,
@@ -266,15 +269,15 @@ mod tests {
         assert_eq!((s[0].used, s[0].accounts, s[0].next_reset), (15.0, 2, None));
     }
 
-    /// Accounts count by their plans' multipliers: a used-up Max 5x beside
-    /// an unused Pro is 5/6 used.
+    /// Accounts count by their plans' multipliers: a used-up Max 5x (3.5x) beside
+    /// an unused Pro is 3.5/4.5 used.
     #[test]
     fn plans_count_by_their_multipliers() {
-        let lists = [(vec![limit("5h", 100.0, None)], 5.0), (vec![limit("5h", 0.0, None)], 1.0)];
+        let lists = [(vec![limit("5h", 100.0, None)], 3.5), (vec![limit("5h", 0.0, None)], 1.0)];
         let s = sum_limits(lists.iter().map(|(l, w)| (l.as_slice(), *w)), 0);
-        assert!((s[0].used - 500.0 / 6.0).abs() < 1e-3);
+        assert!((s[0].used - 350.0 / 4.5).abs() < 1e-3);
         let w = |provider, plan: &str| weight(&api::Account { provider, plan: plan.into(), ..Default::default() });
-        assert_eq!([w(Kind::Claude, "Max 20x"), w(Kind::Claude, "Max 5x"), w(Kind::Claude, "Max"), w(Kind::Claude, "Pro")], [20.0, 5.0, 5.0, 1.0]);
+        assert_eq!([w(Kind::Claude, "Max 20x"), w(Kind::Claude, "Max 5x"), w(Kind::Claude, "Max"), w(Kind::Claude, "Pro")], [6.0, 3.5, 3.5, 1.0]);
         assert_eq!([w(Kind::Claude, "Team Premium"), w(Kind::Claude, "Team Standard"), w(Kind::Claude, "claude_team")], [6.25, 1.25, 1.25]);
         assert_eq!(
             [api::team_seat("team_tier_1", "default_claude_max_5x"), api::team_seat("", "default_raven"), api::team_seat("", "default_claude_max_5x"), api::team_seat("team_standard", "")],

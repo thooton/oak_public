@@ -60,6 +60,8 @@ pub const BEAT_TAG: &str = "<heartbeat>";
 pub const ALERT_TAG: &str = "<usage-alert>";
 /// Starts the message that gives the model a /goal.
 pub const GOAL_TAG: &str = "<goal>";
+/// Starts it for an endless goal (one the model can't justify or finish).
+pub const ENDLESS_GOAL_TAG: &str = "<goal mode=\"endless\">";
 /// Starts a message from another session: a subagent, or for a subagent
 /// the main session or another agent. `<agent-message from="...">`, with
 /// `type="final reply"` for what a subagent said as it ended its turn.
@@ -165,8 +167,16 @@ pub fn take_deleted() -> Vec<String> {
     std::mem::take(&mut *DELETED.lock().unwrap())
 }
 
-/// The message that gives the model a /goal.
-fn goal_prompt(goal: &str) -> String {
+/// The message that gives the model a /goal; `endless`: one it can't
+/// justify or finish, which goes on until the user pauses or clears it.
+fn goal_prompt(goal: &str, endless: bool) -> String {
+    if endless {
+        return format!(
+            "{ENDLESS_GOAL_TAG}\n{goal}\n</goal>\n\n\
+             The user set this goal as endless: GOAL action=justify and action=finish are disabled for it. Keep working \
+             on it; whenever you end your turn, Oak asks you to continue. Only the user ends it, by pausing or clearing it."
+        );
+    }
     format!(
         "{GOAL_TAG}\n{goal}\n</goal>\n\n\
          Continue working until you have completed the user's goal. When you have completed the user's goal, \
@@ -178,7 +188,13 @@ fn goal_prompt(goal: &str) -> String {
 }
 
 /// Sent when the model ends its turn with the goal not finished.
-fn goal_continue(goal: &str) -> String {
+fn goal_continue(goal: &str, endless: bool) -> String {
+    if endless {
+        return format!(
+            "Automatic message from Oak, not from the user: you ended your turn, but the goal is endless: \"{goal}\" \
+             Continue working on it. Justifying and finishing it are disabled; only the user ends it."
+        );
+    }
     format!(
         "Automatic message from Oak, not from the user: you ended your turn, but the goal isn't finished: \"{goal}\" \
          Continue with what remains. Once all of it is done, call GOAL action=justify with a complete explanation \
@@ -214,8 +230,9 @@ pub const OLD_GOAL_TAG: &str = "<oak-goal>";
 /// next request, without interrupting what it is doing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    /// The session goal; empty clears it.
-    Goal(String),
+    /// The session goal (empty clears it), and whether it is endless: the
+    /// model can't justify or finish it.
+    Goal(String, bool),
     Effort(String),
     /// The provider and model the conversation goes on with (its id).
     Model(api::Provider, String),
@@ -1912,12 +1929,12 @@ pub(crate) fn answer_lost_calls(c: &mut Conversation) -> bool {
 /// (for a goal) and the line for the transcript.
 fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKind, String)) {
     match cmd {
-        Command::Goal(goal) => {
+        Command::Goal(goal, endless) => {
             let cleared = goal.is_empty();
             let note = if cleared {
                 "The user cleared the goal: you no longer need to call GOAL.".to_string()
             } else {
-                goal_prompt(&goal)
+                goal_prompt(&goal, endless)
             };
             // A cleared goal gives the model nothing to do: its note waits
             // for the next request. A new goal supersedes a waiting one.
@@ -1933,6 +1950,7 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKin
                 c.cache.cold();
             }
             c.goal = goal.clone();
+            c.goal_endless = endless && !cleared;
             c.goal_justification.clear();
             c.goal_finished = false;
             c.goal_paused = false;
@@ -2026,6 +2044,7 @@ fn after_turn(c: &mut Conversation, interrupted: bool, now: i64) -> Option<Value
         let text = std::mem::take(&mut c.goal_justification);
         add_mark(c, MarkKind::GoalFinished, text, String::new(), now);
         c.goal.clear();
+        c.goal_endless = false;
         c.goal_finished = false;
         end_ask_request(c);
         return None;
@@ -2033,7 +2052,7 @@ fn after_turn(c: &mut Conversation, interrupted: bool, now: i64) -> Option<Value
     if interrupted || c.goal_paused {
         return None;
     }
-    let text = goal_continue(&c.goal);
+    let text = goal_continue(&c.goal, c.goal_endless);
     add_mark(c, MarkKind::GoalContinued, String::new(), text.clone(), now);
     Some(goal_block(&text))
 }

@@ -275,7 +275,7 @@ impl App {
             ..Default::default()
         };
         let id = conv.id.clone();
-        if let Some(Command::Goal(g)) = &cmd {
+        if let Some(Command::Goal(g, _)) = &cmd {
             conv.title = g.lines().next().unwrap_or("").head(60);
         }
         if let Some((_, title)) = named

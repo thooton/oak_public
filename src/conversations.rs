@@ -64,7 +64,7 @@ impl App {
         if self.editing.as_ref().is_some_and(|e| e.conv == id) {
             self.editing = None;
         }
-        if self.goal_edit.as_ref().is_some_and(|g| g.0 == id) {
+        if self.goal_edit.as_ref().is_some_and(|g| g.key == id) {
             self.goal_edit = None;
         }
         if self.settings.tabs.iter().any(|t| t == id) {
@@ -139,7 +139,7 @@ impl App {
         (self.input, self.attachments) = self.drafts.remove(&key).unwrap_or_default();
         self.hint = None;
         self.lists.values_mut().for_each(vlist::List::leave);
-        if self.goal_edit.as_ref().is_some_and(|g| g.0 != key) {
+        if self.goal_edit.as_ref().is_some_and(|g| g.key != key) {
             self.goal_edit = None;
         }
     }

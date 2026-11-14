@@ -8,13 +8,13 @@ use super::reply::spread_thinking_tokens;
 #[test]
 fn clearing_a_goal_waits_for_the_next_request() {
     let mut c = Conversation::default();
-    apply_command(&mut c, Command::Goal("ship it".into()));
-    let (block, mark) = apply_command(&mut c, Command::Goal(String::new()));
+    apply_command(&mut c, Command::Goal("ship it".into(), false));
+    let (block, mark) = apply_command(&mut c, Command::Goal(String::new(), false));
     assert!(block.is_none(), "a cleared goal gives the model nothing to do");
     assert_eq!(mark.0, MarkKind::Goal);
     assert!(c.held[0].contains("cleared the goal"));
     // A new goal supersedes the waiting note.
-    let (block, _) = apply_command(&mut c, Command::Goal("again".into()));
+    let (block, _) = apply_command(&mut c, Command::Goal("again".into(), false));
     assert!(block.is_some() && c.held.is_empty());
 }
 
@@ -162,6 +162,33 @@ fn pause_waits_for_the_request() {
 /// it unfinished brings the continue prompt; GOAL_JUSTIFICATION then
 /// GOAL_FINISH end it when the turn ends, and its line keeps the
 /// justification.
+/// An endless goal can't be justified or finished: OAK keeps asking the
+/// model to continue until the user pauses or clears it.
+#[test]
+fn endless_goal_never_finishes() {
+    let goal = "Keep improving the docs.";
+    let mut c = Conversation::default();
+    let tool = |c: &mut Conversation, name: &str, input: Value| memory_tool(c, name, &input, 0);
+    let (block, mark) = apply_command(&mut c, Command::Goal(goal.into(), true));
+    let text = block.unwrap()["text"].as_str().unwrap().to_string();
+    assert!(text.starts_with(ENDLESS_GOAL_TAG) && text == goal_prompt(goal, true));
+    assert_eq!(mark, (MarkKind::Goal, goal.into()));
+    assert!(c.goal_endless && render_memory(&c).contains("as endless"));
+    assert!(tool(&mut c, "GOAL_JUSTIFICATION", json!({"justification": "done"})).is_err());
+    assert!(tool(&mut c, "GOAL_FINISH", json!({})).is_err());
+    assert!(c.goal_justification.is_empty() && !c.goal_finished);
+    let more = after_turn(&mut c, false, 5).expect("asked to continue");
+    assert_eq!(more["text"], goal_continue(goal, true));
+    assert_eq!(c.goal, goal);
+    // Set again without the mode: it can be finished.
+    apply_command(&mut c, Command::Goal(goal.into(), false));
+    assert!(!c.goal_endless && tool(&mut c, "GOAL_JUSTIFICATION", json!({"justification": "done"})).is_ok());
+    // Clearing ends the mode with the goal.
+    apply_command(&mut c, Command::Goal(goal.into(), true));
+    apply_command(&mut c, Command::Goal(String::new(), true));
+    assert!(c.goal.is_empty() && !c.goal_endless);
+}
+
 #[test]
 fn goal_runs_until_finished() {
     let goal = "Do X, Y, and then Z.";
@@ -172,11 +199,11 @@ fn goal_runs_until_finished() {
     assert!(tool(&mut c, "GOAL_FINISH", json!({})).is_err());
     assert_eq!(after_turn(&mut c, false, 0), None);
 
-    let (block, _) = apply_command(&mut c, Command::Goal(goal.into()));
-    assert_eq!(block.unwrap()["text"], goal_prompt(goal));
+    let (block, _) = apply_command(&mut c, Command::Goal(goal.into(), false));
+    assert_eq!(block.unwrap()["text"], goal_prompt(goal, false));
     // Ending the turn without finishing: asked to carry on, not when interrupted.
     let more = after_turn(&mut c, false, 5).expect("asked to continue");
-    assert_eq!(more["text"], goal_continue(goal));
+    assert_eq!(more["text"], goal_continue(goal, false));
     assert!(is_hidden_block(&more));
     assert_eq!(c.marks.last().map(|m| m.kind), Some(MarkKind::GoalContinued));
     assert_eq!(after_turn(&mut c, true, 6), None);
@@ -260,7 +287,7 @@ fn request_ask_gates_ask_during_a_goal() {
     assert!(w.tool("REQUEST_ASK", &json!({"about": "x"})).0.unwrap_err().contains("call ASK directly"));
     assert_eq!(ask_gate(&mut s.conv.lock().unwrap()), Ok(()));
 
-    apply_command(&mut s.conv.lock().unwrap(), Command::Goal("ship it".into()));
+    apply_command(&mut s.conv.lock().unwrap(), Command::Goal("ship it".into(), false));
     let refused = w.tool("ASK", &question).0.unwrap_err();
     assert!(refused.starts_with("ASK isn't available while a goal is active. Call REQUEST_ASK"), "{refused}");
     w.tool("REQUEST_ASK", &json!({"about": "Which database to use"})).0.unwrap();
@@ -291,7 +318,7 @@ fn request_ask_gates_ask_during_a_goal() {
 
     // A cleared goal drops a waiting request.
     w.tool("REQUEST_ASK", &json!({"about": "x"})).0.unwrap();
-    apply_command(&mut s.conv.lock().unwrap(), Command::Goal(String::new()));
+    apply_command(&mut s.conv.lock().unwrap(), Command::Goal(String::new(), false));
     let c = s.conv.lock().unwrap();
     assert!(c.ask_request.is_empty() && !c.ask_granted);
 }
@@ -479,7 +506,7 @@ fn start_marks_show_what_the_model_is_given() {
 fn memory_changes_only_with_the_cache() {
     let mut c = Conversation::default();
     assert_eq!(memory_for_request(&mut c, 0, false), "");
-    let (block, mark) = apply_command(&mut c, Command::Goal("ship v2".into()));
+    let (block, mark) = apply_command(&mut c, Command::Goal("ship v2".into(), false));
     let block = block.unwrap();
     assert!(block["text"].as_str().unwrap().starts_with(GOAL_TAG) && is_hidden_block(&block));
     assert_eq!(mark, (MarkKind::Goal, "ship v2".into()));

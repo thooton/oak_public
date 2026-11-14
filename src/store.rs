@@ -418,6 +418,10 @@ pub struct Conversation {
     /// to the user, when it ends its turn.
     #[serde(default)]
     pub goal_finished: bool,
+    /// The user made the goal endless: GOAL_JUSTIFICATION and GOAL_FINISH
+    /// are refused, and the goal lasts until the user pauses or clears it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub goal_endless: bool,
     /// The user paused the goal: it stays (and the model still has it), but
     /// OAK doesn't ask the model to carry on with it when it ends its turn.
     /// Only OAK knows; nothing about it is sent.

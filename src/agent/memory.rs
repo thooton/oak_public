@@ -4,6 +4,9 @@
 
 use super::*;
 
+/// What GOAL justify and finish answer for an endless goal.
+const ENDLESS_REFUSAL: &str = "The user made this goal endless, so it can't be justified or finished: keep working on it. Only the user ends it.";
+
 /// NOTE, HEARTBEAT, PROGRESS and GOAL: the tools that change the session's
 /// memory (`name` is the action's tool, as `tools::canonical` gives it).
 pub(crate) fn memory_tool(c: &mut Conversation, name: &str, input: &Value, now: i64) -> Result<String, String> {
@@ -13,6 +16,9 @@ pub(crate) fn memory_tool(c: &mut Conversation, name: &str, input: &Value, now: 
             let text = input["justification"].as_str().unwrap_or("").trim().to_string();
             if c.goal.is_empty() {
                 return Err("No goal is set, so there is nothing to justify.".into());
+            }
+            if c.goal_endless {
+                return Err(ENDLESS_REFUSAL.into());
             }
             if text.is_empty() {
                 return Err("The justification is empty.".into());
@@ -25,6 +31,9 @@ pub(crate) fn memory_tool(c: &mut Conversation, name: &str, input: &Value, now: 
         "GOAL_FINISH" => {
             if c.goal.is_empty() {
                 return Err("No goal is set, so there is nothing to finish.".into());
+            }
+            if c.goal_endless {
+                return Err(ENDLESS_REFUSAL.into());
             }
             if c.goal_justification.is_empty() {
                 return Err("Call GOAL action=justify first, with how you have completed the user's goal.".into());
@@ -167,7 +176,9 @@ pub(crate) fn render_memory(c: &Conversation) -> String {
         return String::new();
     }
     let mut s = String::from("\n\n# Session memory\n");
-    if !c.goal.is_empty() {
+    if c.goal_endless {
+        s += &format!("\nGoal, set by the user as endless (GOAL justify and finish are disabled: keep working on it until the user clears it):\n{}\n", c.goal);
+    } else if !c.goal.is_empty() {
         s += &format!("\nGoal, set by the user (when it is done: GOAL action=justify, then action=finish):\n{}\n", c.goal);
     }
     if !c.notes.is_empty() {

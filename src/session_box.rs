@@ -30,6 +30,8 @@ pub(crate) struct SessionInfo {
     pub(crate) efforts: Vec<&'static str>,
     pub(crate) new: bool,
     pub(crate) goal: String,
+    /// The goal is endless: the model can't justify or finish it.
+    pub(crate) goal_endless: bool,
     /// The goal's auto-continue is paused.
     pub(crate) goal_paused: bool,
     pub(crate) heartbeats: Vec<store::Heartbeat>,
@@ -84,6 +86,7 @@ impl SessionInfo {
             model_id: model,
             new: true,
             goal: String::new(),
+            goal_endless: false,
             goal_paused: false,
             heartbeats: vec![],
             meters: vec![],
@@ -101,9 +104,10 @@ impl SessionInfo {
         let pending = s.live.lock().unwrap().commands.clone();
         let c = s.conv.lock().unwrap();
         let (mut effort, mut goal, mut model, mut provider) = (c.effort.clone(), c.goal.clone(), c.model.clone(), c.provider());
+        let mut goal_endless = c.goal_endless;
         for cmd in pending {
             match cmd {
-                Command::Goal(g) => goal = g,
+                Command::Goal(g, endless) => (goal, goal_endless) = (g, endless),
                 Command::Effort(e) => effort = e,
                 Command::Model(p, m) => (provider, model) = (p, m),
             }
@@ -112,7 +116,8 @@ impl SessionInfo {
         SessionInfo {
             new: false,
             // (A new goal waiting to go out starts unpaused.)
-            goal_paused: c.goal_paused && !goal.is_empty() && goal == c.goal,
+            goal_paused: c.goal_paused && !goal.is_empty() && goal == c.goal && goal_endless == c.goal_endless,
+            goal_endless: goal_endless && !goal.is_empty(),
             goal,
             heartbeats: c.heartbeats.clone(),
             meters: c.meters.clone(),
@@ -123,6 +128,15 @@ impl SessionInfo {
             ..with(title, c.folder.display().to_string(), provider, model, &effort)
         }
     }
+}
+
+/// The goal command for a goal set (or cleared, `goal` empty) in the
+/// session box, if it changes anything: a new text, or a new mode for the
+/// same goal (sent again, so the model learns it). A cleared goal is never
+/// endless.
+fn goal_change(info: &SessionInfo, goal: String, endless: bool) -> Option<(String, bool)> {
+    let endless = endless && !goal.is_empty();
+    (goal != info.goal || endless != info.goal_endless).then_some((goal, endless))
 }
 
 /// What the folder row reads before a conversation without a folder.
@@ -172,7 +186,8 @@ pub(crate) struct BoxActions {
     effort: Option<String>,
     /// A model to switch to: its provider and id.
     model: Option<(api::Provider, String)>,
-    goal: Option<String>,
+    /// A goal to set (empty clears it), and whether it is endless.
+    goal: Option<(String, bool)>,
     /// Pause (true) or resume the goal's auto-continue.
     goal_pause: Option<bool>,
     stop_beat: Option<u64>,
@@ -219,7 +234,7 @@ impl App {
             *title = self.sessions.get(conv.as_str()).map(|s| s.conv.lock().unwrap().title.clone()).unwrap_or_default();
         }
         let mut act = BoxActions::default();
-        let editing = self.goal_edit.as_mut().filter(|g| g.0 == key);
+        let editing = self.goal_edit.as_mut().filter(|g| g.key == key);
         let tasks = self.sessions.get(&key).map(|s| s.tasks.clone());
         let bottom = area.bottom() - GAP;
         corner_area(ctx, "session-box", area, |ui| {
@@ -237,7 +252,7 @@ impl App {
     /// screen) asked for; `info` is what it showed.
     fn box_actions(&mut self, ctx: &egui::Context, t: &Theme, key: &str, info: &SessionInfo, act: BoxActions) {
         if act.edit_start {
-            self.goal_edit = Some((key.to_string(), info.goal.clone(), true));
+            self.goal_edit = Some(GoalEdit { key: key.to_string(), text: info.goal.clone(), focus: true, endless: info.goal_endless });
         }
         if act.edit_end {
             self.goal_edit = None;
@@ -265,12 +280,12 @@ impl App {
                 }
             }
         }
-        if let Some(g) = act.goal.filter(|g| *g != info.goal) {
+        if let Some((g, endless)) = act.goal.and_then(|(g, e)| goal_change(info, g, e)) {
             match self.sessions.get(key) {
-                Some(s) => s.command(Command::Goal(g)),
+                Some(s) => s.command(Command::Goal(g, endless)),
                 // Before a conversation, a goal starts one (with the
                 // message being written, if any).
-                None if !g.is_empty() => self.send_input(|app, text, images| app.start_conversation(text, images, Some(Command::Goal(g)), ctx)),
+                None if !g.is_empty() => self.send_input(|app, text, images| app.start_conversation(text, images, Some(Command::Goal(g, endless)), ctx)),
                 None => {}
             }
         }
@@ -482,7 +497,7 @@ fn provider_row(ui: &mut Ui, t: &Theme, p: api::Provider) -> (egui::Response, bo
 }
 
 /// The session box's rows.
-pub(crate) fn session_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, editing: Option<&mut (String, String, bool)>, act: &mut BoxActions) {
+pub(crate) fn session_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, editing: Option<&mut GoalEdit>, act: &mut BoxActions) {
     ui.spacing_mut().item_spacing.y = 3.0;
     title_row(ui, t, info, act);
     folder_row(ui, info, RichText::new(&info.folder).small().color(t.ink3));
@@ -620,12 +635,23 @@ fn link_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, font: &FontId, act: &mu
     }
 }
 
-/// The session box's goal: a click edits it (`editing`: the text being
-/// written, and whether it is to take focus); under it, pausing it.
-fn goal_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, font: &FontId, editing: Option<&mut (String, String, bool)>, act: &mut BoxActions) {
+/// The goal being edited in the session box.
+pub(crate) struct GoalEdit {
+    /// The conversation (or the new screen's draft key).
+    pub(crate) key: String,
+    pub(crate) text: String,
+    /// The field is to take focus.
+    pub(crate) focus: bool,
+    /// Endless: the model can't justify or finish the goal.
+    pub(crate) endless: bool,
+}
+
+/// The session box's goal: a click edits it (`editing`); under it,
+/// pausing it.
+fn goal_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, font: &FontId, editing: Option<&mut GoalEdit>, act: &mut BoxActions) {
     let job = |key: &str, value: &str, color: Color32| labeled(t, font, key, value, color);
     match editing {
-        Some((_, text, focus)) => {
+        Some(GoalEdit { text, focus, endless, .. }) => {
             caption(ui, "goal", t.accent);
             let id = Id::unique("goal-edit");
             let enter = enter_pressed(ui, id);
@@ -648,23 +674,25 @@ fn goal_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, font: &FontId, editing:
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let set = ui.button(RichText::new(if info.new { "Start" } else { "Set" }).small().color(t.accent)).clicked();
                 if set || enter {
-                    act.goal = Some(text.trim().to_string());
+                    act.goal = Some((text.trim().to_string(), *endless));
                     act.edit_end = true;
                 }
                 if ui.button(RichText::new("Cancel").small()).clicked() || esc {
                     act.edit_end = true;
                 }
                 if !info.goal.is_empty() && ui.button(RichText::new("Clear").small()).clicked() {
-                    act.goal = Some(String::new());
+                    act.goal = Some((String::new(), false));
                     act.edit_end = true;
                 }
+                ui.checkbox(endless, RichText::new("Endless").small())
+                    .on_hover_text("Disables GOAL justify and finish: the model continues until you pause or clear the goal.");
             });
         }
         None => {
             let label = if info.goal.trim().is_empty() {
                 egui::Label::new(job("goal  ", "none", t.ink3))
             } else {
-                egui::Label::new(job("goal  ", info.goal.trim(), t.ink2)).wrap()
+                egui::Label::new(job(if info.goal_endless { "endless goal  " } else { "goal  " }, info.goal.trim(), t.ink2)).wrap()
             };
             let resp = ScrollArea::vertical()
                 .id_salt("session-goal")
@@ -937,6 +965,20 @@ mod tests {
     use super::*;
 
     /// The folder row opens and copies only a folder that was chosen.
+    #[test]
+    fn a_goal_mode_change_sends_the_goal_again() {
+        let mut info = SessionInfo::new(None, &Settings::default(), vec![], |m| m.to_string());
+        assert_eq!(goal_change(&info, String::new(), true), None, "nothing to clear");
+        assert_eq!(goal_change(&info, "ship".into(), true), Some(("ship".into(), true)));
+        info.goal = "ship".into();
+        assert_eq!(goal_change(&info, "ship".into(), false), None);
+        assert_eq!(goal_change(&info, "ship".into(), true), Some(("ship".into(), true)));
+        info.goal_endless = true;
+        assert_eq!(goal_change(&info, "ship".into(), true), None);
+        assert_eq!(goal_change(&info, "ship".into(), false), Some(("ship".into(), false)));
+        assert_eq!(goal_change(&info, String::new(), true), Some((String::new(), false)));
+    }
+
     #[test]
     fn folder_row_has_a_path_only_when_a_folder_is_chosen() {
         let mut settings = Settings::default();

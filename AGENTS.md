@@ -220,6 +220,9 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
   Old tool output is replaced by a placeholder in requests, and a line marks where that stops.
 - Goals: the model keeps working until it calls GOAL finish; "pause goal" stops Oak asking it to
   continue without telling it. While a goal is set, ASK needs the user's yes through REQUEST_ASK.
+  An endless goal (the Endless box when editing it) refuses GOAL justify and finish, so it lasts
+  until the user pauses or clears it; the model is told in the goal's message and its memory block,
+  and changing only the mode sends the goal again.
 - Notes (sent with every request, so they outlive summaries), heartbeats, progress meters (a
   shell command whose output's last line is `x/y`, `N%` or a number; `src/progress.rs`) and
   subagents (`src/agent/subagents.rs`; sessions message each other, and a subagent's final reply

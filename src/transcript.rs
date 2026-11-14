@@ -733,6 +733,7 @@ pub(crate) fn mark_row(ui: &mut Ui, t: &Theme, m: &Mark) {
         MarkKind::GoalContinued => ("goal not finished yet: asked to continue".to_string(), Some(GOAL_ICON)),
         MarkKind::GoalFinished => ("goal finished".to_string(), Some(GOAL_ICON)),
         MarkKind::Goal if m.text.is_empty() => ("goal cleared".to_string(), Some(GOAL_ICON)),
+        MarkKind::Goal if m.sent.starts_with(crate::agent::ENDLESS_GOAL_TAG) => (format!("endless goal set to {}", crate::tools::one_line(&m.text)), Some(GOAL_ICON)),
         MarkKind::Goal => (format!("goal set to {}", crate::tools::one_line(&m.text)), Some(GOAL_ICON)),
         MarkKind::Effort => (format!("effort set to {}", m.text), Some(EFFORT_ICON)),
         MarkKind::Model => (format!("model set to {}", api::model_name(&m.text)), Some(MODEL_ICON)),

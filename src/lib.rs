@@ -301,9 +301,8 @@ struct App {
     /// The text last sent from each tab's message box, by the same keys as
     /// `drafts`: Up in the empty box brings it back (`composer::recall`).
     last_sent: HashMap<String, String>,
-    /// The goal being edited in the session box: (conversation, text,
-    /// focus it next frame).
-    goal_edit: Option<(String, String, bool)>,
+    /// The goal being edited in the session box.
+    goal_edit: Option<session_box::GoalEdit>,
     /// A model switch waiting for the user to confirm it: (conversation,
     /// model id).
     model_switch: Option<(String, api::Provider, String)>,
