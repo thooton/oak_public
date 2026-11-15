@@ -908,7 +908,10 @@ fn execute_returns_when_its_command_exits() {
     let (w, _s) = idle_worker("exec-exit", Conversation { folder: dir.clone(), ..Default::default() });
     let run = |cmd: &str| w.tool("EXECUTE", &json!({"command": cmd, "summary": "Run it", "timeout": 20}));
     let quickest = |f: &dyn Fn()| (0..10).map(|_| { let t = Instant::now(); f(); t.elapsed() }).min().unwrap();
-    let execute = quickest(&|| assert_eq!(run("echo hi"), (Ok("hi\n[exit code 0]".to_string()), false)));
+    let execute = quickest(&|| {
+        let (r, interrupted) = run("echo hi");
+        assert!(r.as_ref().is_ok_and(|r| r.starts_with("hi\n[exit code 0")) && !interrupted, "{r:?}"); // "[exit code 0, ran 7.1s]" on a busy machine
+    });
     let bare = quickest(&|| assert_eq!(tasks::spawn("echo hi", &dir).unwrap().wait_exit(Duration::from_secs(20)), Some(0)));
     assert!(execute < bare + Duration::from_millis(15), "EXECUTE took {execute:?}, the command itself {bare:?}");
     std::thread::scope(|scope| {

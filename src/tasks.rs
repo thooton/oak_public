@@ -1333,6 +1333,7 @@ mod tests {
     }
 
     /// The least of `n` timings of `f`, in ms.
+    #[cfg(unix)]
     fn quickest(n: usize, mut f: impl FnMut()) -> f64 {
         (0..n)
             .map(|_| {
@@ -1345,7 +1346,10 @@ mod tests {
 
     /// A command's exit, with all of its output, is seen as soon as bash
     /// exits: no fixed wait after it (once 10ms for the output, then
-    /// EXECUTE's 30ms tick). Against bash running the same script by itself.
+    /// EXECUTE's 30ms tick). Against bash running the same script by itself
+    /// (not on Windows, where Oak's own start-up, a job and three files,
+    /// costs ~25ms more than bash's on CI; EXECUTE's test covers the tick).
+    #[cfg(unix)]
     #[test]
     fn the_exit_is_seen_as_soon_as_bash_exits() {
         let dir = std::env::temp_dir();
