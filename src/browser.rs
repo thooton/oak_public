@@ -1640,7 +1640,7 @@ impl Instance {
     /// The model's pointer goes to (x, y), CSS pixels: the page gets the
     /// move (with `buttons` held), and the view glides it there over `glide`
     /// (from the middle the first time).
-    fn agent_move(&self, page: &Cdp, x: f64, y: f64, buttons: i64, glide: Duration) {
+    fn agent_move(&self, page: &Cdp, x: f64, y: f64, buttons: i64, glide: Duration) -> Result<(), String> {
         let to = egui::pos2(x as f32, y as f32);
         let (w, h) = self.viewport_size();
         self.update_view(|v| {
@@ -1649,13 +1649,20 @@ impl Instance {
             v.agent_ptr = Some(AgentPointer { from, to, at: Instant::now(), glide });
         });
         let button = if buttons & 1 != 0 { "left" } else if buttons & 2 != 0 { "right" } else if buttons & 4 != 0 { "middle" } else { "none" };
-        page.send("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y, "button": button, "buttons": buttons}));
+        // Chromium routes input asynchronously (hit-testing, then the
+        // renderer). A later Runtime.evaluate can overtake it: sleeping in
+        // settle is not a delivery barrier, especially on a busy renderer.
+        // The dispatch reply acknowledges input processing. User pointer
+        // streaming remains nonblocking; model actions must wait for it.
+        page.call_until("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y, "button": button, "buttons": buttons}), CALL_TIMEOUT, &|| self.dialog_open())
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     /// The model clicks `button` (left, right or middle) at (x, y), CSS
     /// pixels, `clicks` times in a row (2: a double click).
-    fn click_at(&self, page: &Cdp, x: f64, y: f64, button: &str, clicks: i64) {
-        self.agent_move(page, x, y, 0, GLIDE);
+    fn click_at(&self, page: &Cdp, x: f64, y: f64, button: &str, clicks: i64) -> Result<(), String> {
+        self.agent_move(page, x, y, 0, GLIDE)?;
         // The ring shows as the pointer arrives.
         self.update_view(|v| v.agent_at = Some((egui::pos2(x as f32, y as f32), Instant::now() + GLIDE / 2)));
         let bit = match button {
@@ -1667,6 +1674,7 @@ impl Instance {
             page.send("Input.dispatchMouseEvent", json!({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": bit, "clickCount": n}));
             page.send("Input.dispatchMouseEvent", json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": 0, "clickCount": n}));
         }
+        Ok(())
     }
 
     /// A point the model names: element `ref_key` (from read; scrolled into
@@ -1765,7 +1773,7 @@ impl Instance {
                 let dy = input["dy"].as_f64().unwrap_or(if dx == 0.0 { h as f64 * 0.8 } else { 0.0 });
                 let x = input["x"].as_f64().unwrap_or(w as f64 / 2.0);
                 let y = input["y"].as_f64().unwrap_or(h as f64 / 2.0);
-                self.agent_move(&page, x, y, 0, GLIDE);
+                self.agent_move(&page, x, y, 0, GLIDE)?;
                 page.send("Input.dispatchMouseEvent", json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy}));
                 std::thread::sleep(Duration::from_millis(350));
                 let s = self.eval(&page, SCROLL_JS, CALL_TIMEOUT)?;
@@ -1849,7 +1857,7 @@ impl Instance {
             return Err(format!("Unknown button `{button}`: use left, right or middle."));
         }
         let clicks = input["clicks"].as_i64().unwrap_or(1).clamp(1, 3);
-        self.click_at(page, x, y, button, clicks);
+        self.click_at(page, x, y, button, clicks)?;
         self.settle(navs);
         let how = match (button, clicks) {
             ("left", 1) => "Clicked".to_string(),
@@ -1865,7 +1873,7 @@ impl Instance {
     /// tooltips that open on hover).
     fn hover(&self, page: &Cdp, input: &Value, navs: u64) -> Result<String, String> {
         let (x, y, what) = self.target(page, input, "ref", "x", "y")?;
-        self.agent_move(page, x, y, 0, GLIDE);
+        self.agent_move(page, x, y, 0, GLIDE)?;
         self.settle(navs);
         Ok(self.report(&format!("The pointer is over {what}.")))
     }
@@ -1879,7 +1887,7 @@ impl Instance {
         // Bringing the end into view may have moved the start: again (it
         // only scrolls when out of view).
         let (x0, y0, _) = self.target(page, input, "ref", "x", "y")?;
-        self.agent_move(page, x0, y0, 0, GLIDE);
+        self.agent_move(page, x0, y0, 0, GLIDE)?;
         page.send("Input.dispatchMouseEvent", json!({"type": "mousePressed", "x": x0, "y": y0, "button": "left", "buttons": 1, "clickCount": 1}));
         std::thread::sleep(Duration::from_millis(60));
         self.update_view(|v| v.agent_ptr = Some(AgentPointer { from: egui::pos2(x0 as f32, y0 as f32), to: egui::pos2(x1 as f32, y1 as f32), at: Instant::now(), glide: DRAG_TIME }));
@@ -2302,6 +2310,15 @@ mod tests {
         // Record input delivery as well as CSS state: a failed hover must
         // distinguish a missed input event from layout or style readiness.
         eval("document.addEventListener('mousemove', e => window.lastTestMove = {x:e.clientX, y:e.clientY, target:e.target.id})");
+        // Runtime.evaluate can overtake input queued on Chromium's other
+        // channels while its renderer is busy. A mouse action must wait for
+        // the input acknowledgement, not assume a fixed delay delivers it.
+        let page = inst.page().unwrap();
+        eval("setTimeout(() => { const end = performance.now() + 600; while (performance.now() < end) {} }, 0); true");
+        inst.agent_move(&page, 70.0, 35.0, 0, GLIDE).unwrap();
+        assert_eq!(eval("getComputedStyle(menu).display"), "block", "mouse move returned before delivery to a busy renderer");
+        inst.agent_move(&page, 700.0, 350.0, 0, GLIDE).unwrap();
+        assert_eq!(eval("getComputedStyle(menu).display"), "none");
         // Hover opens the menu, and the model's pointer is there.
         call("BROWSER_HOVER", json!({"x": 70, "y": 35})).unwrap();
         let display = eval("getComputedStyle(menu).display");
