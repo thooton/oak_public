@@ -37,6 +37,13 @@ cargo run --release
 cargo build && cargo test && cargo clippy --all-targets
 ```
 
+The build downloads the latest [ripgrep](https://github.com/BurntSushi/ripgrep/releases) release
+for the target with curl (checked against its `.sha256`) and bundles it into the binary (`build.rs`):
+each version is kept in the build folder, so rebuilds download nothing, and a newer release is
+picked up when the build script runs again (with each commit). Offline, it bundles the newest one
+kept; `OAK_RIPGREP=<path to rg>` bundles that executable instead. With neither, a release build
+(`OAK_RELEASE=1`) fails and any other is built without ripgrep, with a warning.
+
 `oak --version` prints the version, `oak --plugins` the plugins found and whether each runs,
 `oak --no-plugins` starts without any.
 
@@ -108,7 +115,8 @@ owner-only on Linux), `window.json` (the window's
 size, place and maximized state), `seats.json` (which account each
 conversation is on), `tasks/` and `task-output/` (background tasks), `browser/` (the browser pane's
 profiles), `plugins/` (plugins to load, and what they keep is beside it under names of their
-own), `usage.jsonl` and `crash.log`. Files are written to a temporary file and renamed over
+own), `bin/` (programs for the agent's commands: the bundled ripgrep, `src/toolbin.rs`),
+`usage.jsonl` and `crash.log`. Files are written to a temporary file and renamed over
 the old one, so a crash never leaves half a file; an unreadable `settings.json` is kept as
 `settings.json.unreadable`.
 
@@ -224,7 +232,10 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
 - EXECUTE takes a timeout (0 to 550 seconds, 0 for the background) and a one-line summary shown in
   place of the command. Longer commands become background tasks (`src/tasks.rs`), kept across
   restarts; on closing, Oak can leave them running (on Windows each one's bash is handed a handle
-  to its own job, so no Oak process stays behind to lock oak.exe; the next Oak takes it back). Output over 50,000 characters is saved to the
+  to its own job, so no Oak process stays behind to lock oak.exe; the next Oak takes it back). Every
+  command's PATH starts with Oak's `bin/` folder, which holds the ripgrep bundled at build time
+  (`src/toolbin.rs`; written there on a run's first command when missing or different), and the
+  prompt tells the model to search with `rg` instead of grep. Output over 50,000 characters is saved to the
   scratchpad. Before a command runs, `src/guard.rs` refuses likely-destructive ones (recursive
   removals of the home folder, the working folder or `.git`, disk commands, git commands that
   discard work, killing Oak) and `src/sleeps.rs` refuses sleeps over 5 seconds; the error says

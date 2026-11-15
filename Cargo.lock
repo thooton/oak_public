@@ -2463,6 +2463,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "eframe",
+ "flate2",
  "iana-time-zone",
  "image",
  "libc",

@@ -89,29 +89,39 @@ fn git_root() -> Option<&'static PathBuf> {
 }
 
 /// MSYS bash itself rather than Git's bin\bash.exe launcher, so the PID OAK
-/// holds is bash's own; the environment is what the launcher would set up.
+/// holds is bash's own; the environment is what the launcher would set up,
+/// with Oak's bin folder (ripgrep, `src/toolbin.rs`) first on PATH.
 #[cfg(windows)]
 fn bash(args: &[&str]) -> Command {
+    let bin = crate::toolbin::dir().map(|d| format!("{};", d.display())).unwrap_or_default();
+    let path = std::env::var("PATH").unwrap_or_default();
     let mut cmd = match git_root() {
         Some(root) => {
             let mut cmd = Command::new(root.join(r"usr\bin\bash.exe"));
-            let path = std::env::var("PATH").unwrap_or_default();
             let (mingw, usr) = (root.join(r"mingw64\bin"), root.join(r"usr\bin"));
-            cmd.env("MSYSTEM", "MINGW64").env("PATH", format!("{};{};{path}", mingw.display(), usr.display()));
+            cmd.env("MSYSTEM", "MINGW64").env("PATH", format!("{bin}{};{};{path}", mingw.display(), usr.display()));
             cmd
         }
-        None => Command::new("bash"),
+        None => {
+            let mut cmd = Command::new("bash");
+            cmd.env("PATH", format!("{bin}{path}"));
+            cmd
+        }
     };
     cmd.args(args).creation_flags(CREATE_NO_WINDOW);
     cmd
 }
 
 /// The system's bash, as the leader of a new process group so that an
-/// interrupt reaches everything the command started.
+/// interrupt reaches everything the command started, with Oak's bin folder
+/// (ripgrep, `src/toolbin.rs`) first on PATH.
 #[cfg(unix)]
 fn bash(args: &[&str]) -> Command {
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new("bash");
+    if let Some(path) = crate::toolbin::path_with_bin() {
+        cmd.env("PATH", path);
+    }
     cmd.args(args).process_group(0);
     cmd
 }

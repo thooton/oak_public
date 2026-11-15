@@ -54,6 +54,7 @@ mod tasks;
 mod time;
 mod token_rate;
 mod tools;
+mod toolbin;
 mod unslop;
 mod update;
 mod usage;
