@@ -899,3 +899,28 @@ fn super_agents_coordinate_and_their_agents_work() {
     let (r, ..) = w.request_body();
     assert!(r.system.starts_with("You are Oak, a coding agent") && r.system.contains("started by a super agent") && !r.system.contains("Load the AGENT kit"));
 }
+
+/// EXECUTE returns as soon as its command exits, not on its next tick;
+/// a message from the user still moves a running one to the background.
+#[test]
+fn execute_returns_when_its_command_exits() {
+    let dir = std::env::temp_dir();
+    let (w, _s) = idle_worker("exec-exit", Conversation { folder: dir.clone(), ..Default::default() });
+    let run = |cmd: &str| w.tool("EXECUTE", &json!({"command": cmd, "summary": "Run it", "timeout": 20}));
+    let quickest = |f: &dyn Fn()| (0..10).map(|_| { let t = Instant::now(); f(); t.elapsed() }).min().unwrap();
+    let execute = quickest(&|| assert_eq!(run("echo hi"), (Ok("hi\n[exit code 0]".to_string()), false)));
+    let bare = quickest(&|| assert_eq!(tasks::spawn("echo hi", &dir).unwrap().wait_exit(Duration::from_secs(20)), Some(0)));
+    assert!(execute < bare + Duration::from_millis(15), "EXECUTE took {execute:?}, the command itself {bare:?}");
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            w.interrupt.store(true, Ordering::SeqCst);
+        });
+        let t = Instant::now();
+        let (r, interrupted) = run("echo started; until [ -e /oak-never ]; do sleep 1; done");
+        let r = r.unwrap();
+        assert!(interrupted && r.contains("started") && r.contains("moved to the background"), "{r}");
+        assert!(t.elapsed() < Duration::from_secs(3));
+    });
+    w.tasks.kill_all();
+}

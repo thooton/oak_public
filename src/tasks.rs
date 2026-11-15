@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(windows)]
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -173,6 +173,8 @@ pub struct Proc {
     started_ms: i64,
     lines: Mutex<Vec<String>>,
     state: Mutex<State>,
+    /// Signalled when `state.exit` is set, for those waiting on it.
+    exit_cv: Condvar,
     pid: u32,
     #[cfg(windows)]
     job: usize,
@@ -199,7 +201,9 @@ pub struct Proc {
     owned: bool,
     /// Bash has exited; the reader takes what is left of the output.
     exited: AtomicBool,
-    drained: AtomicBool,
+    /// The reader has all of the output (signalled on `drained_cv`).
+    drained: Mutex<bool>,
+    drained_cv: Condvar,
 }
 
 /// Closing the job kills what is left of the command's process tree (not
@@ -339,6 +343,7 @@ pub fn spawn(command: &str, cwd: &Path) -> Result<Arc<Proc>, String> {
         started_ms,
         lines: Mutex::new(vec![]),
         state: Mutex::new(State { exit: None, ended_ms: None, ended: None, cursor: 0, notify: vec![], note: None }),
+        exit_cv: Condvar::new(),
         pid: child.id(),
         #[cfg(windows)]
         job,
@@ -354,7 +359,8 @@ pub fn spawn(command: &str, cwd: &Path) -> Result<Arc<Proc>, String> {
         #[cfg(unix)]
         owned: true,
         exited: AtomicBool::new(false),
-        drained: AtomicBool::new(false),
+        drained: Mutex::new(false),
+        drained_cv: Condvar::new(),
     });
     let reader = read_on(&proc, 0);
     #[cfg(unix)]
@@ -385,7 +391,7 @@ fn read_on(p: &Arc<Proc>, from: u64) -> std::thread::Thread {
     std::thread::spawn(move || {
         use std::io::{Seek, SeekFrom};
         let Ok(mut f) = std::fs::File::open(&p.files.log) else {
-            p.drained.store(true, Ordering::SeqCst);
+            p.set_drained();
             return;
         };
         let _ = f.seek(SeekFrom::Start(from));
@@ -417,7 +423,7 @@ fn read_on(p: &Arc<Proc>, from: u64) -> std::thread::Thread {
                 }
             }
         }
-        p.drained.store(true, Ordering::SeqCst);
+        p.set_drained();
     })
     .thread()
     .clone()
@@ -483,17 +489,21 @@ impl Proc {
         Duration::from_millis((end - self.started_ms).max(0) as u64)
     }
 
+    /// The reader has the whole output: `finish` may go on at once.
+    fn set_drained(&self) {
+        *self.drained.lock().unwrap() = true;
+        self.drained_cv.notify_all();
+    }
+
     /// Bash exited with `code` (`note` says how, when Oak didn't see it):
     /// once the reader has the rest of the output, the exit is set and
-    /// those waiting for it are told.
+    /// those waiting for it are told, at once (`wait_exit`, `on_exit`).
     fn finish(&self, code: i32, note: Option<String>, reader: &std::thread::Thread) {
         self.exited.store(true, Ordering::SeqCst);
         reader.unpark();
-        // Don't wait on a grandchild that keeps writing, though.
-        let t = Instant::now();
-        while !self.drained.load(Ordering::SeqCst) && t.elapsed() < Duration::from_secs(1) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // Don't wait on a grandchild that keeps writing, though: at most 1s.
+        let drained = self.drained.lock().unwrap();
+        drop(self.drained_cv.wait_timeout_while(drained, Duration::from_secs(1), |d| !*d).unwrap());
         let _ = std::fs::remove_file(&self.files.script);
         let notify = {
             let mut s = self.state.lock().unwrap();
@@ -501,6 +511,7 @@ impl Proc {
             s.ended = Some(Instant::now());
             s.ended_ms = Some(now_ms());
             s.note = note;
+            self.exit_cv.notify_all();
             std::mem::take(&mut s.notify)
         };
         for f in notify {
@@ -628,12 +639,12 @@ impl Proc {
         }
     }
 
-    fn wait(&self, d: Duration) -> bool {
-        let t = Instant::now();
-        while self.exit().is_none() && t.elapsed() < d {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        self.exit().is_some()
+    /// Waits at most `d` for the command to exit, returning as soon as it
+    /// has (with all its output read): its exit code, or None if it still
+    /// runs.
+    pub fn wait_exit(&self, d: Duration) -> Option<i32> {
+        let s = self.state.lock().unwrap();
+        self.exit_cv.wait_timeout_while(s, d, |s| s.exit.is_none()).unwrap().0.exit
     }
 
     /// SIGINT, then SIGKILL if it is still going two seconds later.
@@ -642,11 +653,11 @@ impl Proc {
             return "had already exited";
         }
         self.interrupt();
-        if self.wait(Duration::from_secs(2)) {
+        if self.wait_exit(Duration::from_secs(2)).is_some() {
             return "stopped after SIGINT";
         }
         self.kill();
-        self.wait(Duration::from_secs(2));
+        self.wait_exit(Duration::from_secs(2));
         "killed (did not stop within 2s of SIGINT)"
     }
 
@@ -910,6 +921,7 @@ fn revive(r: &Record, closed_ms: i64) -> Arc<Proc> {
         started_ms: r.started_ms,
         lines: Mutex::new(lines),
         state: Mutex::new(State { exit, ended_ms, ended: ended_ms.map(instant_at), cursor, notify: vec![], note }),
+        exit_cv: Condvar::new(),
         pid: r.pid,
         #[cfg(windows)]
         job,
@@ -925,7 +937,8 @@ fn revive(r: &Record, closed_ms: i64) -> Arc<Proc> {
         #[cfg(unix)]
         owned: false,
         exited: AtomicBool::new(running.is_none()),
-        drained: AtomicBool::new(running.is_none()),
+        drained: Mutex::new(running.is_none()),
+        drained_cv: Condvar::new(),
     });
     let Some(running) = running else {
         let _ = std::fs::remove_file(&r.files.script);
@@ -1316,10 +1329,49 @@ mod tests {
     }
 
     fn wait_exit(p: &Proc) {
+        p.wait_exit(Duration::from_secs(20));
+    }
+
+    /// The least of `n` timings of `f`, in ms.
+    fn quickest(n: usize, mut f: impl FnMut()) -> f64 {
+        (0..n)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .fold(f64::MAX, f64::min)
+    }
+
+    /// A command's exit, with all of its output, is seen as soon as bash
+    /// exits: no fixed wait after it (once 10ms for the output, then
+    /// EXECUTE's 30ms tick). Against bash running the same script by itself.
+    #[test]
+    fn the_exit_is_seen_as_soon_as_bash_exits() {
+        let dir = std::env::temp_dir();
+        let oak = quickest(10, || {
+            let p = spawn("echo out", &dir).unwrap();
+            assert_eq!(p.wait_exit(Duration::from_secs(20)), Some(0));
+            assert_eq!(p.take_new(usize::MAX).0, "out\n");
+        });
+        let script = dir.join(format!("oak-bare-{}.sh", std::process::id()));
+        std::fs::write(&script, "trap 'echo $? > /dev/null' EXIT\necho out\n").unwrap();
+        let bare = quickest(10, || {
+            bash(&[&bash_path(&script)]).stdout(Stdio::null()).status().unwrap();
+        });
+        let _ = std::fs::remove_file(&script);
+        assert!(oak < bare + 8.0, "Oak saw the exit after {oak:.1}ms; bash alone takes {bare:.1}ms");
+    }
+
+    /// A wait for the exit ends at its timeout while the command runs on.
+    #[test]
+    fn a_wait_for_the_exit_times_out() {
+        let p = spawn("sleep 5", &std::env::temp_dir()).unwrap();
         let t = Instant::now();
-        while p.exit().is_none() && t.elapsed() < Duration::from_secs(20) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        assert_eq!(p.wait_exit(Duration::from_millis(100)), None);
+        assert!(t.elapsed() >= Duration::from_millis(100) && t.elapsed() < Duration::from_secs(3));
+        p.kill();
+        assert_eq!(p.wait_exit(Duration::from_secs(20)), Some(137));
     }
 
     /// Task records outlive the Tasks: an ended task comes back with its

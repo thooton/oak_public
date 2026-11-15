@@ -653,10 +653,19 @@ impl Worker {
                     self.ctx.request_repaint();
                 }
             }
-            std::thread::sleep(Duration::from_millis(30));
+            // Until it exits (its result goes at once), or for at most a
+            // tick: what else ends the wait (an interrupt, ultrapause, the
+            // timeout) and new output for the row are looked at that often.
+            let left = timeout.saturating_sub(t.elapsed()).max(Duration::from_millis(1));
+            p.wait_exit(EXECUTE_TICK.min(left));
         }
     }
 }
+
+/// How often a running EXECUTE looks at what isn't its command's exit (an
+/// interrupt, ultrapause, the timeout, new output to show); the exit itself
+/// ends the wait at once.
+const EXECUTE_TICK: Duration = Duration::from_millis(30);
 
 /// How long PROGRESS_SET waits for the meter's first reading.
 const FIRST_READING: Duration = Duration::from_secs(15);
