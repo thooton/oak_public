@@ -16,6 +16,9 @@ const TAB_MIN_W: f32 = 120.0;
 /// The + at the end of the strip.
 pub(crate) const PLUS_W: f32 = 36.0;
 
+/// The icon before a chat's title (`Conversation::chat`), of the icon font.
+const CHAT_ICON: &str = "\u{f086}";
+
 /// How many closed tabs Ctrl+Shift+T can bring back.
 const CLOSED_KEPT: usize = 50;
 
@@ -215,7 +218,9 @@ impl App {
             let c = s.conv.lock().unwrap();
             let title = if c.title.is_empty() { "Untitled".to_string() } else { c.title.clone() };
             // (A plugin's role may mark its conversations' tabs.)
-            let icon = Some(crate::agent::prompt::role(&c.role).icon).filter(|i| !i.is_empty()).map(|i| (i.to_string(), markdown::icon_font(13.0)));
+            // (A chat's tab has speech bubbles: Font Awesome's comments.)
+            let icon = if c.chat { CHAT_ICON } else { crate::agent::prompt::role(&c.role).icon };
+            let icon = Some(icon).filter(|i| !i.is_empty()).map(|i| (i.to_string(), markdown::icon_font(13.0)));
             return (title, c.paused, s.live.lock().unwrap().busy, icon);
         }
         if let Some(kind) = crate::plugins::tab_kind(id) {

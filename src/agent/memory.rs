@@ -227,8 +227,9 @@ pub(crate) fn memory_for_request(c: &mut Conversation, now: i64, cold: bool) -> 
             Some(m) if !reload => (m.context, m.files),
             old => {
                 let mut skipped = vec![];
-                let files = instructions::load(&c.folder, &instructions::home(), &mut skipped);
-                let context = instructions::render(&files, &instructions::memory_index(&c.folder));
+                // A chat has no folder: no instruction files or memory.
+                let files = if c.chat { vec![] } else { instructions::load(&c.folder, &instructions::home(), &mut skipped) };
+                let context = if c.chat { String::new() } else { instructions::render(&files, &instructions::memory_index(&c.folder)) };
                 let paths: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
                 let before = old.map(|m| m.files).unwrap_or_default();
                 if paths != before && (!paths.is_empty() || !before.is_empty()) {

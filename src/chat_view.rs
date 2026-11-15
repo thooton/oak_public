@@ -177,8 +177,9 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         // Where old tool output stops being cleared (by a summary or at a
         // cold moment), when any is.
         let cleared = results.values().any(|r| r.cleared).then(|| unit_of(conv.rolling.cleared_to())).filter(|&u| u < units.len());
-        // File links in replies are relative to the working folder.
-        crate::markdown::set_link_base(ui.ctx(), Some(&conv.folder));
+        // File links in replies are relative to the working folder (a chat
+        // has none).
+        crate::markdown::set_link_base(ui.ctx(), (!conv.chat).then_some(conv.folder.as_path()));
         crate::transcript::for_conversation(id, || frame.show(ui, t, list, items, &units, results, Some(&conv.messages), tail, cut, cleared));
         crate::markdown::set_link_base(ui.ctx(), None);
         let right = frame.map.map_or(frame.track.left(), |m| m.left()) - 4.0;

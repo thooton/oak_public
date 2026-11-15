@@ -44,6 +44,8 @@ pub(crate) struct SessionInfo {
     pub(crate) parent: Option<(u64, String, String)>,
     /// Draws the separate agent and system prompt note (cloud sessions).
     pub(crate) note_separate_system: bool,
+    /// A chat (`Conversation::chat`): no folder, no goal, no Freebuff.
+    pub(crate) chat: bool,
 }
 
 /// What a subagent in the session box is doing.
@@ -94,6 +96,7 @@ impl SessionInfo {
             agents: vec![],
             parent: None,
             note_separate_system: false,
+            chat: false,
         };
         let Some(s) = session else {
             let folder = settings.folder.trim();
@@ -113,7 +116,9 @@ impl SessionInfo {
             }
         }
         let title = if c.title.is_empty() { "Untitled".into() } else { c.title.clone() };
-        SessionInfo {
+        let chat = c.chat;
+        let folder = if chat { CHAT_FOLDER.to_string() } else { c.folder.display().to_string() };
+        let mut info = SessionInfo {
             new: false,
             // (A new goal waiting to go out starts unpaused.)
             goal_paused: c.goal_paused && !goal.is_empty() && goal == c.goal && goal_endless == c.goal_endless,
@@ -125,8 +130,15 @@ impl SessionInfo {
             agents: c.agents.iter().map(|a| (a.id, a.name.clone(), a.conv.clone(), AgentState::Idle)).collect(),
             parent: c.parent.clone().map(|p| (c.agent_id, p, String::new())),
             note_separate_system: crate::cloud::is_key(&c.id),
-            ..with(title, c.folder.display().to_string(), provider, model, &effort)
+            chat,
+            ..with(title, folder, provider, model, &effort)
+        };
+        if chat {
+            // It switches to none of what it can't use.
+            info.folder_path = None;
+            info.models.retain(|m| agent::chat_refuses_provider(true, m.provider).is_none());
         }
+        info
     }
 }
 
@@ -141,6 +153,9 @@ fn goal_change(info: &SessionInfo, goal: String, endless: bool) -> Option<(Strin
 
 /// What the folder row reads before a conversation without a folder.
 const NO_FOLDER: &str = "no folder chosen";
+
+/// What the folder row reads in a chat (it has none).
+const CHAT_FOLDER: &str = "Chat, no files or commands";
 
 /// The session box's folder row: a click opens the folder in the system's
 /// file manager (Explorer, or the desktop's through xdg-open); the
@@ -508,14 +523,17 @@ pub(crate) fn session_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, editing: 
         // prompt: Oak is only the pipe to them.
         (info.provider == api::Provider::Freebuff || info.note_separate_system).then_some("Uses its own agent and system prompt"),
         // A model on the user's own server gets the basics only (`local`).
-        (info.provider == api::Provider::Local).then_some("Limited tools; no notes, heartbeats, progress meters, subagents, or screenshots."),
+        (info.provider == api::Provider::Local && !info.chat).then_some("Limited tools; no notes, heartbeats, progress meters, subagents, or screenshots."),
     ];
     for note in notes.into_iter().flatten() {
         ui.add_space(3.0);
         ui.add(egui::Label::new(RichText::new(note).small().color(t.ink3)).wrap());
     }
     ui.add_space(4.0);
-    goal_rows(ui, t, info, &font, editing, act);
+    // (A chat has no goals: `tools::CHAT_TOOLS`.)
+    if !info.chat {
+        goal_rows(ui, t, info, &font, editing, act);
+    }
     if !info.meters.is_empty() {
         ui.add_space(4.0);
         meter_rows(ui, t, &info.meters, act);

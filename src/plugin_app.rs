@@ -36,9 +36,11 @@ impl App {
         self.page = Page::Chats;
         self.hint = None;
         if kind.is_empty() || kind == home::LOCAL_TAB {
-            (self.new_cloud, self.new_kind) = (false, None);
+            (self.new_cloud, self.new_kind, self.new_chat) = (false, None, false);
         } else if crate::plugins::parts().new_kinds.iter().any(|k| k.id() == kind) {
             (self.new_cloud, self.new_kind) = (false, Some(kind.to_string()));
+        } else if kind == crate::new_screen::CHAT_KIND {
+            (self.new_cloud, self.new_kind, self.new_chat) = (false, None, true);
         } else if let Some(provider) = cloud::Provider::from_id(kind) {
             (self.new_cloud, self.new_kind, self.new_provider) = (true, None, provider);
         }

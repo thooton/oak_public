@@ -244,6 +244,17 @@ impl Worker {
         }
     }
 
+    /// Why a chat (`Conversation::chat`) won't run tool `name` (as OAK
+    /// runs it, or a family's name when its action is invalid): any tool
+    /// not in `tools::CHAT_TOOLS`. Checked whatever the model was given, so
+    /// no call reaches the user's files or runs anything on the machine.
+    fn chat_refuses(&self, name: &str) -> Option<String> {
+        let chat = self.conv.lock().unwrap().chat;
+        (chat && !tools::chat_allows(name) && name != "NOTE").then(|| {
+            format!("{} isn't available in a chat: it has only web search, fetch, ASK and notes, no files, commands or other agents.", tools::call_name(name))
+        })
+    }
+
     /// Runs one tool call and returns its tool_result block, and whether
     /// the user sent a message.
     fn run_call(&self, call: &Value, stop: &str) -> (Value, bool) {
@@ -257,6 +268,9 @@ impl Worker {
             (format!("Not run: the reply hit {stop} before this call was complete. Retry with smaller input (e.g. split a large WRITE)."), true, false)
         } else if let Some(raw) = call.get("_oak_raw") {
             (json!({"INVALID_JSON": raw}).to_string(), true, false)
+        } else if let Some(e) = self.chat_refuses(name) {
+            // First: a chat runs nothing else, whatever the call is.
+            (e, true, false)
         } else if name == "LOAD" {
             return self.load(call, input, stop);
         } else if let Some(e) = self.unloaded(name) {
@@ -432,6 +446,9 @@ impl Worker {
         };
         if !tools::allowed(name, agent, spawner) {
             return (Err(format!("{} isn't available to a subagent.", tools::call_name(name))), false);
+        }
+        if let Some(e) = self.chat_refuses(name) {
+            return (Err(e), false);
         }
         let id = input["id"].as_u64().unwrap_or(0);
         let result = match name {

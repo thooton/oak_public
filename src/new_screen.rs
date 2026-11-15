@@ -1,8 +1,15 @@
 //! The New screen: where a conversation starts (its folder, model, effort
-//! and system prompt), or a cloud session, or what a plugin adds
-//! (a plugin's `NewKind`).
+//! and system prompt), or a chat (model and effort only), or a cloud
+//! session, or what a plugin adds (a plugin's `NewKind`).
 
 use super::*;
+
+/// The New screen's choice for a chat, as `oak_sdk` hosts name it
+/// (`plugin_go_new`).
+pub(crate) const CHAT_KIND: &str = "chat";
+
+/// What the New screen says a chat is.
+const CHAT_INFO: &str = "A conversation with the model, not about a project: it can search the web and read pages, and has no access to your files, commands or browser.";
 
 impl App {
     /// What a plugin adds that the New screen is set to start, if it is
@@ -46,6 +53,15 @@ impl App {
                 }
                 return;
             }
+            if self.new_chat {
+                caption(ui, CHAT_INFO, t.ink3);
+                ui.add_space(16.0);
+                self.model_rows(ui, t);
+                ui.add_space(16.0);
+                self.effort_row(ui, t);
+                ui.add_space(16.0);
+                return;
+            }
             self.local_rows(ui, t);
             ui.add_space(16.0);
             self.role_row(ui, t);
@@ -63,15 +79,23 @@ impl App {
         self.effort_row(ui, t);
     }
 
-    /// Where it runs: a local folder or a cloud session (Oak's, or through
-    /// a plugin's service), or what a plugin starts instead.
+    /// Where it runs: a local folder, a chat (no folder) or a cloud session
+    /// (Oak's, or through a plugin's service), or what a plugin starts
+    /// instead.
     fn where_row(&mut self, ui: &mut Ui) {
-        let choice = (self.new_cloud, self.new_provider, self.new_kind.clone());
+        let choice = (self.new_cloud, self.new_provider, self.new_kind.clone(), self.new_chat);
         let kind = self.new_kind().map(|k| k.id());
         ui.horizontal_wrapped(|ui| {
-            if ui.selectable_label(!self.new_cloud && kind.is_none(), "Local folder").on_hover_text("Runs on this machine").clicked() {
+            let here = !self.new_cloud && kind.is_none();
+            if ui.selectable_label(here && !self.new_chat, "Local folder").on_hover_text("Runs on this machine").clicked() {
                 self.new_cloud = false;
                 self.new_kind = None;
+                self.new_chat = false;
+            }
+            if ui.selectable_label(here && self.new_chat, "Chat").on_hover_text("Just a conversation: web search and fetch, no files or commands").clicked() {
+                self.new_cloud = false;
+                self.new_kind = None;
+                self.new_chat = true;
             }
             for provider in cloud::Provider::all() {
                 let (icon, text) = provider.icon();
@@ -86,6 +110,7 @@ impl App {
                     self.new_cloud = true;
                     self.new_kind = None;
                     self.new_provider = provider;
+                    self.new_chat = false;
                 }
             }
             for k in &crate::plugins::parts().new_kinds {
@@ -99,11 +124,12 @@ impl App {
                 if r.clicked() {
                     self.new_kind = Some(id);
                     self.new_cloud = false;
+                    self.new_chat = false;
                 }
             }
         });
         // A hint is about the choice it was given for.
-        if choice != (self.new_cloud, self.new_provider, self.new_kind.clone()) {
+        if choice != (self.new_cloud, self.new_provider, self.new_kind.clone(), self.new_chat) {
             self.hint = None;
         }
     }
@@ -124,7 +150,8 @@ impl App {
     }
 
     /// The providers with models, then the chosen one's models (once they
-    /// are loaded). One saved from before is the model's.
+    /// are loaded). One saved from before is the model's. A chat's leave
+    /// out who can't serve one (`agent::chat_refuses_provider`).
     fn model_rows(&mut self, ui: &mut Ui, t: &Theme) {
         caption(ui, "Provider", t.ink3);
         let models = self.models.lock().unwrap().clone();
@@ -142,7 +169,9 @@ impl App {
             }
             Some(Ok(list)) => list,
         };
-        let providers: Vec<api::Provider> = api::Provider::ALL.into_iter().filter(|p| list.iter().any(|m| m.provider == *p)).collect();
+        let chat = self.new_chat;
+        let providers: Vec<api::Provider> =
+            api::Provider::ALL.into_iter().filter(|p| list.iter().any(|m| m.provider == *p) && agent::chat_refuses_provider(chat, *p).is_none()).collect();
         let mut provider = self.settings.provider.unwrap_or_else(|| api::Provider::of(&self.settings.model));
         if !providers.contains(&provider)
             && let Some(&p) = providers.first()
@@ -244,30 +273,45 @@ impl App {
     /// role, and by that title if it gives one (never retitled then).
     /// Returns its id, or None with the hint saying why it didn't start.
     pub(crate) fn start_conversation_as(&mut self, text: String, images: Vec<Value>, cmd: Option<Command>, named: Option<(String, String)>, ctx: &egui::Context) -> Option<String> {
-        let typed = self.settings.folder.trim();
-        if typed.is_empty() {
-            self.hint = Some("Folder required".into());
-            return None;
-        }
-        let folder = instructions::expand_home(typed, &instructions::user_home());
-        if !folder.is_dir() {
-            self.hint = Some(format!("Folder not found: {}", folder.display()));
-            return None;
-        }
+        // A chat has no folder, no goal and no role (a plugin's start is
+        // never one).
+        let chat = self.new_chat && named.is_none();
+        let provider = self.settings.provider.unwrap_or_else(|| api::Provider::of(&self.settings.model));
+        let folder = if chat {
+            std::path::PathBuf::new()
+        } else {
+            let typed = self.settings.folder.trim();
+            if typed.is_empty() {
+                self.hint = Some("Folder required".into());
+                return None;
+            }
+            let folder = instructions::expand_home(typed, &instructions::user_home());
+            if !folder.is_dir() {
+                self.hint = Some(format!("Folder not found: {}", folder.display()));
+                return None;
+            }
+            folder
+        };
         if !matches!(&*self.models.lock().unwrap(), Some(Ok(_))) || self.settings.model.is_empty() {
             self.hint = Some("Model required".into());
             return None;
         }
+        if let Some(why) = agent::chat_refuses_provider(chat, provider) {
+            self.hint = Some(why);
+            return None;
+        }
+        let cmd = cmd.filter(|_| !chat);
         store::save_settings(&self.settings);
         let now = api::now_ms();
         let mut conv = Conversation {
             id: now.to_string(),
             title: String::new(),
             folder,
-            provider: Some(self.settings.provider.unwrap_or_else(|| api::Provider::of(&self.settings.model))),
+            provider: Some(provider),
             model: self.settings.model.clone(),
             effort: agent::effort_for(&self.settings.model, &self.settings.effort),
-            role: agent::prompt::role(named.as_ref().map_or(self.settings.role.as_str(), |(role, _)| role.as_str())).id.to_string(),
+            role: if chat { String::new() } else { agent::prompt::role(named.as_ref().map_or(self.settings.role.as_str(), |(role, _)| role.as_str())).id.to_string() },
+            chat,
             messages: Default::default(),
             last_message_at: now,
             next_task_id: 0,

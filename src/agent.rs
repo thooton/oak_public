@@ -145,7 +145,8 @@ pub fn scratch_owners() -> Vec<crate::scratch::Owner> {
         .filter_map(|s| {
             let busy = s.live.lock().unwrap().busy || s.tasks.running() > 0;
             let c = s.conv.lock().unwrap();
-            (!c.deleted).then(|| crate::scratch::Owner { id: c.id.clone(), folder: c.folder.clone(), scratch: c.scratch.clone(), last_ms: c.last_message_at, in_use: busy })
+            // (A chat has no folder, so no scratchpad.)
+            (!c.deleted && !c.chat).then(|| crate::scratch::Owner { id: c.id.clone(), folder: c.folder.clone(), scratch: c.scratch.clone(), last_ms: c.last_message_at, in_use: busy })
         })
         .collect()
 }
@@ -1359,6 +1360,15 @@ impl Worker {
         let mut c = self.conv.lock().unwrap();
         let mut blocks = vec![];
         for cmd in cmds {
+            // A chat has no goals and no Freebuff (whatever sent them).
+            let refused = match &cmd {
+                Command::Goal(..) => c.chat,
+                Command::Model(p, _) => chat_refuses_provider(c.chat, *p).is_some(),
+                Command::Effort(_) => false,
+            };
+            if refused {
+                continue;
+            }
             let (block, mark) = apply_command(&mut c, cmd);
             let sent = block.as_ref().and_then(|b| b["text"].as_str()).map(String::from).or_else(|| c.held.last().cloned()).unwrap_or_default();
             blocks.extend(block);
@@ -1930,6 +1940,14 @@ pub(crate) fn answer_lost_calls(c: &mut Conversation) -> bool {
 
 /// Applies a command to the conversation: the block telling the model
 /// (for a goal) and the line for the transcript.
+/// Why a chat (`chat`) can't be served by `provider`: Freebuff's own
+/// agent works on a project (its prompt and tools, a snapshot of the
+/// folder). None for every other provider, and for every conversation that
+/// isn't a chat.
+pub(crate) fn chat_refuses_provider(chat: bool, provider: api::Provider) -> Option<String> {
+    (chat && provider == api::Provider::Freebuff).then(|| "Freebuff can't serve a chat: its agent works on a project. Switch to another model.".to_string())
+}
+
 fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKind, String)) {
     match cmd {
         Command::Goal(goal, endless) => {
@@ -2137,7 +2155,8 @@ fn start_marks(c: &mut Conversation, from: usize, p: &api::Preamble, context: &s
     let label = if crate::freebuff::serves(&c.model) {
         format!("instructions loaded: Freebuff system prompt{listed} ({instructions})")
     } else {
-        format!("instructions loaded: {} system prompt{listed} ({instructions})", prompt::role(&c.role).name)
+        let name = if c.chat { "Chat" } else { prompt::role(&c.role).name };
+        format!("instructions loaded: {name} system prompt{listed} ({instructions})")
     };
     c.marks.push(mark(MarkKind::Instructions, label, store::sent_parts(&parts)));
     let tool_chars = p.tools.iter().map(|t| t.to_string().len()).sum();

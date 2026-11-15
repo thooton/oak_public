@@ -782,3 +782,103 @@ fn a_limit_wait_ends_when_an_account_comes_free() {
     assert!(limit_over(0, 4, 4));
     assert!(limit_over(60_000, 4, 5));
 }
+
+/// A chat runs only the web, ASK and notes: every other tool is refused
+/// at run time (whether or not the model was given it, called directly,
+/// as a family, through LOAD or the browser), and nothing touches the
+/// folder. Its requests carry only those tools, the chat prompt, no
+/// folder and no scratchpad; goals and Freebuff never reach it.
+#[test]
+fn a_chat_runs_no_file_command_or_agent_tool() {
+    let dir = std::env::temp_dir().join(format!("oak-chat-test-{}", api::now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("secret.txt"), "hidden").unwrap();
+    let (w, s) = idle_worker("chat", Conversation { chat: true, model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
+    s.conv.lock().unwrap().folder = PathBuf::new();
+    let secret = dir.join("secret.txt").display().to_string();
+    let made = dir.join("made.txt");
+    let refused = [
+        ("READ", json!({"path": secret})),
+        ("WRITE", json!({"path": made.display().to_string(), "content": "x"})),
+        ("EDIT", json!({"path": secret, "old_string": "hidden", "new_string": "shown"})),
+        ("EXECUTE", json!({"command": format!("cat {secret} > {}", made.display())})),
+        ("TASK_NEW", json!({"command": "true"})),
+        ("DISPLAY", json!({"paths": [secret]})),
+        ("SCREENSHOT", json!({"url": format!("file://{secret}")})),
+        ("CD", json!({"path": dir.display().to_string()})),
+        ("AGENT_NEW", json!({"name": "x", "task": "read the files"})),
+        ("HEARTBEAT_START", json!({"every_min": 5, "message": "x"})),
+        ("PROGRESS_SET", json!({"label": "x", "command": "ls", "every_min": 1})),
+        ("GOAL_FINISH", json!({})),
+        ("BROWSER_EVAL", json!({"script": "1"})),
+    ];
+    for (name, input) in &refused {
+        let e = w.tool(name, input).0.unwrap_err();
+        assert!(e.contains("isn't available in a chat"), "{name}: {e}");
+    }
+    // As the model would call them: families, LOAD, the browser, an unknown tool.
+    let calls = vec![
+        json!({"type": "tool_call", "id": "a", "name": "TASK", "input": {"action": "new", "command": "true"}}),
+        json!({"type": "tool_call", "id": "b", "name": "LOAD", "input": {"name": "AGENT", "input": {"action": "new", "name": "x", "task": "y"}}}),
+        json!({"type": "tool_call", "id": "c", "name": "BROWSER", "input": {"action": "eval", "script": "1"}}),
+        json!({"type": "tool_call", "id": "d", "name": "EXECUTE", "input": {"command": "true"}}),
+        json!({"type": "tool_call", "id": "e", "name": "NOPE", "input": {}}),
+        json!({"type": "tool_call", "id": "f", "name": "NOTE", "input": {"action": "new", "text": "likes tea"}}),
+    ];
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+    w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    {
+        let c = s.conv.lock().unwrap();
+        let results = c.messages[2]["content"].as_array().unwrap();
+        assert_eq!(results.len(), 6);
+        for r in &results[..5] {
+            assert!(r["content"].to_string().contains("isn't available in a chat"), "{r}");
+        }
+        assert!(!results[5]["content"].to_string().contains("isn't available"), "{}", results[5]);
+        assert_eq!(c.notes.len(), 1);
+        assert!(c.agents.is_empty() && c.scratch.is_empty() && c.prefix.kits.is_empty());
+    }
+    assert!(!made.exists() && std::fs::read_to_string(dir.join("secret.txt")).unwrap() == "hidden");
+    // The request: the chat's prompt and tools only.
+    let (r, ..) = w.request_body();
+    let mut names: Vec<String> = r.tools.iter().map(|t| t["name"].as_str().unwrap_or("").to_string()).collect();
+    names.sort();
+    assert_eq!(names, ["ASK", "FETCH", "NOTE", "SEARCH"]);
+    assert!(r.system.contains("This is a chat, not a coding session") && !r.system.contains("Working folder") && !r.system.contains("EXECUTE"));
+    assert!(r.system.contains("[1] likes tea"));
+    assert!(r.folder.is_none());
+    assert!(s.conv.lock().unwrap().scratch.is_empty());
+    // No goal, no Freebuff; effort and other models go through.
+    s.command(Command::Goal("ship it".into(), false));
+    s.command(Command::Model(api::Provider::Freebuff, "freebuff".into()));
+    s.command(Command::Effort("low".into()));
+    w.take_commands();
+    {
+        let c = s.conv.lock().unwrap();
+        assert!(c.goal.is_empty() && c.provider() != api::Provider::Freebuff && c.effort == "low");
+    }
+    assert!(chat_refuses_provider(true, api::Provider::Freebuff).is_some());
+    assert!(chat_refuses_provider(false, api::Provider::Freebuff).is_none() && chat_refuses_provider(true, api::Provider::Claude).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A coding conversation keeps every tool; `chat` isn't written for it, so
+/// its file reads as before, and a chat's reads back as a chat.
+#[test]
+fn chat_is_kept_and_coding_conversations_are_unchanged() {
+    let coding = Conversation { id: "c".into(), ..Default::default() };
+    let text = serde_json::to_string(&coding).unwrap();
+    assert!(!text.contains("\"chat\""));
+    assert!(!serde_json::from_str::<Conversation>(&text).unwrap().chat);
+    let chat = Conversation { id: "c".into(), chat: true, ..Default::default() };
+    assert!(serde_json::from_str::<Conversation>(&serde_json::to_string(&chat).unwrap()).unwrap().chat);
+    let (w, s) = idle_worker("coding", Conversation { model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    let (r, ..) = w.request_body();
+    let names: Vec<&str> = r.tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.contains(&"EXECUTE") && names.contains(&"READ") && names.contains(&"LOAD"), "{names:?}");
+    assert!(r.system.contains("Working folder") && r.folder.is_some());
+    assert!(w.tool("NOTE_NEW", &json!({"text": "x"})).0.is_ok());
+    assert!(prompt::ROLES.iter().all(|r| r.id != "chat" && r.id != "tools"));
+}

@@ -268,7 +268,8 @@ impl Worker {
             c.messages = messages;
         }
         let memory = memory_for_request(&mut c, now, cold);
-        let scratch = scratchpad(&mut c);
+        // A chat has no folder, so no scratchpad either.
+        let scratch = if c.chat { PathBuf::new() } else { scratchpad(&mut c) };
         let context = memory_context(&c).to_string();
         let agent = c.parent.is_some().then(|| agent_label(c.agent_id, &c.title));
         // A model on the user's own server gets the basics only, and the
@@ -280,7 +281,7 @@ impl Worker {
         }
         // (A model without effort levels goes without.)
         let effort = Some(effort_for(&c.model, &c.effort).to_string()).filter(|e| !e.is_empty());
-        let tools = tools::definitions_with_kits(agent.is_some(), c.spawner, local, &kits);
+        let tools = if c.chat { tools::chat_definitions() } else { tools::definitions_with_kits(agent.is_some(), c.spawner, local, &kits) };
         let built = crate::prefix::Pin { day: crate::time::today_utc(), kits, effort, tools, folder: c.folder.display().to_string() };
         // The stable prefix: the date, kits, tools and effort the cache was
         // written with, and messages for what changed since (`crate::prefix`).
@@ -295,7 +296,11 @@ impl Worker {
             None => built,
         };
         // (The folder the cache was written with: a CD's result says the new one.)
-        let system = system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, &c.model, agent.as_deref(), &pin.kits, &c.role);
+        let system = if c.chat {
+            super::prompt::chat_prompt(&pin.day, &c.model)
+        } else {
+            system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, &c.model, agent.as_deref(), &pin.kits, &c.role)
+        };
         let tools = Value::Array(pin.tools);
         // Again after a switch to a model whose provider sends other things
         // (another identity, prompt or tools), where it takes effect.
@@ -325,7 +330,7 @@ impl Worker {
             route: (provider == api::Provider::OpenRouter && !c.served_by.is_empty()).then(|| c.served_by.clone()),
             // The Freebuff sidecar signs and snapshots the project the same
             // way the CLI does; it needs the folder.
-            folder: Some(c.folder.to_string_lossy().into_owned()),
+            folder: (!c.chat).then(|| c.folder.to_string_lossy().into_owned()),
             conv: Some(c.id.clone()),
             ttl: cache.ttl,
             anchor: cache.anchor,
@@ -377,6 +382,14 @@ impl Worker {
     }
 
     fn ask_inner(&self, batch: &mut Batch) -> Reply {
+        // Freebuff's own agent works on a project (its prompt, its tools,
+        // the folder's snapshot): no chat goes there.
+        if let Some(why) = {
+            let c = self.conv.lock().unwrap();
+            chat_refuses_provider(c.chat, c.provider())
+        } {
+            return Reply::Failed(why);
+        }
         let (rx, thread) = self.send_request();
         self.set(|l| {
             l.blocks.clear();

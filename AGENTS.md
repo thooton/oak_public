@@ -221,8 +221,8 @@ REQUEST_ASK, ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which
 `action` and show as tools of their own (`TASK action=wait` is TASK_WAIT). LOAD loads a kit (AGENT,
 BROWSER, WINDOW): a tool and its instructions, left out of the prompt until needed.
 
-- The system prompt is `prompts/<role>.md` (who the model is; every file but `tools.md` is a role
-  offered on the New screen; plugins can add roles) with `prompts/tools.md` in place of `{{tools}}`. `{{folder}}`,
+- The system prompt is `prompts/<role>.md` (who the model is; every file but `tools.md` and
+  `chat.md` is a role offered on the New screen; plugins can add roles) with `prompts/tools.md` in place of `{{tools}}`. `{{folder}}`,
   `{{scratch}}`, `{{date}}`, `{{os}}`, `{{model}}` and `{{agent}}` are filled in, `{{#windows}}`,
   `{{#unix}}`, `{{#main}}`, `{{#agent}}`, `{{#full}}`, `{{#local}}`, `{{#goal}}` and kit blocks are kept only where they apply, and
   comments are dropped (`build.rs`, `src/agent/prompt.rs`). It is compiled in: a change takes a
@@ -273,6 +273,18 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
   user by Gemma 4 31B through OpenRouter; the model's context keeps its own text.
 - Losing the GPU device ultrapauses the conversations at work and restarts Oak (`src/gpu.rs`).
   On Windows Oak prefers Direct3D 12; `WGPU_BACKEND` picks another.
+
+**Chats** (`Conversation::chat`). The New screen's Chat, beside Local folder, starts a
+conversation that is no project: no folder, role or goal, just a model and effort. Its system
+prompt is `prompts/chat.md` whole (no `tools.md`, no project instructions or memory, no
+scratchpad), and its tools are `tools::CHAT_TOOLS`: SEARCH, FETCH, ASK and NOTE. Every other tool
+(files, EXECUTE, tasks, DISPLAY, SCREENSHOT, CD, heartbeats, progress, goals, LOAD and its kits, so
+also subagents and the browser) is refused at run time (`tool_calls::chat_refuses`), whatever the
+model was given or calls, so nothing reaches the user's files or runs on the machine. Goal
+commands are dropped and Freebuff (whose agent works on a project) is neither offered nor sent a
+chat (`agent::chat_refuses_provider`). It is saved with `"chat": true` (coding conversations, the
+default, don't write it); its tab has a speech-bubble icon, its Home row says Chat, and its side
+chat is a chat too. `oak_sdk`'s `go_new` takes `chat` to pick it.
 
 **Side chats** (`src/side_chat.rs`). The message bubble immediately left of the browser icon opens
 this conversation's side chat from the right within Oak, with only its transcript and message box.

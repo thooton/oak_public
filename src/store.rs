@@ -381,6 +381,13 @@ pub struct Conversation {
     /// `agent::prompt::ROLES` (empty, from before roles: the default).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
+    /// A chat: conversation only, no project. It has no working folder,
+    /// its own system prompt (`agent::prompt::CHAT`) and only the tools
+    /// in `tools::CHAT_TOOLS` (web search and fetch, ASK, notes): no file,
+    /// command, browser or subagent tool, refused at run time too
+    /// (`tool_calls::run_call`). Unset, a coding conversation.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub chat: bool,
     /// The transcript, in the Oak format (`crate::oak`): only ever
     /// appended to.
     pub messages: Messages,

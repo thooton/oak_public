@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 mod defs;
-pub use defs::{browser_help, definitions_with_kits, kit_help, kit_of, kits_for};
+pub use defs::{browser_help, chat_definitions, definitions_with_kits, kit_help, kit_of, kits_for};
 mod search;
 pub use search::{parse_results as search_results, search};
 
@@ -163,6 +163,20 @@ pub fn definitions(agent: bool) -> Value {
 pub const LOCAL_TOOLS: [&str; 13] = [
     "READ", "WRITE", "EDIT", "EXECUTE", "TASK_NEW", "TASK_GET_NEW_OUTPUT", "TASK_WAIT", "TASK_LIST", "TASK_DELETE", "SEARCH", "FETCH", "ASK", "DISPLAY",
 ];
+/// All a chat (`store::Conversation::chat`) has: the web and the
+/// conversation itself. Nothing that reaches the user's files or runs
+/// anything on the machine (no file, command, task, browser, window,
+/// screenshot, subagent, heartbeat or goal tool, no LOAD), so neither
+/// directly nor through another tool or agent. The model is given only
+/// these (`defs::chat_definitions`) and any other call is refused
+/// (`chat_allows`).
+pub const CHAT_TOOLS: [&str; 6] = ["SEARCH", "FETCH", "ASK", "NOTE_NEW", "NOTE_UPDATE", "NOTE_DELETE"];
+
+/// Whether a chat may run the tool OAK runs as `name` (`CHAT_TOOLS`).
+pub fn chat_allows(name: &str) -> bool {
+    CHAT_TOOLS.contains(&name)
+}
+
 const GOAL_TOOLS: [&str; 3] = ["GOAL_JUSTIFICATION", "GOAL_FINISH", "REQUEST_ASK"];
 
 /// The tools the model gets: those OAK runs, with each family's as one

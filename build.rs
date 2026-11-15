@@ -1,4 +1,5 @@
-//! Bundles the system prompts: every file in prompts/ but tools.md is a role
+//! Bundles the system prompts: every file in prompts/ but tools.md and
+//! chat.md (a chat's whole prompt, `agent::prompt::CHAT`) is a role
 //! the New screen offers (`agent::prompt::ROLES`), named after its file with
 //! the first letter capitalized. Normal comes first, as the default; the
 //! others follow in alphabetical order. Also bundles ripgrep (`ripgrep()`)
@@ -19,7 +20,7 @@ fn main() {
         .map(|e| e.path())
         .filter(|p| p.is_file())
         .filter_map(|p| Some((p.file_stem()?.to_str()?.to_string(), p)))
-        .filter(|(id, _)| id != "tools" && !id.is_empty() && !id.starts_with('.'))
+        .filter(|(id, _)| id != "tools" && id != "chat" && !id.is_empty() && !id.starts_with('.'))
         .collect();
     roles.sort_by(|a, b| (a.0 != "normal", &a.0).cmp(&(b.0 != "normal", &b.0)));
     assert!(!roles.is_empty(), "prompts/ has no role besides tools.md");

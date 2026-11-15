@@ -329,6 +329,9 @@ struct App {
     chat_filter: String,
     /// The New screen starts a cloud session.
     new_cloud: bool,
+    /// The New screen starts a chat (`store::Conversation::chat`), when it
+    /// starts neither a cloud session nor what a plugin adds.
+    new_chat: bool,
     new_provider: cloud::Provider,
     /// The New screen starts what a plugin adds (`oak_sdk::NewKind`): its id.
     new_kind: Option<String>,

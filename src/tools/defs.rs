@@ -50,6 +50,14 @@ pub fn definitions_with_kits(agent: bool, spawner: bool, local: bool, kits: &[St
     families(all, agent && !spawner)
 }
 
+/// The tools a chat gets (`CHAT_TOOLS`), the same for every model: no
+/// kits, no LOAD.
+pub fn chat_definitions() -> Vec<Value> {
+    let mut all = run_definitions(false, false, false, false);
+    all.retain(|d| chat_allows(d["name"].as_str().unwrap_or("")));
+    families(all, false)
+}
+
 /// The kits a session can load: a subagent has AGENT always (to reach the
 /// main session) and no browser.
 pub fn kits_for(agent: bool) -> Vec<&'static str> {

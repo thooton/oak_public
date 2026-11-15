@@ -175,7 +175,8 @@ impl App {
             .filter_map(|(id, s)| {
                 let c = s.conv.lock().unwrap();
                 if c.side_chat_of.is_some() { return None; }
-                let folder = c.folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                // (A chat has no folder: it says it is one.)
+                let folder = if c.chat { "Chat".to_string() } else { c.folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() };
                 Some(ChatRow {
                     id: id.clone(),
                     title: if c.title.is_empty() { "Untitled".into() } else { c.title.clone() },

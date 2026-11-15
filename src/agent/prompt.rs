@@ -21,7 +21,7 @@ pub(crate) struct Role {
     pub(crate) offered: bool,
 }
 
-// `ROLES`: every file in prompts/ but tools.md, bundled into the binary
+// `ROLES`: every file in prompts/ but tools.md and chat.md, bundled into the binary
 // when OAK is built (build.rs). The first (Normal) is the default, and
 // stands in for an unknown id (a role since removed, one whose plugin isn't
 // loaded, or none in conversations from before roles). To add one, put its
@@ -62,6 +62,15 @@ pub(crate) fn role(id: &str) -> &'static Role {
 
 /// The tool instructions every role's prompt has.
 const TOOLS: &str = include_str!("../../prompts/tools.md");
+
+/// A chat's whole system prompt (`Conversation::chat`): no role, none of
+/// the tool instructions, no folder or scratchpad.
+const CHAT: &str = include_str!("../../prompts/chat.md");
+
+/// A chat's system prompt (`CHAT`), dated `day`, for `model`.
+pub(crate) fn chat_prompt(day: &str, model: &str) -> String {
+    fill_prompt(CHAT, Path::new(""), Path::new(""), day, &crate::api::model_name(model), None)
+}
 
 /// The system prompt: the role's prompt (`role`, an id in `ROLES`) with the
 /// tool instructions in it, both bundled into the binary (changing them

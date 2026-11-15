@@ -10,6 +10,9 @@ use super::*;
 
 pub(crate) const FORK_MESSAGE: &str = "The session was forked to be placed in a \"side chat\". This is only a chat for asking questions or requesting small changes, so do not continue work as you were before it was forked. Only make changes to the project if the user explicitly requests so.";
 
+/// A chat's fork (`Conversation::chat`: it has no project).
+pub(crate) const CHAT_FORK_MESSAGE: &str = "The conversation was forked to be placed in a \"side chat\", for asking questions on the side: do not carry on with what you were doing before it was forked unless the user asks.";
+
 /// A snapshot of the durable context, not the source's worker, task ownership,
 /// goal, timers, inbox, usage totals or account/server thread. Complete any
 /// in-flight tool calls in the copy before adding the fork instruction.
@@ -23,6 +26,7 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation 
         model: source.model.clone(),
         effort: source.effort.clone(),
         role: source.role.clone(),
+        chat: source.chat,
         messages: source.messages.clone(),
         format: source.format,
         rolling: source.rolling.clone(),
@@ -35,7 +39,8 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation 
         ..Default::default()
     };
     agent::answer_lost_calls(&mut c);
-    c.messages.push(serde_json::json!({"role": "user", "content": [oak::text(FORK_MESSAGE)]}));
+    let message = if c.chat { CHAT_FORK_MESSAGE } else { FORK_MESSAGE };
+    c.messages.push(serde_json::json!({"role": "user", "content": [oak::text(message)]}));
     c
 }
 
