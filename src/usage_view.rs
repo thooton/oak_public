@@ -175,6 +175,9 @@ fn work_out(range: Range, acct: &Option<String>, current: &str) -> Data {
                 accounts.push((a.email.clone(), a.plan.clone()));
             }
         }
+        for a in &mut accounts {
+            a.1 = api::plan_label(&a.1).to_string();
+        }
         let focus = acct.clone().or_else(|| (!current.is_empty()).then(|| current.to_string())).or_else(|| accounts.first().map(|a| a.0.clone()));
         let (s5, s7) = (usage::samples(recs, false), usage::samples(recs, true));
         let measured = |s: &[usage::Sample]| accounts.iter().map(|(a, _)| (a.clone(), Measured::of(s, a))).filter(|m| !m.1.raw.is_empty()).collect::<Vec<_>>();

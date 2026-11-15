@@ -190,6 +190,10 @@ can't read.
   account refused for its limit is usable again once a usage reading taken after the refusal shows
   its 5-hour and weekly limits below 100% (a reset used here or anywhere else), and waiting
   sessions try again then. Settings can turn rotation off. The model is never told.
+- A Claude account's plan is read from its profile: Pro, Max, Ultra, Team Standard or Team
+  Premium. Max and Ultra are the two sizes of Max (rate-limit tiers `..._max_5x` and `..._max_20x`);
+  accounts, the usage log and vaults keep them as "Max 5x" and "Max 20x", the names they had
+  before, and only what Oak shows says Max and Ultra (`api::plan_label`).
 - Usage-limit resets (`src/api/resets.rs`, `src/resets_view.rs`): the resets Anthropic offers a
   Claude account ("Full reset", "Fable reset", "5-hour reset", "Weekly reset", as Claude Code's
   /limit-reset lists them) come in its usage report (`/api/oauth/usage?cedar_ember=1`, read at

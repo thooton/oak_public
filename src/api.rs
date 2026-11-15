@@ -1071,6 +1071,18 @@ fn read_profile(p: &Value) -> (String, String, String) {
     )
 }
 
+/// A Claude plan as users see it. Accounts keep the plan as OAK first
+/// named it ("Max 5x", "Max 20x": saved accounts, the usage log and the
+/// command center's vault all carry those), and Anthropic now calls those
+/// two Max and Ultra.
+pub fn plan_label(plan: &str) -> &str {
+    match plan {
+        "Max 5x" => "Max",
+        "Max 20x" => "Ultra",
+        p => p,
+    }
+}
+
 /// A Team seat's kind, from the profile's `seat_tier` ("team_tier_1" on a
 /// Premium seat) or, without one, its rate-limit tier (a Premium seat's is
 /// "default_claude_max_5x", a Standard one's "default_raven").

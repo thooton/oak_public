@@ -253,7 +253,7 @@ pub fn fable_offer(id: &str, accounts: &[Account], now: i64) -> Option<(String, 
     }
     let plans: Vec<(&Account, FableTerms)> = accounts.iter().filter(|a| a.provider == Provider::Claude && !a.api_key && !a.plan.is_empty()).map(|a| (a, fable_terms(&a.plan))).collect();
     let who = |terms: FableTerms| -> Vec<String> {
-        plans.iter().filter(|(_, t)| *t == terms).map(|(a, _)| if a.email.is_empty() { a.plan.clone() } else { format!("{} ({})", a.email, a.plan) }).collect()
+        plans.iter().filter(|(_, t)| *t == terms).map(|(a, _)| if a.email.is_empty() { super::plan_label(&a.plan).to_string() } else { format!("{} ({})", a.email, super::plan_label(&a.plan)) }).collect()
     };
     let (limited, included) = (who(FableTerms::LimitedTime), who(FableTerms::Included));
     if limited.is_empty() && included.is_empty() {
@@ -296,6 +296,7 @@ mod tests {
         assert_eq!(fable_terms("Pro"), FableTerms::LimitedTime);
         assert_eq!(fable_terms("Team Standard"), FableTerms::LimitedTime);
         assert_eq!(fable_terms("Max 20x"), FableTerms::Included);
+        assert_eq!([plan_label("Max 5x"), plan_label("Max 20x"), plan_label("Max"), plan_label("Pro"), plan_label("Team Premium")], ["Max", "Ultra", "Max", "Pro", "Team Premium"]);
         assert_eq!(fable_terms("Team Premium"), FableTerms::Included);
         assert_eq!(fable_terms("claude_enterprise"), FableTerms::Other);
 

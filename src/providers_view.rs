@@ -57,7 +57,8 @@ pub(crate) struct Summed {
 pub(crate) fn weight(a: &api::Account) -> f32 {
     let plan = a.plan.to_ascii_lowercase();
     match a.provider {
-        // "Max 5x", "Max 20x", or "Max" from before OAK told them apart.
+        // "Max 5x" (shown as Max), "Max 20x" (shown as Ultra), or "Max" from
+        // before OAK told them apart.
         // Not the advertised 5x and 20x: what they actually give over Pro,
         // from Anthropic's own Sonnet 4 weekly hours (Table 1 of the class
         // action complaint, Case 3:26-cv-05763, June 2026).
@@ -155,7 +156,7 @@ pub(crate) fn provider_box(ui: &mut Ui, t: &Theme, p: Kind, accounts: usize, sho
                         })
                         .response;
                     let how = match p {
-                        Kind::Claude => ", each plan counting by its size (Pro 1, Team Standard 1.25, Max 5x 5, Team Premium 6.25, Max 20x 20)",
+                        Kind::Claude => ", each plan counting by its size (Pro 1, Team Standard 1.25, Max 5, Team Premium 6.25, Ultra 20)",
                         Kind::Codex => ", each plan counting by its size (Plus 1, Pro 5x 5, Pro 20x 20)",
                         _ => "",
                     };
@@ -275,7 +276,7 @@ mod tests {
         assert_eq!((s[0].used, s[0].accounts, s[0].next_reset), (15.0, 2, None));
     }
 
-    /// Accounts count by their plans' multipliers: a used-up Max 5x (3.5x) beside
+    /// Accounts count by their plans' multipliers: a used-up Max (3.5x) beside
     /// an unused Pro is 3.5/4.5 used.
     #[test]
     fn plans_count_by_their_multipliers() {

@@ -790,7 +790,7 @@ pub(crate) fn usage_panel(ui: &mut Ui, t: &Theme, a: Option<&api::Account>, stat
             head_row(ui, t, name, status);
             return loading(ui, t, "loading usage…");
         }
-        let head = if acc.plan.is_empty() { name.to_string() } else { format!("{name}, {}", acc.plan) };
+        let head = if acc.plan.is_empty() { name.to_string() } else { format!("{name}, {}", api::plan_label(&acc.plan)) };
         // A failed refresh (often a 429: the usage endpoint answers few
         // requests) keeps the usage from before, marked as of then.
         let stale = acc.error.as_ref().filter(|_| !acc.limits.is_empty()).map(|e| (format!("as of {}", clock(acc.usage_at)), e));
