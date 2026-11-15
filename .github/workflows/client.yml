@@ -221,7 +221,7 @@ jobs:
             git log --no-merges --format='%h %s' "$range" -- src sdk plugins vendor assets prompts linux build.rs Cargo.toml Cargo.lock \
               | head -40 | cut -c1-240 | sed 's/^/- /'
             echo
-            echo "Oak installs this itself (Home, left of Duck.ai). By hand: Windows, oak-windows-x86_64.exe in place of oak.exe; Linux, unpack oak-linux-x86_64.tar.gz and run ./oak (./install.sh adds it to the launcher)."
+            echo "Oak installs this itself (Home, at the right end of its tabs' row). By hand: Windows, oak-windows-x86_64.exe in place of oak.exe; Linux, unpack oak-linux-x86_64.tar.gz and run ./oak (./install.sh adds it to the launcher)."
           } > notes.md
           cat notes.md
 

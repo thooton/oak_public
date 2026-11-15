@@ -1,10 +1,8 @@
 //! A small DevTools-protocol client: one websocket to one target (a tab),
 //! with a reader thread that hands each answer to the call waiting for it
-//! and events to whoever listens. duck.ai's browser and the browser pane
-//! both drive Chromium with it.
+//! and events to whoever listens. The browser pane drives Chromium with
+//! it.
 
-use crate::tools::Head;
-use crate::duck::Error;
 use base64::Engine as _;
 use serde_json::{Value, json};
 use std::io::BufRead;
@@ -15,6 +13,38 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Why a call failed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Error {
+    /// The browser is gone or hung.
+    Down(String),
+    /// Anything else in the page.
+    Page(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Error::Down(s) | Error::Page(s) => f.write_str(s),
+        }
+    }
+}
+
+/// The job object that ends a browser with Oak, even when Oak is killed.
+#[cfg(windows)]
+pub(crate) fn job_object(child: &std::process::Child) -> usize {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::*;
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32);
+        AssignProcessToJobObject(job, child.as_raw_handle() as _);
+        job as usize
+    }
+}
 
 /// Reads a starting browser's `stderr` on a thread named `name`: the first
 /// line with `prefix` in it (its DevTools address, "ws://…") comes back from
@@ -270,16 +300,6 @@ impl Cdp {
 
     pub(crate) fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         self.call_for(method, params, CALL_TIMEOUT)
-    }
-
-    /// Runs `expr` in the page; its value (promises awaited).
-    pub(crate) fn eval_for(&self, expr: &str, timeout: Duration) -> Result<Value, Error> {
-        let r = self.call_for("Runtime.evaluate", json!({"expression": expr, "returnByValue": true, "awaitPromise": true}), timeout)?;
-        if let Some(e) = r.get("exceptionDetails") {
-            let text = e["exception"]["description"].as_str().or(e["text"].as_str()).unwrap_or("");
-            return Err(Error::Page(format!("Script error in the page: {}", text.head(300))));
-        }
-        Ok(r["result"]["value"].clone())
     }
 
     /// Every event from now until the listener is dropped.

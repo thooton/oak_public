@@ -26,7 +26,6 @@ mod cdp;
 mod changes;
 mod cloud;
 mod codex;
-mod duck;
 mod freebuff;
 mod freebuff_tools;
 mod gateway;
@@ -74,7 +73,6 @@ mod copy_menu;
 mod find;
 mod geometry;
 mod gpu;
-mod duck_view;
 mod highlight;
 mod home;
 mod markdown;
@@ -175,8 +173,6 @@ enum Page {
     Chats,
     /// Charts of the usage log, opened from Home's preview.
     Usage,
-    /// A private duck.ai chat, opened from Home (`duck_view.rs`).
-    Duck,
 }
 
 /// A quick hasher (FxHash's step) for what is hashed every frame: the
@@ -360,11 +356,6 @@ struct App {
     closing: Option<pausing::Closing>,
     /// Conversations paused when OAK last closed, offered for resuming.
     resume_offer: Vec<String>,
-    /// The Duck.ai page's message being written and its attachments, and
-    /// why the last couldn't be sent (`duck_view.rs`). Never stored.
-    duck_input: String,
-    duck_files: Vec<Value>,
-    duck_hint: Option<String>,
     /// The transcripts plugins have Oak draw (`oak_sdk::App::transcript`),
     /// by tab: the version each was made from, and it as a conversation.
     plugin_chats: HashMap<String, (u64, Conversation, Live)>,
@@ -596,7 +587,6 @@ impl eframe::App for App {
                     self.page = Page::Home;
                 }
             }
-            Page::Duck => { central(&mut |ui| self.duck_page(ui, &t)); }
             Page::Chats => self.chats_page(ui, &t, plain),
         }
     }
@@ -787,8 +777,6 @@ pub fn main() -> eframe::Result {
     store::flush();
     // Freebuff bills a whole hour per session: give it back on the way out.
     freebuff::release();
-    // The duck.ai browser, if one was started.
-    duck::shutdown();
     // The conversations' browsers, gently, so they keep their cookies.
     browser::shutdown_all();
     // "Restart to update": the new version, now that this one is done.

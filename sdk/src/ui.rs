@@ -10,6 +10,7 @@ use crate::egui::{self, Color32, FontFamily, FontId, Id, Rangef, Rect, Response,
 use crate::rt::{api, carry, rethrow, s};
 use crate::theme::Theme;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::ffi::c_void;
 
 /// The font family of Nerd Font icons.
@@ -156,6 +157,18 @@ pub fn markdown(ui: &mut Ui, _t: &Theme, text: &str, key: (usize, usize)) {
 /// `markdown`, its code blocks colored for their language.
 pub fn markdown_highlighted(ui: &mut Ui, _t: &Theme, text: &str, key: (usize, usize)) {
     unsafe { (api().oak_markdown)(ui.as_raw(), s(text), key.0 as u64, key.1 as u64, OAK_MARKDOWN_HIGHLIGHT) };
+}
+
+/// A reply's work as a conversation draws it: its thinking (`thinking`, a
+/// `{"type": "reasoning", "text", "_oak_ms"}` block; "Thinking…" while
+/// `streaming`), then its tool calls (`{"type": "tool_call", "id", "name",
+/// "input"}`) in one block with their outputs from `results` (by call id:
+/// the text, and whether it failed). `key` keeps its rows' open state apart.
+pub fn work_block(ui: &mut Ui, _t: &Theme, thinking: Option<&Value>, key: (usize, usize), streaming: bool, calls: &[Value], results: &HashMap<String, (String, bool)>) {
+    let thinking = thinking.map(Value::to_string).unwrap_or_default();
+    let calls = Value::from(calls.to_vec()).to_string();
+    let results = Value::Object(results.iter().map(|(id, (text, failed))| (id.clone(), serde_json::json!([text, failed]))).collect()).to_string();
+    unsafe { (api().oak_work_block)(ui.as_raw(), s(&thinking), key.0 as u64, key.1 as u64, streaming, s(&calls), s(&results)) };
 }
 
 /// The bar under a message (`msg`, its rectangle): Copy, and when it was sent.

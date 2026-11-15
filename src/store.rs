@@ -1141,10 +1141,6 @@ pub struct Settings {
     /// The conversations paused (or ultrapaused) by closing Oak while they
     /// worked: the next start offers to resume them, once.
     pub paused_on_close: Vec<String>,
-    /// The Duck.ai page's model (a duck.ai model id) and whether it reasons
-    /// ("Reasoning" rather than "Fast").
-    pub duck_model: String,
-    pub duck_reasoning: bool,
     /// Scratchpads idle this long (seconds) are emptied (`crate::scratch`);
     /// 0: never.
     pub scratch_clear: u64,
@@ -1188,8 +1184,6 @@ impl Default for Settings {
             title_model: crate::openrouter::TITLE_CHOICES[0].0.into(),
             or_routing: "balanced".into(),
             paused_on_close: vec![],
-            duck_model: crate::duck::DEFAULT_MODEL.into(),
-            duck_reasoning: false,
             scratch_clear: 0,
             chat_sort: String::new(),
         }

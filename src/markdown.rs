@@ -491,7 +491,7 @@ pub fn show(ui: &mut Ui, t: &Theme, text: &str, id: Id) {
 }
 
 /// Draws markdown text, its code blocks colored for their language when
-/// the fence names one (`Duck`'s replies, `duck_view::duck_transcript`).
+/// the fence names one (`oak_sdk::ui::markdown_highlighted`).
 pub fn show_highlighted(ui: &mut Ui, t: &Theme, text: &str, id: Id) {
     show_as(ui, t, text, id, true);
 }
@@ -1403,7 +1403,7 @@ mod tests {
         assert!(matches!(&b[1], Block::Code { text, .. } if text == "print(1)\n"));
     }
 
-    /// Duck.ai's replies color their code; the plain path draws the same
+    /// Highlighted replies color their code; the plain path draws the same
     /// text, and neither panics on an unknown fence or an empty block.
     #[test]
     fn highlighted_code_draws() {

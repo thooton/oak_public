@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A provider. Duck.ai is not one: it has its own page.
+/// A provider.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {

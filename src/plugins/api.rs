@@ -1551,6 +1551,26 @@ impl HostApi for Oak {
         );
         (if act { OAK_CONFIRMED } else { 0 }) | (if cancel { OAK_CANCELLED } else { 0 })
     }
+
+    unsafe extern "C" fn oak_work_block(ui: *mut OakUi, thinking: OakStr, key_a: u64, key_b: u64, streaming: bool, calls: OakStr, results: OakStr) {
+        let (ui, t, key) = (ui_of(ui), theme(), (key_a as usize, key_b as usize));
+        let thinking = serde_json::from_str::<Value>(str_of(thinking)).ok().filter(Value::is_object);
+        let calls = match serde_json::from_str::<Value>(str_of(calls)) {
+            Ok(Value::Array(calls)) => calls,
+            _ => vec![],
+        };
+        if calls.is_empty() {
+            if let Some(b) = &thinking {
+                crate::transcript::thinking_row(ui, &t, b, key, streaming, None, false);
+            }
+            return;
+        }
+        let results: HashMap<String, (String, bool)> = match serde_json::from_str::<Value>(str_of(results)) {
+            Ok(Value::Object(m)) => m.into_iter().map(|(id, r)| (id, (r[0].as_str().unwrap_or_default().to_string(), r[1] == true))).collect(),
+            _ => HashMap::new(),
+        };
+        crate::transcript::tool_block(ui, &t, thinking.as_ref().map(|b| (b, key, streaming)), &calls, &results);
+    }
 }
 
 fn stroke_kind_of(kind: u32) -> StrokeKind {

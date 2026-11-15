@@ -351,7 +351,7 @@ pub(crate) fn markdown(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize)) 
 }
 
 /// Draws a reply's text as markdown, its code blocks colored for their
-/// language (the Duck.ai page's replies).
+/// language (`oak_sdk::ui::markdown_highlighted`: plugins' replies).
 pub(crate) fn markdown_highlighted(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize)) {
     let id = key_id("markdown", key);
     crate::select::message(ui, id, || markdown::plain_text(text), |ui| markdown::show_highlighted(ui, t, text, id));
@@ -1629,8 +1629,9 @@ fn with_commas(n: u64) -> String {
     out
 }
 
-/// Tool calls from outside a conversation (the Duck.ai page), drawn as a
-/// conversation's are: one block, the thinking before them first.
+/// Tool calls from outside a conversation (a plugin's chat,
+/// `oak_sdk::ui::work_block`), drawn as a conversation's are: one block,
+/// the thinking before them first.
 /// `results` are the calls' outputs by id, as text (true: failed).
 pub(crate) fn tool_block(ui: &mut Ui, t: &Theme, thinking: Option<(&Value, (usize, usize), bool)>, calls: &[Value], results: &HashMap<String, (String, bool)>) {
     let results: Results = results

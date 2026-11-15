@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 1;
+pub const OAK_API_VERSION: u32 = 2;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -503,7 +503,7 @@ c_structs! {
     /// A tab on Home.
     pub struct OakHomeTab {
         pub size: u32,
-        /// `OAK_ICON_IS_TEXT`.
+        /// `OAK_ICON_IS_TEXT`, `OAK_HOME_TAB_LINK`.
         pub flags: u32,
         pub user: *mut c_void,
         /// What `app_go_home` takes.
@@ -988,6 +988,11 @@ c_consts! {
     pub const OAK_MARKDOWN_HIGHLIGHT = 1 << 0;
     /// `texture_new`: smooth when scaled (not pixelated).
     pub const OAK_TEXTURE_LINEAR = 1 << 0;
+    /// `OakHomeTab`: a link at the right end of Home's tabs' row, styled
+    /// as a tab but never lit: a click opens the tab `id` (as `app_open`
+    /// does) and `show` isn't called. Oaks before version 2 show it as a
+    /// tab.
+    pub const OAK_HOME_TAB_LINK = 1 << 1;
 }
 
 /// A width that takes all there is (`OakTextEdit.width`).
@@ -1287,6 +1292,16 @@ c_api! {
     /// (a spinner while `running`) and Cancel. Returns `OAK_CONFIRMED` or
     /// `OAK_CANCELLED`, or 0.
     fn oak_confirm_dialog(id: OakStr, title: OakStr, body: Option<OakBody>, user: *mut c_void, error: OakStr, action: OakStr, running: bool) -> u32;
+
+    // Version 2.
+
+    /// A reply's work as a conversation draws it: its thinking (a JSON
+    /// block, `{"type": "reasoning", "text", "_oak_ms"}`; empty: none),
+    /// streaming when `streaming`, then its tool calls (a JSON array of
+    /// `{"type": "tool_call", "id", "name", "input"}`) in one block, their
+    /// outputs from `results` (a JSON object: call id to `[text, failed]`).
+    /// `key_a`, `key_b` keep its rows' open state apart.
+    fn oak_work_block(ui: *mut OakUi, thinking: OakStr, key_a: u64, key_b: u64, streaming: bool, calls: OakStr, results: OakStr);
 }
 
 /// The C header: everything declared above, in C.

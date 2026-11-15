@@ -13,7 +13,7 @@ A plugin can add:
 
 | Part | Rust trait (`oak_sdk`) | C descriptor | What it is |
 | --- | --- | --- | --- |
-| A tab on Home | `HomeTab` | `OakHomeTab` | A tab beside Conversations and Cloud; the plugin draws the cell. |
+| A tab on Home | `HomeTab` | `OakHomeTab` | A tab beside Conversations and Cloud; the plugin draws the cell. Or a link at the right end of the tabs' row (`link`, `OAK_HOME_TAB_LINK`) that opens one of the plugin's own tabs. |
 | Tabs of its own | `TabKind` | `OakTabKind` | Tabs in the strip under keys the plugin owns: their title and icon, their page, whether they have the message box and what a message sent there does, their corner box. |
 | A choice on the New screen | `NewKind` | `OakNewKind` | Beside Local folder and Cloud: its form, and what the first message starts. |
 | A cloud backend | `CloudBackend` | `OakCloudBackend` | Another service cloud sessions run through: its accounts and its requests. Oak's cloud engine, list and transcript do the rest. |

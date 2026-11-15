@@ -89,7 +89,12 @@ pub trait HomeTab: Send + Sync {
     fn order(&self) -> i32 { 100 }
     /// Whether the tab is there at all, asked every frame.
     fn shown(&self) -> bool { true }
-    /// Draws the cell: `ui.max_rect()` is all of it.
+    /// A link rather than a tab: it sits at the right end of the tabs'
+    /// row, and a click opens the tab whose key is `id` (as `App::open`
+    /// does) instead of showing a cell. `order` doesn't apply to it.
+    fn link(&self) -> bool { false }
+    /// Draws the cell: `ui.max_rect()` is all of it (a link's only in an
+    /// Oak older than links, which shows it as a tab).
     fn show(&self, ui: &mut Ui, app: &mut dyn App);
 }
 
@@ -647,7 +652,7 @@ impl Registrar {
         let (id, label, icon, tip) = (tab.id(), tab.label(), tab.icon(), tab.tip());
         let d = OakHomeTab {
             size: size_of::<OakHomeTab>(),
-            flags: icon_flags(tab.icon_is_text()),
+            flags: icon_flags(tab.icon_is_text()) | if tab.link() { OAK_HOME_TAB_LINK } else { 0 },
             id: s(&id),
             label: s(&label),
             icon: s(&icon),

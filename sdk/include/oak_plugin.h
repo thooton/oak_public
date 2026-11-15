@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 1
+#define OAK_API_VERSION 2
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -402,7 +402,7 @@ struct OakRequest {
 /* A tab on Home. */
 struct OakHomeTab {
     uint32_t size;
-    /* `OAK_ICON_IS_TEXT`. */
+    /* `OAK_ICON_IS_TEXT`, `OAK_HOME_TAB_LINK`. */
     uint32_t flags;
     void *user;
     /* What `app_go_home` takes. */
@@ -874,6 +874,12 @@ struct OakHooks {
 #define OAK_MARKDOWN_HIGHLIGHT 1u
 /* `texture_new`: smooth when scaled (not pixelated). */
 #define OAK_TEXTURE_LINEAR 1u
+/* `OakHomeTab`: a link at the right end of Home's tabs' row, styled
+ * as a tab but never lit: a click opens the tab `id` (as `app_open`
+ * does) and `show` isn't called. Oaks before version 2 show it as a
+ * tab.
+ */
+#define OAK_HOME_TAB_LINK 2u
 
 /* The functions Oak gives a plugin. */
 struct OakApi {
@@ -1307,6 +1313,15 @@ struct OakApi {
      * `OAK_CANCELLED`, or 0.
      */
     uint32_t (*oak_confirm_dialog)(OakStr id, OakStr title, OakBody body, void *user, OakStr error, OakStr action, bool running);
+
+    /* A reply's work as a conversation draws it: its thinking (a JSON
+     * block, `{"type": "reasoning", "text", "_oak_ms"}`; empty: none),
+     * streaming when `streaming`, then its tool calls (a JSON array of
+     * `{"type": "tool_call", "id", "name", "input"}`) in one block, their
+     * outputs from `results` (a JSON object: call id to `[text, failed]`).
+     * `key_a`, `key_b` keep its rows' open state apart.
+     */
+    void (*oak_work_block)(OakUi *ui, OakStr thinking, uint64_t key_a, uint64_t key_b, bool streaming, OakStr calls, OakStr results);
 };
 
 /* Text from a C string, and from a literal. */

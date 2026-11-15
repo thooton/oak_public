@@ -1,6 +1,6 @@
 //! Home, the first tab: the forest, and over it the box with the
 //! conversations (or another of its tabs: Cloud, those plugins add,
-//! Plugins, Duck.ai) on the left and the accounts on the right.
+//! Plugins; plugins' links at the row's end) on the left and the accounts on the right.
 
 use super::*;
 pub(crate) use crate::look::{BAR_ROOM, HOME_HEAD, list_rows, row_title_color};
@@ -37,15 +37,16 @@ impl App {
     }
 
     /// The left cell's tabs: this machine's conversations, the cloud
-    /// sessions, and those plugins add (`oak_sdk::HomeTab`). Duck.ai, on
-    /// the tabs' row against its right end, and left of it an update when
-    /// there is one (`update.rs`); the tabs scroll in what is left.
+    /// sessions, and those plugins add (`oak_sdk::HomeTab`). The plugins'
+    /// links on the tabs' row against its right end, and left of them an
+    /// update when there is one (`update.rs`); the tabs scroll in what is
+    /// left.
     fn chats_head(&mut self, ui: &mut Ui, t: &Theme, head: Rect) {
-        let (duck_w, duck) = duck_tab(ui, t, head);
-        if duck {
-            self.page = Page::Duck;
+        let (links_w, link) = link_tabs(ui, t, head);
+        if let Some(key) = link {
+            self.open(key);
         }
-        let right = (head.right() - duck_w).max(head.left());
+        let right = (head.right() - links_w).max(head.left());
         let update_w = update_tab(ui, t, Rect::from_min_max(head.min, egui::pos2(right, head.bottom())));
         let tabs_head = Rect::from_min_max(head.min, egui::pos2((right - update_w).max(head.left()), head.bottom()));
         if let Some(pick) = home_tabs(ui, t, tabs_head, &self.home_list) {
@@ -1015,7 +1016,7 @@ pub(crate) const CLOUD_TAB: &str = "cloud";
 
 /// The plugin tab with this id, while it is there.
 fn plugin_tab(id: &str) -> Option<&'static Arc<crate::plugins::HomeTab>> {
-    crate::plugins::parts().home_tabs.iter().find(|tab| tab.id() == id && tab.shown())
+    crate::plugins::parts().home_tabs.iter().find(|tab| tab.id() == id && !tab.link() && tab.shown())
 }
 
 /// A tab in the heading of Home's left cell.
@@ -1038,7 +1039,7 @@ fn home_tab_looks() -> Vec<HomeTabLook> {
         own(CLOUD_TAB, crate::cloud_view::CLOUD_ICON, "Cloud", "Claude Code sessions in Anthropic's cloud, on your Claude accounts", 10),
         own(crate::plugins_view::TAB, crate::plugins_view::ICON, "Plugins", "Switch plugins on and off", i32::MAX),
     ];
-    for tab in crate::plugins::parts().home_tabs.iter().filter(|tab| tab.shown()) {
+    for tab in crate::plugins::parts().home_tabs.iter().filter(|tab| !tab.link() && tab.shown()) {
         let id = tab.id();
         if !id.is_empty() && tabs.iter().all(|x| x.id != id) {
             tabs.push(HomeTabLook { id, icon: tab.icon(), icon_is_text: tab.icon_is_text(), label: tab.label(), tip: tab.tip(), order: tab.order() });
@@ -1125,25 +1126,39 @@ fn home_tabs_inner(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<Strin
     picked
 }
 
-/// Nerd Font: a duck.
-pub(crate) const DUCK_ICON: &str = "\u{f01e5}";
-
-/// "Duck.ai" at the right end of the tabs' row, styled as a tab (it opens
-/// its own page, so it is never lit). Returns its width and whether it
-/// was clicked; in a row too narrow for it and a tab, it isn't drawn.
-fn duck_tab(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, bool) {
+/// The plugins' links (`oak_sdk::HomeTab::link`) at the right end of the
+/// tabs' row, styled as tabs (each opens a tab of its own, so none is ever
+/// lit), in the order they registered. Returns their width and the tab key
+/// of the one clicked; in a row too narrow for them and a tab, they aren't
+/// drawn.
+fn link_tabs(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, Option<String>) {
     let font = FontId::proportional(12.5);
     let icons = markdown::icon_font(13.0);
-    let text_w = crate::widgets::text_width(ui, "Duck.ai", &font);
-    let w = 24.0 + 18.0 + text_w;
-    if head.width() < w + 160.0 {
-        return (0.0, false);
+    let links: Vec<_> = crate::plugins::parts().home_tabs.iter().filter(|tab| tab.link() && tab.shown() && !tab.id().is_empty()).collect();
+    let widths: Vec<f32> = links.iter().map(|tab| 24.0 + if tab.icon().is_empty() { 0.0 } else { 18.0 } + crate::widgets::text_width(ui, &tab.label(), &font)).collect();
+    let total: f32 = widths.iter().sum();
+    if links.is_empty() || head.width() < total + 160.0 {
+        return (0.0, None);
     }
-    let rect = Rect::from_min_max(egui::pos2(head.right() - 4.0 - w, head.top()), egui::pos2(head.right() - 4.0, head.bottom() - 1.0));
-    let resp = ui.interact(rect, Id::unique("home-tab-duck"), Sense::click()).on_hover_text("A private chat on duck.ai, kept nowhere");
-    let color = if resp.hovered() { t.ink2 } else { t.ink3 };
-    tab_face(ui, t, rect, resp.hovered(), (DUCK_ICON, icons, color), "Duck.ai", color);
-    (w + 8.0, resp.clicked())
+    let mut x = head.right() - 4.0 - total;
+    let mut picked = None;
+    for (tab, w) in links.iter().zip(widths) {
+        let rect = Rect::from_min_max(egui::pos2(x, head.top()), egui::pos2(x + w, head.bottom() - 1.0));
+        x += w;
+        let id = tab.id();
+        let mut resp = ui.interact(rect, Id::unique(("home-link", &id)), Sense::click());
+        let tip = tab.tip();
+        if !tip.is_empty() {
+            resp = resp.on_hover_text(tip);
+        }
+        let color = if resp.hovered() { t.ink2 } else { t.ink3 };
+        let icon_font = if tab.icon_is_text() { FontId::proportional(14.0) } else { icons.clone() };
+        tab_face(ui, t, rect, resp.hovered(), (&tab.icon(), icon_font, color), &tab.label(), color);
+        if resp.clicked() {
+            picked = Some(id);
+        }
+    }
+    (total + 8.0, picked)
 }
 
 /// A Home tab's face in `rect`: lit by the pointer (`hover`), its icon
@@ -1167,7 +1182,7 @@ fn tab_face(ui: &Ui, t: &Theme, rect: Rect, hover: bool, (icon, icon_font, icon_
 const UPDATE_ICON: &str = "\u{f0aa}";
 const RESTART_ICON: &str = "\u{f01e}";
 
-/// An update, at the right end of `head` (left of Duck.ai): "Update
+/// An update, at the right end of `head` (left of the plugins' links): "Update
 /// available  0.1.276 → 0.1.280", which downloads and installs it; then its
 /// progress; then "Restart to update", which restarts into it. Nothing
 /// when Oak is up to date, or when the row is too narrow. Returns the width
@@ -1281,7 +1296,7 @@ fn version_label(ui: &mut Ui, t: &Theme, head: Rect) {
     }
     // The button lit while it looks, then for a few seconds how the look it
     // asked for went: a tick (up to date), a cross (couldn't; the tooltip
-    // says why) or an arrow (an update, which appears left of Duck.ai).
+    // says why) or an arrow (an update, which appears at the tabs' row's right end).
     const SHOW: std::time::Duration = std::time::Duration::from_secs(4);
     let result = match (&s.checked, s.asked) {
         (Some((at, r)), Some(asked)) if !s.checking && *at >= asked && at.elapsed() < SHOW => Some(match (r, &s.phase) {

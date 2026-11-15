@@ -747,7 +747,7 @@ mod tests {
         for theme in std::iter::once(crate::theme::OAK.to_string()).chain(p.themes.iter().map(|t| t.id())).rev() {
             app.settings.theme = theme.clone();
             crate::theme::apply_theme(&ctx, &crate::theme::theme(&theme));
-            for tab in &p.home_tabs {
+            for tab in p.home_tabs.iter().filter(|tab| !tab.link()) {
                 app.page = Page::Home;
                 app.home_list = tab.id();
                 frames(&mut app, &format!("Home's {} tab in the {theme} theme", tab.id()));
@@ -769,6 +769,8 @@ mod tests {
             assert!(matches!(&app.screen, Screen::Chat(k) if k == key), "the tab {key} didn't open");
             frames(&mut app, &format!("the tab {key}"));
         }
+        // As Oak does when it quits: what the plugins started ends.
+        exiting();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

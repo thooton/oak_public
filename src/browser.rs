@@ -387,7 +387,7 @@ impl Instance {
         let _ = std::fs::write(self.profile.join("oak.pid"), child.id().to_string());
         #[cfg(windows)]
         {
-            *self.job.lock().unwrap() = crate::duck::job_object(&child);
+            *self.job.lock().unwrap() = crate::cdp::job_object(&child);
         }
         let stderr = child.stderr.take().expect("piped");
         *self.child.lock().unwrap() = Some(child);

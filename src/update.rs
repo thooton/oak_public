@@ -4,8 +4,8 @@
 //! and, when it passes, published as release `v<version>` (marked latest),
 //! with the Windows and Linux binaries and their SHA-256 sums. Here Oak
 //! looks at the latest release now and then (`start`), and when it is newer
-//! than this build, Home shows "Update available  <this> → <new>" left of
-//! Duck.ai. A click downloads the build for this machine, checks its sum and
+//! than this build, Home shows "Update available  <this> → <new>" at the
+//! right end of its tabs' row. A click downloads the build for this machine, checks its sum and
 //! puts it in place of Oak's executable (`install`); then the same place
 //! says "Restart to update", and a click closes Oak (through the close
 //! dialog when conversations are at work, so they pause and resume) and

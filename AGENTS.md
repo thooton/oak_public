@@ -29,7 +29,7 @@ belongs in its file's opening comment.
 You need a recent stable Rust (edition 2024). Oak runs on Windows 10/11 with
 [Git for Windows](https://gitforwindows.org/) (commands run in Git Bash) and on Linux with X11 or
 Wayland (commands run in `bash`). Optional, for the agent's tools: Chrome, Chromium, Brave or Edge
-(FETCH `render`, SCREENSHOT, the browser pane, Duck.ai), and on Linux Xvfb, xdotool and ImageMagick
+(FETCH `render`, SCREENSHOT, the browser pane), and on Linux Xvfb, xdotool and ImageMagick
 (testing GUI apps off-screen).
 
 ```sh
@@ -139,7 +139,7 @@ Use commas, parentheses, or spacing instead; actual Markdown lists are unaffecte
 
 **Layout.** A title bar Oak draws itself, a strip of tabs and the page. The first tab is Home
 (Alt+H): its left side has the tabs Conversations and Cloud, then those plugins add, then
-Plugins (and Duck.ai), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F) narrows the list to
+Plugins (and at the row's right end the links plugins add), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F) narrows the list to
 conversations whose title or folder has every word typed, in any case; Enter opens the first, Esc
 clears it, and the query isn't kept across restarts. The picker beside it sorts the list by the
 latest message or by scratchpad size, biggest first (each row then shows its size; kept in settings).
@@ -312,8 +312,7 @@ ends it, and after a plain click it runs until the next click, Esc or the wheel.
 takes reach nothing else, so the text selection stays, and a middle click on a tab still closes
 it. The browser pane
 (Ctrl+Shift+B, `src/browser.rs`) is a real Chromium page per
-conversation that the user and the model (the BROWSER kit, when the user asks) both use. Duck.ai
-(`src/duck.rs`) drives a private duck.ai chat in a headless browser, keeping nothing. The Usage page
+conversation that the user and the model (the BROWSER kit, when the user asks) both use. The Usage page
 (`src/usage_view.rs`) charts API-priced cost per 1% of the plan limits, from this machine's usage log
 (`usage.jsonl`; a plugin can add the records other machines made, `oak_sdk::Host::usage_set_shared`). Every text field has a right-click menu (Cut,
 Copy, Paste, Select all; `src/text_menu.rs`) that keeps the selection and the field's focus; a
