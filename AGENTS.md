@@ -101,7 +101,7 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 
 `%APPDATA%\oak` on Windows, `~/.config/oak` (`$XDG_CONFIG_HOME/oak`) on Linux, or `OAK_DIR` (to try
 a build against a copy of your conversations). Each conversation is a file in `conversations/`
-named after its folder and title, with its id last. Beside it: `settings.json`, `models.json`, the
+named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
@@ -130,8 +130,8 @@ Use commas, parentheses, or spacing instead; actual Markdown lists are unaffecte
 ## The app
 
 **Layout.** A title bar Oak draws itself, a strip of tabs and the page. The first tab is Home
-(Alt+H): its left side has the tabs Conversations and Cloud, then those plugins add (and
-Duck.ai), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F) narrows the list to
+(Alt+H): its left side has the tabs Conversations and Cloud, then those plugins add, then
+Plugins (and Duck.ai), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F) narrows the list to
 conversations whose title or folder has every word typed, in any case; Enter opens the first, Esc
 clears it, and the query isn't kept across restarts. The picker beside it sorts the list by the
 latest message or by scratchpad size, biggest first (each row then shows its size; kept in settings).
@@ -147,7 +147,15 @@ agents, progress meters) and the message box with the smart context, Unslop and 
 A click on the session box's folder opens it in the system's file manager; its right-click menu
 has Open folder and Copy path (a folder that no longer exists can only be copied).
 Settings is the gear in the bottom left corner; its Theme and Font rows show once a plugin adds a
-choice to Oak's own (the Oak theme, IBM Plex Sans), and its Plugins row lists the plugins found.
+choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings.
+Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
+with its name, version and description (or why it isn't running) and a switch; a click on a row
+flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
+Switches are saved by plugin id in `plugins.json` and apply at the next start, since plugins load
+only then: a changed row says "On after restart" or "Off after restart", and Restart to apply
+restarts Oak as an update's restart does. Switching a plugin on switches on the plugins it needs;
+one whose needs are switched off says so. A switched-off plugin's library is opened to read who it
+is but never started.
 The window opens with the size, place and maximized state it was closed with (`src/geometry.rs`);
 a place no monitor shows any more is left to the system, and a window partly off its monitor is
 moved and shrunk onto it. Wayland keeps only the size and maximized state.

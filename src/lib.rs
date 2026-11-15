@@ -82,6 +82,7 @@ mod select;
 mod pausing;
 mod plugin_app;
 pub mod plugins;
+mod plugins_view;
 mod rename;
 mod resets_view;
 mod session_box;

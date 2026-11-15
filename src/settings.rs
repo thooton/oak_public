@@ -1,6 +1,6 @@
 //! The Settings page: theme, font (and a plugin font's download), the
 //! interface's zoom (kept in settings.json, see `sync_zoom`), image zoom, touchpad scroll, prompt cache, account rotation, server threads,
-//! the connections and the plugins; and the boxes that add a Codex
+//! the connections, and what plugins add (Home has the plugins themselves); and the boxes that add a Codex
 //! account, the OpenRouter or NodeClub key, or a local server.
 
 use super::*;
@@ -101,8 +101,6 @@ impl App {
         ui.horizontal(|ui| self.scratch_row(ui, t));
         ui.end_row();
 
-        self.plugins_row(ui, t);
-
         if option_row(ui, t, "Image zoom", &mut self.settings.click_zoom, [(false, "Scroll"), (true, "Click")], Some("Scroll: wheel to zoom, right-drag to pan. Click: toggle zoom, drag to pan.")) {
             store::save_settings(&self.settings);
         }
@@ -175,40 +173,6 @@ impl App {
             } else if let Some(e) = &job.error {
                 caption(ui, e, t.error);
             }
-        });
-        ui.end_row();
-    }
-
-    /// The Plugins row: each library Oak looked at, and why one isn't
-    /// running; where they are looked for.
-    fn plugins_row(&mut self, ui: &mut Ui, t: &Theme) {
-        caption(ui, "Plugins", t.ink3);
-        ui.vertical(|ui| {
-            ui.set_max_width(520.0);
-            ui.spacing_mut().item_spacing.y = 4.0;
-            let found = crate::plugins::found();
-            for f in &found {
-                let file = f.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let (name, about) = match &f.info {
-                    Some(i) => (format!("{} {}", if i.name.is_empty() { &i.id } else { &i.name }, i.version), i.about.clone()),
-                    None => (file.clone(), String::new()),
-                };
-                let row = ui.horizontal(|ui| {
-                    ui.label(RichText::new(name).color(if f.trouble.is_some() { t.ink3 } else { t.ink2 }));
-                    if f.trouble.is_none() && !about.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(&about).small().color(t.ink3)).truncate());
-                    }
-                });
-                row.response.on_hover_text(f.path.display().to_string());
-                if let Some(why) = &f.trouble {
-                    ui.add(egui::Label::new(RichText::new(format!("Not running: {why}")).small().color(t.error)).wrap());
-                }
-            }
-            let dirs = crate::plugins::dirs();
-            let place = dirs.iter().find(|d| d.is_dir()).or(dirs.first()).map(|d| d.display().to_string()).unwrap_or_default();
-            let none = if found.is_empty() { "None loaded. " } else { "" };
-            let note = ui.add(egui::Label::new(RichText::new(format!("{none}Plugins are libraries in {place}, loaded when Oak starts.")).small().color(t.ink3)).wrap());
-            note.on_hover_text(format!("Looked for in:\n{}\n\nA plugin runs with all of Oak's access to this computer: add only those you trust.", dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join("\n")));
         });
         ui.end_row();
     }

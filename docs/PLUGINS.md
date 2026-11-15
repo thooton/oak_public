@@ -39,8 +39,10 @@ Oak looks for libraries in, in this order:
 
 - `oak --plugins` lists the folders, each library found and whether it runs, and what was
   registered. It exits with 1 when a library doesn't run.
-- Settings → Plugins shows the same: each plugin's name, version and description, or why it
-  isn't running.
+- Home → Plugins shows the same: each plugin's name, version and description, or why it isn't
+  running, with a switch to turn it off or on. Switches are kept in `plugins.json` in Oak's folder
+  and apply at the next start (Restart to apply). A switched-off plugin's library is opened to read
+  who it is, but its `init` never runs; switching one on also switches on what it `needs`.
 - `oak --no-plugins`, or `OAK_PLUGINS=off`, starts Oak without any.
 - Two libraries with the same plugin id: the first found runs.
 
@@ -201,7 +203,7 @@ documented in it. How it reads (`hello.c` shows each):
   has one, has the same id. A tab kind owns the keys its `owns` says; pick a prefix nothing
   else uses.
 - **Failures.** In Rust, a panic stops the plugin, not Oak: the SDK catches it at the boundary,
-  its parts answer nothing from then on, Settings names it and `crash.log` has the panic. A
+  its parts answer nothing from then on, Home's Plugins tab names it and `crash.log` has the panic. A
   crash in C (or any `abort`) takes Oak down with it, as in any shared process.
 - **Never unwind or `longjmp` across the boundary**, in either direction.
 
@@ -216,7 +218,7 @@ OAK_PLUGINS=<folder> cargo test --lib every_plugin_draws -- --ignored        # a
 ```
 
 The first also compiles `plugins/hello-c/hello.c` (with `CC`, or `cc`). `every_plugin_draws`
-loads whatever `OAK_PLUGINS` holds and draws every Home tab in every theme, Settings, every
+loads whatever `OAK_PLUGINS` holds and draws every Home tab in every theme, Settings, Home's Plugins tab, every
 choice on the New screen, and the tabs `OAK_PLUGIN_TABS` names (keys separated by commas),
 failing if a plugin doesn't load or stops. It runs in a scratch Oak folder, never the user's:
 `OAK_PLUGIN_SEED` names a folder whose files are copied there first (a saved connection to a
@@ -238,6 +240,7 @@ A Rust plugin can also be tested in Oak's own test process, without building a l
 - `src/plugins.rs`: finding and loading libraries. `src/plugins/api.rs`: Oak's side of the
   table, every function of it. `src/plugins/parts.rs`: a plugin's parts as Oak calls them.
   `src/plugin_app.rs`: what the window does for plugins.
+- `src/plugins_view.rs`: Home's Plugins tab, the manager.
 - Where parts are used: `home.rs` (tabs, Providers), `tabs.rs`, `composer.rs`, `session_box.rs`,
   `new_screen.rs`, `cloud.rs` (backends and kits), `api/vault.rs`, `theme.rs`, `markdown.rs`
   (fonts), `settings.rs`, `agent/prompt.rs` (roles).

@@ -14,6 +14,12 @@
 //! runs in this one; one built for a newer Oak says so and isn't started.
 //!
 //! `OAK_PLUGINS=off` (or `--no-plugins`) loads none.
+//!
+//! Plugins can be switched off (Home's Plugins tab): their ids are kept in
+//! `plugins.json` in Oak's folder. A switched-off plugin's library is
+//! opened to read who it is, but its `init` is never called, so it
+//! registers and runs nothing. A change takes effect at the next start
+//! (`pending`).
 
 mod api;
 mod parts;
@@ -38,6 +44,81 @@ pub(crate) struct Found {
     /// Why it isn't running: it doesn't fit, it failed to start, or it
     /// panicked since.
     pub(crate) trouble: Option<String>,
+    /// It was switched off when Oak started, so it wasn't started.
+    pub(crate) disabled: bool,
+}
+
+/// Which plugins are switched off, by id: as Oak started, and as saved
+/// since (what the next start does).
+struct Switches {
+    at_start: Vec<String>,
+    saved: Vec<String>,
+}
+
+static SWITCHES: Mutex<Option<Switches>> = Mutex::new(None);
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct SwitchFile {
+    #[serde(default)]
+    disabled: Vec<String>,
+}
+
+fn switch_file() -> PathBuf {
+    store::dir().join("plugins.json")
+}
+
+/// The ids switched off, as saved (read once, then kept here).
+fn with_switches<R>(f: impl FnOnce(&mut Switches) -> R) -> R {
+    let mut s = SWITCHES.lock().unwrap();
+    let s = s.get_or_insert_with(|| {
+        let disabled = store::read_json::<SwitchFile>(&switch_file()).unwrap_or_default().disabled;
+        Switches { at_start: disabled.clone(), saved: disabled }
+    });
+    f(s)
+}
+
+/// Whether the plugin `id` is on, as saved (for the next start).
+pub(crate) fn enabled(id: &str) -> bool {
+    with_switches(|s| !s.saved.iter().any(|d| d == id))
+}
+
+/// Switches the plugins `ids` on or off for the next start, and saves it.
+/// Switching one on switches on what it needs too (those found).
+pub(crate) fn set_enabled(ids: &[String], on: bool) {
+    let found = found();
+    let mut ids: Vec<String> = ids.to_vec();
+    if on {
+        let mut i = 0;
+        while i < ids.len() {
+            let needs = found.iter().filter_map(|f| f.info.as_ref()).find(|info| info.id == ids[i]).map(|info| info.needs.clone()).unwrap_or_default();
+            for n in needs {
+                if found.iter().any(|f| f.info.as_ref().is_some_and(|i| i.id == n)) && !ids.contains(&n) {
+                    ids.push(n);
+                }
+            }
+            i += 1;
+        }
+    }
+    let saved = with_switches(|s| {
+        s.saved.retain(|d| !ids.contains(d));
+        if !on {
+            s.saved.extend(ids);
+            s.saved.sort();
+        }
+        s.saved.clone()
+    });
+    if let Err(e) = store::write_json(&switch_file(), &SwitchFile { disabled: saved }) {
+        crate::log_crash(&format!("plugins.json couldn't be saved: {e}"));
+    }
+}
+
+/// Whether the plugins switched on or off since Oak started differ from
+/// what runs: a restart applies them.
+pub(crate) fn pending() -> bool {
+    let found = found();
+    with_switches(|s| {
+        found.iter().filter_map(|f| f.info.as_ref()).any(|i| s.at_start.contains(&i.id) != s.saved.contains(&i.id))
+    })
 }
 
 static PARTS: OnceLock<Parts> = OnceLock::new();
@@ -68,6 +149,11 @@ pub(crate) fn found() -> Vec<Found> {
 /// `--no-plugins`: `load` loads none.
 pub fn disable() {
     OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Oak started without plugins (`--no-plugins`, `OAK_PLUGINS=off`).
+pub(crate) fn none_loaded() -> bool {
+    OFF.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The folders plugins are looked for in.
@@ -147,6 +233,8 @@ pub fn load() {
         return;
     }
     let off = OFF.load(std::sync::atomic::Ordering::Relaxed) || std::env::var("OAK_PLUGINS").is_ok_and(|v| v == "off" || v == "0");
+    OFF.store(off, std::sync::atomic::Ordering::Relaxed);
+    let switched_off = with_switches(|s| s.at_start.clone());
     let mut found: Vec<Found> = vec![];
     let mut started: Vec<(usize, Info, OakInit)> = vec![];
     for dir in if off { vec![] } else { dirs() } {
@@ -157,19 +245,20 @@ pub fn load() {
             let at = found.len();
             match open(&path) {
                 Ok((info, init)) => {
+                    let disabled = !info.id.is_empty() && switched_off.contains(&info.id);
                     let trouble = if info.id.is_empty() {
                         Some("it has no id".to_string())
-                    } else if started.iter().any(|(_, i, _)| i.id == info.id) {
+                    } else if found.iter().any(|f| f.info.as_ref().is_some_and(|i| i.id == info.id)) {
                         Some(format!("a plugin with the id {} is loaded already", info.id))
                     } else {
                         None
                     };
-                    found.push(Found { path, info: Some(info.clone()), trouble: trouble.clone() });
-                    if trouble.is_none() {
+                    found.push(Found { path, info: Some(info.clone()), trouble: trouble.clone(), disabled });
+                    if trouble.is_none() && !disabled {
                         started.push((at, info, init));
                     }
                 }
-                Err(why) => found.push(Found { path, info: None, trouble: Some(why) }),
+                Err(why) => found.push(Found { path, info: None, trouble: Some(why), disabled: false }),
             }
         }
     }
@@ -197,7 +286,12 @@ pub fn load() {
     let mut found = FOUND.lock().unwrap();
     for (at, info, _) in started {
         let missing: Vec<&str> = info.needs.iter().filter(|n| !done.contains(n)).map(|s| s.as_str()).collect();
-        found[at].trouble = Some(format!("it needs the plugin{} {}, which {} loaded", oak_sdk::plural(missing.len()), missing.join(", "), if missing.len() == 1 { "isn't" } else { "aren't" }));
+        let off: Vec<&str> = missing.iter().copied().filter(|n| switched_off.iter().any(|d| d == n)).collect();
+        found[at].trouble = Some(if off.len() == missing.len() {
+            format!("it needs the plugin{} {}, which {} switched off", oak_sdk::plural(off.len()), off.join(", "), if off.len() == 1 { "is" } else { "are" })
+        } else {
+            format!("it needs the plugin{} {}, which {} loaded", oak_sdk::plural(missing.len()), missing.join(", "), if missing.len() == 1 { "isn't" } else { "aren't" })
+        });
     }
     drop(found);
     let _ = PARTS.set(all);
@@ -218,6 +312,7 @@ pub fn report() -> i32 {
     for f in &found {
         let who = f.info.as_ref().map_or_else(|| "?".to_string(), |i| format!("{} {} ({})", name_of(i), i.version, i.id));
         match &f.trouble {
+            None if f.disabled => println!("off      {who}\n         {}", f.path.display()),
             None => println!("ok       {who}\n         {}", f.path.display()),
             Some(why) => println!("NOT RUN  {who}\n         {}\n         {why}", f.path.display()),
         }
@@ -241,13 +336,13 @@ pub fn report() -> i32 {
     found.iter().any(|f| f.trouble.is_some()) as i32
 }
 
-/// A plugin's name, as Settings and `--plugins` show it.
-fn name_of(info: &Info) -> String {
+/// A plugin's name, as Home's Plugins tab and `--plugins` show it.
+pub(crate) fn name_of(info: &Info) -> String {
     if info.name.is_empty() { info.id.clone() } else { info.name.clone() }
 }
 
-/// The plugin `id` can't go on (it panicked, and told Oak): Settings says
-/// so. Its own code stops answering; Oak keeps running.
+/// The plugin `id` can't go on (it panicked, and told Oak): Home's Plugins
+/// tab says so. Its own code stops answering; Oak keeps running.
 fn failed(id: &str, why: &str) {
     let line = format!("it stopped: {why} (crash.log in Oak's folder has more)");
     if let Some(f) = FOUND.lock().unwrap().iter_mut().find(|f| f.info.as_ref().is_some_and(|i| i.id == id)) {
@@ -497,7 +592,8 @@ mod tests {
     /// The example plugins, loaded into the whole app, headless: the Rust
     /// one's tab on Home draws and takes clicks, its theme and its row are
     /// on Settings, its role on the New screen; the C one (built here from
-    /// the header alone) draws its tab, counts clicks and takes typing.
+    /// the header alone) draws its tab, counts clicks and takes typing;
+    /// Home's Plugins tab lists both and switches one off and on.
     /// Needs the Rust plugin built, and no other test in the process
     /// (plugins are loaded once, for all of it):
     /// `cargo build -p oak-hello && OAK_PLUGINS=target/debug cargo test --lib the_example_plugins -- --ignored`
@@ -542,11 +638,11 @@ mod tests {
         assert!(matches!(app.screen, Screen::New) && app.page == Page::Chats);
         assert!(texts(&shown).contains("Haiku"), "its role is offered: {}", texts(&shown));
 
-        // Settings: its theme, its row, and itself among the plugins.
+        // Settings: its theme and its row.
         app.page = Page::Settings;
         let shown = frames(&mut app, vec![]);
         let all = texts(&shown);
-        for want in ["Moss", "A row the example plugin adds.", "Hello 0.1.0"] {
+        for want in ["Moss", "A row the example plugin adds."] {
             assert!(all.contains(want), "{want} isn't on Settings: {all}");
         }
         let before = ctx.global_style().visuals.panel_fill;
@@ -576,13 +672,32 @@ mod tests {
         let shown = frames(&mut app, vec![eframe::egui::Event::Text("ly ".into())]);
         assert!(texts(&shown).contains("from C") && !texts(&shown).contains("Hello, world, from C"), "{}", texts(&shown));
         assert_eq!(super::found().iter().filter_map(|f| f.trouble.clone()).collect::<Vec<_>>(), Vec::<String>::new());
+
+        // Home's Plugins tab lists both; a click on a row switches it off
+        // for the next start (saved), and Restart to apply shows; another
+        // switches it back.
+        let shown = frames(&mut app, vec![]);
+        let tab = rect_of(&shown, "Plugins");
+        let shown = frames(&mut app, click(tab.center(), Primary));
+        assert_eq!(app.home_list, crate::plugins_view::TAB);
+        let in_list = |shown: &[(String, eframe::egui::Rect)], s: &str| shown.iter().find(|(x, r)| x == s && r.top() > tab.bottom()).map(|(_, r)| *r).unwrap_or_else(|| panic!("no {s} in the list: {}", texts(shown)));
+        in_list(&shown, "Hello C");
+        assert!(!texts(&shown).contains("Restart to apply"));
+        let shown = frames(&mut app, click(in_list(&shown, "Hello").center(), Primary));
+        assert!(!enabled("hello") && enabled("hello-c") && pending());
+        assert!(texts(&shown).contains("Off after restart") && texts(&shown).contains("Restart to apply"), "{}", texts(&shown));
+        let saved = std::fs::read_to_string(switch_file()).unwrap();
+        assert!(saved.contains("\"hello\""), "{saved}");
+        let shown = frames(&mut app, click(in_list(&shown, "Hello").center(), Primary));
+        assert!(enabled("hello") && !pending());
+        assert!(!texts(&shown).contains("Restart to apply"), "{}", texts(&shown));
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(c_dir);
     }
 
     /// Whatever plugins `OAK_PLUGINS` holds, loaded into the whole app,
     /// headless: each loads, and each part that draws does so without
-    /// panicking (every Home tab, every theme, Settings, every choice on
+    /// panicking (every Home tab, every theme, Settings, Home's Plugins tab, every choice on
     /// the New screen, and the tabs `OAK_PLUGIN_TABS` names, separated by
     /// commas), in a scratch Oak folder (`scratch_folder`). For a plugin's
     /// own repository to run against its build:
@@ -635,6 +750,9 @@ mod tests {
         }
         app.page = Page::Settings;
         frames(&mut app, "Settings");
+        app.page = Page::Home;
+        app.home_list = crate::plugins_view::TAB.to_string();
+        frames(&mut app, "Home's Plugins tab");
         let kinds = p.new_kinds.iter().map(|k| k.id()).chain(p.cloud_backends.iter().map(|b| b.id()));
         for kind in kinds {
             app.plugin_go_new(&kind);

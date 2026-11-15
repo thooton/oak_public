@@ -221,13 +221,17 @@ pub fn secret_edit(ui: &mut Ui, t: &Theme, salt: &str, edit: TextEdit, small: bo
 /// An on/off switch `size` big, its knob at the end it is set to.
 pub fn switch(ui: &mut Ui, t: &Theme, on: bool, size: egui::Vec2) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let p = ui.painter();
-    p.rect_filled(rect, 0.0, if on { t.accent } else { t.panel2 });
-    p.rect_stroke(rect, 0.0, Stroke::new(1.0, if resp.hovered() { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
-    let r = size.y / 2.0;
-    let knob = Rect::from_center_size(egui::pos2(if on { rect.right() - r } else { rect.left() + r }, rect.center().y), egui::Vec2::splat(size.y - 6.0));
-    p.rect_filled(knob, 0.0, if on { t.bg } else { t.ink3 });
+    paint_switch(ui.painter(), t, rect, on, resp.hovered());
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A `switch`'s face in `rect`, for one whose clicks are taken elsewhere.
+pub fn paint_switch(p: &egui::Painter, t: &Theme, rect: Rect, on: bool, hovered: bool) {
+    p.rect_filled(rect, 0.0, if on { t.accent } else { t.panel2 });
+    p.rect_stroke(rect, 0.0, Stroke::new(1.0, if hovered { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
+    let r = rect.height() / 2.0;
+    let knob = Rect::from_center_size(egui::pos2(if on { rect.right() - r } else { rect.left() + r }, rect.center().y), egui::Vec2::splat(rect.height() - 6.0));
+    p.rect_filled(knob, 0.0, if on { t.bg } else { t.ink3 });
 }
 
 /// A page's card (Settings, Usage) on the page color: at most `max_w`

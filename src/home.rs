@@ -1,6 +1,6 @@
 //! Home, the first tab: the forest, and over it the box with the
 //! conversations (or another of its tabs: Cloud, those plugins add,
-//! Duck.ai) on the left and the accounts on the right.
+//! Plugins, Duck.ai) on the left and the accounts on the right.
 
 use super::*;
 pub(crate) use crate::look::{BAR_ROOM, HOME_HEAD, list_rows, row_title_color};
@@ -57,6 +57,10 @@ impl App {
     fn chats_cell(&mut self, ui: &mut Ui, t: &Theme, chats: Rect) {
         let key = match self.home_list.as_str() {
             CLOUD_TAB => ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| cloud_list_view(ui, t, cloud::Provider::OWN)).inner,
+            crate::plugins_view::TAB => {
+                ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| crate::plugins_view::show(ui, t, chats));
+                None
+            }
             id => match plugin_tab(id) {
                 Some(tab) => {
                     ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| tab.show(ui, self));
@@ -1024,12 +1028,14 @@ struct HomeTabLook {
     order: i32,
 }
 
-/// The left cell's tabs, in order: Conversations, Cloud, and the plugins'.
+/// The left cell's tabs, in order: Conversations, Cloud, the plugins', and
+/// Plugins (the manager, `plugins_view`) last.
 fn home_tab_looks() -> Vec<HomeTabLook> {
     let own = |id: &str, icon: &str, label: &str, tip: &str, order| HomeTabLook { id: id.into(), icon: icon.into(), icon_is_text: false, label: label.into(), tip: tip.into(), order };
     let mut tabs = vec![
         own(LOCAL_TAB, "", "Conversations", "This machine's conversations", 0),
         own(CLOUD_TAB, crate::cloud_view::CLOUD_ICON, "Cloud", "Claude Code sessions in Anthropic's cloud, on your Claude accounts", 10),
+        own(crate::plugins_view::TAB, crate::plugins_view::ICON, "Plugins", "Switch plugins on and off", i32::MAX),
     ];
     for tab in crate::plugins::parts().home_tabs.iter().filter(|tab| tab.shown()) {
         let id = tab.id();
