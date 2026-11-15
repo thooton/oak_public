@@ -7,7 +7,7 @@
 //! their own, in their own tabs.
 
 use crate::agent::{self, Live};
-use crate::session_box::{AgentState, model_label};
+use crate::session_box::{AgentState, BoxActions, model_label};
 use crate::store::{Conversation, MarkKind};
 use crate::super_view::{self, AgentBox, AgentRow, BoxAction, Chat, Icon, Model, Msg, Pic, SuperBox};
 use crate::transcript::Item;
@@ -237,10 +237,19 @@ impl App {
         rows.sort_by_key(|(r, _)| (!r.working, std::cmp::Reverse(r.n)));
         let convs: Vec<(i64, String)> = rows.iter().map(|(r, c)| (r.n, c.clone())).collect();
         b.agents = rows.into_iter().map(|(r, _)| r).collect();
-        let info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
+        crate::unslop::start_notes(&s.conv, ctx);
+        let mut info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
+        for a in &mut info.agents {
+            a.3 = self.sessions.get(&a.2).map_or(AgentState::Idle, AgentState::of);
+        }
+        if let Some((_, parent, title)) = &mut info.parent {
+            *title = self.sessions.get(parent.as_str()).map(|s| s.conv.lock().unwrap().title.clone()).unwrap_or_default();
+        }
         let tasks = s.tasks.clone();
         let bottom = area.bottom() - crate::look::GAP;
-        let act = super_view::super_box(ctx, t, area, &b, |ui, w| side_boxes(ui, t, w, bottom, key, &info, &tasks));
+        let mut controls = BoxActions::default();
+        let editing = self.goal_edit.as_mut().filter(|g| g.key == key);
+        let act = super_view::super_box(ctx, t, area, &b, |ui, w| local_controls(ui, t, w, bottom, key, &info, &tasks, editing, &mut controls));
         let Some(s) = self.sessions.get(key) else { return };
         match act {
             Some(BoxAction::Stop) => s.interrupt(),
@@ -261,7 +270,7 @@ impl App {
             }
             _ => {}
         }
-        self.model_switch_dialog(ctx, t, key);
+        self.box_actions(ctx, t, key, &info, controls);
     }
 
     /// A super agent's subagent's corner box on this computer: an agent's
@@ -290,19 +299,40 @@ impl App {
             Some(Ok(list)) => list.clone(),
             _ => vec![],
         };
-        let info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
+        crate::unslop::start_notes(&s.conv, ctx);
+        let mut info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
+        for a in &mut info.agents {
+            a.3 = self.sessions.get(&a.2).map_or(AgentState::Idle, AgentState::of);
+        }
+        if let Some((_, parent, title)) = &mut info.parent {
+            *title = self.sessions.get(parent.as_str()).map(|s| s.conv.lock().unwrap().title.clone()).unwrap_or_default();
+        }
         let tasks = s.tasks.clone();
         let bottom = area.bottom() - crate::look::GAP;
-        let stop = super_view::agent_box(ctx, t, area, &b, |ui, w| side_boxes(ui, t, w, bottom, key, &info, &tasks));
+        let mut controls = BoxActions::default();
+        let editing = self.goal_edit.as_mut().filter(|g| g.key == key);
+        let stop = super_view::agent_box(ctx, t, area, &b, |ui, w| local_controls(ui, t, w, bottom, key, &info, &tasks, editing, &mut controls));
         if stop {
             s.interrupt();
         }
+        self.box_actions(ctx, t, key, &info, controls);
     }
 }
 
 /// A local super agent's or subagent's notes and background tasks, under
 /// its box, when it has any (the command center's have neither).
-fn side_boxes(ui: &mut Ui, t: &Theme, w: f32, bottom: f32, key: &str, info: &crate::session_box::SessionInfo, tasks: &crate::tasks::Tasks) {
+#[allow(clippy::too_many_arguments)]
+fn local_controls(ui: &mut Ui, t: &Theme, w: f32, bottom: f32, key: &str, info: &crate::session_box::SessionInfo, tasks: &crate::tasks::Tasks, editing: Option<&mut crate::session_box::GoalEdit>, act: &mut BoxActions) {
+    // Keep the common super-agent layout uncluttered, without taking away
+    // a local conversation's provider switching, goals, meters, heartbeats,
+    // folder actions or navigation back to its parent.
+    crate::look::panel_box(ui, t, w, 8, 2.0, |ui| {
+        let label = if info.goal.is_empty() { "Local controls" } else { "Local controls · Goal" };
+        egui::CollapsingHeader::new(label).id_salt(("local-super-controls", key))
+            .open(editing.as_ref().map(|_| true)).show(ui, |ui| {
+                crate::session_box::session_rows(ui, t, info, editing, act);
+            });
+    });
     if !info.notes.is_empty() || !tasks.infos().is_empty() {
         crate::session_box::side_boxes(ui, t, w, bottom, key, info, tasks);
     }
@@ -355,4 +385,30 @@ mod tests {
         assert!(!is_super(&sub) && is_super_agent(&sub));
         assert!(!is_super(&Conversation::default()));
     }
+
+    #[test]
+    fn local_controls_keep_goals_and_heartbeat_management() {
+        use crate::app_hover_test::{painted, run_frame, test_ctx};
+        let (ctx, t) = test_ctx(true, true);
+        let mut info = crate::session_box::SessionInfo::new(None, &crate::store::Settings::default(), vec![], str::to_string);
+        info.new = false;
+        info.goal = "Ship the release".into();
+        info.heartbeats = vec![crate::store::Heartbeat { id: 4, message: "Check the build".into(), every_min: 10, next_at: 0 }];
+        info.parent = Some((1, "boss".into(), "Release train".into()));
+        let tasks = crate::tasks::Tasks::default();
+        let mut edit = crate::session_box::GoalEdit { key: "a".into(), text: info.goal.clone(), focus: false, endless: false };
+        let mut time = 0.0;
+        let mut shown = vec![];
+        for _ in 0..3 {
+            shown = painted(&run_frame(&ctx, egui::vec2(900.0, 1100.0), &mut time, 0.1, vec![], |ui| {
+                let mut act = BoxActions::default();
+                local_controls(ui, &t, 240.0, 1000.0, "a", &info, &tasks, Some(&mut edit), &mut act);
+            }));
+        }
+        let text = shown.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join("|");
+        for wanted in ["Local controls", "Claude", "Ship the release", "Release train", "Check the build"] {
+            assert!(text.contains(wanted), "missing {wanted}: {text}");
+        }
+    }
+
 }

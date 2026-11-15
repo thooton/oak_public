@@ -276,7 +276,7 @@ impl App {
 
     /// Does what the session box of conversation `key` (or of the new
     /// screen) asked for; `info` is what it showed.
-    fn box_actions(&mut self, ctx: &egui::Context, t: &Theme, key: &str, info: &SessionInfo, act: BoxActions) {
+    pub(crate) fn box_actions(&mut self, ctx: &egui::Context, t: &Theme, key: &str, info: &SessionInfo, act: BoxActions) {
         if act.edit_start {
             self.goal_edit = Some(GoalEdit { key: key.to_string(), text: info.goal.clone(), focus: true, endless: info.goal_endless });
         }

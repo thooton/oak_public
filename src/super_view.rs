@@ -484,7 +484,7 @@ pub(crate) fn super_box(ctx: &egui::Context, t: &Theme, area: Rect, b: &SuperBox
         ScrollArea::vertical().id_salt(("super-box", &b.salt)).max_height(max_h).auto_shrink([true, true]).show(ui, |ui| {
             panel_box(ui, t, w, 10, 4.0, |ui| {
                 box_header(ui, t, b.icon, &b.name, &b.caption, w);
-                let state = if !b.working { "Idle" } else if b.activity.is_empty() { "Working" } else { &b.activity };
+                let state = if !b.activity.is_empty() { &b.activity } else if b.working { "Working" } else { "Idle" };
                 ui.horizontal(|ui| {
                     state_label(ui, t, state, b.working);
                     for (tip, what) in [(&b.stop, BoxAction::Stop), (&b.clear, BoxAction::Clear), (&b.delete, BoxAction::Delete)] {
@@ -547,4 +547,26 @@ pub(crate) fn agent_box(ctx: &egui::Context, t: &Theme, area: Rect, b: &AgentBox
         more(ui, w);
     });
     stop
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paused_super_agents_are_not_labelled_idle() {
+        use crate::app_hover_test::{painted, run_frame, test_ctx};
+        let (ctx, t) = test_ctx(true, true);
+        let b = SuperBox { name: "Release train".into(), activity: "Paused".into(), ..Default::default() };
+        let mut time = 0.0;
+        let mut shown = vec![];
+        for _ in 0..3 {
+            shown = painted(&run_frame(&ctx, egui::vec2(1384.0, 821.0), &mut time, 0.1, vec![], |ui| {
+                super_box(ui.ctx(), &t, ui.max_rect(), &b, |_, _| {});
+            }));
+        }
+        assert!(shown.iter().any(|(s, _)| s == "Paused"), "{shown:?}");
+        assert!(!shown.iter().any(|(s, _)| s == "Idle"), "{shown:?}");
+    }
 }

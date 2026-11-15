@@ -335,7 +335,9 @@ and time after a pause, three dots and its status while it works; its tool calls
 subagents' messages stay out of it, and its questions show under it), its corner box its name and
 folder, what it is doing with Stop, its model and effort, and its subagents, each opening its tab,
 and a subagent's corner box an agent's (its title, "Agent n, run by" the super agent, its state
-with Stop, its model), each with notes and background tasks under it when there are any. It still
+with Stop, its model), each with notes and background tasks under it when there are any. A collapsed "Local controls"
+section keeps provider/model/effort switching, goals, progress meters, heartbeats, folder actions
+and parent navigation available without crowding the shared layout. It still
 runs here: its subagents are conversations of their own. Oak's own choices win over a plugin's `NewKind` of the same id,
 as built-in roles do over plugin roles (`add_roles`), so a plugin can't replace either.
 
