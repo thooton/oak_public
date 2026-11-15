@@ -2299,9 +2299,13 @@ mod tests {
         let r = call("BROWSER_WAIT", json!({"text": "Arrived later", "timeout": 5})).unwrap();
         assert!(r.contains("is on the page"), "{r}");
         assert!(call("BROWSER_WAIT", json!({"text": "Arrived later", "gone": true, "timeout": 1})).unwrap_err().contains("still on the page"));
+        // Record input delivery as well as CSS state: a failed hover must
+        // distinguish a missed input event from layout or style readiness.
+        eval("document.addEventListener('mousemove', e => window.lastTestMove = {x:e.clientX, y:e.clientY, target:e.target.id})");
         // Hover opens the menu, and the model's pointer is there.
         call("BROWSER_HOVER", json!({"x": 70, "y": 35})).unwrap();
-        assert_eq!(eval("getComputedStyle(menu).display"), "block");
+        let display = eval("getComputedStyle(menu).display");
+        assert_eq!(display, "block", "{}", eval("JSON.stringify({move:window.lastTestMove, hit:document.elementFromPoint(70,35)?.outerHTML, hovered:[...document.querySelectorAll(':hover')].map(e=>e.id||e.tagName), scroll:[scrollX,scrollY], viewport:[innerWidth,innerHeight,devicePixelRatio], focus:document.hasFocus(), browser:navigator.userAgent})"));
         assert_eq!(inst.view.lock().unwrap().agent_ptr.map(|p| p.to), Some(egui::pos2(70.0, 35.0)));
         // Drags: the slider to its end, the box by 200 px, src onto dst.
         call("BROWSER_DRAG", json!({"x": 205, "y": 30, "to_x": 520, "to_y": 30})).unwrap();

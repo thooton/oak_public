@@ -119,15 +119,17 @@ jobs:
             libegl1-mesa-dev libgl1-mesa-dev \
             libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev
 
+      # Keep a runnable binary for startup diagnostics even when a test fails.
+      - name: Build (release)
+        id: build
+        run: cargo build --release --locked
+
       - name: Test
         env:
           OAK_DIR: ${{ runner.temp }}/oak-test-profile
         run: |
           mkdir -p "$OAK_DIR"
           cargo test --release --locked
-
-      - name: Build (release)
-        run: cargo build --release --locked
 
       # The example plugins (one in Rust, one in C, which the test compiles
       # itself with gcc on Windows; no CC here, or cargo would build the
@@ -163,6 +165,7 @@ jobs:
       # Defender's real-time scanning on and off. Each run's startup.log
       # goes to the run's summary. Informational: it never fails the build.
       - name: Time startup
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 10
         run: |
