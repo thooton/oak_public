@@ -35,12 +35,18 @@ impl App {
         self.screen = Screen::New;
         self.page = Page::Chats;
         self.hint = None;
-        if kind.is_empty() || kind == home::LOCAL_TAB {
-            (self.new_cloud, self.new_kind, self.new_chat) = (false, None, false);
+        use crate::new_screen::Here;
+        // (Oak's own choices first: a plugin's of the same id can't hide one.)
+        let here = match kind {
+            "" | home::LOCAL_TAB => Some(Here::Folder),
+            crate::new_screen::CHAT_KIND => Some(Here::Chat),
+            crate::new_screen::SUPER_KIND => Some(Here::Super),
+            _ => None,
+        };
+        if let Some(here) = here {
+            (self.new_cloud, self.new_kind, self.new_here) = (false, None, here);
         } else if crate::plugins::parts().new_kinds.iter().any(|k| k.id() == kind) {
             (self.new_cloud, self.new_kind) = (false, Some(kind.to_string()));
-        } else if kind == crate::new_screen::CHAT_KIND {
-            (self.new_cloud, self.new_kind, self.new_chat) = (false, None, true);
         } else if let Some(provider) = cloud::Provider::from_id(kind) {
             (self.new_cloud, self.new_kind, self.new_provider) = (true, None, provider);
         }

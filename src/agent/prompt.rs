@@ -28,6 +28,11 @@ pub(crate) struct Role {
 // file in prompts/, or have a plugin register it (`oak_sdk::Role`).
 include!(concat!(env!("OUT_DIR"), "/roles.rs"));
 
+/// A super agent's role (prompts/super.md): a conversation in a folder
+/// that gives the work to subagents there (the New screen's Super agent,
+/// `new_screen::SUPER_KIND`). Not offered as a System prompt.
+pub(crate) const SUPER_ROLE: &str = "super";
+
 /// The roles plugins added (`add_roles`).
 static EXTRA: std::sync::OnceLock<Vec<Role>> = std::sync::OnceLock::new();
 
@@ -270,7 +275,13 @@ mod tests {
         ]);
         assert_eq!((role("coordinator").name, role("coordinator").icon), ("Coordinator", "x"));
         assert_eq!(role("normal").name, "Normal");
-        assert!(offered().all(|r| r.id != "coordinator") && offered().count() == ROLES.len());
+        // A super agent's, only through the New screen's Super agent.
+        assert!(offered().all(|r| r.id != "coordinator" && r.id != SUPER_ROLE) && offered().count() == ROLES.len() - 1);
+        assert_eq!((role(SUPER_ROLE).id, role(SUPER_ROLE).name), (SUPER_ROLE, "Super agent"));
+        let p = system_prompt(Path::new("F"), Path::new("S"), "claude-opus-5-5", None, false, SUPER_ROLE);
+        assert!(p.starts_with("You are a super agent") && p.contains("Load the AGENT kit"));
+        let p = system_prompt(Path::new("F"), Path::new("S"), "claude-opus-5-5", Some("agent 1 (x)"), false, SUPER_ROLE);
+        assert!(p.starts_with("You are Oak, a coding agent") && !p.contains("You are a super agent"));
         let p = system_prompt(Path::new("F"), Path::new("S"), "claude-opus-5-5", None, false, "coordinator");
         assert!(p.starts_with("You coordinate.") && p.contains("Every EXECUTE and TASK command starts in a fresh shell") && !p.contains("{{"));
         for r in ROLES.iter() {

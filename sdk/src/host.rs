@@ -432,7 +432,7 @@ pub trait App {
     /// Shows Home, on tab `tab` (a `HomeTab`'s id, "local", "cloud").
     fn go_home(&mut self, tab: &str);
     /// Shows the New screen with `kind` picked (a `NewKind`'s id, a cloud
-    /// backend's id, "local", "chat").
+    /// backend's id, "local", "chat", "super").
     fn go_new(&mut self, kind: &str);
     /// Says `text` over the message box, in the error color (None clears it).
     fn hint(&mut self, text: Option<String>);

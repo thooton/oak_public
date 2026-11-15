@@ -187,6 +187,8 @@ impl App {
                             let title = p.conv.lock().unwrap().title.clone();
                             format!("{folder}, agent {} of {}", c.agent_id, if title.is_empty() { "Untitled" } else { &title })
                         }
+                        // And a super agent, that it is one.
+                        _ if c.role == crate::agent::prompt::SUPER_ROLE => format!("{folder}, super agent"),
                         _ => folder,
                     },
                     at: c.last_message_at,

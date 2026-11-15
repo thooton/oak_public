@@ -1,6 +1,7 @@
 //! The New screen: where a conversation starts (its folder, model, effort
-//! and system prompt), or a chat (model and effort only), or a cloud
-//! session, or what a plugin adds (a plugin's `NewKind`).
+//! and system prompt), or a chat (model and effort only), or a super agent
+//! (a name, its folder, model and effort), or a cloud session, or what a
+//! plugin adds (a plugin's `NewKind`).
 
 use super::*;
 
@@ -8,8 +9,27 @@ use super::*;
 /// (`plugin_go_new`).
 pub(crate) const CHAT_KIND: &str = "chat";
 
+/// The New screen's choice for a super agent, as `oak_sdk` hosts name it.
+pub(crate) const SUPER_KIND: &str = "super";
+
 /// What the New screen says a chat is.
 const CHAT_INFO: &str = "A conversation with the model, not about a project: it can search the web and read pages, and has no access to your files, commands or browser.";
+
+/// What the New screen says a super agent is.
+const SUPER_INFO: &str = "A conversation that coordinates: it plans the work and gives it to agents of its own, subagents working in the folder on this computer, with the model below. Your other conversations don't see it.";
+
+/// What the New screen starts on this machine (`App::new_here`).
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub(crate) enum Here {
+    /// A conversation in a folder, in the role picked.
+    #[default]
+    Folder,
+    /// A chat: no folder, no project (`Conversation::chat`).
+    Chat,
+    /// A super agent: a conversation in a folder, by the name given, in
+    /// the super agent's role (`agent::prompt::SUPER_ROLE`).
+    Super,
+}
 
 impl App {
     /// What a plugin adds that the New screen is set to start, if it is
@@ -53,7 +73,22 @@ impl App {
                 }
                 return;
             }
-            if self.new_chat {
+            if self.new_here == Here::Super {
+                caption(ui, SUPER_INFO, t.ink3);
+                ui.add_space(16.0);
+                caption(ui, "Name", t.ink3);
+                crate::text_menu::add(ui, TextEdit::singleline(&mut self.new_super_name).desired_width(ui.available_width()).char_limit(40).hint_text("e.g. Release train"));
+                ui.add_space(16.0);
+                self.local_rows(ui, t);
+                ui.add_space(16.0);
+                if ui.button("Create").on_hover_text("Makes it and opens its tab; or write its first message below").clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.start_conversation(String::new(), vec![], None, &ctx);
+                }
+                ui.add_space(16.0);
+                return;
+            }
+            if self.new_here == Here::Chat {
                 caption(ui, CHAT_INFO, t.ink3);
                 ui.add_space(16.0);
                 self.model_rows(ui, t);
@@ -79,23 +114,25 @@ impl App {
         self.effort_row(ui, t);
     }
 
-    /// Where it runs: a local folder, a chat (no folder) or a cloud session
-    /// (Oak's, or through a plugin's service), or what a plugin starts
-    /// instead.
+    /// Where it runs: a local folder, a chat (no folder), a super agent
+    /// (in a folder) or a cloud session (Oak's, or through a plugin's
+    /// service), or what a plugin starts instead.
     fn where_row(&mut self, ui: &mut Ui) {
-        let choice = (self.new_cloud, self.new_provider, self.new_kind.clone(), self.new_chat);
+        let choice = (self.new_cloud, self.new_provider, self.new_kind.clone(), self.new_here);
         let kind = self.new_kind().map(|k| k.id());
         ui.horizontal_wrapped(|ui| {
             let here = !self.new_cloud && kind.is_none();
-            if ui.selectable_label(here && !self.new_chat, "Local folder").on_hover_text("Runs on this machine").clicked() {
-                self.new_cloud = false;
-                self.new_kind = None;
-                self.new_chat = false;
-            }
-            if ui.selectable_label(here && self.new_chat, "Chat").on_hover_text("Just a conversation: web search and fetch, no files or commands").clicked() {
-                self.new_cloud = false;
-                self.new_kind = None;
-                self.new_chat = true;
+            let choices = [
+                (Here::Folder, "Local folder".to_string(), "Runs on this machine"),
+                (Here::Chat, "Chat".to_string(), "Just a conversation: web search and fetch, no files or commands"),
+                (Here::Super, format!("{} Super agent", agent::prompt::role(agent::prompt::SUPER_ROLE).icon), "A conversation that runs agents of its own in a folder on this machine, giving each a task"),
+            ];
+            for (h, label, tip) in choices {
+                if ui.selectable_label(here && self.new_here == h, label).on_hover_text(tip).clicked() {
+                    self.new_cloud = false;
+                    self.new_kind = None;
+                    self.new_here = h;
+                }
             }
             for provider in cloud::Provider::all() {
                 let (icon, text) = provider.icon();
@@ -110,7 +147,6 @@ impl App {
                     self.new_cloud = true;
                     self.new_kind = None;
                     self.new_provider = provider;
-                    self.new_chat = false;
                 }
             }
             for k in &crate::plugins::parts().new_kinds {
@@ -124,12 +160,11 @@ impl App {
                 if r.clicked() {
                     self.new_kind = Some(id);
                     self.new_cloud = false;
-                    self.new_chat = false;
                 }
             }
         });
         // A hint is about the choice it was given for.
-        if choice != (self.new_cloud, self.new_provider, self.new_kind.clone(), self.new_chat) {
+        if choice != (self.new_cloud, self.new_provider, self.new_kind.clone(), self.new_here) {
             self.hint = None;
         }
     }
@@ -169,7 +204,7 @@ impl App {
             }
             Some(Ok(list)) => list,
         };
-        let chat = self.new_chat;
+        let chat = self.new_here == Here::Chat;
         let providers: Vec<api::Provider> =
             api::Provider::ALL.into_iter().filter(|p| list.iter().any(|m| m.provider == *p) && agent::chat_refuses_provider(chat, *p).is_none()).collect();
         let mut provider = self.settings.provider.unwrap_or_else(|| api::Provider::of(&self.settings.model));
@@ -264,9 +299,23 @@ impl App {
         });
     }
 
-    /// Starts a conversation with a message, a goal, or both.
+    /// Starts a conversation with a message, a goal, or both; a super
+    /// agent, when the New screen makes one, by the name it was given.
     pub(crate) fn start_conversation(&mut self, text: String, images: Vec<Value>, cmd: Option<Command>, ctx: &egui::Context) {
-        self.start_conversation_as(text, images, cmd, None, ctx);
+        let named = if self.new_here == Here::Super {
+            let name = crate::look::one_line(&self.new_super_name);
+            if name.is_empty() {
+                self.hint = Some("Name required".into());
+                return;
+            }
+            Some((agent::prompt::SUPER_ROLE.to_string(), name))
+        } else {
+            None
+        };
+        let made = named.is_some();
+        if self.start_conversation_as(text, images, cmd, named, ctx).is_some() && made {
+            self.new_super_name.clear();
+        }
     }
 
     /// Starts a conversation; with `named`, one a plugin starts: in that
@@ -275,7 +324,7 @@ impl App {
     pub(crate) fn start_conversation_as(&mut self, text: String, images: Vec<Value>, cmd: Option<Command>, named: Option<(String, String)>, ctx: &egui::Context) -> Option<String> {
         // A chat has no folder, no goal and no role (a plugin's start is
         // never one).
-        let chat = self.new_chat && named.is_none();
+        let chat = self.new_here == Here::Chat && named.is_none();
         let provider = self.settings.provider.unwrap_or_else(|| api::Provider::of(&self.settings.model));
         let folder = if chat {
             std::path::PathBuf::new()

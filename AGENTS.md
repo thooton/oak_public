@@ -222,7 +222,7 @@ REQUEST_ASK, ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which
 BROWSER, WINDOW): a tool and its instructions, left out of the prompt until needed.
 
 - The system prompt is `prompts/<role>.md` (who the model is; every file but `tools.md` and
-  `chat.md` is a role offered on the New screen; plugins can add roles) with `prompts/tools.md` in place of `{{tools}}`. `{{folder}}`,
+  `chat.md` is a role offered on the New screen, `super.md` only as its Super agent; plugins can add roles) with `prompts/tools.md` in place of `{{tools}}`. `{{folder}}`,
   `{{scratch}}`, `{{date}}`, `{{os}}`, `{{model}}` and `{{agent}}` are filled in, `{{#windows}}`,
   `{{#unix}}`, `{{#main}}`, `{{#agent}}`, `{{#full}}`, `{{#local}}`, `{{#goal}}` and kit blocks are kept only where they apply, and
   comments are dropped (`build.rs`, `src/agent/prompt.rs`). It is compiled in: a change takes a
@@ -285,6 +285,15 @@ commands are dropped and Freebuff (whose agent works on a project) is neither of
 chat (`agent::chat_refuses_provider`). It is saved with `"chat": true` (coding conversations, the
 default, don't write it); its tab has a speech-bubble icon, its Home row says Chat, and its side
 chat is a chat too. `oak_sdk`'s `go_new` takes `chat` to pick it.
+
+**Super agents** (`agent::prompt::SUPER_ROLE`). The New screen's Super agent, beside Chat, starts a
+conversation that coordinates: a name (its title, kept), a folder, model and effort, then Create or
+a first message. Its role is `prompts/super.md` (not offered as a System prompt; `main` says it
+plans the work and hands it to subagents with the AGENT kit, `agent` says its subagents each do one
+task), saved as `"role": "super"`, so its subagents work in its folder on this machine with the
+same prompt. Its tab has Oak's tree, its Home row says "folder, super agent", and `oak_sdk`'s
+`go_new` takes `super` to pick it. Oak's own choices win over a plugin's `NewKind` of the same id,
+as built-in roles do over plugin roles (`add_roles`), so a plugin can't replace either.
 
 **Side chats** (`src/side_chat.rs`). The message bubble immediately left of the browser icon opens
 this conversation's side chat from the right within Oak, with only its transcript and message box.

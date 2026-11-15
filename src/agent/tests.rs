@@ -882,3 +882,20 @@ fn chat_is_kept_and_coding_conversations_are_unchanged() {
     assert!(w.tool("NOTE_NEW", &json!({"text": "x"})).0.is_ok());
     assert!(prompt::ROLES.iter().all(|r| r.id != "chat" && r.id != "tools"));
 }
+
+/// A super agent (the New screen's Super agent) asks as one, with the
+/// AGENT kit to load; its subagents, of its role, ask as one agent with
+/// one task.
+#[test]
+fn super_agents_coordinate_and_their_agents_work() {
+    let role = crate::agent::prompt::SUPER_ROLE.to_string();
+    let (w, s) = idle_worker("super", Conversation { model: "claude-opus-5-5".into(), role: role.clone(), title: "Release train".into(), titled: true, ..Default::default() });
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("ship it")]}));
+    let (r, ..) = w.request_body();
+    assert!(r.system.starts_with("You are a super agent") && r.system.contains("Load the AGENT kit") && r.system.contains("Every EXECUTE and TASK command"));
+    assert!(r.tools.iter().any(|t| t["name"] == "LOAD"));
+    let (w, s) = idle_worker("super-agent1", Conversation { model: "claude-opus-5-5".into(), role, parent: Some("unit-test-super".into()), agent_id: 1, ..Default::default() });
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("do x")]}));
+    let (r, ..) = w.request_body();
+    assert!(r.system.starts_with("You are Oak, a coding agent") && r.system.contains("started by a super agent") && !r.system.contains("Load the AGENT kit"));
+}

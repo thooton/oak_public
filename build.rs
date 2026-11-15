@@ -1,8 +1,10 @@
 //! Bundles the system prompts: every file in prompts/ but tools.md and
 //! chat.md (a chat's whole prompt, `agent::prompt::CHAT`) is a role
-//! the New screen offers (`agent::prompt::ROLES`), named after its file with
-//! the first letter capitalized. Normal comes first, as the default; the
-//! others follow in alphabetical order. Also bundles ripgrep (`ripgrep()`)
+//! (`agent::prompt::ROLES`), named after its file with the first letter
+//! capitalized, that the New screen offers; super.md, a super agent's
+//! (`agent::prompt::SUPER_ROLE`), is offered only as its Super agent
+//! choice. Normal comes first, as the default; the others follow in
+//! alphabetical order. Also bundles ripgrep (`ripgrep()`)
 //! and sets the version (`version()`).
 
 use std::fmt::Write;
@@ -29,7 +31,10 @@ fn main() {
         let mut name = id.chars();
         let name: String = name.next().map(|c| c.to_uppercase().chain(name).collect()).unwrap_or_default();
         let path = path.to_str().expect("a prompt's path isn't UTF-8");
-        writeln!(out, "    Role {{ id: {id:?}, name: {name:?}, text: include_str!({path:?}), icon: \"\", offered: true }},").unwrap();
+        // (A super agent's role is the New screen's Super agent, not a
+        // System prompt choice; its tabs have Oak's tree.)
+        let (name, icon, offered) = if id == "super" { ("Super agent".to_string(), "\u{f1bb}", false) } else { (name, "", true) };
+        writeln!(out, "    Role {{ id: {id:?}, name: {name:?}, text: include_str!({path:?}), icon: {icon:?}, offered: {offered} }},").unwrap();
     }
     out.push_str("];\n");
     let file = Path::new(&std::env::var("OUT_DIR").unwrap()).join("roles.rs");
