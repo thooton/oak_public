@@ -943,7 +943,7 @@ pub fn claude_body(req: &crate::oak::Request) -> Value {
     // conversation breakpoint was.
     // (Mid-conversation system messages, `crate::prefix`, come after the
     // user turn a breakpoint goes on.)
-    let user_at = |msgs: &[Value], i: usize| (0..=i.min(msgs.len().saturating_sub(1))).rev().find(|&k| msgs[k]["role"] != "system");
+    let user_at = |msgs: &[Value], i: usize| (0..msgs.len().min(i + 1)).rev().find(|&k| msgs[k]["role"] != "system");
     if req.ttl == crate::oak::Ttl::FiveMinutes
         && let Some(msgs) = body["messages"].as_array_mut()
         && let Some(i) = req.anchor.and_then(|i| user_at(msgs, i))
