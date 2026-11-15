@@ -2302,3 +2302,6 @@ mod live;
 
 #[cfg(test)]
 mod request_bench;
+
+#[cfg(test)]
+mod tool_bench;

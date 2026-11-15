@@ -52,7 +52,10 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
 - Benchmarks, at no cost: `bench_frames`, `bench_between_turns` (frames idle, scrolling and with
   a reply streaming in, startup, picture memory; `BENCH_TURNS` sets the long conversation's length),
   `bench_streaming_reply` (a 40 kB reply streaming in at the end of a long conversation),
-  `bench_transcript_steps`, `bench_request_messages`. Build them with `--release`.
+  `bench_transcript_steps`, `bench_request_messages`, and `bench_tool_turnaround` (what a
+  conversation adds around EXECUTE, READ and WRITE calls, against the fake model of
+  `bench/tools/` in the private repository, beside Claude Code's and the command center's; set
+  `OAK_API_BASE` and a scratch `OAK_DIR`). Build them with `--release`.
 - Against the real services, signed in (a small cost): `live_rolling`, `live_images`,
   `live_agents`, `live_freebuff` (`OAK_TEST_PROMPT`, `OAK_TEST_FOLDER`) and `live_cloud_list`
   (read only), `live_rewrite` and `live_search`. `live_hidden_desktop` (Windows, after `cargo build`)
