@@ -36,6 +36,11 @@ pub(crate) fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     {
         new.native_adapter_selector = Some(std::sync::Arc::new(|adapters, surface| {
             use eframe::wgpu::{Backend, DeviceType};
+            crate::startup::step("graphics adapters found");
+            for a in adapters {
+                let info = a.get_info();
+                crate::startup::note(format!("Graphics adapter: {} on {:?} ({:?})", info.name, info.backend, info.device_type));
+            }
             adapters
                 .iter()
                 .filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)))
@@ -70,6 +75,7 @@ pub(crate) fn watch(cc: &eframe::CreationContext) {
     let Some(rs) = &cc.wgpu_render_state else { return };
     let info = rs.adapter.get_info();
     let adapter = format!("{} on {:?} (driver {})", info.name, info.backend, format!("{} {}", info.driver, info.driver_info).trim());
+    crate::startup::note(format!("Drawing with: {adapter}"));
     *DEVICE.lock().unwrap() = Some((rs.device.clone(), adapter));
     rs.device.set_device_lost_callback(move |reason, message| {
         LOST.store(true, Ordering::SeqCst);

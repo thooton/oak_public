@@ -90,6 +90,9 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
   so glibc 2.35 is enough) for every push that touches it, the example plugin included. A passing
   push to master (the default branch) is released as `v<version>`, with `oak-windows-x86_64.exe`,
   `oak-linux-x86_64` and `oak-linux-x86_64.tar.gz` (each with a `.sha256`); the 20 newest releases are kept.
+  Its "Time startup" step starts the release build on both systems with a fresh profile and with
+  300 conversations (~200 MB), on Windows with Defender's real-time scanning on and off, and puts each
+  `startup.log` in the run's summary (informational: it never fails the build).
 - The version is MAJOR.MINOR from `Cargo.toml` and the number of commits as the patch
   (`build.rs`), so every commit on master is a version. Other builds are marked `-dev`;
   `OAK_BUILD_VERSION` sets any version (to try the updater). `oak --version` prints it.
@@ -122,7 +125,9 @@ size, place and maximized state), `seats.json` (which account each
 conversation is on), `tasks/` and `task-output/` (background tasks), `browser/` (the browsers'
 profiles), `plugins/` (plugins to load, and what they keep is beside it under names of their
 own), `bin/` (programs for the agent's commands: the bundled ripgrep, `src/toolbin.rs`),
-`usage.jsonl` and `crash.log`. Files are written to a temporary file and renamed over
+`usage.jsonl`, `crash.log` and `startup.log` (how long the last start took, step by step, until
+its first frame was on screen, and the processor time spent by each step: `src/startup.rs`; the
+place to look first when Oak starts slowly). Files are written to a temporary file and renamed over
 the old one, so a crash never leaves half a file; an unreadable `settings.json` is kept as
 `settings.json.unreadable`.
 

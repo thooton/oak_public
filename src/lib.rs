@@ -48,6 +48,7 @@ mod rotation;
 mod scratch;
 mod guard;
 mod sleeps;
+mod startup;
 mod store;
 mod tasks;
 mod time;
@@ -365,6 +366,7 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext) -> App {
+        startup::step("window and graphics up");
         gpu::watch(cc);
         let settings = store::load_settings();
         rolling::set_config(rolling::Config { trigger: settings.roll_trigger, keep: settings.roll_keep });
@@ -390,12 +392,14 @@ impl App {
         copy_menu::install(&cc.egui_ctx);
         autoscroll::install(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx, &theme::theme(&settings.theme));
+        startup::step("settings, fonts and theme");
         // Before the sessions start: one resuming at once (after a usage
         // limit) sends its request through these accounts.
         let signed_in = api::load_auth();
         if !cfg!(test) {
             gateway::start_in_app();
         }
+        startup::step("accounts and gateway");
         // Calls left without a result and unfinished rewrites are looked for
         // in every conversation as it starts (`Session::start`): in the
         // loading threads first, as that reads them all.
@@ -403,14 +407,17 @@ impl App {
             agent::look_for_lost_calls(c);
             unslop::look(c);
         });
+        startup::step(format!("{} conversations read", conversations.len()));
         let sessions = conversations
             .into_iter()
             .map(|c| (c.id.clone(), Session::start(c, cc.egui_ctx.clone())))
             .collect();
+        startup::step("conversations started");
         // Their tasks left running when OAK closed are theirs again.
         if !cfg!(test) {
             tasks::release_holder();
         }
+        startup::step("tasks taken back");
         let mut app = App {
             settings,
             signed_in,
@@ -428,6 +435,7 @@ impl App {
         }
         // The plugins' turn: the window is up.
         plugins::started(&cc.egui_ctx);
+        startup::step("plugins told the window is up");
         app
     }
 
@@ -518,6 +526,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        startup::frame(ui.ctx());
         self.sync_zoom(ui.ctx());
         let t = theme::theme(&self.settings.theme);
         plugins::begin_frame(ui.ctx(), &t);
@@ -733,12 +742,14 @@ pub fn main() -> eframe::Result {
         log_panics(store::dir().join("crash.log"));
         std::process::exit(gateway::main(&args[2..]));
     }
+    startup::begin();
     log_panics(store::dir().join("crash.log"));
     // The plugins, before anything of Oak's runs (`plugins.rs`).
     if args.iter().any(|a| a == "--no-plugins") {
         plugins::disable();
     }
     plugins::load();
+    startup::step("plugins loaded");
     if args.len() > 1 && args[1] == "--plugins" {
         std::process::exit(plugins::report());
     }
@@ -760,6 +771,7 @@ pub fn main() -> eframe::Result {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions { viewport, wgpu_options: gpu::wgpu_options(), ..Default::default() };
+    startup::step("ready for the window");
     let run = || eframe::run_native("OAK", options, Box::new(|cc| Ok(Box::new(App::new(cc)))));
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(result) => result,

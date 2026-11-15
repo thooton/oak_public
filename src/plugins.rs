@@ -243,7 +243,9 @@ pub fn load() {
         files.sort();
         for path in files {
             let at = found.len();
-            match open(&path) {
+            let opened = open(&path);
+            crate::startup::step(format!("plugin file {} opened", path.file_name().unwrap_or_default().to_string_lossy()));
+            match opened {
                 Ok((info, init)) => {
                     let disabled = !info.id.is_empty() && switched_off.contains(&info.id);
                     let trouble = if info.id.is_empty() {
@@ -273,6 +275,7 @@ pub fn load() {
         // SAFETY: the plugin's `init`, with the table it was built for (or
         // a later one, which starts the same).
         let ok = unsafe { init(&api::TABLE) };
+        crate::startup::step(format!("plugin {} started", info.id));
         let parts = REGISTERING.lock().unwrap().take().unwrap_or_default();
         let mut found = FOUND.lock().unwrap();
         if ok && found[at].trouble.is_none() {

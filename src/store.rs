@@ -977,6 +977,8 @@ fn read_all(files: &[std::fs::DirEntry], look: &(dyn Fn(&mut Conversation) + Syn
     order.sort_by_key(|&i| std::cmp::Reverse(files[i].metadata().map_or(0, |m| m.len())));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(files.len()).max(1);
+    let bytes: u64 = files.iter().map(|f| f.metadata().map_or(0, |m| m.len())).sum();
+    crate::startup::note(format!("Conversation files: {} ({:.1} MB), read on {threads} threads", files.len(), bytes as f64 / 1e6));
     let mut parsed: Vec<(usize, Option<Conversation>)> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {

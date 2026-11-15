@@ -156,6 +156,54 @@ jobs:
           echo "built: $got, expected: $VERSION"
           test "$got" = "$VERSION"
 
+      # How long startup takes (src/startup.rs): the release build started
+      # until its first frame is on screen, under a fresh profile and under
+      # one with 300 conversations (~200 MB, .github/startup_profile.py),
+      # first just written and then again unchanged; on Windows with
+      # Defender's real-time scanning on and off. Each run's startup.log
+      # goes to the run's summary. Informational: it never fails the build.
+      - name: Time startup
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          exe=target/release/oak
+          [ "$RUNNER_OS" = Windows ] && exe=target/release/oak.exe
+          py=$(command -v python3 || command -v python)
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get install -y xvfb libgl1-mesa-dri > /dev/null
+          fi
+          defender() {
+            [ "$RUNNER_OS" = Windows ] || return 0
+            powershell -NoProfile -Command "Set-MpPreference -DisableRealtimeMonitoring \$$1" || true
+            powershell -NoProfile -Command "(Get-MpComputerStatus).RealTimeProtectionEnabled" || true
+          }
+          timed() {
+            rm -f "$1/startup.log"
+            if [ "$RUNNER_OS" = Linux ]; then OAK_DIR="$1" xvfb-run -a "$exe" & else OAK_DIR="$1" "$exe" & fi
+            for _ in $(seq 300); do [ -s "$1/startup.log" ] && break; sleep 0.2; done
+            sleep 1
+            if [ "$RUNNER_OS" = Windows ]; then taskkill //F //IM oak.exe > /dev/null 2>&1; else pkill -f "$exe"; fi
+            wait
+            {
+              echo "### $RUNNER_OS: $2"
+              echo '```'
+              cat "$1/startup.log" 2>/dev/null || echo "(no startup.log: no first frame within a minute)"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          for scan in false true; do
+            [ "$RUNNER_OS" = Windows ] || [ $scan = false ] || break
+            on=$(defender "$([ $scan = true ] && echo false || echo true)" | tail -1)
+            label=""; [ "$RUNNER_OS" = Windows ] && label=", real-time scanning: ${on:-unknown}"
+            fresh="$RUNNER_TEMP/startup-fresh-$scan"; big="$RUNNER_TEMP/startup-big-$scan"
+            mkdir -p "$fresh"
+            timed "$fresh" "a fresh profile$label"
+            "$py" .github/startup_profile.py "$big" 300 100
+            timed "$big" "300 conversations just written$label"
+            timed "$big" "300 conversations, started again$label"
+          done
+          defender false > /dev/null
+
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
