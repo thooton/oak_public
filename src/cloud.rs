@@ -859,7 +859,10 @@ impl Chat {
                     let resets = info["resetsAt"].as_f64().unwrap_or(0.0);
                     if resets > 0.0 {
                         self.limited_until = (resets * 1000.0) as i64;
-                        note_limit(&self.rid, self.limited_until);
+                        match Provider::from_rid(&self.rid).backend() {
+                            None => api::note_cloud_limit_info(&self.rid, self.limited_until, info),
+                            Some(b) => b.note_limit(&self.rid, self.limited_until),
+                        }
                     }
                     true
                 } else if info["status"].is_string() {
@@ -1329,7 +1332,7 @@ pub fn move_chat(key: &str, text: String, attachments: Vec<Value>, ctx: &eframe:
         c.moving = true;
         (c.rid.clone(), c.id.clone(), c.title.clone(), c.limited_until)
     };
-    if limited > api::now_ms() {
+    if limited > api::now_ms() && !provider.is_own() {
         note_limit(&rid, limited);
     }
     record_started(move || {

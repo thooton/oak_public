@@ -21,6 +21,7 @@ use vault::{add_remote, remote_token};
 
 mod vault;
 mod models;
+mod limits;
 pub mod resets;
 pub use models::{Model, Provider, claude_efforts, claude_models_error, context_window, fable_offer, known_models, latest_models, max_output, model_name};
 
@@ -86,6 +87,14 @@ pub struct Stored {
     /// reading asked for after it that shows room clears it (`take_limits`).
     #[serde(default)]
     pub limited_at: i64,
+    /// Refusals applying only to the requested model family, never other models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_refusals: Vec<limits::ModelRefusal>,
+    /// An unscoped cloud-session refusal is not evidence about desktop models.
+    #[serde(default)]
+    pub cloud_limited_until: i64,
+    #[serde(default)]
+    pub cloud_limited_at: i64,
     /// Its plan limits as last fetched, and why fetching failed (not saved).
     #[serde(skip)]
     pub limits: Vec<Limit>,
@@ -117,7 +126,7 @@ pub struct Stored {
 impl Stored {
     fn new(id: u64, auth: Auth) -> Stored {
         let none = String::new;
-        Stored { id, auth, email: none(), name: none(), plan: none(), limited_until: 0, limited_at: 0, limits: vec![], error: None, fetched: false, usage_at: 0, usage_fails: 0, usage_retry_at: 0, unreachable_until: 0, resets: None, resets_read: 0 }
+        Stored { id, auth, email: none(), name: none(), plan: none(), limited_until: 0, limited_at: 0, model_refusals: vec![], cloud_limited_until: 0, cloud_limited_at: 0, limits: vec![], error: None, fetched: false, usage_at: 0, usage_fails: 0, usage_retry_at: 0, unreachable_until: 0, resets: None, resets_read: 0 }
     }
 
     fn api_key(&self) -> bool {
@@ -149,55 +158,6 @@ impl Stored {
         }
     }
 
-    /// The 5-hour and weekly limits (the ones that stop every request).
-    fn main_limits(&self) -> impl Iterator<Item = &Limit> {
-        self.limits.iter().filter(|l| l.label == "5h" || l.label == "Week")
-    }
-
-    /// Until when it can't make requests (ms since 1970), or 0 when it can:
-    /// it was refused for its limit, or its usage shows one used up.
-    fn blocked_until(&self, now: i64) -> i64 {
-        let used_up = self.main_limits().filter(|l| l.percent >= 100.0).filter_map(|l| l.resets_at).filter(|&at| at > now).max();
-        let at = used_up.unwrap_or(0).max(self.limited_until).max(self.unreachable_until);
-        if at > now { at } else { 0 }
-    }
-
-    /// Takes a usage reading asked for at `asked_at`. A refusal for its
-    /// usage limit noted before then is over when the reading shows the
-    /// 5-hour and weekly limits below 100%: the limit was reset early (a
-    /// usage-limit reset used, here or anywhere else). A refusal for a
-    /// model's own weekly limit may come again then, which costs nothing.
-    /// Returns whether the refusal was cleared, and whether the account can
-    /// make requests now where it couldn't before (sessions waiting for a
-    /// reset try again then).
-    fn take_limits(&mut self, limits: Vec<Limit>, asked_at: i64, now: i64) -> (bool, bool) {
-        let blocked = self.blocked_until(now) > 0;
-        self.limits = limits;
-        let room = self.main_limits().count() == 2 && self.main_limits().all(|l| l.percent < 100.0);
-        let cleared = self.limited_until > now && asked_at > self.limited_at && room;
-        if cleared {
-            self.limited_until = 0;
-        }
-        (cleared, blocked && self.blocked_until(now) == 0)
-    }
-
-    /// How much usage it has left, in percent of its tightest limit. API
-    /// keys pay per token, so they come after every subscription.
-    fn headroom(&self, now: i64) -> f32 {
-        if self.api_key() {
-            return -1.0;
-        }
-        self.main_limits()
-            .map(|l| if l.resets_at.is_some_and(|at| at <= now) { 100.0 } else { 100.0 - l.percent })
-            .reduce(f32::min)
-            .unwrap_or(0.0)
-    }
-
-    /// Close to its limit: the 5-hour one at 95%, the weekly one at 99%.
-    fn near_limit(&self, now: i64) -> bool {
-        self.main_limits()
-            .any(|l| l.resets_at.is_none_or(|at| at > now) && l.percent >= if l.label == "5h" { SOON_5H } else { SOON_WEEK })
-    }
 }
 
 /// "rotating soon" from this much of the 5-hour limit used...
@@ -368,6 +328,8 @@ fn add_account(auth: Auth) {
         Some(i) => {
             a.list[i].auth = auth;
             a.list[i].limited_until = 0;
+            a.list[i].model_refusals.clear();
+            a.list[i].cloud_limited_until = 0;
             a.list[i].id
         }
         None => a.push(auth),
@@ -429,12 +391,16 @@ fn current_id() -> Result<u64, String> {
 /// The accounts as rotation weighs them (`crate::rotation`): logins on
 /// this machine are only a fallback once a vault has accounts.
 fn candidates(list: &[Stored], now: i64) -> Vec<crate::rotation::Candidate> {
+    candidates_for(list, "", now)
+}
+
+fn candidates_for(list: &[Stored], model: &str, now: i64) -> Vec<crate::rotation::Candidate> {
     let remote = list.iter().any(Stored::remote);
     list.iter()
         .map(|s| crate::rotation::Candidate {
             id: s.id.to_string(),
-            left: s.headroom(now) as f64,
-            usable: s.blocked_until(now) == 0,
+            left: s.headroom_for(model, now) as f64,
+            usable: s.blocked_for(model, now) == 0,
             resets_at: s.main_limits().filter(|l| l.label == "Week").find_map(|l| l.resets_at).unwrap_or(i64::MAX),
             preferred: s.remote() || !remote,
         })
@@ -445,15 +411,15 @@ fn candidates(list: &[Stored], now: i64) -> Vec<crate::rotation::Candidate> {
 /// see `crate::rotation`; `conv` empty for a one-off). When none can make
 /// requests, or with rotation off its own can't, Err says when the first
 /// comes free.
-fn account_for(conv: &str, now: i64) -> Result<u64, Fail> {
+fn account_for(conv: &str, model: &str, now: i64) -> Result<u64, Fail> {
     let mut a = ACCOUNTS.lock().unwrap();
     if a.list.is_empty() {
         return Err(Fail::err(NO_ACCOUNT.into()));
     }
-    let picked = crate::rotation::pick(Provider::Claude, conv, &candidates(&a.list, now), now, !rotation_on()).and_then(|id| id.parse::<u64>().ok());
-    let first_free = |a: &Accounts| a.list.iter().map(|s| s.blocked_until(now)).filter(|&t| t > 0).min().unwrap_or(now + 60_000);
+    let picked = crate::rotation::pick(Provider::Claude, conv, &candidates_for(&a.list, model, now), now, !rotation_on()).and_then(|id| id.parse::<u64>().ok());
+    let first_free = |a: &Accounts| a.list.iter().map(|s| s.blocked_for(model, now)).filter(|&t| t > 0).min().unwrap_or(now + 60_000);
     match picked.and_then(|id| a.get(id)) {
-        Some(s) if s.blocked_until(now) > 0 => Err(Fail::Report(Sse::Limit(s.blocked_until(now)))),
+        Some(s) if s.blocked_for(model, now) > 0 => Err(Fail::Report(Sse::Limit(s.blocked_for(model, now)))),
         Some(s) => {
             let id = s.id;
             // The account Home shows as in use: the last one a request went through.
@@ -467,12 +433,26 @@ fn account_for(conv: &str, now: i64) -> Result<u64, Fail> {
     }
 }
 
-/// A request through account `id` was refused for its usage limit, which
-/// resets at `at`: no request goes through it before then.
-fn note_limited(id: u64, at: i64) {
+/// Whether this Claude conversation could send now, including fixed seats.
+/// Used while waiting too: a persisted wait or a model change must not hide room.
+pub(crate) fn room_for(conv: &str, model: &str) -> bool {
+    let now = now_ms();
+    let seat = crate::rotation::seat(Provider::Claude, conv);
+    let a = ACCOUNTS.lock().unwrap();
+    let cands = candidates_for(&a.list, model, now);
+    if !rotation_on() && let Some(seat) = seat {
+        return cands.iter().find(|c| c.id == seat).is_some_and(|c| c.usable);
+    }
+    cands.iter().any(|c| c.usable)
+}
+
+/// A rejected request holds only its requested family unless the server
+/// explicitly identifies a shared window. Never infer scope from reset time.
+fn note_limited(id: u64, model: &str, h: &reqwest::header::HeaderMap, at: i64) {
+    let claim = h.get("anthropic-ratelimit-unified-representative-claim").and_then(|v| v.to_str().ok()).unwrap_or("");
     let mut a = ACCOUNTS.lock().unwrap();
     if let Some(s) = a.get_mut(id) {
-        (s.limited_until, s.limited_at) = (s.limited_until.max(at), now_ms());
+        s.refuse(model, claim, at, now_ms());
         a.save();
     }
 }
@@ -1125,10 +1105,35 @@ fn usage_report(id: u64) -> Result<UsageReport, (String, Option<u64>)> {
 
 fn read_limits(u: &Value) -> Vec<Limit> {
     let mut out = vec![];
-    for (key, label) in [("five_hour", "5h"), ("seven_day", "Week"), ("seven_day_opus", "Opus wk"), ("seven_day_sonnet", "Sonnet wk")] {
+    for (key, label) in [("five_hour", "5h"), ("seven_day", "Week"), ("seven_day_opus", "Opus wk"), ("seven_day_sonnet", "Sonnet wk"), ("seven_day_haiku", "Haiku wk"), ("seven_day_fable", "Fable wk"), ("seven_day_mythos", "Fable wk")] {
         let l = &u[key];
         if let Some(p) = l["utilization"].as_f64() {
             out.push(Limit { label, percent: p as f32, resets_at: l["resets_at"].as_str().and_then(parse_time) });
+        }
+    }
+    // New reports name model quotas only in limits[].scope.model; the id
+    // may be null, with only display_name (the live Fable report).
+    for l in u["limits"].as_array().into_iter().flatten() {
+        let kind = l["kind"].as_str().unwrap_or("");
+        let m = &l["scope"]["model"];
+        let model = m["id"].as_str().or_else(|| m["display_name"].as_str()).unwrap_or("").to_ascii_lowercase();
+        let label = match kind {
+            "session" if l["scope"].is_null() => "5h",
+            "weekly_all" if l["scope"].is_null() => "Week",
+            _ => match model.as_str() {
+                "opus" => "Opus wk", "sonnet" => "Sonnet wk", "haiku" => "Haiku wk", "fable" | "mythos" => "Fable wk",
+                m if m.starts_with("claude-opus-") => "Opus wk",
+                m if m.starts_with("claude-sonnet-") => "Sonnet wk",
+                m if m.starts_with("claude-haiku-") => "Haiku wk",
+                m if models::is_fable(m) => "Fable wk",
+                _ => continue, // Unknown scope is not evidence of a global quota.
+            },
+        };
+        if let Some(p) = l["percent"].as_f64() {
+            let limit = Limit { label, percent: p as f32, resets_at: l["resets_at"].as_str().and_then(parse_time) };
+            if let Some(old) = out.iter_mut().find(|old| old.label == label) {
+                if limit.percent > old.percent { *old = limit; }
+            } else { out.push(limit); }
         }
     }
     out
@@ -1161,7 +1166,7 @@ fn note_usage(id: u64, h: &reqwest::header::HeaderMap) {
     let Some(s) = a.get_mut(id) else { return };
     let mut limits = new;
     limits.extend(s.limits.iter().filter(|l| l.label != "5h" && l.label != "Week").cloned());
-    limits.sort_by_key(|l| ["5h", "Week", "Opus wk", "Sonnet wk"].iter().position(|x| *x == l.label));
+    limits.sort_by_key(|l| ["5h", "Week", "Opus wk", "Sonnet wk", "Haiku wk", "Fable wk"].iter().position(|x| *x == l.label));
     (s.limits, s.error, s.usage_at, s.usage_fails, s.usage_retry_at, s.fetched) = (limits, None, now_ms(), 0, 0, true);
 }
 
@@ -1303,7 +1308,7 @@ fn cloud_rid(s: &Stored) -> Option<String> {
 pub fn cloud_accounts() -> Vec<CloudAccount> {
     let now = now_ms();
     let a = ACCOUNTS.lock().unwrap();
-    let of = |s: &Stored| cloud_rid(s).map(|rid| CloudAccount { rid, label: s.label(), blocked_until: s.blocked_until(now) });
+    let of = |s: &Stored| cloud_rid(s).map(|rid| CloudAccount { rid, label: s.label(), blocked_until: s.blocked_until(now).max(s.cloud_limited_until) });
     let (remote, local): (Vec<&Stored>, Vec<&Stored>) = a.list.iter().partition(|s| s.remote());
     remote.into_iter().chain(local).filter_map(of).collect()
 }
@@ -1311,11 +1316,26 @@ pub fn cloud_accounts() -> Vec<CloudAccount> {
 /// Notes that account `rid` hit its usage limit until `until` (from a cloud
 /// session), so it is skipped for new sessions meanwhile.
 pub fn note_cloud_limit(rid: &str, until: i64) {
+    note_cloud_limit_info(rid, until, &Value::Null);
+}
+
+pub(crate) fn note_cloud_limit_info(rid: &str, until: i64, info: &Value) {
+    let claim = info["rateLimitType"].as_str().unwrap_or("");
+    let model = match claim {
+        "seven_day_opus" => "opus", "seven_day_sonnet" => "sonnet",
+        "seven_day_haiku" => "haiku", "seven_day_fable" | "seven_day_mythos" => "fable",
+        _ => "",
+    };
     let mut a = ACCOUNTS.lock().unwrap();
-    if let Some(s) = a.list.iter_mut().find(|s| cloud_rid(s).as_deref() == Some(rid))
-        && until > s.limited_until
-    {
-        (s.limited_until, s.limited_at) = (until, now_ms());
+    if let Some(s) = a.list.iter_mut().find(|s| cloud_rid(s).as_deref() == Some(rid)) {
+        if !model.is_empty() || matches!(claim, "five_hour" | "seven_day") {
+            s.refuse(model, claim, until, now_ms());
+        } else {
+            // The cloud session didn't identify its model or quota. Keep
+            // its refusal separate, not an account-wide desktop embargo.
+            s.cloud_limited_until = s.cloud_limited_until.max(until);
+            s.cloud_limited_at = now_ms();
+        }
         a.save();
     }
 }
@@ -1602,7 +1622,7 @@ pub fn probe_thinking(model: &str, tool: bool) -> Result<String, String> {
         ..Default::default()
     };
     let body = unstreamed(claude_body(&req));
-    let id = account_for("probe-thinking", now_ms()).map_err(|_| NO_ACCOUNT.to_string())?;
+    let id = account_for("probe-thinking", model, now_ms()).map_err(|_| NO_ACCOUNT.to_string())?;
     let r = send_as(id, reqwest::Method::POST, "/v1/messages", &[], true, Some(&body))?;
     if !r.status().is_success() {
         return Err(error_text(r));
@@ -1852,7 +1872,7 @@ fn open(body: &Value, betas: &[&str], continuing: bool, seat: &Seat, tx: &Sender
         // The conversation's account, or another when it can't make
         // requests (used up, or its token can't be had); with every account
         // used up, the wait is for the first to reset.
-        let id = account_for(&seat.conv, now_ms())?;
+        let id = account_for(&seat.conv, body["model"].as_str().unwrap_or(""), now_ms())?;
         if last.is_some_and(|l| l != id) {
             note_rotation();
             if tx.send(Sse::Rotated(label_of(id))).is_err() {
@@ -1871,7 +1891,7 @@ fn open(body: &Value, betas: &[&str], continuing: bool, seat: &Seat, tx: &Sender
                 // another.
                 match usage_limit_reset(r.status().as_u16(), r.headers(), now_ms()) {
                     Some(at) => {
-                        note_limited(id, at);
+                        note_limited(id, body["model"].as_str().unwrap_or(""), r.headers(), at);
                         if rotations >= 20 {
                             return Err(Fail::Report(Sse::Limit(at)));
                         }

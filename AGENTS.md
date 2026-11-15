@@ -195,7 +195,14 @@ can't read.
   used up, Oak waits for the first reset, or until an account is signed in or comes free early: an
   account refused for its limit is usable again once a usage reading taken after the refusal shows
   its 5-hour and weekly limits below 100% (a reset used here or anywhere else), and waiting
-  sessions try again then. Settings can turn rotation off. The model is never told.
+  sessions try again then. Shared 5-hour/weekly limits apply to every Claude model; model-scoped
+  quotas (including Fable's `limits[].scope.model`, even with a null id) apply only to that family.
+  Refusals without a shared-window claim stay with the requested family, and cloud refusals with
+  no known scope never disable desktop models. A scoped refusal clears only after a newer reading
+  shows both shared room and that family's own room, or its reset passes. Legacy account-wide
+  refusals retain the early-reset recognition above. Waiting sessions recheck eligibility for their
+  current model, including fixed seats, so a stale wait cannot hide available capacity.
+  Settings can turn rotation off. The model is never told.
 - A Claude account's plan is read from its profile: Pro, Max, Ultra, Team Standard or Team
   Premium. Max and Ultra are the two sizes of Max (rate-limit tiers `..._max_5x` and `..._max_20x`);
   accounts, the usage log and vaults keep them as "Max 5x" and "Max 20x", the names they had

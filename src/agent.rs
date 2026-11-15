@@ -1494,6 +1494,10 @@ impl Worker {
             l.status = "Waiting for the usage limit to reset".into();
         });
         let since = api::accounts_freed();
+        let waiting_on = {
+            let c = self.conv.lock().unwrap();
+            (c.provider(), c.model.clone())
+        };
         let cleared = loop {
             if self.interrupted() {
                 break false;
@@ -1501,7 +1505,12 @@ impl Worker {
             let left = at + LIMIT_SLACK_MS - api::now_ms();
             // Done at the reset, or at once when the user signed in with
             // another account or one came free early.
-            if limit_over(left, since, api::accounts_freed()) {
+            let ready = {
+                let c = self.conv.lock().unwrap();
+                (c.provider(), c.model.clone()) != waiting_on
+                    || (c.provider() == api::Provider::Claude && api::room_for(&c.id, &c.model))
+            };
+            if ready || limit_over(left, since, api::accounts_freed()) {
                 break true;
             }
             // (Paused meanwhile, nothing runs: the pause has taken hold.)

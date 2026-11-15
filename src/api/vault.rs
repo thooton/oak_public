@@ -192,6 +192,8 @@ pub(crate) fn add_remote(auth: Auth) -> Result<(), String> {
     };
     let s = a.get_mut(id).unwrap();
     s.auth = remote;
+    s.model_refusals.clear();
+    s.cloud_limited_until = 0;
     (s.email, s.name, s.plan, s.limited_until, s.unreachable_until) = (email, name, plan, 0, 0);
     if a.get(a.current).is_none_or(|c| !c.remote()) {
         a.current = id;
