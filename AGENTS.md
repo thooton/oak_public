@@ -77,10 +77,10 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 
 - `.github/workflows/client.yml` builds and tests the app on Windows and on Linux (Ubuntu 22.04,
   so glibc 2.35 is enough) for every push that touches it, the example plugin included. A passing
-  push to main is released as `v<version>`, with `oak-windows-x86_64.exe`, `oak-linux-x86_64` and
-  `oak-linux-x86_64.tar.gz` (each with a `.sha256`); the 20 newest releases are kept.
+  push to master (the default branch) is released as `v<version>`, with `oak-windows-x86_64.exe`,
+  `oak-linux-x86_64` and `oak-linux-x86_64.tar.gz` (each with a `.sha256`); the 20 newest releases are kept.
 - The version is MAJOR.MINOR from `Cargo.toml` and the number of commits as the patch
-  (`build.rs`), so every commit on main is a version. Other builds are marked `-dev`;
+  (`build.rs`), so every commit on master is a version. Other builds are marked `-dev`;
   `OAK_BUILD_VERSION` sets any version (to try the updater). `oak --version` prints it.
 - Oak updates itself (`src/update.rs`) from the GitHub repository it was built in
   (`GITHUB_REPOSITORY` in CI, or `OAK_UPDATE_REPO`, at build time; a build that names none looks

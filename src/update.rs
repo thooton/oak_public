@@ -1,6 +1,6 @@
 //! Oak's version, and updating Oak from its GitHub releases.
 //!
-//! Every push to main is built and tested by `.github/workflows/client.yml`
+//! Every push to master is built and tested by `.github/workflows/client.yml`
 //! and, when it passes, published as release `v<version>` (marked latest),
 //! with the Windows and Linux binaries and their SHA-256 sums. Here Oak
 //! looks at the latest release now and then (`start`), and when it is newer

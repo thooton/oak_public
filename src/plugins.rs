@@ -549,14 +549,19 @@ mod tests {
     use crate::{Page, Screen};
     use eframe::egui::PointerButton::Primary;
 
-    /// Builds the C example (`plugins/hello-c`) with the system's C
-    /// compiler (`CC`, else `cc`) into a scratch folder; the folder.
+    /// Builds the C example (`plugins/hello-c`) with a gcc-style C
+    /// compiler (`OAK_TEST_CC`, else `CC`, else `gcc` on Windows and `cc`
+    /// elsewhere) into a scratch folder; the folder. On Windows CI sets
+    /// none: a `CC` of gcc there would also build the crates' own C
+    /// (aws-lc, zstd) with MinGW, which MSVC's linker can't link.
     fn built_c_example() -> PathBuf {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let out = std::env::temp_dir().join(format!("oak-hello-c-{}", std::process::id()));
         std::fs::create_dir_all(&out).unwrap();
         let lib = out.join(format!("liboak_hello_c.{}", std::env::consts::DLL_EXTENSION));
-        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        let cc = std::env::var("OAK_TEST_CC")
+            .or_else(|_| std::env::var("CC"))
+            .unwrap_or_else(|_| if cfg!(windows) { "gcc" } else { "cc" }.into());
         // (Windows has no use for -fPIC, and its compilers warn about it.)
         let pic: &[&str] = if cfg!(windows) { &[] } else { &["-fPIC"] };
         let done = std::process::Command::new(&cc)

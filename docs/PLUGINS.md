@@ -217,7 +217,7 @@ OAK_PLUGINS=target/debug cargo test --lib the_example_plugins -- --ignored   # b
 OAK_PLUGINS=<folder> cargo test --lib every_plugin_draws -- --ignored        # any plugins
 ```
 
-The first also compiles `plugins/hello-c/hello.c` (with `CC`, or `cc`). `every_plugin_draws`
+The first also compiles `plugins/hello-c/hello.c` (with `OAK_TEST_CC`, else `CC`, else `gcc` on Windows and `cc` elsewhere). `every_plugin_draws`
 loads whatever `OAK_PLUGINS` holds and draws every Home tab in every theme, Settings, Home's Plugins tab, every
 choice on the New screen, and the tabs `OAK_PLUGIN_TABS` names (keys separated by commas),
 failing if a plugin doesn't load or stops. It runs in a scratch Oak folder, never the user's:

@@ -1,10 +1,11 @@
 # The Oak app: build and test on every push and pull request, on Windows and
-# Linux, instead of doing it locally (the example plugins included). A push to main that passes is also
+# Linux, instead of doing it locally (the example plugins included). A push to the default branch
+# (master) that passes is also
 # published as a release, v<version>, marked latest, which every Oak offers as
 # an update on its Home page (src/update.rs).
 #
 # The version is MAJOR.MINOR from Cargo.toml and the number of commits up to
-# the one built (build.rs), so each commit on main has its own and they only
+# the one built (build.rs), so each commit on master has its own and they only
 # go up. Bump MAJOR or MINOR in Cargo.toml for a bigger step.
 #
 # Release assets (src/update.rs looks for these names):
@@ -43,18 +44,18 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: Publish a release from this run (main only)
+        description: Publish a release from this run (default branch only)
         type: boolean
         default: true
 
 permissions:
   contents: read
 
-# On main, runs go one after another so releases come out in order; elsewhere
-# a newer push cancels the run of the older one.
+# On the default branch (master), runs go one after another so releases come
+# out in order; elsewhere a newer push cancels the run of the older one.
 concurrency:
   group: oak-app-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -129,14 +130,14 @@ jobs:
         run: cargo build --release --locked
 
       # The example plugins (one in Rust, one in C, which the test compiles
-      # itself), loaded into the whole app, headless: the plugin interface
+      # itself with gcc on Windows; no CC here, or cargo would build the
+      # crates' C with it too and MSVC couldn't link them), loaded into the whole app, headless: the plugin interface
       # end to end (docs/PLUGINS.md). Alone in its process, since plugins
       # load once.
       - name: Test the example plugins
         env:
           OAK_DIR: ${{ runner.temp }}/oak-plugin-profile
           OAK_PLUGINS: target/release
-          CC: gcc
         run: |
           mkdir -p "$OAK_DIR"
           cargo build --release --locked -p oak-hello
@@ -186,7 +187,7 @@ jobs:
   release:
     name: Release
     needs: build
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release))
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

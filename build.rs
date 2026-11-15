@@ -34,7 +34,7 @@ fn main() {
 
 /// Oak's version, for the version shown on Home and the updater
 /// (`src/update.rs`): MAJOR.MINOR from Cargo.toml and, as the patch number,
-/// the number of commits up to HEAD, so every commit on main is a version of
+/// the number of commits up to HEAD, so every commit on master is a version of
 /// its own and a build of any commit can be told apart from the release
 /// made of it. The release workflow sets `OAK_RELEASE=1`; any other build
 /// is marked `-dev`. `OAK_BUILD_VERSION` overrides it all (to try the
