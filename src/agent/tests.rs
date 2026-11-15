@@ -403,6 +403,50 @@ fn tool_call_order() {
     ];
     let none: Vec<usize> = vec![];
     assert_eq!(waits_for(&calls, folder), vec![none.clone(), none.clone(), none.clone(), none, vec![0, 3], vec![1], vec![0, 3, 4], (0..7).collect(), vec![7]]);
+    // CD goes alone too: what follows it means another folder.
+    let calls = [call("READ", json!({"path": "a.rs"})), call("CD", json!({"path": "sub"})), call("READ", json!({"path": "a.rs"})), call("SEARCH", json!({}))];
+    assert_eq!(waits_for(&calls, folder), vec![vec![], vec![0], vec![1], vec![1]]);
+}
+
+/// CD switches the working folder (relative, `..`, `~`), keeps the
+/// scratchpad where it was and returns the new folder's instructions; a
+/// missing folder or a file is refused, and the system prompt keeps the
+/// folder the cache has.
+#[test]
+fn cd_switches_the_working_folder() {
+    let root = std::env::temp_dir().join(format!("oak-cd-{}", api::now_ms()));
+    let sub = root.join("proj");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("CLAUDE.md"), "Use tabs.").unwrap();
+    std::fs::write(sub.join("a.txt"), "in proj").unwrap();
+    let (w, s) = idle_worker("cd", Conversation { folder: root.clone(), ..Default::default() });
+    let pad = scratchpad(&mut s.conv.lock().unwrap());
+    let cd = |path: &str| w.tool("CD", &json!({"path": path})).0;
+
+    assert!(cd("nowhere").unwrap_err().starts_with("No folder"));
+    assert!(cd("proj/a.txt").unwrap_err().contains("is a file"));
+    assert!(cd(".").unwrap().contains("already"));
+    let out = cd("proj").unwrap();
+    assert!(out.contains(&format!("now {}", sub.display())) && out.contains("Use tabs.") && out.contains(&pad.display().to_string()), "{out}");
+    assert_eq!(s.conv.lock().unwrap().folder, sub);
+    assert!(w.tool("READ", &json!({"path": "a.txt"})).0.unwrap().contains("in proj"));
+    // The scratchpad stays, and is still found by the scan.
+    assert_eq!(scratchpad(&mut s.conv.lock().unwrap()), pad);
+    let owners = [crate::scratch::Owner { id: "x".into(), folder: sub.clone(), scratch: s.conv.lock().unwrap().scratch.clone(), last_ms: 0, in_use: false }];
+    assert!(crate::scratch::pads(&owners).iter().any(|p| p.dir == pad && p.owner.as_deref() == Some("x")));
+    // Back up, with `..`; the old folder has no instructions.
+    let out = cd("../proj/..").unwrap();
+    assert!(out.contains(&format!("now {}", root.display())) && !out.contains("instructions"), "{out}");
+    assert_eq!(scratchpad(&mut s.conv.lock().unwrap()), pad);
+    // The pin keeps the folder the cache was written with.
+    let mut p = crate::prefix::State::default();
+    let pin = |folder: &Path| crate::prefix::Pin { day: "d".into(), folder: folder.display().to_string(), tools: vec![json!({"name": "READ"})], ..Default::default() };
+    let setup = |n, now| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, cold: false, n, cut: 0, add: true, effort_per_message: true, now };
+    assert_eq!(p.prepare(setup(1, pin(&root))).folder, root.display().to_string());
+    assert_eq!(p.prepare(setup(3, pin(&sub))).folder, root.display().to_string());
+    assert!(p.sys.is_empty());
+    drop(s);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A reply's tool calls start as they stream in, when the calls before

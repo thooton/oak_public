@@ -45,6 +45,7 @@ pub(crate) fn cloud_list_view(ui: &mut Ui, t: &Theme, provider: cloud::Provider)
             busy: x.status == "running",
             paused: false,
             renamable: false,
+            scratch: None,
         })
         .collect();
     ui.scope_builder(UiBuilder::new().max_rect(r), |ui| chat_list(ui, t, &rows, false)).inner.open

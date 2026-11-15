@@ -338,6 +338,24 @@ impl App {
             crate::nodeclub::set_key,
         )
     }
+
+    /// Adding a Refuseless key from Home, as the NodeClub one: checked with
+    /// Refuseless (its credits), then kept on the vault when connected to
+    /// one (for every OAK), else on this machine. True once added.
+    pub(crate) fn refuseless_add_box(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
+        key_add_box(
+            ui,
+            t,
+            w,
+            ("Add Refuseless key", "add-refuseless-key", "abl_…"),
+            || {
+                let to = if api::signing_in_remotely() { format!("kept on {}", api::vault_name()) } else { "kept on this machine".to_string() };
+                format!("refuseless.com, {to}")
+            },
+            &mut self.adding_refuseless,
+            crate::refuseless::set_key,
+        )
+    }
 }
 
 /// A key being added from Home: its box is open, the key typed, and why
@@ -349,7 +367,7 @@ pub(crate) struct KeyForm {
     error: Option<String>,
 }
 
-/// The OpenRouter and NodeClub key boxes from Home: a caption, the key in a
+/// The OpenRouter, NodeClub and Refuseless key boxes from Home: a caption, the key in a
 /// password field, a line (its error, or `note`), and Add and Cancel.
 /// The key goes to `set_key`; on success, the form closes. True once added.
 fn key_add_box(ui: &mut Ui, t: &Theme, w: f32, (title, id, hint): (&str, &str, &str), note: impl Fn() -> String, form: &mut KeyForm, set_key: fn(&str) -> Result<(), String>) -> bool {
@@ -422,9 +440,9 @@ enum Conn {
 }
 
 /// The connections Settings lists: Claude, Codex, OpenRouter, NodeClub,
-/// Freebuff and the local llama.cpp server, how each is, and what its dot's
+/// Freebuff, Refuseless and the local llama.cpp server, how each is, and what its dot's
 /// hover says.
-fn connections() -> [(&'static str, Conn, String); 6] {
+fn connections() -> [(&'static str, Conn, String); 7] {
     let kept = |remote: bool| if remote { " (shared)" } else if api::vault_on() { " (on this machine)" } else { "" };
     let accounts = api::accounts();
     let claude = if accounts.is_empty() {
@@ -459,6 +477,13 @@ fn connections() -> [(&'static str, Conn, String); 6] {
             None => (Conn::Ok, format!("{}{}", if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) }, kept(a.remote))),
         },
     };
+    let refuseless = match crate::refuseless::account() {
+        None => (Conn::Off, "No Refuseless key: add one on Home.".to_string()),
+        Some(a) => match a.error {
+            Some(e) => (Conn::Failing, e),
+            None => (Conn::Ok, format!("{}{}", if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) }, kept(a.remote))),
+        },
+    };
     let freebuff = match freebuff::account() {
         None => (Conn::Off, "No Freebuff account: add one on Home.".to_string()),
         Some((email, _)) => match freebuff::error() {
@@ -474,7 +499,7 @@ fn connections() -> [(&'static str, Conn, String); 6] {
     };
     [("Claude", claude.0, claude.1), ("Codex", codex.0, codex.1), ("OpenRouter", router.0, router.1),
         ("NodeClub", nodeclub.0, nodeclub.1),
-        ("Freebuff", freebuff.0, freebuff.1), ("Local", llama.0, llama.1)]
+        ("Freebuff", freebuff.0, freebuff.1), ("Refuseless", refuseless.0, refuseless.1), ("Local", llama.0, llama.1)]
 }
 
 /// The zoom factors Oak takes, as egui's own Ctrl+Plus and Ctrl+Minus.

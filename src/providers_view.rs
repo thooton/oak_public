@@ -18,6 +18,7 @@ pub(crate) fn logo(ctx: &egui::Context, p: Kind) -> egui::TextureHandle {
         Kind::OpenRouter => include_bytes!("../assets/logo-openrouter.png"),
         Kind::NodeClub => include_bytes!("../assets/logo-nodeclub.png"),
         Kind::Freebuff => include_bytes!("../assets/logo-freebuff.png"),
+        Kind::Refuseless => include_bytes!("../assets/logo-refuseless.png"),
         Kind::Local => include_bytes!("../assets/logo-local.png"),
     };
     let img = image::load_from_memory(bytes).expect("built-in logo decodes").to_rgba8();
@@ -197,6 +198,10 @@ pub(crate) fn shown(p: Kind) -> Shown {
     let now = api::now_ms();
     match p.metered() {
         Metered::Free => Shown::Free,
+        Metered::Credits if p == Kind::Refuseless => match crate::refuseless::account() {
+            Some(a) => Shown::Credits(a.left, a.spent, a.error),
+            None => Shown::Loading,
+        },
         Metered::Credits => match openrouter::account() {
             Some(a) => Shown::Credits(a.left, a.spent, a.error),
             None => Shown::Loading,
@@ -229,6 +234,7 @@ pub(crate) fn account_count(p: Kind) -> usize {
         Kind::OpenRouter => openrouter::accounts().len(),
         Kind::NodeClub => crate::nodeclub::accounts().len(),
         Kind::Freebuff => crate::freebuff::accounts().len(),
+        Kind::Refuseless => crate::refuseless::accounts().len(),
         Kind::Local => local::on() as usize,
     }
 }

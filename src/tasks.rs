@@ -179,6 +179,10 @@ pub struct Proc {
     /// Left running when Oak closed (or about to be): Oak no longer kills
     /// it on the way out.
     detached: AtomicBool,
+    /// The job's handle in bash's own handle table, given it as Oak closes
+    /// with the task left running (`give_job`), 0 when it has none.
+    #[cfg(windows)]
+    held: AtomicUsize,
     /// Oak started it (and so may signal its process group when it goes);
     /// not one found running again after a restart.
     #[cfg(unix)]
@@ -335,6 +339,8 @@ pub fn spawn(command: &str, cwd: &Path) -> Result<Arc<Proc>, String> {
         files,
         keep: AtomicBool::new(false),
         detached: AtomicBool::new(false),
+        #[cfg(windows)]
+        held: AtomicUsize::new(0),
         #[cfg(unix)]
         owned: true,
         exited: AtomicBool::new(false),
@@ -522,6 +528,10 @@ impl Proc {
             job: self.job_name.clone(),
             #[cfg(unix)]
             job: String::new(),
+            #[cfg(windows)]
+            held: self.held.load(Ordering::SeqCst) as u64,
+            #[cfg(unix)]
+            held: 0,
             files: self.files.clone(),
             removed,
             detached: self.detached.load(Ordering::SeqCst) && s.exit.is_none(),
@@ -758,6 +768,9 @@ struct Record {
     pid: u32,
     /// Its job object's name (Windows).
     job: String,
+    /// The job's handle in its bash's handle table, which keeps the name
+    /// while Oak is closed (Windows, `give_job`); 0 for none.
+    held: u64,
     files: Files,
     removed: bool,
     /// Left running when Oak closed.
@@ -802,12 +815,12 @@ fn exit_file(path: &Path) -> Option<(i32, i64)> {
 #[cfg(windows)]
 fn find_running(r: &Record) -> Option<usize> {
     use windows_sys::Win32::Foundation::FILETIME;
-    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
     if r.pid == 0 {
         return None;
     }
     unsafe {
-        let h = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, r.pid);
+        let h = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_DUP_HANDLE, 0, r.pid);
         if h.is_null() {
             return None;
         }
@@ -875,6 +888,10 @@ fn revive(r: &Record, closed_ms: i64) -> Arc<Proc> {
             AssignProcessToJobObject(job, h as HANDLE);
         }
         set_kill_on_close(job as usize, true);
+        // Oak's handle is the job's only one again, so closing it kills.
+        if r.held != 0 {
+            take_job(h, r.held as usize, job as usize);
+        }
         job as usize
     });
     let p = Arc::new(Proc {
@@ -893,6 +910,8 @@ fn revive(r: &Record, closed_ms: i64) -> Arc<Proc> {
         files: r.files.clone(),
         keep: AtomicBool::new(true),
         detached: AtomicBool::new(false),
+        #[cfg(windows)]
+        held: AtomicUsize::new(0),
         #[cfg(unix)]
         owned: false,
         exited: AtomicBool::new(running.is_none()),
@@ -954,101 +973,71 @@ pub fn keeping_on_close() -> bool {
 pub fn close_all() {
     let keep = keeping_on_close();
     let all: Vec<Arc<Tasks>> = ALL.lock().unwrap().iter().filter_map(|t| t.upgrade()).collect();
-    #[cfg(windows)]
-    let mut jobs = vec![];
     for t in all {
         if keep {
             for p in t.map.lock().unwrap().values() {
                 p.detach();
                 #[cfg(windows)]
-                if p.detached.load(Ordering::SeqCst) {
-                    jobs.push(p.job_name.clone());
+                if p.detached.load(Ordering::SeqCst) && p.job != 0 {
+                    p.held.store(give_job(p.pid, p.job), Ordering::SeqCst);
                 }
             }
         }
         t.save();
     }
-    #[cfg(windows)]
-    if !jobs.is_empty() {
-        start_holder(&jobs);
-    }
-}
-
-/// Where the process holding the jobs of tasks left running is noted
-/// (Windows): its ID and when it started.
-#[cfg(windows)]
-fn holder_file() -> PathBuf {
-    crate::store::dir().join("tasks").join("holder.json")
 }
 
 /// A job's name stays only while a handle to it is open, so as Oak closes
-/// with tasks left running, `oak --hold-jobs` keeps their jobs open till
-/// the next Oak has opened them again (`release_holder`), or they are done.
+/// with a task left running, its bash gets a handle to its own job (bash
+/// doesn't know of it, and its children don't inherit it): the name lasts
+/// as long as the task, with no process of Oak's left behind (one would
+/// lock oak.exe, which a rebuild has to replace). The next Oak opens the
+/// job by name and closes that handle again (`take_job`). The handle's
+/// value in bash, or 0 when it couldn't be given.
 #[cfg(windows)]
-fn start_holder(names: &[String]) {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(pid) = spawn_holder(&exe, names)
-    {
-        let file = holder_file();
-        let _ = std::fs::create_dir_all(file.parent().unwrap());
-        let _ = crate::store::write_atomic(&file, serde_json::json!({ "pid": pid, "started_ms": now_ms() }).to_string());
+fn give_job(pid: u32, job: usize) -> usize {
+    use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE};
+    unsafe {
+        let bash = OpenProcess(PROCESS_DUP_HANDLE, 0, pid);
+        if bash.is_null() {
+            return 0;
+        }
+        let mut held: HANDLE = std::ptr::null_mut();
+        let ok = DuplicateHandle(GetCurrentProcess(), job as HANDLE, bash, &mut held, 0, 0, DUPLICATE_SAME_ACCESS) != 0;
+        CloseHandle(bash);
+        if ok { held as usize } else { 0 }
     }
 }
 
-/// Starts `exe --hold-jobs` and waits (a while) for it to have the jobs.
+/// Closes the job handle `give_job` put in bash (process handle `bash`, with
+/// PROCESS_DUP_HANDLE) as `held`, once Oak has `job` open again: then a
+/// later close kills the task as usual. Only if `held` is still that job.
 #[cfg(windows)]
-fn spawn_holder(exe: &Path, names: &[String]) -> Option<u32> {
-    let child = Command::new(exe).arg("--hold-jobs").args(names).creation_flags(DETACHED_PROCESS).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
-    let mut child = child.ok()?;
-    // Oak's own handles stay open till the holder has its own.
-    let mut out = child.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut b = [0u8; 4];
-        let _ = tx.send(out.read(&mut b).is_ok_and(|n| n > 0));
-    });
-    rx.recv_timeout(Duration::from_secs(5)).ok().filter(|&held| held)?;
-    Some(child.id())
-}
-
-/// `oak --hold-jobs <name>...`: holds the jobs named open (see
-/// `start_holder`) till all their processes are gone, or the next Oak ends
-/// this.
-#[cfg(windows)]
-pub fn hold_jobs(names: &[String]) {
-    use std::io::Write;
-    use windows_sys::Win32::System::JobObjects::{JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation};
-    let mut jobs: Vec<HANDLE> = names
-        .iter()
-        .map(|n| {
-            let wide: Vec<u16> = n.encode_utf16().chain([0]).collect();
-            unsafe { OpenJobObjectW(0x1F_003F, 0, wide.as_ptr()) }
-        })
-        .filter(|j| !j.is_null())
-        .collect();
-    let _ = std::io::stdout().write_all(b"held\n");
-    let _ = std::io::stdout().flush();
-    while !jobs.is_empty() {
-        std::thread::sleep(Duration::from_secs(2));
-        jobs.retain(|&j| unsafe {
-            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
-            let ok = QueryInformationJobObject(j, JobObjectBasicAccountingInformation, &mut info as *mut _ as *mut _, std::mem::size_of_val(&info) as u32, std::ptr::null_mut());
-            let live = ok != 0 && info.ActiveProcesses > 0;
-            if !live {
-                CloseHandle(j);
-            }
-            live
-        });
+fn take_job(bash: usize, held: usize, job: usize) {
+    use windows_sys::Win32::Foundation::{CompareObjectHandles, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let mut copy: HANDLE = std::ptr::null_mut();
+        if DuplicateHandle(bash as HANDLE, held as HANDLE, GetCurrentProcess(), &mut copy, 0, 0, DUPLICATE_SAME_ACCESS) == 0 {
+            return;
+        }
+        let same = CompareObjectHandles(copy, job as HANDLE) != 0;
+        CloseHandle(copy);
+        if same {
+            DuplicateHandle(bash as HANDLE, held as HANDLE, std::ptr::null_mut(), std::ptr::null_mut(), 0, 0, DUPLICATE_CLOSE_SOURCE);
+        }
     }
 }
 
-/// At start, once the conversations have opened their tasks' jobs again:
-/// the holder from when Oak last closed can go.
+/// At start: an `oak --hold-jobs` that an Oak from before `give_job` left
+/// holding its tasks' jobs (noted in tasks/holder.json) can go, now that
+/// the conversations have opened them again.
 pub fn release_holder() {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
-        let file = holder_file();
+        let file = crate::store::dir().join("tasks").join("holder.json");
         let Some(v) = crate::store::read_json::<serde_json::Value>(&file) else { return };
         let _ = std::fs::remove_file(&file);
         let r = Record { pid: v["pid"].as_u64().unwrap_or(0) as u32, started_ms: v["started_ms"].as_i64().unwrap_or(0), ..Default::default() };
@@ -1361,6 +1350,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A task left running as Oak closes holds its own job (no other process
+    /// does), and the next Oak opens it by name and takes the handle back.
+    #[cfg(windows)]
+    #[test]
+    fn a_task_left_running_keeps_its_job_for_the_next_oak() {
+        let dir = std::env::temp_dir().join(format!("oak-tasks-held-{}", std::process::id()));
+        let file = dir.join("conv.json");
+        let t = Arc::new(Tasks::load(Some(file.clone())));
+        let p = spawn("sleep 20", &std::env::temp_dir()).unwrap();
+        t.add(1, p.clone(), "");
+        p.detach();
+        p.held.store(give_job(p.pid, p.job), Ordering::SeqCst);
+        t.save();
+        let r = p.record(1, "", false);
+        assert!(r.held != 0 && r.detached);
+        // As if Oak had gone: its handle is closed, bash's keeps the name.
+        unsafe { CloseHandle(p.job as HANDLE) };
+        let wide: Vec<u16> = r.job.encode_utf16().chain([0]).collect();
+        let named = unsafe { OpenJobObjectW(0x1F_003F, 0, wide.as_ptr()) };
+        assert!(!named.is_null(), "the name outlives Oak's handle");
+        unsafe { CloseHandle(named) };
+
+        let t2 = Tasks::load(Some(file.clone()));
+        let q = t2.take_revived().pop().unwrap().1;
+        assert!(q.exit().is_none() && q.job != 0);
+        let bash = find_running(&r).unwrap();
+        let mut copy: HANDLE = std::ptr::null_mut();
+        let still = unsafe { windows_sys::Win32::Foundation::DuplicateHandle(bash as HANDLE, r.held as HANDLE, windows_sys::Win32::System::Threading::GetCurrentProcess(), &mut copy, 0, 0, windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS) };
+        unsafe { CloseHandle(bash as HANDLE) };
+        assert_eq!(still, 0, "bash's handle was taken back");
+        q.kill();
+        wait_exit(&q);
+        assert_eq!(q.exit(), Some(137));
+        t2.forget();
+        // (The first Proc's job handle was closed above.)
+        std::mem::forget(p);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A task found gone after a restart, with no exit code written (the
     /// job killed it when Oak closed), says it was stopped.
     #[test]
@@ -1372,38 +1400,45 @@ mod tests {
     }
 
     /// What lets a task outlive Oak on Windows: with kill-on-close cleared,
-    /// closing its job leaves the process running, and with the holder's
-    /// handle the job can still be opened by name (without one, its name
-    /// goes with Oak's handle).
+    /// closing its job leaves the process running, and with the handle bash
+    /// was given the job can still be opened by name. Taken back, the
+    /// handle is gone from bash: closing Oak's kills the job again.
     #[cfg(windows)]
     #[test]
     fn a_detached_job_outlives_its_handle() {
-        let mut child = bash(&["-c", "sleep 5"]).spawn().unwrap();
+        let mut child = bash(&["-c", "sleep 10"]).spawn().unwrap();
         let name = format!("Local\\oak-task-test-{}", now_ms());
         let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
-        unsafe {
+        let held = unsafe {
             let job = CreateJobObjectW(std::ptr::null(), wide.as_ptr());
             set_kill_on_close(job as usize, true);
             AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE);
             set_kill_on_close(job as usize, false);
-            // The holder's handle (`hold_jobs`, from Oak's build when
-            // there is one); then Oak's goes.
-            let exe = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("oak.exe");
-            if exe.exists() {
-                assert!(spawn_holder(&exe, std::slice::from_ref(&name)).is_some(), "the holder has the job");
-            } else {
-                assert!(!OpenJobObjectW(0x1F_003F, 0, wide.as_ptr()).is_null());
-            }
+            let held = give_job(child.id(), job as usize);
+            assert_ne!(held, 0, "bash has the job");
             CloseHandle(job);
-        }
+            held
+        };
         std::thread::sleep(Duration::from_millis(300));
         assert!(child.try_wait().unwrap().is_none(), "still running");
+        let r = Record { pid: child.id(), started_ms: now_ms(), ..Default::default() };
+        let bash_handle = find_running(&r).expect("bash found running");
         unsafe {
             let job = OpenJobObjectW(0x1F_003F, 0, wide.as_ptr());
             assert!(!job.is_null(), "the job is there to open again");
-            TerminateJobObject(job, 137);
+            set_kill_on_close(job as usize, true);
+            take_job(bash_handle, held, job as usize);
+            let mut copy: HANDLE = std::ptr::null_mut();
+            let still = windows_sys::Win32::Foundation::DuplicateHandle(bash_handle as HANDLE, held as HANDLE, windows_sys::Win32::System::Threading::GetCurrentProcess(), &mut copy, 0, 0, windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS);
+            assert_eq!(still, 0, "bash's handle is closed");
+            CloseHandle(bash_handle as HANDLE);
+            // Oak's handle is the last: closing it kills the job.
             CloseHandle(job);
         }
-        assert_eq!(child.wait().unwrap().code(), Some(137));
+        let t = Instant::now();
+        while child.try_wait().unwrap().is_none() && t.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(child.try_wait().unwrap().is_some(), "killed by the job's close");
     }
 }

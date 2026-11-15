@@ -227,6 +227,8 @@ fn definitions_with(agent: bool) -> Value {
             json!({"command": {"type": "string"},
                    "summary": {"type": "string", "description": SUMMARY},
                    "timeout": {"type": "integer", "description": "Seconds to wait; pick one that fits the command"}}), &["command", "summary", "timeout"]),
+        tool("CD", "Switch your working folder to `path`, an existing folder, for the rest of the session: relative paths, EXECUTE and new tasks use it from then on (running tasks keep theirs; your scratchpad stays where it is). Runs on its own, after the calls before it in the reply and before those after it. Returns the folder's project instructions (CLAUDE.md, AGENTS.md) if it has any.",
+            json!({"path": {"type": "string", "description": "The folder: absolute, ~ for the home folder, or relative to the current working folder"}}), &["path"]),
         tool("TASK_NEW", "start `command` (for servers, watchers and other long-running commands); returns its task ID, and you are notified when it finishes",
             json!({"command": {"type": "string"}, "summary": {"type": "string", "description": SUMMARY}}), &["command", "summary"]),
         tool("TASK_GET_NEW_OUTPUT", "the lines task `id` printed since the last call, and whether it is still running",
@@ -410,6 +412,7 @@ fn model_list(models: &[crate::api::Model]) -> String {
                 Provider::Freebuff => "Freebuff, billed in hours, a pipe with its own agent that can't start subagents",
                 Provider::Local => "The user's own server",
                 Provider::NodeClub => "NodeClub, an OpenAI-compatible API",
+                Provider::Refuseless => "Refuseless, abliterated (refusal-removed) open models, paid per token",
                 Provider::Claude => "Claude",
             };
             format!("{head}: {}.", items.join(", "))
@@ -422,7 +425,7 @@ fn model_list(models: &[crate::api::Model]) -> String {
 /// once, before its models).
 fn model_note(m: &crate::api::Model) -> &'static str {
     let id = m.id.to_lowercase();
-    if matches!(m.provider, crate::api::Provider::OpenRouter | crate::api::Provider::Freebuff | crate::api::Provider::Local | crate::api::Provider::NodeClub) {
+    if matches!(m.provider, crate::api::Provider::OpenRouter | crate::api::Provider::Freebuff | crate::api::Provider::Local | crate::api::Provider::NodeClub | crate::api::Provider::Refuseless) {
         ""
     } else if id.contains("astra") || id.contains("opus") {
         "most capable"

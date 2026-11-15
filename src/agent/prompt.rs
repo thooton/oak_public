@@ -214,11 +214,13 @@ pub(crate) fn scratchpad(c: &mut Conversation) -> PathBuf {
         let _ = std::fs::create_dir_all(&fallback);
         return fallback;
     }
-    let ignore = root.parent().unwrap().join(".gitignore");
+    // (After a CD the name is the pad's full path, in the folder before.)
+    let dir = root.join(&c.scratch);
+    let ignore = dir.parent().and_then(Path::parent).unwrap_or(&root).join(".gitignore");
     if !ignore.exists() {
         let _ = std::fs::write(ignore, "# Oak's session scratchpads\ntmp/\n");
     }
-    root.join(&c.scratch)
+    dir
 }
 
 /// Makes the next `tempN` folder in `root`: N is one past the highest

@@ -30,17 +30,17 @@ pub(crate) fn haiku() -> Option<String> {
 /// key, first to the model picked in Settings there (falling back to
 /// `openrouter::title_models`' others); if that fails, to the session's
 /// own kind of model: DeepSeek for an OpenRouter session and the session's
-/// model for a Codex or NodeClub one (they use no Claude account), the
+/// model for a Codex, NodeClub or Refuseless one (they use no Claude account), the
 /// newest Haiku for a Claude one, or `model` itself at low effort if there
 /// is no Haiku. Also returns what it cost through OpenRouter (dollars).
 pub(crate) fn title_for(text: &str, model: &str) -> (Option<String>, f64) {
     let text: String = text.head(4000);
-    let elsewhere = crate::openrouter::serves(model) || crate::codex::serves(model) || crate::nodeclub::serves(model);
+    let elsewhere = crate::openrouter::serves(model) || crate::codex::serves(model) || crate::nodeclub::serves(model) || crate::refuseless::serves(model);
     let mut tries: Vec<(String, Option<&str>)> = vec![];
     if crate::openrouter::on() {
         tries.push((crate::openrouter::title_models()[0].to_string(), None));
     }
-    // An OpenRouter, Codex or NodeClub session has no Claude account for a Haiku.
+    // An OpenRouter, Codex, NodeClub or Refuseless session has no Claude account for a Haiku.
     tries.push(match if elsewhere { None } else { haiku() } {
         Some(h) => (h, None),
         None => (model.to_string(), Some("low")),

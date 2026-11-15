@@ -262,6 +262,9 @@ pub fn efforts(model: &str) -> Vec<&'static str> {
     if let Some(m) = crate::nodeclub::model(model) {
         return m.efforts.to_vec();
     }
+    if let Some(m) = crate::refuseless::model(model) {
+        return m.efforts.to_vec();
+    }
     if crate::local::serves(model) {
         return crate::local::EFFORTS.to_vec();
     }

@@ -119,6 +119,10 @@ pub struct Pin {
     pub kits: Vec<String>,
     pub effort: Option<String>,
     pub tools: Vec<Value>,
+    /// The working folder the system prompt names. A CD's result tells the
+    /// model of the new one, so no message is needed (empty in a pin from
+    /// an older Oak: the folder then is the folder now, as it never changed).
+    pub folder: String,
 }
 
 /// A change the model is told of, before transcript message `at`.
@@ -193,6 +197,9 @@ impl State {
         let old = self.pin.as_ref().is_some_and(|p| p.tools.is_empty() && !s.now.tools.is_empty());
         if s.cold || self.pin.is_none() || old {
             self.renew(s.n, &s.now);
+        }
+        if let Some(p) = self.pin.as_mut().filter(|p| p.folder.is_empty()) {
+            p.folder = s.now.folder.clone();
         }
         let pin = self.pin.clone().unwrap_or_default();
         let (now, cut) = (&s.now, s.cut);
@@ -354,7 +361,7 @@ mod tests {
     }
 
     fn now(day: &str, effort: &str, tools: Vec<Value>) -> Pin {
-        Pin { day: day.into(), kits: vec![], effort: Some(effort.into()), tools }
+        Pin { day: day.into(), kits: vec![], effort: Some(effort.into()), tools, folder: "F".into() }
     }
 
     fn setup(mode: Mode, n: usize, now: Pin) -> Setup {

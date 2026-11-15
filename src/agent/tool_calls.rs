@@ -461,6 +461,7 @@ impl Worker {
             }
             "ASK" => return self.ask_user(input),
             "REQUEST_ASK" => self.edit(|c| request_ask(c, input)),
+            "CD" => self.edit(|c| change_folder(c, input, &instructions::home())),
             "NOTE_NEW" | "NOTE_UPDATE" | "NOTE_DELETE" | "HEARTBEAT_START" | "HEARTBEAT_STOP" | "GOAL_JUSTIFICATION" | "GOAL_FINISH" => {
                 self.edit(|c| memory_tool(c, name, input, api::now_ms()))
             }
@@ -686,6 +687,47 @@ fn request_ask(c: &mut Conversation, input: &Value) -> Result<String, String> {
     Ok("The request is shown to the user. Keep working on the goal meanwhile: if they accept, a message tells you so (with your next request), and you may then call ASK once. If they decline, a message tells you that instead.".into())
 }
 
+/// CD: the conversation's working folder becomes `path` (`tools::folder_path`,
+/// `home` for `~`), an existing folder. The scratchpad stays where it is:
+/// its name becomes its full path, which `scratchpad` and the scratchpads'
+/// scan take as it is. The system prompt keeps the folder its cache was
+/// written with until the next cold moment (`prefix::Pin::folder`), so the
+/// result says what changed, with the new folder's project instructions
+/// (the user's own file is in the context already).
+pub(crate) fn change_folder(c: &mut Conversation, input: &Value, home: &Path) -> Result<String, String> {
+    let typed = input["path"].as_str().unwrap_or("").trim();
+    if typed.is_empty() {
+        return Err("`path` is empty: give the folder to switch to.".into());
+    }
+    let dir = tools::folder_path(&c.folder, typed, home);
+    match std::fs::metadata(&dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(format!("{} is a file, not a folder.", dir.display())),
+        Err(e) => return Err(format!("No folder {}: {e}", dir.display())),
+    }
+    if tools::path_key(&dir) == tools::path_key(&c.folder) {
+        return Ok(format!("Your working folder is {} already.", c.folder.display()));
+    }
+    if !c.scratch.is_empty() && Path::new(&c.scratch).is_relative() {
+        c.scratch = c.folder.join(SCRATCH_ROOT).join(&c.scratch).display().to_string();
+    }
+    let old = std::mem::replace(&mut c.folder, dir);
+    let mut out = format!(
+        "Your working folder is now {} (it was {}): relative paths, EXECUTE and new tasks use it from now on; tasks already running keep the old one.",
+        c.folder.display(),
+        old.display()
+    );
+    if !c.scratch.is_empty() {
+        out += &format!(" Your scratchpad stays at {}.", c.scratch);
+    }
+    let mut skipped = vec![];
+    let files: Vec<instructions::File> = instructions::load(&c.folder, home, &mut skipped).into_iter().filter(|f| f.kind != instructions::Kind::User).collect();
+    if !files.is_empty() {
+        out += &format!("\n\nThe new folder's project instructions:\n{}", instructions::render(&files, &[]));
+    }
+    Ok(out)
+}
+
 /// The stop reason of a reply cut short (interrupted, paused, broken off,
 /// refused) after some of its tool calls had started: it is kept up to
 /// the last of them.
@@ -865,8 +907,8 @@ pub(crate) fn end_ask_request(c: &mut Conversation) {
     c.ask_granted = false;
 }
 /// For each of a reply's tool calls, the calls before it that it waits
-/// for; the rest run at the same time. ASK waits for all before it, and
-/// all after it wait for it (it runs on its own); a call on a file waits
+/// for; the rest run at the same time. ASK and CD wait for all before
+/// them, and all after them wait for them (they run on their own); a call on a file waits
 /// for the calls before it on that file when one of them writes it
 /// (WRITE, EDIT, a SCREENSHOT saved there). Calls on one file thus run in
 /// the order they were made.
@@ -885,7 +927,8 @@ pub(crate) fn waits_for(calls: &[Value], folder: &Path) -> Vec<Vec<usize>> {
             if name == "BROWSER" {
                 paths.push("\0browser".into());
             }
-            (paths, matches!(name, "WRITE" | "EDIT" | "SCREENSHOT" | "BROWSER"), name == "ASK")
+            // CD changes what every later call's paths and commands mean.
+            (paths, matches!(name, "WRITE" | "EDIT" | "SCREENSHOT" | "BROWSER"), matches!(name, "ASK" | "CD"))
         })
         .collect();
     (0..calls.len())

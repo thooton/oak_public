@@ -204,7 +204,7 @@ static NO_IMAGES: AtomicBool = AtomicBool::new(false);
 /// "HTTP 400: message", from an error reply's body; a prompt longer than
 /// the context window worded as the Claude API words it ("prompt is too
 /// long: N tokens > M maximum"), which the agent answers by summarizing.
-fn error_text(status: u16, body: &str) -> String {
+pub(crate) fn error_text(status: u16, body: &str) -> String {
     let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let msg = provider::error_msg(&v, body, v.get("message").and_then(Value::as_str));
     if let Some(long) = too_long(&msg, &v) {
@@ -238,7 +238,7 @@ fn context_numbers(msg: &str) -> (Option<u64>, Option<u64>) {
 
 /// With a prompt that fits, the reply limit that does: from an error saying
 /// `max_tokens` is too large for what the prompt leaves.
-fn room_for_reply(msg: &str) -> Option<u64> {
+pub(crate) fn room_for_reply(msg: &str) -> Option<u64> {
     let (input, max) = context_numbers(msg);
     let room = max?.checked_sub(input?)?.checked_sub(64)?;
     (room >= 256).then_some(room)
@@ -297,7 +297,7 @@ fn part(b: &Value, images: bool) -> Option<Value> {
 
 /// Parts as a message's content: a plain string when they are all text
 /// (what every server takes), else the parts.
-fn content_of(parts: Vec<Value>) -> Value {
+pub(crate) fn content_of(parts: Vec<Value>) -> Value {
     if parts.iter().all(|p| p["type"] == "text") {
         Value::String(parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n\n"))
     } else {
@@ -309,7 +309,7 @@ fn content_of(parts: Vec<Value>) -> Value {
 /// A user turn's tool results become tool messages (in order, right after
 /// the assistant's calls); their images, which a tool message can't carry,
 /// and the turn's own text and images follow in a user message.
-fn chat_messages(req: &Request, images: bool) -> Vec<Value> {
+pub(crate) fn chat_messages(req: &Request, images: bool) -> Vec<Value> {
     let mut out = vec![];
     if !req.system.is_empty() {
         out.push(json!({"role": "system", "content": req.system}));
@@ -386,7 +386,7 @@ fn thinks(req: &Request) -> bool {
 
 /// Tokens a request takes, about: its text (images not counted by their
 /// bytes, but as about a thousand tokens each).
-fn estimate(req: &Value) -> u64 {
+pub(crate) fn estimate(req: &Value) -> u64 {
     fn walk(v: &Value, chars: &mut usize, images: &mut u64) {
         match v {
             Value::String(s) => *chars += s.len(),
@@ -572,7 +572,7 @@ fn open(body: &Request, m: &Model, req: &mut Value, key: &str, tx: &Sender<Sse>)
 }
 
 /// A tool call so far.
-struct Tool {
+pub(crate) struct Tool {
     /// The call's index in the stream, its id, its block's index, whether
     /// any arguments came, and whether its block is still open.
     at: u64,
@@ -584,11 +584,13 @@ struct Tool {
 
 /// Turns chat completions chunks into Oak events: a start, then blocks
 /// (reasoning, text, tool calls) opened and closed as the reply goes from
-/// one to the next, and at the end its usage and stop reason.
-struct Translator {
+/// one to the next, and at the end its usage and stop reason. Refuseless's
+/// streams are read with it too (`Translator::of`).
+pub(crate) struct Translator {
     model: String,
-    /// The provider whose reasoning it is.
+    /// The provider whose reasoning it is, and its name in errors.
     by: &'static str,
+    name: &'static str,
     started: bool,
     /// The open thinking and text blocks (their index).
     think: Option<usize>,
@@ -607,19 +609,25 @@ struct Translator {
     called: bool,
     finish: Option<String>,
     /// Prompt tokens (all), of them read from the cache, and written.
-    usage: (u64, u64, u64),
+    pub(crate) usage: (u64, u64, u64),
     /// The server's count of thinking tokens, if it gave one.
     reasoning: Option<u64>,
     count: ThinkCount,
     /// The stream said [DONE].
-    done: bool,
+    pub(crate) done: bool,
 }
 
 impl Translator {
     fn new(model: &str) -> Translator {
+        Translator::of(model, "nodeclub", "NodeClub")
+    }
+
+    /// One for provider `by` (its id), named `name` in errors.
+    pub(crate) fn of(model: &str, by: &'static str, name: &'static str) -> Translator {
         Translator {
             model: model.into(),
-            by: "nodeclub",
+            by,
+            name,
             started: false,
             think: None,
             text: None,
@@ -726,11 +734,11 @@ impl Translator {
         self.writing(t, out);
     }
 
-    fn feed(&mut self, chunk: &Value) -> Result<Vec<Event>, String> {
+    pub(crate) fn feed(&mut self, chunk: &Value) -> Result<Vec<Event>, String> {
         let mut out = vec![];
         if let Some(e) = chunk.get("error").filter(|e| !e.is_null()) {
             let msg = e["message"].as_str().or(e.as_str()).unwrap_or("unknown error");
-            return Err(too_long(msg, chunk).unwrap_or_else(|| format!("NodeClub error: {msg}")));
+            return Err(too_long(msg, chunk).unwrap_or_else(|| format!("{} error: {msg}", self.name)));
         }
         if !self.started {
             self.started = true;
@@ -794,9 +802,9 @@ impl Translator {
 
     /// The stream ended: the blocks closed, the usage and stop reason. Err
     /// when it ended before the reply did.
-    fn finish(&mut self) -> Result<Vec<Event>, String> {
+    pub(crate) fn finish(&mut self) -> Result<Vec<Event>, String> {
         if !self.started {
-            return Err("NodeClub's stream ended before the reply began".into());
+            return Err(format!("{}'s stream ended before the reply began", self.name));
         }
         if self.finish.is_none() && !self.done {
             return Err("Stream ended before the reply was complete".into());

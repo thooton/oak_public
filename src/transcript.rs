@@ -112,7 +112,7 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             let summary = if name == "Bash" { s("description") } else { s("summary") };
             if summary.trim().is_empty() { s("command") } else { crate::tools::one_line(&summary) }
         }
-        "READ" | "WRITE" | "EDIT" => s("path"),
+        "READ" | "WRITE" | "EDIT" | "CD" => s("path"),
         // Claude Code's tools, in cloud sessions.
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => if input["file_path"].is_string() { s("file_path") } else { s("notebook_path") },
         "Grep" | "Glob" => s("pattern"),
@@ -1168,6 +1168,7 @@ fn tool_color(name: &str) -> Color32 {
         n if n.starts_with("BROWSER") => 0x8fc3d9,
         "ASK" | "REQUEST_ASK" => 0xe5a1b7,
         "DISPLAY" => 0x99bdd3,
+        "CD" => 0xd8c38a,
         n if n.starts_with("NOTE_") => 0xb8bc88,
         n if n.starts_with("HEARTBEAT_") => 0xe6a3a7,
         n if n.starts_with("PROGRESS_") => 0x9dc8c0,

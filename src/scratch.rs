@@ -112,7 +112,12 @@ pub fn pads(owners: &[Owner]) -> Vec<Pad> {
     for o in owners {
         let root = o.folder.join(crate::agent::SCRATCH_ROOT);
         if !o.scratch.is_empty() {
-            by_dir.insert(root.join(&o.scratch), o);
+            // After a CD the name is the pad's full path, in the folder before.
+            let dir = root.join(&o.scratch);
+            if let Some(parent) = dir.parent().filter(|p| *p != root && !roots.iter().any(|r| r == p)) {
+                roots.push(parent.to_path_buf());
+            }
+            by_dir.insert(dir, o);
         }
         if !roots.contains(&root) {
             roots.push(root);

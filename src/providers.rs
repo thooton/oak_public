@@ -25,6 +25,10 @@ pub enum Kind {
     /// NodeClub's models (OpenAI-compatible), through its key.
     #[serde(alias = "NodeClub")]
     NodeClub,
+    /// Refuseless's abliterated models (OpenAI-compatible), through its
+    /// key, paid from its credits.
+    #[serde(alias = "Refuseless")]
+    Refuseless,
 }
 
 /// What a provider's box measures.
@@ -40,7 +44,7 @@ pub enum Metered {
 
 impl Kind {
     /// Every provider, in the order pickers and Home list them.
-    pub const ALL: [Kind; 6] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::NodeClub, Kind::Freebuff, Kind::Local];
+    pub const ALL: [Kind; 7] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Local];
 
     /// Signed in to it: a login or key (for Claude, an account here or a
     /// vault, which has them).
@@ -52,6 +56,7 @@ impl Kind {
             Kind::Freebuff => crate::freebuff::on(),
             Kind::Local => crate::local::on(),
             Kind::NodeClub => crate::nodeclub::on(),
+            Kind::Refuseless => crate::refuseless::on(),
         }
     }
 
@@ -64,6 +69,7 @@ impl Kind {
             Kind::Freebuff => "freebuff",
             Kind::Local => "local",
             Kind::NodeClub => "nodeclub",
+            Kind::Refuseless => "refuseless",
         }
     }
 
@@ -76,13 +82,14 @@ impl Kind {
             Kind::Freebuff => "Freebuff",
             Kind::Local => "Local",
             Kind::NodeClub => "NodeClub",
+            Kind::Refuseless => "Refuseless",
         }
     }
 
     pub fn metered(self) -> Metered {
         match self {
             Kind::Claude | Kind::Codex => Metered::Limits,
-            Kind::OpenRouter => Metered::Credits,
+            Kind::OpenRouter | Kind::Refuseless => Metered::Credits,
             Kind::NodeClub | Kind::Freebuff | Kind::Local => Metered::Free,
         }
     }
@@ -102,6 +109,8 @@ impl Kind {
             Kind::Local
         } else if crate::nodeclub::serves(model) {
             Kind::NodeClub
+        } else if crate::refuseless::serves(model) {
+            Kind::Refuseless
         } else {
             Kind::Claude
         }

@@ -7,7 +7,7 @@ pub(crate) use crate::look::{BAR_ROOM, HOME_HEAD, list_rows, row_title_color};
 use crate::api::Provider;
 use crate::widgets::{add_field, clip_width, sign_in_heading, state_dot};
 
-use crate::composer::{BOX_W, nodeclub_panel, openrouter_panel, side_box, usage_panel};
+use crate::composer::{BOX_W, nodeclub_panel, openrouter_panel, refuseless_panel, side_box, usage_panel};
 
 impl App {
     /// Home: the forest, and over it one solid box: the chats on the left
@@ -77,11 +77,28 @@ impl App {
     /// This machine's conversations, in `area`: the search field over the
     /// list once there is something to search, and the list.
     fn local_list(&mut self, ui: &mut Ui, t: &Theme, mut area: Rect) {
-        let rows = self.chat_rows();
+        let mut rows = self.chat_rows();
+        let sort = ChatSort::from_setting(&self.settings.chat_sort);
+        if sort == ChatSort::Scratchpad {
+            // The sizes come from the background scan (`crate::scratch`),
+            // scanned again when older than 15 seconds; until the first
+            // one is in, the list stays the latest first.
+            let scan = crate::scratch::scan(Duration::from_secs(15), ui.ctx());
+            if scan.at.is_some() {
+                let sizes: HashMap<&str, u64> = scan.pads.iter().filter_map(|p| Some((p.owner.as_deref()?, p.bytes))).collect();
+                sort_by_scratch(&mut rows, |id| sizes.get(id).copied());
+            }
+        }
         let mut enter = false;
         if !rows.is_empty() || !self.chat_filter.is_empty() {
-            let field = Rect::from_min_max(egui::pos2(area.left() + 8.0, area.top() + 8.0), egui::pos2(area.right() - BAR_ROOM - 8.0, area.top() + 8.0 + SEARCH_H));
+            let (top, right) = (area.top() + 8.0, area.right() - BAR_ROOM - 8.0);
+            let sort_rect = Rect::from_min_max(egui::pos2((right - SORT_W).max(area.left() + 8.0), top), egui::pos2(right, top + SEARCH_H));
+            let field = Rect::from_min_max(egui::pos2(area.left() + 8.0, top), egui::pos2((sort_rect.left() - 6.0).max(area.left() + 8.0), top + SEARCH_H));
             enter = search_field(ui, t, field, &mut self.chat_filter);
+            if let Some(pick) = sort_button(ui, t, sort_rect, sort).filter(|s| *s != sort) {
+                self.settings.chat_sort = pick.setting().into();
+                store::save_settings(&self.settings);
+            }
             area.min.y = field.bottom() + 4.0;
         }
         let rows = filter_rows(rows, &self.chat_filter);
@@ -170,6 +187,7 @@ impl App {
                     busy: s.live.lock().unwrap().busy,
                     paused: c.paused,
                     renamable: c.parent.is_none(),
+                    scratch: None,
                 })
             })
             .collect();
@@ -216,7 +234,7 @@ impl App {
                     crate::widgets::error_note(ui, t, e);
                 }
                 // Logins kept on this machine though meant for the vault.
-                for note in [codex::note(), openrouter::KEYS.note(), crate::nodeclub::KEYS.note(), freebuff::note()].into_iter().flatten() {
+                for note in [codex::note(), openrouter::KEYS.note(), crate::nodeclub::KEYS.note(), crate::refuseless::KEYS.note(), freebuff::note()].into_iter().flatten() {
                     caption(ui, &note, t.ink3);
                 }
                 if busy {
@@ -276,11 +294,12 @@ impl App {
             || self.adding_local
             || self.adding_openrouter.open
             || self.adding_nodeclub.open
+            || self.adding_refuseless.open
             || self.adding.is_some()
     }
 
     /// "+ Add account", which asks what to add: a Claude account, a Codex
-    /// account, an API key (OpenRouter, NodeClub), a Freebuff account or a
+    /// account, an API key (OpenRouter, NodeClub, Refuseless), a Freebuff account or a
     /// local server. While one is being added, its box.
     fn add_account_box(&mut self, ui: &mut Ui, t: &Theme) {
         let w = ui.available_width();
@@ -314,6 +333,8 @@ impl App {
             Some(self.openrouter_add_box(ui, t, w))
         } else if self.adding_nodeclub.open {
             Some(self.nodeclub_add_box(ui, t, w))
+        } else if self.adding_refuseless.open {
+            Some(self.refuseless_add_box(ui, t, w))
         } else {
             None
         };
@@ -354,6 +375,7 @@ impl App {
             }
             Add::OpenRouter => self.adding_openrouter.open = true,
             Add::NodeClub => self.adding_nodeclub.open = true,
+            Add::Refuseless => self.adding_refuseless.open = true,
             Add::Local => self.adding_local = true,
             Add::Freebuff => match freebuff::login_start() {
                 Ok(url) => {
@@ -385,6 +407,7 @@ enum Add {
     OpenRouter,
     NodeClub,
     Freebuff,
+    Refuseless,
     Local,
 }
 
@@ -406,6 +429,7 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
         (Provider::OpenRouter, "OpenRouter API key", "OpenRouter, pay per token.", Add::OpenRouter),
         (Provider::NodeClub, "NodeClub API key", "NodeClub, OpenAI-compatible API (Qwen).", Add::NodeClub),
         (Provider::Freebuff, "Freebuff account", "Freebuff, sign in in the browser; its models run a separate system.", Add::Freebuff),
+        (Provider::Refuseless, "Refuseless API key", "Refuseless, abliterated models, pay per token.", Add::Refuseless),
     ] {
         if item(ui, provider, label).on_hover_text(format!("{tip}{remote}")).clicked() {
             pick = Some(add);
@@ -431,7 +455,7 @@ pub(crate) struct AccountState {
     /// Whether there were an OpenRouter key and a Codex login when the
     /// models were last listed: a sync with the vault that
     /// brings or takes one lists them again.
-    pub(crate) services: Option<(bool, bool, bool, bool, bool)>,
+    pub(crate) services: Option<(bool, bool, bool, bool, bool, bool)>,
     /// Whether a Claude account was there last time: the model list is
     /// asked for again when one arrives.
     pub(crate) claude: Option<bool>,
@@ -533,6 +557,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
         AccountAct::Remove(Provider::Codex, id) => codex::sign_out(&id),
         AccountAct::Remove(Provider::OpenRouter, id) => openrouter::KEYS.remove(&id),
         AccountAct::Remove(Provider::NodeClub, id) => crate::nodeclub::KEYS.remove(&id),
+        AccountAct::Remove(Provider::Refuseless, id) => crate::refuseless::KEYS.remove(&id),
         AccountAct::Remove(Provider::Freebuff, id) => freebuff::sign_out(&id),
         AccountAct::Remove(Provider::Local, _) => {
             local::remove();
@@ -543,6 +568,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
             Provider::Codex => codex::move_to_vault(id),
             Provider::OpenRouter => openrouter::KEYS.move_to_vault(id),
             Provider::NodeClub => crate::nodeclub::KEYS.move_to_vault(id),
+            Provider::Refuseless => crate::refuseless::KEYS.move_to_vault(id),
             Provider::Freebuff => freebuff::move_to_vault(id),
             Provider::Local => Ok(()),
         }),
@@ -682,6 +708,14 @@ fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &
                 account_card(ui, t, w, (p, &a.id), movable, &remove, busy, act, |ui, t, w| nodeclub_panel(ui, t, Some(&a), status.as_deref(), w));
             }
         }
+        Provider::Refuseless => {
+            for a in crate::refuseless::accounts() {
+                let movable = crate::refuseless::KEYS.movable(&a.id);
+                let status = status(&a.id, movable);
+                let remove = format!("Remove Refuseless key {}{}", a.label, if a.remote { " (all clients)" } else { "" });
+                account_card(ui, t, w, (p, &a.id), movable, &remove, busy, act, |ui, t, w| refuseless_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w));
+            }
+        }
         Provider::Freebuff => {
             for a in freebuff::accounts() {
                 let movable = freebuff::movable(&a.id);
@@ -744,6 +778,81 @@ pub(crate) struct ChatRow {
     pub(crate) paused: bool,
     /// It can be renamed (not a subagent).
     pub(crate) renamable: bool,
+    /// Its scratchpad's size, when the list is sorted by it (shown in
+    /// place of the date).
+    pub(crate) scratch: Option<u64>,
+}
+
+/// How Home lists this machine's conversations (`Settings::chat_sort`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatSort {
+    /// The latest message first.
+    Recent,
+    /// The biggest scratchpad first (then the latest).
+    Scratchpad,
+}
+
+impl ChatSort {
+    const ALL: [ChatSort; 2] = [ChatSort::Recent, ChatSort::Scratchpad];
+
+    pub(crate) fn from_setting(s: &str) -> Self {
+        if s == "scratchpad" { ChatSort::Scratchpad } else { ChatSort::Recent }
+    }
+
+    fn setting(self) -> &'static str {
+        match self {
+            ChatSort::Recent => "",
+            ChatSort::Scratchpad => "scratchpad",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ChatSort::Recent => "Most recent",
+            ChatSort::Scratchpad => "Scratchpad size",
+        }
+    }
+}
+
+/// Puts the rows (the latest first) in the order of the biggest
+/// scratchpad, `size` giving each one's (none counts as empty); equal ones
+/// keep their order. Each row shows its size.
+pub(crate) fn sort_by_scratch(rows: &mut [ChatRow], size: impl Fn(&str) -> Option<u64>) {
+    for r in rows.iter_mut() {
+        r.scratch = Some(size(&r.id).unwrap_or(0));
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.scratch));
+}
+
+/// The sort picker right of the search field, in `rect`: the current
+/// order, and a menu of the orders. Gives the one picked.
+fn sort_button(ui: &mut Ui, t: &Theme, rect: Rect, now: ChatSort) -> Option<ChatSort> {
+    let resp = ui.interact(rect, Id::unique("home-chat-sort"), Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+    let lit = resp.hovered() || open;
+    let p = ui.painter();
+    p.rect_filled(rect, 3.0, if lit { t.tool_hover } else { Color32::TRANSPARENT });
+    p.rect_stroke(rect, 3.0, Stroke::new(1.0, if lit { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
+    let color = if lit { t.ink } else { t.ink2 };
+    let font = FontId::proportional(12.5);
+    let text = clip_width(ui, now.label(), &font, rect.width() - 30.0);
+    p.text(egui::pos2(rect.left() + 9.0, rect.center().y), Align2::LEFT_CENTER, text, font, color);
+    crate::widgets::chevron_v(p, egui::pos2(rect.right() - 11.0, rect.center().y), open, color);
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let resp = if open { resp } else { resp.on_hover_text("Sort conversations") };
+    egui::Popup::menu(&resp)
+        .width(rect.width())
+        .show(|ui| {
+            caption(ui, "Sort by", t.ink3);
+            let mut pick = None;
+            for s in ChatSort::ALL {
+                if ui.selectable_label(s == now, RichText::new(s.label()).color(if s == now { t.accent } else { t.ink })).clicked() {
+                    pick = Some(s);
+                }
+            }
+            pick
+        })
+        .and_then(|r| r.inner)
 }
 
 /// What a click or right-click in the list asked for.
@@ -782,7 +891,10 @@ pub(crate) fn chat_list(ui: &mut Ui, t: &Theme, rows: &[ChatRow], can_delete: bo
         p.text(egui::pos2(x, y - 9.0), Align2::LEFT_CENTER, title, big, row_title_color(t, resp.hovered()));
         p.text(egui::pos2(x, y + 11.0), Align2::LEFT_CENTER, &row.folder, FontId::proportional(11.5), t.ink3);
         p.text(egui::pos2(right, y - 9.0), Align2::RIGHT_CENTER, ago(row.at), FontId::proportional(12.5), t.ink3);
-        p.text(egui::pos2(right, y + 11.0), Align2::RIGHT_CENTER, mdy(row.at), FontId::proportional(11.5), t.ink4);
+        match row.scratch {
+            Some(n) => p.text(egui::pos2(right, y + 11.0), Align2::RIGHT_CENTER, crate::scratch::fmt_bytes(n), FontId::proportional(11.5), if n > 0 { t.ink2 } else { t.ink4 }),
+            None => p.text(egui::pos2(right, y + 11.0), Align2::RIGHT_CENTER, mdy(row.at), FontId::proportional(11.5), t.ink4),
+        };
         if can_delete {
             resp.context_menu(|ui| {
                 if row.renamable && ui.button("Rename…").clicked() {
@@ -814,6 +926,8 @@ pub(crate) fn chat_list(ui: &mut Ui, t: &Theme, rows: &[ChatRow], can_delete: bo
 
 /// The search field's height over Home's conversations.
 const SEARCH_H: f32 = 28.0;
+/// The sort picker's width, right of the search field.
+const SORT_W: f32 = 140.0;
 /// Nerd Font: a magnifying glass.
 const SEARCH_ICON: &str = "\u{f002}";
 
@@ -1199,7 +1313,48 @@ mod search_tests {
     use crate::app_hover_test::{key, run_frame, test_ctx};
 
     fn row(title: &str, folder: &str) -> ChatRow {
-        ChatRow { id: title.into(), title: title.into(), folder: folder.into(), at: 0, busy: false, paused: false, renamable: true }
+        ChatRow { id: title.into(), title: title.into(), folder: folder.into(), at: 0, busy: false, paused: false, renamable: true, scratch: None }
+    }
+
+    /// The biggest scratchpad first; equal sizes (and none, counted as
+    /// empty) keep the latest-first order, and every row gets its size.
+    #[test]
+    fn sort_by_scratch_biggest_first() {
+        let mut rows: Vec<ChatRow> = ["a", "b", "c", "d", "e"].iter().map(|n| row(n, "f")).collect();
+        let sizes = HashMap::from([("b", 10u64), ("c", 500), ("d", 10), ("e", 0)]);
+        sort_by_scratch(&mut rows, |id| sizes.get(id).copied());
+        assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["c", "b", "d", "a", "e"]);
+        assert_eq!(rows.iter().map(|r| r.scratch).collect::<Vec<_>>(), [Some(500), Some(10), Some(10), Some(0), Some(0)]);
+        // And the setting reads back, anything unknown being the default.
+        for s in ChatSort::ALL {
+            assert_eq!(ChatSort::from_setting(s.setting()), s);
+        }
+        assert_eq!(ChatSort::from_setting("bogus"), ChatSort::Recent);
+    }
+
+    /// The picker shows the current order; a click opens the menu of
+    /// orders, and clicking one gives it.
+    #[test]
+    fn sort_button_picks() {
+        use crate::app_hover_test::{click, painted};
+        use egui::PointerButton::Primary;
+        let (ctx, t) = test_ctx(false, false);
+        let mut time = 0.0;
+        let rect = Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(SORT_W, SEARCH_H));
+        let mut run = |events: Vec<egui::Event>| {
+            let mut pick = None;
+            let out = run_frame(&ctx, vec2(600.0, 300.0), &mut time, 1.0 / 60.0, events, |ui| pick = sort_button(ui, &t, rect, ChatSort::Recent));
+            (pick, painted(&out))
+        };
+        let (_, shown) = run(vec![]);
+        assert!(shown.iter().any(|(s, _)| s == "Most recent"), "{shown:?}");
+        run(vec![egui::Event::PointerMoved(rect.center())]);
+        run(click(rect.center(), Primary));
+        let (_, shown) = run(vec![]);
+        let item = shown.iter().find(|(s, _)| s == "Scratchpad size").map(|(_, r)| r.center()).expect("no Scratchpad size in the menu");
+        run(vec![egui::Event::PointerMoved(item)]);
+        let (pick, _) = run(click(item, Primary));
+        assert_eq!(pick, Some(ChatSort::Scratchpad));
     }
 
     /// Every word must be in the title or the folder, in any case; the

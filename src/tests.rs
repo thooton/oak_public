@@ -69,6 +69,7 @@ fn chat_list_delete_menu() {
             busy: false,
             paused: false,
             renamable: true,
+            scratch: None,
         })
         .collect();
     let mut time = 0.0;

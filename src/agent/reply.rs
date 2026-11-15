@@ -281,7 +281,7 @@ impl Worker {
         // (A model without effort levels goes without.)
         let effort = Some(effort_for(&c.model, &c.effort).to_string()).filter(|e| !e.is_empty());
         let tools = tools::definitions_with_kits(agent.is_some(), c.spawner, local, &kits);
-        let built = crate::prefix::Pin { day: crate::time::today_utc(), kits, effort, tools };
+        let built = crate::prefix::Pin { day: crate::time::today_utc(), kits, effort, tools, folder: c.folder.display().to_string() };
         // The stable prefix: the date, kits, tools and effort the cache was
         // written with, and messages for what changed since (`crate::prefix`).
         let mode = crate::prefix::mode(provider, &c.model);
@@ -294,7 +294,8 @@ impl Worker {
             }
             None => built,
         };
-        let system = system_prompt_on(&pin.day, &c.folder, &scratch, &c.model, agent.as_deref(), &pin.kits, &c.role);
+        // (The folder the cache was written with: a CD's result says the new one.)
+        let system = system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, &c.model, agent.as_deref(), &pin.kits, &c.role);
         let tools = Value::Array(pin.tools);
         // Again after a switch to a model whose provider sends other things
         // (another identity, prompt or tools), where it takes effect.

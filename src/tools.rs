@@ -341,6 +341,33 @@ pub fn resolve(folder: &Path, p: &str) -> PathBuf {
     if p.is_absolute() { p } else { folder.join(p) }
 }
 
+/// The folder CD names, from working folder `folder`: `~` is the home
+/// folder (`home`), an MSYS drive path (`/c/Users`) is a Windows one on
+/// Windows, a relative path is joined to `folder`, and `.` and `..` are
+/// taken out (without following links, so the path stays as named).
+pub fn folder_path(folder: &Path, typed: &str, home: &Path) -> PathBuf {
+    let mut typed = typed.trim().to_string();
+    if cfg!(windows) {
+        let b = typed.as_bytes();
+        if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
+            typed = format!("{}:/{}", (b[1] as char).to_ascii_uppercase(), &typed[b.len().min(3)..]);
+        }
+    }
+    let p = crate::instructions::expand_home(&native_seps(&typed), home);
+    let p = if p.is_absolute() { p } else { folder.join(p) };
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// `p` with Windows separators on Windows; as it is elsewhere, where a
 /// backslash can be part of a name.
 pub fn native_seps(p: &str) -> String {
@@ -712,6 +739,28 @@ fn line_ranges(r: &[(usize, usize)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CD's path: relative to the folder, `~`, `.` and `..` resolved, and
+    /// an MSYS drive path on Windows.
+    #[test]
+    fn cd_paths() {
+        let (w, home) = if cfg!(windows) { (Path::new(r"C:\work\oak"), Path::new(r"C:\Users\me")) } else { (Path::new("/work/oak"), Path::new("/home/me")) };
+        let p = |t: &str| folder_path(w, t, home).display().to_string();
+        if cfg!(windows) {
+            assert_eq!(p("src"), r"C:\work\oak\src");
+            assert_eq!(p("../other/./x/.."), r"C:\work\other");
+            assert_eq!(p("~/proj"), r"C:\Users\me\proj");
+            assert_eq!(p("/d/games/x"), r"D:\games\x");
+            assert_eq!(p("/c"), r"C:\");
+            assert_eq!(p("D:/a/b"), r"D:\a\b");
+            assert_eq!(p(r"C:\..\.."), r"C:\");
+        } else {
+            assert_eq!(p("src"), "/work/oak/src");
+            assert_eq!(p("../other/./x/.."), "/work/other");
+            assert_eq!(p("~/proj"), "/home/me/proj");
+            assert_eq!(p("/d/games"), "/d/games");
+        }
+    }
 
     /// A call's tool name without its input copied is `canonical`'s.
     #[test]

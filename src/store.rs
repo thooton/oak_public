@@ -74,11 +74,12 @@ pub fn write_private_json(path: &std::path::Path, v: &impl Serialize) -> std::io
 
 /// The files in `dir()` that hold logins, tokens or keys.
 #[cfg(unix)]
-pub const PRIVATE_FILES: [&str; 8] = [
+pub const PRIVATE_FILES: [&str; 9] = [
     "accounts.json",
     "codex.json",
     "openrouter.json",
     "nodeclub.json",
+    "refuseless.json",
     "freebuff.json",
     "freebuff-device.json",
     "freebuff-device-key.json",
@@ -1140,6 +1141,11 @@ pub struct Settings {
     /// Scratchpads idle this long (seconds) are emptied (`crate::scratch`);
     /// 0: never.
     pub scratch_clear: u64,
+    /// How Home lists this machine's conversations: "" for the latest
+    /// first, "scratchpad" for the biggest scratchpad first
+    /// (`crate::home::ChatSort`). A string so an unknown value doesn't
+    /// make the whole file unreadable.
+    pub chat_sort: String,
 }
 
 impl Default for Settings {
@@ -1178,6 +1184,7 @@ impl Default for Settings {
             duck_model: crate::duck::DEFAULT_MODEL.into(),
             duck_reasoning: false,
             scratch_clear: 0,
+            chat_sort: String::new(),
         }
     }
 }

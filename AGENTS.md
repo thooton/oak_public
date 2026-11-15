@@ -3,8 +3,8 @@
 A coding agent for Windows and Linux, written in Rust with [egui](https://github.com/emilk/egui).
 Each conversation works in a folder you choose, with a model from one of Oak's providers: Claude
 (a subscription login or an API key), the GPT models a ChatGPT plan includes for Codex,
-OpenRouter, NodeClub, Freebuff, or a llama.cpp server of your own. Cloud sessions run Claude Code
-in Anthropic's cloud on your Claude accounts.
+OpenRouter, NodeClub, Freebuff, Refuseless (abliterated GLM 5.3 Flash and DeepSeek V4.1 Flash), or a
+llama.cpp server of your own. Cloud sessions run Claude Code in Anthropic's cloud on your Claude accounts.
 
 Oak is one executable. It loads plugins when it starts: dynamic libraries that add tabs, cloud
 backends, themes, fonts, system prompts and more, through a stable C interface
@@ -103,7 +103,7 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 a build against a copy of your conversations). Each conversation is a file in `conversations/`
 named after its folder and title, with its id last. Beside it: `settings.json`, `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
-`freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
+`refuseless.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
 size, place and maximized state), `seats.json` (which account each
 conversation is on), `tasks/` and `task-output/` (background tasks), `browser/` (the browser pane's
@@ -133,7 +133,9 @@ Use commas, parentheses, or spacing instead; actual Markdown lists are unaffecte
 (Alt+H): its left side has the tabs Conversations and Cloud, then those plugins add (and
 Duck.ai), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F) narrows the list to
 conversations whose title or folder has every word typed, in any case; Enter opens the first, Esc
-clears it, and the query isn't kept across restarts. Conversations,
+clears it, and the query isn't kept across restarts. The picker beside it sorts the list by the
+latest message or by scratchpad size, biggest first (each row then shows its size; kept in settings).
+Conversations,
 cloud sessions and plugins' tabs open as tabs, which are remembered. The browsers' tab keys work, Home
 counting as the first tab: Ctrl+W (or Ctrl+F4) closes the tab shown, even while typing (Ctrl+Backspace
 deletes a word), Ctrl+Tab and Ctrl+PageDown go to the next tab and Ctrl+Shift+Tab and Ctrl+PageUp to
@@ -206,10 +208,15 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
   comments are dropped (`build.rs`, `src/agent/prompt.rs`). It is compiled in: a change takes a
   rebuild. It calls the model Oak, whichever lab made it.
 - A reply's tool calls run in parallel, each as soon as it has streamed in, waiting only for calls
-  on a file it touches, and for ASK (`src/agent/tool_calls.rs`).
+  on a file it touches, and for ASK and CD, which run on their own (`src/agent/tool_calls.rs`).
+- CD switches the conversation's working folder for the rest of the session (relative paths,
+  EXECUTE and new tasks; running tasks keep theirs). The scratchpad stays where it was (its name
+  becomes its full path), the result carries the new folder's project instructions, and the
+  system prompt keeps the folder its cache was written with (`prefix::Pin::folder`).
 - EXECUTE takes a timeout (0 to 550 seconds, 0 for the background) and a one-line summary shown in
   place of the command. Longer commands become background tasks (`src/tasks.rs`), kept across
-  restarts; on closing, Oak can leave them running. Output over 50,000 characters is saved to the
+  restarts; on closing, Oak can leave them running (on Windows each one's bash is handed a handle
+  to its own job, so no Oak process stays behind to lock oak.exe; the next Oak takes it back). Output over 50,000 characters is saved to the
   scratchpad. Before a command runs, `src/guard.rs` refuses likely-destructive ones (recursive
   removals of the home folder, the working folder or `.git`, disk commands, git commands that
   discard work, killing Oak) and `src/sleeps.rs` refuses sleeps over 5 seconds; the error says

@@ -728,6 +728,9 @@ fn account_box(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &Set
         api::Provider::Local => local_panel(ui, t, w).on_hover_text("llama.cpp server"),
         // NodeClub: its key, and the tokens used through it.
         api::Provider::NodeClub => nodeclub_panel(ui, t, crate::nodeclub::account_of_conv(&conv_id).as_ref(), None, w).on_hover_text("NodeClub, OpenAI-compatible API"),
+        // Refuseless: its credits, and what this session spent.
+        api::Provider::Refuseless => refuseless_panel(ui, t, crate::refuseless::account_of_conv(&conv_id).as_ref(), ("This session", spent), None, w)
+            .on_hover_text("Refuseless, abliterated models, paid per token from its credits"),
         api::Provider::Claude => {
             let accounts = api::accounts();
             let account = seat(api::Provider::Claude).and_then(|id| accounts.iter().find(|a| a.id.to_string() == id)).or_else(|| accounts.iter().find(|a| a.current));
@@ -848,6 +851,31 @@ pub(crate) fn openrouter_panel(ui: &mut Ui, t: &Theme, a: Option<&openrouter::Ac
             let color = if left < 1.0 { t.error } else { t.ink }; // under a dollar
             kv(ui, t, "Credits left", &openrouter::dollars(left), color)
                 .on_hover_text(format!("{} remaining of {} credits", openrouter::dollars(left), openrouter::dollars(a.total.unwrap_or(0.0))));
+        } else {
+            loading(ui, t, "loading credits…");
+        }
+        kv(ui, t, spent.0, &openrouter::dollars(spent.1), t.ink);
+    })
+    .response
+}
+/// A Refuseless key (or all of them), as the OpenRouter one: the key, the
+/// credits left, and `spent` (what this session or the key spent).
+pub(crate) fn refuseless_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::refuseless::Account>, spent: (&str, f64), note: Option<&str>, w: f32) -> egui::Response {
+    side_box(ui, t, w, |ui| {
+        head_row(ui, t, "Refuseless", note.filter(|v| !v.is_empty()));
+        let Some(a) = a else {
+            caption(ui, "No API key", t.ink3);
+            return;
+        };
+        let key = if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) };
+        key_line(ui, &key, t.ink3);
+        if let Some(e) = &a.error {
+            let what = if a.rejected { "Key rejected: remove it" } else { "Credits unavailable" };
+            ui.label(RichText::new(what).small().color(t.error)).on_hover_text(e);
+        } else if let Some(left) = a.left {
+            let color = if left < 1.0 { t.error } else { t.ink }; // under a dollar
+            kv(ui, t, "Credits left", &openrouter::dollars(left), color)
+                .on_hover_text(format!("{} available of a {} balance", openrouter::dollars(left), openrouter::dollars(a.balance.unwrap_or(0.0))));
         } else {
             loading(ui, t, "loading credits…");
         }
