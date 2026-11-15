@@ -10,12 +10,14 @@ use transcript::*;
 /// Which tabs each close command closes, in the order they're drawn.
 #[test]
 fn tab_close_targets_follow_visual_order() {
-    let targets = |action: TabClose, anchor, count| (0..count).filter(|&i| action.includes(i, anchor)).collect::<Vec<_>>();
+    let targets = |action: TabClose, anchor, count| (0..count).filter(|&i| action.includes(i, anchor, i % 2 == 1)).collect::<Vec<_>>();
     assert_eq!(targets(TabClose::One, 1, 3), [1]);
     assert_eq!(targets(TabClose::Others, 1, 3), [0, 2]);
     assert_eq!(targets(TabClose::Left, 1, 3), [0]);
     assert_eq!(targets(TabClose::Right, 1, 3), [2]);
     assert_eq!(targets(TabClose::All, 1, 3), [0, 1, 2]);
+    // (Here the odd tabs are the inactive ones.)
+    assert_eq!(targets(TabClose::Inactive, 0, 4), [1, 3]);
     assert!(targets(TabClose::Left, 0, 3).is_empty() && targets(TabClose::Right, 2, 3).is_empty());
     assert!(targets(TabClose::Others, 0, 1).is_empty());
 }

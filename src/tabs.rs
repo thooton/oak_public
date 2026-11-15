@@ -29,16 +29,22 @@ pub(crate) enum TabClose {
     Others,
     Left,
     Right,
+    /// The tabs that aren't shown and whose work is neither running nor
+    /// paused (no dot on the tab).
+    Inactive,
     All,
 }
 
 impl TabClose {
-    pub(crate) fn includes(self, index: usize, anchor: usize) -> bool {
+    /// Whether tab `index` closes, `anchor` being the tab right-clicked and
+    /// `inactive` whether tab `index` is inactive (`App::tab_inactive`).
+    pub(crate) fn includes(self, index: usize, anchor: usize, inactive: bool) -> bool {
         match self {
             Self::One => index == anchor,
             Self::Others => index != anchor,
             Self::Left => index < anchor,
             Self::Right => index > anchor,
+            Self::Inactive => inactive,
             Self::All => true,
         }
     }
@@ -172,10 +178,11 @@ impl App {
         if anchor >= self.settings.tabs.len() {
             return;
         }
+        let closes: Vec<bool> = self.settings.tabs.iter().enumerate().map(|(i, id)| action.includes(i, anchor, matches!(action, TabClose::Inactive) && self.tab_inactive(id))).collect();
         // As if closed from right to left, so each place counts only the
         // tabs left of it, and reopening (newest first) puts each back.
         for (i, id) in self.settings.tabs.iter().enumerate().rev() {
-            if action.includes(i, anchor) {
+            if closes[i] {
                 self.closed_tabs.push((i, id.clone()));
             }
         }
@@ -187,13 +194,11 @@ impl App {
         };
         // If the selected tab closes, prefer its nearest surviving tab on
         // the right, then the left. Count its new position before removal.
-        let next = selected.filter(|&i| action.includes(i, anchor)).map(|i| {
-            (0..i).filter(|&j| !action.includes(j, anchor)).count()
-        });
+        let next = selected.filter(|&i| closes[i]).map(|i| (0..i).filter(|&j| !closes[j]).count());
         let mut index = 0;
         self.settings.tabs.retain(|_| {
             index += 1;
-            !action.includes(index - 1, anchor)
+            !closes[index - 1]
         });
         store::save_settings(&self.settings);
         self.tab_drag = None;
@@ -208,6 +213,13 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Whether `id`'s tab is inactive: not the one shown, and its work
+    /// neither running nor paused. "Close inactive tabs" closes these.
+    pub(crate) fn tab_inactive(&self, id: &str) -> bool {
+        let (_, paused, busy, _) = self.tab_look(id);
+        !paused && !busy && !matches!(&self.screen, Screen::Chat(shown) if shown == id)
     }
 
     /// What `id`'s tab shows: its title, whether it is paused and whether
@@ -399,7 +411,8 @@ impl App {
                     }
                     ui.separator();
                 }
-                if let Some(action) = tab_menu(ui, i, n, on, can_reopen, &mut reopen) {
+                let any_inactive = self.settings.tabs.iter().any(|id| self.tab_inactive(id));
+                if let Some(action) = tab_menu(ui, i, n, on, any_inactive, can_reopen, &mut reopen) {
                     close = Some((i, action));
                 }
             });
@@ -522,16 +535,17 @@ impl Strip {
 }
 
 /// A tab's right-click menu: the closes (`n` tabs, this one `i`, `on` if
-/// shown) and reopening a closed tab, which sets `reopen`. Gives the close
+/// shown, `any_inactive` if there are inactive tabs) and reopening a closed tab, which sets `reopen`. Gives the close
 /// picked.
-fn tab_menu(ui: &mut Ui, i: usize, n: usize, on: bool, can_reopen: bool, reopen: &mut bool) -> Option<TabClose> {
+fn tab_menu(ui: &mut Ui, i: usize, n: usize, on: bool, any_inactive: bool, can_reopen: bool, reopen: &mut bool) -> Option<TabClose> {
     let mut picked = None;
     for (label, action, enabled, divider) in [
         ("Close tab", TabClose::One, true, false),
         ("Close others", TabClose::Others, n > 1, false),
         ("Close tabs to the left", TabClose::Left, i > 0, false),
         ("Close tabs to the right", TabClose::Right, i + 1 < n, false),
-        ("Close all tabs", TabClose::All, true, true),
+        ("Close inactive tabs", TabClose::Inactive, any_inactive, true),
+        ("Close all tabs", TabClose::All, true, false),
     ] {
         if divider {
             ui.separator();
@@ -669,6 +683,39 @@ mod tests {
         app.close_tabs(2, TabClose::Others);
         press(&mut h, &mut app, Key::T, shift);
         press(&mut h, &mut app, Key::T, shift);
+        assert_eq!(app.settings.tabs, ids);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Close inactive tabs closes only the tabs without a dot that aren't
+    /// shown: the shown one, one at work and one paused stay open, and
+    /// their conversations all stay; Ctrl+Shift+T brings the closed back.
+    #[test]
+    #[ignore]
+    fn whole_app_close_inactive_tabs() {
+        let ids = ["inactive-a", "inactive-busy", "inactive-b", "inactive-paused", "inactive-shown", "inactive-c"];
+        let convs: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let mut c = conv_json(id, id, serde_json::json!([]));
+                c["paused"] = serde_json::json!(*id == "inactive-paused");
+                c
+            })
+            .collect();
+        let (dir, mut h, mut app) = Headless::start("close-inactive", &convs);
+        app.settings.tabs = ids.iter().map(|s| s.to_string()).collect();
+        h.events(&mut app, vec![]);
+        app.sessions["inactive-busy"].live.lock().unwrap().busy = true;
+        app.open("inactive-shown".into());
+        h.events(&mut app, vec![]);
+        assert!(!app.tab_inactive("inactive-busy") && !app.tab_inactive("inactive-paused") && !app.tab_inactive("inactive-shown"));
+        app.close_tabs(0, TabClose::Inactive);
+        assert_eq!(app.settings.tabs, ["inactive-busy", "inactive-paused", "inactive-shown"]);
+        assert!(matches!(&app.screen, Screen::Chat(id) if id == "inactive-shown"));
+        assert!(ids.iter().all(|id| app.sessions.contains_key(*id)));
+        for _ in 0..3 {
+            app.reopen_tab();
+        }
         assert_eq!(app.settings.tabs, ids);
         let _ = std::fs::remove_dir_all(&dir);
     }
