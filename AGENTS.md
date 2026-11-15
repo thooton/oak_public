@@ -326,7 +326,17 @@ a first message. Its role is `prompts/super.md` (not offered as a System prompt;
 plans the work and hands it to subagents with the AGENT kit, `agent` says its subagents each do one
 task), saved as `"role": "super"`, so its subagents work in its folder on this machine with the
 same prompt. Its tab has Oak's tree, its Home row says "folder, super agent", and `oak_sdk`'s
-`go_new` takes `super` to pick it. Oak's own choices win over a plugin's `NewKind` of the same id,
+`go_new` takes `super` to pick it. It looks as the command center's super agents do (the Oak tab's
+and Delta's), drawn by the one implementation of that look, `src/super_view.rs`, which plugins
+use through `oak_sdk::ui::super_chat`, `super_box` and `super_agent_box` (interface version 3):
+`src/super_local.rs` makes a super agent's tab a text conversation (the user's messages in deep
+blue bubbles on the right, what it says beside its avatar on the left, in stretches with the day
+and time after a pause, three dots and its status while it works; its tool calls, thinking and
+subagents' messages stay out of it, and its questions show under it), its corner box its name and
+folder, what it is doing with Stop, its model and effort, and its subagents, each opening its tab,
+and a subagent's corner box an agent's (its title, "Agent n, run by" the super agent, its state
+with Stop, its model), each with notes and background tasks under it when there are any. It still
+runs here: its subagents are conversations of their own. Oak's own choices win over a plugin's `NewKind` of the same id,
 as built-in roles do over plugin roles (`add_roles`), so a plugin can't replace either.
 
 **Side chats** (`src/side_chat.rs`). The message bubble in the title bar, left of the window's buttons,

@@ -171,6 +171,27 @@ pub fn work_block(ui: &mut Ui, _t: &Theme, thinking: Option<&Value>, key: (usize
     unsafe { (api().oak_work_block)(ui.as_raw(), s(&thinking), key.0 as u64, key.1 as u64, streaming, s(&calls), s(&results)) };
 }
 
+/// A super agent's chat as Oak draws its own (`oak_super_chat` in `abi`
+/// says what `chat` holds).
+pub fn super_chat(ui: &mut Ui, _t: &Theme, chat: &Value) {
+    unsafe { (api().oak_super_chat)(ui.as_raw(), s(&chat.to_string())) };
+}
+
+/// A super agent's corner box as Oak draws its own (`oak_super_box` in
+/// `abi` says what `b` holds): what was done, if anything (`"stop"`,
+/// `"clear"`, `"delete"`, `{"model": [id, effort]}`, `{"open": n}`).
+pub fn super_box(_ctx: &egui::Context, _t: &Theme, area: Rect, b: &Value) -> Option<Value> {
+    let (_, out) = crate::rt::text_from(|out, user| unsafe { (api().oak_super_box)(&rect_in(area), s(&b.to_string()), out, user) });
+    serde_json::from_str(&out).ok()
+}
+
+/// A super agent's agent's corner box as Oak draws its own
+/// (`oak_super_agent_box` in `abi` says what `b` holds): true when Stop
+/// was pressed.
+pub fn super_agent_box(_ctx: &egui::Context, _t: &Theme, area: Rect, b: &Value) -> bool {
+    unsafe { (api().oak_super_agent_box)(&rect_in(area), s(&b.to_string())) & OAK_CLICKED != 0 }
+}
+
 /// The bar under a message (`msg`, its rectangle): Copy, and when it was sent.
 pub fn message_bar(ui: &mut Ui, _t: &Theme, msg: Rect, id: Id, copy_text: impl Fn() -> String, at: Option<i64>) {
     let raw = ui.as_raw();

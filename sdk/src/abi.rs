@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 2;
+pub const OAK_API_VERSION: u32 = 3;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -1302,6 +1302,36 @@ c_api! {
     /// outputs from `results` (a JSON object: call id to `[text, failed]`).
     /// `key_a`, `key_b` keep its rows' open state apart.
     fn oak_work_block(ui: *mut OakUi, thinking: OakStr, key_a: u64, key_b: u64, streaming: bool, calls: OakStr, results: OakStr);
+
+    // Version 3.
+
+    /// A super agent's chat, as Oak draws its own super agents': people's
+    /// messages in deep blue bubbles on the right, the super agent's (as
+    /// markdown) by its avatar on the left, in stretches with the day and
+    /// time after a pause, then three dots while it works. `chat` is JSON:
+    /// `{"salt", "icon": "tree"|"delta", "me", "intro", "loaded", "trouble",
+    /// "working", "activity", "messages": [{"kind": "user"|"oak"|"error",
+    /// "from", "time" (ms; 0: sending, below 0: not known), "text", "key",
+    /// "images": [{"name", "block" (an image block), "failed"}]}]}`; an image
+    /// with neither block nor failed shows as loading.
+    fn oak_super_chat(ui: *mut OakUi, chat: OakStr);
+
+    /// A super agent's box in the corner of `area`: its icon, name and
+    /// caption, what it is doing with Stop, Clear and Delete, its model and
+    /// effort pickers, and its agents. `json`: `{"salt", "icon", "name",
+    /// "caption", "working", "activity", "stop", "clear", "delete" (each
+    /// button's tip; empty: none), "models": [{"id", "name", "efforts"}],
+    /// "model", "effort", "model_tip", "agents": [{"n", "title", "state",
+    /// "live", "working", "report"}]}`. What was done goes to `out` as JSON:
+    /// `"stop"`, `"clear"`, `"delete"`, `{"model": [id, effort]}` or
+    /// `{"open": n}`; nothing when nothing was.
+    fn oak_super_box(area: *const OakRect, json: OakStr, out: OakSink, out_user: *mut c_void);
+
+    /// One of a super agent's agents' box in the corner of `area`: its
+    /// title and caption, what it is doing with Stop, its model. `json`:
+    /// `{"icon", "title", "caption", "working", "state", "stop" (Stop's tip;
+    /// empty: none), "model"}`. OAK_CLICKED when Stop was pressed.
+    fn oak_super_agent_box(area: *const OakRect, json: OakStr) -> u32;
 }
 
 /// The C header: everything declared above, in C.

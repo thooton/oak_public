@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 2
+#define OAK_API_VERSION 3
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -1322,6 +1322,37 @@ struct OakApi {
      * `key_a`, `key_b` keep its rows' open state apart.
      */
     void (*oak_work_block)(OakUi *ui, OakStr thinking, uint64_t key_a, uint64_t key_b, bool streaming, OakStr calls, OakStr results);
+
+    /* A super agent's chat, as Oak draws its own super agents': people's
+     * messages in deep blue bubbles on the right, the super agent's (as
+     * markdown) by its avatar on the left, in stretches with the day and
+     * time after a pause, then three dots while it works. `chat` is JSON:
+     * `{"salt", "icon": "tree"|"delta", "me", "intro", "loaded", "trouble",
+     * "working", "activity", "messages": [{"kind": "user"|"oak"|"error",
+     * "from", "time" (ms; 0: sending, below 0: not known), "text", "key",
+     * "images": [{"name", "block" (an image block), "failed"}]}]}`; an image
+     * with neither block nor failed shows as loading.
+     */
+    void (*oak_super_chat)(OakUi *ui, OakStr chat);
+
+    /* A super agent's box in the corner of `area`: its icon, name and
+     * caption, what it is doing with Stop, Clear and Delete, its model and
+     * effort pickers, and its agents. `json`: `{"salt", "icon", "name",
+     * "caption", "working", "activity", "stop", "clear", "delete" (each
+     * button's tip; empty: none), "models": [{"id", "name", "efforts"}],
+     * "model", "effort", "model_tip", "agents": [{"n", "title", "state",
+     * "live", "working", "report"}]}`. What was done goes to `out` as JSON:
+     * `"stop"`, `"clear"`, `"delete"`, `{"model": [id, effort]}` or
+     * `{"open": n}`; nothing when nothing was.
+     */
+    void (*oak_super_box)(const OakRect *area, OakStr json, OakSink out, void *out_user);
+
+    /* One of a super agent's agents' box in the corner of `area`: its
+     * title and caption, what it is doing with Stop, its model. `json`:
+     * `{"icon", "title", "caption", "working", "state", "stop" (Stop's tip;
+     * empty: none), "model"}`. OAK_CLICKED when Stop was pressed.
+     */
+    uint32_t (*oak_super_agent_box)(const OakRect *area, OakStr json);
 };
 
 /* Text from a C string, and from a literal. */

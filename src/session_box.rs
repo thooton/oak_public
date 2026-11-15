@@ -233,6 +233,17 @@ impl App {
         }
         let Some(w) = corner_width(area) else { return };
         let key = self.draft_key.clone();
+        // A super agent on this computer, and its subagents: as the
+        // command center's look (`super_local`).
+        let kind = self.sessions.get(&key).map(|s| {
+            let c = s.conv.lock().unwrap();
+            (crate::super_local::is_super(&c), crate::super_local::is_super_agent(&c))
+        });
+        match kind {
+            Some((true, _)) => return self.local_super_box(ctx, t, area, &key),
+            Some((_, true)) => return self.local_agent_box(ctx, t, area, &key),
+            _ => {}
+        }
         let models = match &*self.models.lock().unwrap() {
             Some(Ok(list)) => list.clone(),
             _ => vec![],
@@ -325,7 +336,7 @@ impl App {
     /// request reads all of it again, at the full input price. Switch sends
     /// the change (`Command::Model`); Cancel, Esc or a click outside drops it.
     /// A switch asked for in another tab is dropped when this one shows.
-    fn model_switch_dialog(&mut self, ctx: &egui::Context, t: &Theme, key: &str) {
+    pub(crate) fn model_switch_dialog(&mut self, ctx: &egui::Context, t: &Theme, key: &str) {
         let Some((conv, provider, model)) = self.model_switch.clone() else { return };
         let Some(s) = self.sessions.get(&conv).filter(|_| conv == key) else {
             self.model_switch = None;
@@ -369,7 +380,7 @@ impl App {
 
 /// Notes and tasks under the session box, for a conversation: each a
 /// drop-down. Open ones share the height left down to `bottom`.
-fn side_boxes(ui: &mut Ui, t: &Theme, w: f32, bottom: f32, key: &str, info: &SessionInfo, tasks: &tasks::Tasks) {
+pub(crate) fn side_boxes(ui: &mut Ui, t: &Theme, w: f32, bottom: f32, key: &str, info: &SessionInfo, tasks: &tasks::Tasks) {
     let notes_open = side_open(ui, "notes") && !info.notes.is_empty();
     let task_list = tasks.infos();
     let tasks_open = side_open(ui, "tasks") && !task_list.is_empty();

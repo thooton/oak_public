@@ -86,6 +86,8 @@ mod plugins_view;
 mod rename;
 mod resets_view;
 mod session_box;
+mod super_local;
+mod super_view;
 mod side_chat;
 mod settings;
 mod tabs;
@@ -654,6 +656,9 @@ impl App {
         } else if cloud::is_key(id) {
             cloud::watch(id, ui.ctx());
             cloud_chat_view(ui, t, id, self.lists.entry(id.clone()).or_default());
+        } else if self.sessions.get(id).is_some_and(|s| super_local::is_super(&s.conv.lock().unwrap())) {
+            let id = id.clone();
+            self.local_super_view(ui, t, &id);
         } else if let Some(s) = self.sessions.get(id) {
             let agents_pausing = s.pause_on() && self.agents_pausing(s);
             let list = self.lists.entry(id.clone()).or_default();

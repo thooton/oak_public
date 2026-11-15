@@ -1571,6 +1571,26 @@ impl HostApi for Oak {
         };
         crate::transcript::tool_block(ui, &t, thinking.as_ref().map(|b| (b, key, streaming)), &calls, &results);
     }
+
+    unsafe extern "C" fn oak_super_chat(ui: *mut OakUi, chat: OakStr) {
+        let (ui, t) = (ui_of(ui), theme());
+        let chat: crate::super_view::Chat = serde_json::from_str(str_of(chat)).unwrap_or_default();
+        crate::super_view::chat(ui, &t, &chat, |_| {});
+    }
+
+    unsafe extern "C" fn oak_super_box(area: *const OakRect, json: OakStr, out: OakSink, out_user: *mut c_void) {
+        let Some(ctx) = super::context() else { return };
+        let b: crate::super_view::SuperBox = serde_json::from_str(str_of(json)).unwrap_or_default();
+        if let Some(act) = crate::super_view::super_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) {
+            give_text(out, out_user, &serde_json::to_string(&act).unwrap_or_default());
+        }
+    }
+
+    unsafe extern "C" fn oak_super_agent_box(area: *const OakRect, json: OakStr) -> u32 {
+        let Some(ctx) = super::context() else { return 0 };
+        let b: crate::super_view::AgentBox = serde_json::from_str(str_of(json)).unwrap_or_default();
+        if crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) { OAK_CLICKED } else { 0 }
+    }
 }
 
 fn stroke_kind_of(kind: u32) -> StrokeKind {
@@ -1701,6 +1721,58 @@ mod tests {
         draw(&mut s, vec![egui::Event::Text("!".into())]);
         assert!(s.name.contains('!') && s.name.len() == 4, "{}", s.name);
         drop(shown);
+    }
+
+    /// A plugin's super agent looks as Oak's own: its chat, its box and
+    /// its agents' boxes are drawn by `super_view`, and what was pressed
+    /// comes back.
+    #[test]
+    fn super_agents_drawn_through_the_table() {
+        let (ctx, t) = test_ctx(true, true);
+        let mut time = 0.0;
+        let now = crate::api::now_ms();
+        let chat = json!({"salt": "s", "icon": "delta", "me": "ann", "loaded": true, "working": true, "activity": "Reading", "messages": [
+            {"kind": "user", "from": "bob", "time": now - 60_000, "text": "Ship it", "key": 1},
+            {"kind": "oak", "from": "Delta", "time": now - 50_000, "text": "On it", "key": 2},
+            {"kind": "user", "from": "ann", "time": 0, "text": "Thanks", "key": 3},
+        ]});
+        let shown = frame(&ctx, &t, &mut time, vec![], |ui| oak_sdk::ui::super_chat(ui, &t, &chat));
+        let all = texts(&shown);
+        for want in ["Ship it", "On it", "Thanks", "bob", "Sending…", "Reading"] {
+            assert!(all.contains(want), "{want} isn't drawn: {all}");
+        }
+        assert!(!shown.iter().any(|(s, _)| s == "ann"), "your own name isn't over your messages: {all}");
+        assert!(rect_of(&shown, "Ship it").left() > rect_of(&shown, "On it").left(), "people's on the right, the super agent's on the left");
+
+        let area = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(1400.0, 600.0));
+        let b = json!({"salt": "s", "name": "Delta", "caption": "Shared", "working": true, "activity": "Reading", "stop": "Stops it", "clear": "Clears it",
+            "models": [{"id": "a", "name": "Model A", "efforts": ["low", "high"]}], "model": "a", "effort": "high",
+            "agents": [{"n": 4, "title": "Fix the build", "state": "working", "live": true, "working": true}]});
+        let mut got = vec![];
+        let mut draw = |events: Vec<egui::Event>, got: &mut Vec<Option<Value>>| {
+            frame(&ctx, &t, &mut time, events, |ui| got.push(oak_sdk::ui::super_box(ui.ctx(), &t, area, &b)))
+        };
+        // (An area shows from its second frame.)
+        draw(vec![], &mut got);
+        let shown = draw(vec![], &mut got);
+        for want in ["Delta", "Shared", "Reading", "Stop", "Clear", "Model A", "high", "Agents", "4. Fix the build"] {
+            assert!(shown.iter().any(|(s, _)| s == want), "{want} isn't drawn: {}", texts(&shown));
+        }
+        assert!(!shown.iter().any(|(s, _)| s == "Delete"), "no tip: no button");
+        draw(click(rect_of(&shown, "Stop").center(), Primary), &mut got);
+        draw(click(rect_of(&shown, "4. Fix the build").center(), Primary), &mut got);
+        let acts: Vec<Value> = got.into_iter().flatten().collect();
+        assert_eq!(acts, vec![json!("stop"), json!({"open": 4})]);
+
+        let b = json!({"title": "Fix the build", "caption": "Agent 4, run by Delta", "working": true, "state": "Running EXECUTE", "stop": "Stops it", "model": "Model A at high effort"});
+        frame(&ctx, &t, &mut time, vec![], |ui| assert!(!oak_sdk::ui::super_agent_box(ui.ctx(), &t, area, &b)));
+        let shown = frame(&ctx, &t, &mut time, vec![], |ui| assert!(!oak_sdk::ui::super_agent_box(ui.ctx(), &t, area, &b)));
+        for want in ["Fix the build", "Agent 4, run by Delta", "Running EXECUTE", "Model A at high effort"] {
+            assert!(shown.iter().any(|(s, _)| s == want), "{want} isn't drawn: {}", texts(&shown));
+        }
+        let mut stopped = false;
+        frame(&ctx, &t, &mut time, click(rect_of(&shown, "Stop").center(), Primary), |ui| stopped |= oak_sdk::ui::super_agent_box(ui.ctx(), &t, area, &b));
+        assert!(stopped);
     }
 
     /// An answer goes over the table by its handle, either way, and its
