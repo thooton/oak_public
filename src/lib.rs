@@ -269,7 +269,6 @@ struct App {
     side_chat: Option<String>,
     side_deleting: bool,
     side_focus: bool,
-    side_browser: bool,
     side_active: bool,
     side_hint: Option<String>,
     side_editing: Option<Editing>,
@@ -536,7 +535,6 @@ impl eframe::App for App {
         }
         egui::Panel::top("title-bar").exact_size(TITLE_H).frame(plain).show_separator_line(false).show(ui, |ui| {
             title_bar(ui, &t);
-            self.browser_toggle(ui, &t);
             self.side_chat_toggle(ui, &t);
         });
         window_edges(ui.ctx());
@@ -596,12 +594,15 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// The chats page: the browser pane right of the chat and its message
-    /// box, what's open, and its box at the corner; then what the chat
-    /// asked for (a queue action, a revert, a rewind).
+    /// The chats page: the side chat's pane right of the chat and its
+    /// message box, what's open, its box at the corner and the browser's
+    /// preview beside it (or the browser expanded over it all); then what
+    /// the chat asked for (a queue action, a revert, a rewind).
     fn chats_page(&mut self, ui: &mut Ui, t: &Theme, plain: egui::Frame) {
         browser::retain(|c| self.settings.tabs.iter().any(|t| t == c) && self.sessions.contains_key(c));
         find::keyboard_target(ui.ctx(), None);
+        let ctx = ui.ctx().clone();
+        self.browser_lightbox(&ctx, t);
         self.conversation_pane(ui, t);
         // A plugin's tab may be a dashboard: no message box.
         if !matches!(&self.screen, Screen::Chat(id) if plugins::tab_kind(id).is_some_and(|k| !k.composer(id))) {
@@ -609,8 +610,8 @@ impl App {
         }
         let central = egui::CentralPanel::default().frame(plain).show(ui, |ui| self.screen_view(ui, t));
         find::keyboard_target(ui.ctx(), None);
-        let ctx = ui.ctx().clone();
         self.session_box(&ctx, t, central.response.rect);
+        self.browser_preview(&ctx, t, central.response.rect);
         let Screen::Chat(id) = &self.screen else { return };
         let id = id.clone();
         self.chat_actions(&ctx, &id, central.inner);

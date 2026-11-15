@@ -1,16 +1,38 @@
-//! The browser pane, on the right of a conversation: a toolbar (back,
-//! forward, reload, the address, close) over the page, which takes the
-//! user's pointer, wheel and keys. It shows what the conversation's
-//! browser (`browser.rs`) is doing, the model's calls included. The globe
-//! in the title bar, or Ctrl+Shift+B, opens and closes it.
+//! The browser's view (`browser.rs` is the browser itself). Only the model
+//! opens and closes a conversation's browser (BROWSER action=open and
+//! close), and it fades in and out as it does. While it is open, a preview
+//! of the page sits beside the transcript, between its column and the
+//! minimap (over the transcript's corner when there is no room there),
+//! see-through until the pointer is on it. A click on it (or Ctrl+Shift+B)
+//! expands it into a lightbox over the window, as an image opens, where the
+//! user uses the page: a toolbar (back, forward, reload, the address, back
+//! to the preview) over the page, which takes the pointer, wheel and keys.
+//! The X, a click beside it, Ctrl+Shift+B, or Esc while the page doesn't
+//! have the focus go back to the preview. The page keeps its own viewport
+//! (`browser.rs`) and is scaled to fit either way. The model's pointer
+//! shows on the page as Oak's green cursor, gliding to where it goes.
 
 use super::*;
 use crate::browser::{self, Instance, Status};
+use egui::TextureHandle;
 use std::sync::Arc;
 
-pub(crate) const PANE_DEFAULT_W: f32 = 640.0;
 const BAR_H: f32 = 34.0;
-const GLOBE: &str = "\u{f059f}";
+/// Seconds the browser takes to fade in as it opens, and out as it closes.
+const FADE: f32 = 0.2;
+/// Seconds the preview takes to grow into the lightbox, and back.
+const EXPAND: f32 = 0.16;
+/// The preview's widest, and the narrowest that fits beside the transcript.
+const PREVIEW_MAX_W: f32 = 360.0;
+const PREVIEW_MIN_W: f32 = 170.0;
+/// How opaque the preview is at rest beside the transcript, and over it.
+const REST_ALPHA: f32 = 0.6;
+const REST_ALPHA_OVER: f32 = 0.4;
+/// Seconds the model's cursor stays after its last move (while no call of
+/// its runs), then fades.
+const CURSOR_STAYS: f32 = 20.0;
+/// The caption line under the lightbox's page.
+const CAPTION_H: f32 = 28.0;
 
 /// The toolbar's icons, drawn as strokes of one weight in boxes of one
 /// size (the icon font's glyphs come in different sizes and weights).
@@ -19,8 +41,10 @@ enum Icon {
     Back,
     Forward,
     Reload,
-    /// An x: Stop while a page loads, and Close.
+    /// An x: Stop while a page loads.
     Cross,
+    /// Back to the preview: a bar, as a window's minimize.
+    Shrink,
 }
 
 /// The pointer's state over the page, between frames.
@@ -41,9 +65,165 @@ struct OpenSelect {
     select: browser::Select,
 }
 
+/// A conversation's view between frames.
+#[derive(Clone, Default)]
+struct ViewState {
+    expanded: bool,
+    /// The preview where it was last drawn (the lightbox grows from it),
+    /// and the transcript it was placed beside.
+    preview: Option<Rect>,
+    beside: Option<Rect>,
+    /// The frame this was worked out in.
+    pass: u64,
+    /// How present the browser is, fading in or out (0 to 1).
+    alpha: f32,
+    /// What was shown last, kept to fade out after the browser closes:
+    /// the page's picture and the viewport's size (CSS pixels).
+    tex: Option<TextureHandle>,
+    size: (u32, u32),
+    /// When the page's first picture came (`ctx` time): it fades in over
+    /// "Starting the browser".
+    page_at: Option<f64>,
+    /// When the browser was found gone (`ctx` time).
+    gone_at: Option<f64>,
+}
+
+fn state_id(conv: &str) -> Id {
+    Id::unique(("browser-view", conv))
+}
+
+fn page_id(conv: &str) -> Id {
+    Id::unique(("browser-page", conv))
+}
+
+fn expand_id(conv: &str) -> Id {
+    state_id(conv).with("expand")
+}
+
+/// Oak's green, whatever the theme: the model's cursor.
+fn oak_green() -> Color32 {
+    Theme::oak().accent
+}
+
+/// The view's state for `conv` this frame, worked out once a frame: how
+/// present the browser is (fading in after it opened, out after it closed;
+/// a browser that closed while its conversation wasn't shown just goes),
+/// its newest frame uploaded, and what it should render (`Instance::shown`).
+fn tick(ctx: &egui::Context, conv: &str) -> (Option<Arc<Instance>>, ViewState) {
+    let inst = browser::get(conv);
+    let mut s = ctx.data(|d| d.get_temp::<ViewState>(state_id(conv))).unwrap_or_default();
+    let pass = ctx.cumulative_pass_nr();
+    if s.pass == pass && s.pass != 0 {
+        return (inst, s);
+    }
+    let seen_last = s.pass + 1 >= pass;
+    s.pass = pass;
+    match &inst {
+        Some(i) => {
+            s.gone_at = None;
+            s.alpha = (i.opened.elapsed().as_secs_f32() / FADE).min(1.0);
+            upload(ctx, i);
+            if let Some(t) = i.texture.lock().unwrap().clone() {
+                s.tex = Some(t);
+                s.page_at.get_or_insert(ctx.input(|i| i.time));
+            }
+            s.size = i.viewport_css();
+            let (_, page, k) = lightbox_layout(lightbox_area(ctx), s.size);
+            let ppp = ctx.pixels_per_point();
+            let cast = if s.expanded { page.size() } else { s.preview.map_or(vec2(480.0, 270.0), |r| r.size()) } * ppp;
+            i.shown(k * ppp, [cast.x.ceil() as u32, cast.y.ceil() as u32]);
+        }
+        None if s.alpha > 0.0 => {
+            if s.gone_at.is_none() && !seen_last {
+                s = ViewState { pass, ..Default::default() };
+            } else {
+                let now = ctx.input(|i| i.time);
+                let gone = *s.gone_at.get_or_insert(now);
+                s.alpha = 1.0 - (now - gone) as f32 / FADE;
+                if s.alpha <= 0.0 {
+                    s = ViewState { pass, ..Default::default() };
+                    ctx.memory_mut(|m| m.surrender_focus(page_id(conv)));
+                }
+            }
+        }
+        None => s.expanded = false,
+    }
+    if (s.alpha > 0.0 && s.alpha < 1.0) || page_in(ctx, &s) < 1.0 {
+        ctx.request_repaint();
+    }
+    store(ctx, conv, &s);
+    (inst, s)
+}
+
+/// How far the page's first picture has faded in (0 to 1).
+fn page_in(ctx: &egui::Context, s: &ViewState) -> f32 {
+    s.page_at.map_or(0.0, |at| ((ctx.input(|i| i.time) - at) as f32 / FADE).clamp(0.0, 1.0))
+}
+
+fn store(ctx: &egui::Context, conv: &str, s: &ViewState) {
+    ctx.data_mut(|d| d.insert_temp(state_id(conv), s.clone()));
+}
+
+/// The browser's newest frame, into its texture.
+fn upload(ctx: &egui::Context, inst: &Instance) {
+    let Some(img) = inst.view.lock().unwrap().frame.take() else { return };
+    let mut tex = inst.texture.lock().unwrap();
+    match tex.as_mut() {
+        Some(h) => h.set(img, egui::TextureOptions::LINEAR),
+        None => *tex = Some(ctx.load_texture(format!("browser-{}", inst.conv), img, egui::TextureOptions::LINEAR)),
+    }
+}
+
+fn set_expanded(ctx: &egui::Context, conv: &str, s: &mut ViewState, on: bool) {
+    s.expanded = on;
+    // Expanded, the keys go to the page (not the message box); back as a
+    // preview, nothing of it keeps them.
+    ctx.memory_mut(|m| if on { m.request_focus(page_id(conv)) } else { m.surrender_focus(page_id(conv)) });
+}
+
+/// The window below the title bar: what the lightbox covers.
+fn lightbox_area(ctx: &egui::Context) -> Rect {
+    let screen = ctx.content_rect();
+    Rect::from_min_max(egui::pos2(screen.left(), screen.top() + TITLE_H), screen.max)
+}
+
+/// Where the lightbox puts a `size` viewport (CSS pixels) in `area`: the
+/// frame (the toolbar and the page), the page, and its scale (points per
+/// CSS pixel). Scaled to fit, never above 1:1, with the caption under it.
+fn lightbox_layout(area: Rect, size: (u32, u32)) -> (Rect, Rect, f32) {
+    let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    let margin = vec2((area.width() * 0.03).max(24.0), (area.height() * 0.03).max(20.0));
+    let room = area.shrink2(margin);
+    let room_h = (room.height() - BAR_H - CAPTION_H).max(40.0);
+    let k = (room.width() / w).min(room_h / h).clamp(0.02, 1.0);
+    let frame_size = vec2(w * k, h * k + BAR_H);
+    let center = egui::pos2(room.center().x, room.top() + (room.height() - CAPTION_H) / 2.0);
+    let frame = Rect::from_center_size(center, frame_size);
+    let page = Rect::from_min_max(frame.min + vec2(0.0, BAR_H), frame.max);
+    (frame, page, k)
+}
+
+/// Where the preview of a `size` viewport goes in a transcript `view`
+/// whose column is `col` and whose minimap (or scroll bar) starts at
+/// `right`, from `top`: in the room between the column and the minimap,
+/// else over the transcript's corner (true). Its shape is the viewport's.
+fn preview_layout(view: Rect, col: Rangef, right: f32, top: f32, size: (u32, u32)) -> (Rect, bool) {
+    let aspect = size.0.max(1) as f32 / size.1.max(1) as f32;
+    let max_h = (view.height() * 0.4).clamp(80.0, 300.0);
+    let fit = |w: f32| {
+        let h = (w / aspect).min(max_h);
+        vec2(h * aspect, h)
+    };
+    let right = right - 14.0;
+    let room = right - (col.max + 20.0);
+    let (size, over) = if room >= PREVIEW_MIN_W { (fit(room.min(PREVIEW_MAX_W)), false) } else { (fit((view.width() * 0.3).clamp(140.0, 260.0)), true) };
+    (Rect::from_min_size(egui::pos2(right - size.x, top), size), over)
+}
+
 impl App {
-    /// The conversation whose browser pane the shown screen can have: a
-    /// conversation the user started (not a subagent, a plugin's tab or a cloud session).
+    /// The conversation whose browser the shown screen can have: a
+    /// conversation the user started (not a subagent, a side chat, a
+    /// plugin's tab or a cloud session).
     pub(crate) fn browser_conv(&self) -> Option<String> {
         if self.page != Page::Chats {
             return None;
@@ -56,52 +236,244 @@ impl App {
         }
     }
 
-    fn toggle_browser(&mut self, conv: &str, ctx: &egui::Context) {
-        // Reveal an already-open browser hidden behind the side chat;
-        // switching panes must not end the browser or interrupt its tools.
-        if !self.side_browser && self.shown_side_chat().is_some() && browser::is_open(conv) {
-            self.side_browser = true;
-        } else {
-            browser::toggle(conv, ctx);
-            self.side_browser = browser::is_open(conv);
+    /// Before the chats page's panels: Ctrl+Shift+B, and the lightbox
+    /// while it is expanded (first, so it gets Esc, the wheel and the keys
+    /// before the transcript and the message box).
+    pub(crate) fn browser_lightbox(&mut self, ctx: &egui::Context, t: &Theme) {
+        let Some(conv) = self.browser_conv() else { return };
+        let (inst, mut s) = tick(ctx, &conv);
+        if s.alpha <= 0.0 {
+            return;
         }
-        self.side_active = false;
+        if inst.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::B)) {
+            let on = !s.expanded;
+            set_expanded(ctx, &conv, &mut s, on);
+        }
+        let e = ctx.animate_bool_with_time(expand_id(&conv), s.expanded, EXPAND);
+        if e > 0.0 {
+            lightbox(ctx, t, &conv, inst.as_ref(), &mut s, e);
+        }
+        store(ctx, &conv, &s);
     }
 
-    /// The globe in the title bar, left of the window's buttons: opens or
-    /// closes the shown conversation's pane. Ctrl+Shift+B does the same.
-    pub(crate) fn browser_toggle(&mut self, ui: &mut Ui, t: &Theme) {
+    /// After the transcript (drawn in `view`): the preview beside it.
+    pub(crate) fn browser_preview(&mut self, ctx: &egui::Context, t: &Theme, view: Rect) {
         let Some(conv) = self.browser_conv() else { return };
-        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::B)) {
-            self.toggle_browser(&conv, ui.ctx());
+        let (inst, mut s) = tick(ctx, &conv);
+        if s.alpha <= 0.0 {
+            return;
         }
-        let r = ui.max_rect();
-        let rect = Rect::from_min_size(egui::pos2(r.right() - 3.0 * 36.0 - 40.0, r.top()), vec2(36.0, r.height()));
-        let resp = ui.interact(rect, Id::unique("browser-toggle"), Sense::click());
-        let open = browser::is_open(&conv) && (self.shown_side_chat().is_none() || self.side_browser);
-        let p = ui.painter();
-        if resp.hovered() {
-            p.rect_filled(rect, 0.0, t.panel);
+        let frame = chat_view::Frame::new(view);
+        let right = frame.map.map_or(frame.track.left(), |m| m.left());
+        // Under the find bar, when it is open (it is in the same corner).
+        let finding = ctx.data(|d| d.get_temp::<crate::find::Find>(Id::unique(("find", conv.as_str())))).is_some_and(|f| f.open);
+        let top = view.top() + if finding { 52.0 } else { 12.0 };
+        let (rect, over) = preview_layout(view, frame.col, right, top, s.size);
+        (s.preview, s.beside) = (Some(rect), Some(view));
+        let e = ctx.animate_bool_with_time(expand_id(&conv), s.expanded, EXPAND);
+        let shown = s.alpha * (1.0 - e);
+        if shown > 0.0 {
+            let id = state_id(&conv).with("preview");
+            egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+                let (r, resp) = ui.allocate_exact_size(rect.size(), Sense::click());
+                let hover = ui.ctx().animate_bool_with_time(id.with("hover"), resp.hovered(), 0.12);
+                let rest = if over { REST_ALPHA_OVER } else { REST_ALPHA };
+                let mut p = ui.painter().clone();
+                p.set_opacity(shown * (rest + (1.0 - rest) * hover));
+                p.rect_filled(r.translate(vec2(0.0, 3.0)).expand(1.0), 6.0, Color32::from_black_alpha(70));
+                page_picture(&p, t, None, r, 5.0);
+                let mut pp = p.clone();
+                pp.multiply_opacity(page_in(ui.ctx(), &s));
+                page_picture(&pp, t, s.tex.as_ref(), r, 5.0);
+                if let Some(inst) = &inst {
+                    preview_overlays(ui, &p, t, inst, r, r.width() / s.size.0.max(1) as f32);
+                }
+                p.rect_stroke(r, 5.0, Stroke::new(1.0, if hover > 0.5 { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
+                if let Some(inst) = &inst {
+                    let (title, url) = {
+                        let v = inst.view.lock().unwrap();
+                        (v.title.clone(), shown_url(&v.url))
+                    };
+                    let what = [title, url].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+                    let tip = if what.is_empty() { "Open the browser (Ctrl+Shift+B)".to_string() } else { format!("{what}\nClick to open (Ctrl+Shift+B)") };
+                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked() {
+                        set_expanded(ui.ctx(), &conv, &mut s, true);
+                    }
+                }
+            });
         }
-        let color = if open { t.accent } else if resp.hovered() { t.ink } else { t.ink3 };
-        p.text(rect.center(), Align2::CENTER_CENTER, GLOBE, markdown::icon_font(15.0), color);
-        let tip = if open { "Close the browser (Ctrl+Shift+B)" } else if browser::is_open(&conv) { "Show the browser (Ctrl+Shift+B)" } else { "Open the browser (Ctrl+Shift+B)\nThe model can use it while it is open." };
-        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked() {
-            self.toggle_browser(&conv, ui.ctx());
+        store(ctx, &conv, &s);
+    }
+}
+
+/// The page's picture filling `rect` (white until there is one).
+fn page_picture(p: &egui::Painter, t: &Theme, tex: Option<&TextureHandle>, rect: Rect, round: f32) {
+    let uv = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    match tex {
+        Some(h) => {
+            p.add(egui::epaint::RectShape::filled(rect, round, Color32::WHITE).with_texture(h.id(), uv));
+        }
+        None => {
+            p.rect_filled(rect, round, t.panel);
         }
     }
 }
 
-pub(crate) fn pane(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>) {
-    let r = ui.max_rect();
-    // The panel keeps the size its contents take: claimed whole, or it
-    // would shrink back to what the toolbar and page allocate.
-    ui.expand_to_include_rect(r);
-    ui.painter().vline(r.left(), r.y_range(), Stroke::new(1.0, t.line));
-    let bar = Rect::from_min_max(r.min + vec2(1.0, 0.0), egui::pos2(r.right(), r.top() + BAR_H));
-    toolbar(ui, t, inst, bar);
-    let page = Rect::from_min_max(egui::pos2(r.left() + 1.0, bar.bottom()), r.max);
-    page_view(ui, t, inst, page);
+/// Over the preview: how the browser is doing when it isn't showing a
+/// page, a dialog waiting, and the model's cursor (`k`: points per CSS px).
+fn preview_overlays(ui: &Ui, p: &egui::Painter, t: &Theme, inst: &Arc<Instance>, r: Rect, k: f32) {
+    let (status, dialog) = {
+        let v = inst.view.lock().unwrap();
+        (v.status.clone(), v.dialog.is_some())
+    };
+    let line = |text: &str, color: Color32| {
+        let g = p.layout(text.to_string(), FontId::proportional(11.5), color, r.width() - 20.0);
+        p.galley(r.center() - g.size() / 2.0, g, color);
+    };
+    match status {
+        Status::Starting => {
+            p.rect_filled(r, 5.0, t.panel);
+            line("Starting the browser…", t.ink3);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        Status::Failed(_) | Status::Quit(_) => {
+            p.rect_filled(r, 5.0, t.panel);
+            line("The browser stopped. Click to see why.", t.error);
+        }
+        Status::Ready => {
+            if dialog {
+                let g = p.layout_no_wrap("The page is waiting on a dialog".into(), FontId::proportional(11.0), Color32::WHITE);
+                let tag = Rect::from_min_size(egui::pos2(r.left() + 6.0, r.bottom() - g.size().y - 12.0), g.size() + vec2(10.0, 6.0));
+                p.rect_filled(tag, 4.0, Color32::from_black_alpha(200));
+                p.galley(tag.min + vec2(5.0, 3.0), g, Color32::WHITE);
+            }
+            agent_overlays(ui.ctx(), p, inst, r, k, 0.75, false);
+        }
+    }
+}
+
+/// The model's doing over the page in `rect` (`k` points per CSS px): a
+/// ring where it just clicked, and its cursor (`size` times the usual,
+/// with a name tag when `tag`).
+fn agent_overlays(ctx: &egui::Context, p: &egui::Painter, inst: &Arc<Instance>, rect: Rect, k: f32, size: f32, tag: bool) {
+    let (ptr, at) = {
+        let v = inst.view.lock().unwrap();
+        (v.agent_ptr, v.agent_at)
+    };
+    let green = oak_green();
+    let p = p.with_clip_rect(rect.intersect(p.clip_rect()));
+    if let Some((at, when)) = at {
+        match std::time::Instant::now().checked_duration_since(when).map(|d| d.as_secs_f32()) {
+            Some(age) if age < 0.8 => {
+                let a = 1.0 - age / 0.8;
+                p.circle_stroke(rect.min + at.to_vec2() * k, (5.0 + 16.0 * age) * size, Stroke::new(2.0, green.gamma_multiply(a)));
+                ctx.request_repaint();
+            }
+            Some(_) => {}
+            None => ctx.request_repaint(),
+        }
+    }
+    let Some(ptr) = ptr else { return };
+    let (at, moving) = ptr.now();
+    let idle = ptr.at.elapsed().saturating_sub(ptr.glide).as_secs_f32();
+    let alpha = if inst.agent_busy() { 1.0 } else { 1.0 - ((idle - CURSOR_STAYS) / 0.5).clamp(0.0, 1.0) };
+    if moving || (alpha > 0.0 && alpha < 1.0) {
+        ctx.request_repaint();
+    } else if alpha > 0.0 {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f32((CURSOR_STAYS - idle).max(0.05)));
+    }
+    if alpha > 0.0 {
+        paint_cursor(&p, rect.min + at.to_vec2() * k, size, tag, alpha);
+    }
+}
+
+/// Oak's cursor: a green arrow with its tip at `tip` (`size` times 17
+/// points tall), and when `tag`, a green "Oak" tag beside it.
+fn paint_cursor(p: &egui::Painter, tip: egui::Pos2, size: f32, tag: bool, alpha: f32) {
+    let green = oak_green().gamma_multiply(alpha);
+    let edge = Color32::from_black_alpha((220.0 * alpha) as u8);
+    // The arrow's outline; filled as triangles (it isn't convex).
+    let pts: Vec<egui::Pos2> = [(0.0, 0.0), (0.0, 15.0), (3.6, 11.6), (6.1, 17.4), (8.4, 16.4), (5.9, 10.8), (10.8, 10.8)]
+        .iter()
+        .map(|&(x, y)| tip + vec2(x, y) * size * 1.1)
+        .collect();
+    let mut mesh = egui::Mesh::default();
+    for q in &pts {
+        mesh.colored_vertex(*q, green);
+    }
+    for [a, b, c] in [[0, 1, 2], [0, 2, 5], [0, 5, 6], [2, 3, 4], [2, 4, 5]] {
+        mesh.add_triangle(a, b, c);
+    }
+    p.add(mesh);
+    p.add(egui::Shape::closed_line(pts.clone(), Stroke::new(1.2, edge)));
+    if tag {
+        let g = p.layout_no_wrap("Oak".into(), FontId::proportional(11.0 * size.max(0.8)), Color32::BLACK);
+        let r = Rect::from_min_size(tip + vec2(12.0, 16.0) * size, g.size() + vec2(10.0, 4.0));
+        p.rect_filled(r, 4.0, green);
+        p.galley(r.min + vec2(5.0, 2.0), g, Color32::from_black_alpha((235.0 * alpha) as u8));
+    }
+}
+
+/// The lightbox, `e` of the way open: the page growing from the preview
+/// over a dimming window, then, open, the toolbar, the page to use and its
+/// caption.
+fn lightbox(ctx: &egui::Context, t: &Theme, conv: &str, inst: Option<&Arc<Instance>>, s: &mut ViewState, e: f32) {
+    let area = lightbox_area(ctx);
+    let (frame, page, k) = lightbox_layout(area, s.size);
+    let ease = 1.0 - (1.0 - e).powi(3);
+    let a = s.alpha;
+    let full = e >= 1.0 && a >= 1.0;
+    let mut collapse = false;
+    egui::Area::new(state_id(conv).with("lightbox")).order(egui::Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
+        let (rect, backdrop) = ui.allocate_exact_size(area.size(), Sense::click());
+        let p = ui.painter().clone();
+        p.rect_filled(rect, 0.0, Color32::from_black_alpha((200.0 * ease * a) as u8));
+        let inst = match inst {
+            Some(i) if full => i,
+            _ => {
+                // On its way in or out: the picture alone, from the preview to its place.
+                let from = s.preview.unwrap_or(Rect::from_center_size(page.center(), page.size() * 0.9));
+                let r = Rect::from_min_max(from.min.lerp(page.min, ease), from.max.lerp(page.max, ease));
+                let mut fp = p.clone();
+                fp.set_opacity(a);
+                page_picture(&fp, t, s.tex.as_ref(), r, 0.0);
+                return;
+            }
+        };
+        // Clicks on the frame's bare parts aren't clicks beside it.
+        ui.interact(frame, state_id(conv).with("frame"), Sense::click());
+        if !ui.memory(|m| m.has_focus(page_id(conv))) && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            collapse = true;
+        }
+        p.rect_stroke(frame, 0.0, Stroke::new(1.0, t.line), egui::StrokeKind::Outside);
+        let bar = Rect::from_min_max(frame.min, egui::pos2(frame.right(), frame.top() + BAR_H));
+        collapse |= toolbar(ui, t, inst, bar);
+        page_view(ui, t, inst, page, k);
+        let pct = (k * 100.0).round();
+        let caption = format!("{}×{} viewport{}", s.size.0, s.size.1, if pct < 100.0 { format!(", shown at {pct}%") } else { String::new() });
+        let cy = page.bottom() + CAPTION_H / 2.0 + 2.0;
+        p.text(egui::pos2(page.left(), cy), Align2::LEFT_CENTER, caption, FontId::proportional(12.0), t.ink3);
+        p.text(egui::pos2(page.right(), cy), Align2::RIGHT_CENTER, "Click outside or Ctrl+Shift+B to go back to the preview", FontId::proportional(12.0), t.ink3);
+        collapse |= close_button(ui, t, rect, conv);
+        collapse |= backdrop.clicked();
+    });
+    if collapse {
+        set_expanded(ctx, conv, s, false);
+    }
+}
+
+/// The X in the lightbox's corner; true when clicked.
+fn close_button(ui: &Ui, t: &Theme, rect: Rect, conv: &str) -> bool {
+    let p = ui.painter();
+    let x_rect = Rect::from_center_size(egui::pos2(rect.right() - 32.0, rect.top() + 32.0), vec2(36.0, 36.0));
+    let resp = ui.interact(x_rect, state_id(conv).with("close"), Sense::click());
+    let lit = resp.hovered();
+    p.circle_filled(x_rect.center(), 18.0, Color32::from_white_alpha(if lit { 40 } else { 16 }));
+    let (c, s) = (x_rect.center(), 6.5);
+    let stroke = Stroke::new(1.8, if lit { t.ink } else { t.ink2 });
+    p.line_segment([c + vec2(-s, -s), c + vec2(s, s)], stroke);
+    p.line_segment([c + vec2(-s, s), c + vec2(s, -s)], stroke);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Back to the preview").clicked()
 }
 
 /// A toolbar button: an icon, dimmed when it can't be used.
@@ -144,10 +516,14 @@ fn paint_icon(p: &egui::Painter, c: egui::Pos2, icon: Icon, color: Color32) {
             p.line_segment([c + vec2(-h, -h), c + vec2(h, h)], stroke);
             p.line_segment([c + vec2(-h, h), c + vec2(h, -h)], stroke);
         }
+        Icon::Shrink => {
+            p.line_segment([c + vec2(-5.5, 4.0), c + vec2(5.5, 4.0)], stroke);
+        }
     }
 }
 
-fn toolbar(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, bar: Rect) {
+/// The toolbar over the page; true when its button back to the preview is clicked.
+fn toolbar(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, bar: Rect) -> bool {
     let p = ui.painter().clone();
     p.rect_filled(bar, 0.0, t.panel);
     p.hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, t.line));
@@ -167,12 +543,10 @@ fn toolbar(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, bar: Rect) {
     if bar_button(ui, t, b(2.0), Id::unique(("browser-reload", conv)), icon, tip, ready) {
         if loading { inst.stop_loading() } else { inst.reload() }
     }
-    let close = Rect::from_min_size(egui::pos2(bar.right() - 34.0, bar.top() + 2.0), vec2(30.0, BAR_H - 4.0));
-    if bar_button(ui, t, close, Id::unique(("browser-close", conv)), Icon::Cross, "Close the browser (Ctrl+Shift+B)", true) {
-        browser::close(conv);
-    }
+    let shrink = Rect::from_min_size(egui::pos2(bar.right() - 34.0, bar.top() + 2.0), vec2(30.0, BAR_H - 4.0));
+    let collapse = bar_button(ui, t, shrink, Id::unique(("browser-shrink", conv)), Icon::Shrink, "Back to the preview (Ctrl+Shift+B)", true);
     // The address: what the page is at, until the user edits it.
-    let field = Rect::from_min_max(egui::pos2(b(3.0).left() + 4.0, bar.top() + 5.0), egui::pos2(close.left() - 6.0, bar.bottom() - 5.0));
+    let field = Rect::from_min_max(egui::pos2(b(3.0).left() + 4.0, bar.top() + 5.0), egui::pos2(shrink.left() - 6.0, bar.bottom() - 5.0));
     let id = Id::unique(("browser-address", conv));
     let text_id = id.with("text");
     let focused = ui.memory(|m| m.has_focus(id));
@@ -198,6 +572,7 @@ fn toolbar(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, bar: Rect) {
     } else {
         ui.data_mut(|d| d.remove::<String>(text_id));
     }
+    collapse
 }
 
 /// The address as the bar shows it (about:blank as nothing).
@@ -205,25 +580,14 @@ fn shown_url(url: &str) -> String {
     if url == "about:blank" { String::new() } else { url.to_string() }
 }
 
-fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect) {
+/// The page in the lightbox, at `rect` (`k` points per CSS pixel), taking
+/// the user's input.
+fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, k: f32) {
     let ctx = ui.ctx().clone();
-    let scale = ctx.pixels_per_point();
-    inst.drawn_at(rect.width(), rect.height(), scale);
     let p = ui.painter().with_clip_rect(rect);
     p.rect_filled(rect, 0.0, Color32::WHITE);
-    // The newest frame, into the texture.
-    let frame = inst.view.lock().unwrap().frame.take();
-    {
-        let mut tex = inst.texture.lock().unwrap();
-        if let Some(img) = frame {
-            match tex.as_mut() {
-                Some(h) => h.set(img, egui::TextureOptions::LINEAR),
-                None => *tex = Some(ctx.load_texture(format!("browser-{}", inst.conv), img, egui::TextureOptions::LINEAR)),
-            }
-        }
-        if let Some(h) = tex.as_ref() {
-            paint_page_texture(&p, h, rect);
-        }
+    if let Some(h) = inst.texture.lock().unwrap().as_ref() {
+        paint_page_texture(&p, h, rect);
     }
     let status = inst.view.lock().unwrap().status.clone();
     match status {
@@ -248,11 +612,11 @@ fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect) {
             return;
         }
     }
-    let page_id = Id::unique(("browser-page", &inst.conv));
+    let page_id = page_id(&inst.conv);
     let resp = ui.interact(rect, page_id, Sense::click_and_drag());
-    let (dialog, cursor, select, agent_at, notice, copied) = {
+    let (dialog, cursor, select, notice, copied) = {
         let mut v = inst.view.lock().unwrap();
-        (v.dialog.clone(), v.cursor, v.select.clone(), v.agent_at, v.notice.clone(), v.copied.take())
+        (v.dialog.clone(), v.cursor, v.select.clone(), v.notice.clone(), v.copied.take())
     };
     if let Some(text) = copied {
         ctx.copy_text(text);
@@ -260,7 +624,7 @@ fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect) {
     let sel_id = page_id.with("select");
     let open_select = ui.data(|d| d.get_temp::<OpenSelect>(sel_id));
     if dialog.is_none() && open_select.is_none() {
-        forward_input(ui, inst, rect, page_id, resp.hovered(), select.as_ref());
+        forward_input(ui, inst, rect, k, page_id, resp.hovered(), select.as_ref());
         if resp.hovered() {
             ctx.set_cursor_icon(cursor);
         }
@@ -271,23 +635,7 @@ fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect) {
         let files = if c.multiple { dialog.pick_files().unwrap_or_default() } else { dialog.pick_file().into_iter().collect() };
         inst.choose_files(&c, files);
     }
-    // Where the model just clicked: a ring that fades.
-    if let Some((at, when)) = agent_at {
-        let age = when.elapsed().as_secs_f32();
-        if age < 1.0 {
-            let c = rect.min + at.to_vec2();
-            p.circle_stroke(c, 6.0 + 14.0 * age, Stroke::new(2.0, t.accent.gamma_multiply(1.0 - age)));
-            ctx.request_repaint();
-        }
-    }
-    // The model at work: an accent edge and a tag.
-    if inst.agent_busy() {
-        p.rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
-        let g = p.layout_no_wrap("Oak is using the browser".into(), FontId::proportional(11.5), Color32::WHITE);
-        let tag = Rect::from_min_size(egui::pos2(rect.right() - g.size().x - 18.0, rect.top() + 8.0), g.size() + vec2(12.0, 6.0));
-        p.rect_filled(tag, 4.0, t.accent);
-        p.galley(tag.min + vec2(6.0, 3.0), g, Color32::WHITE);
-    }
+    agent_overlays(&ctx, &p, inst, rect, k, 1.0, true);
     if let Some((text, when)) = notice
         && when.elapsed().as_secs() < 6
     {
@@ -302,30 +650,31 @@ fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect) {
         dialog_view(ui, t, inst, rect, &d);
     }
     if let Some(s) = open_select {
-        select_view(ui, t, inst, rect, sel_id, &s);
+        select_view(ui, t, inst, rect, k, sel_id, &s);
     }
 }
 
-/// Screencast pixels are not necessarily device pixels: Chromium can
-/// downsample them independently of the screen's scale. Map the complete
-/// frame to the page's CSS viewport, which is also where input is sent.
+/// Screencast pixels are not necessarily device pixels: Chromium scales
+/// them to the size asked for. Map the complete frame to the page's
+/// rectangle, which is also where input is taken.
 fn paint_page_texture(p: &egui::Painter, texture: &egui::TextureHandle, rect: Rect) {
     p.image(texture.id(), rect, Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
 }
 
-/// The user's pointer, wheel and keys, to the page.
-/// `hovered`: the page is what the pointer is on (not the pane's resize
-/// edge, which overlaps it), so a press there is the page's.
-fn forward_input(ui: &mut Ui, inst: &Arc<Instance>, rect: Rect, page_id: Id, hovered: bool, select: Option<&browser::Select>) {
+/// The user's pointer, wheel and keys, to the page at `rect` (`k` points
+/// per CSS pixel). `hovered`: the page is what the pointer is on, so a
+/// press there is the page's.
+fn forward_input(ui: &mut Ui, inst: &Arc<Instance>, rect: Rect, k: f32, page_id: Id, hovered: bool, select: Option<&browser::Select>) {
     let events = ui.input(|i| i.events.clone());
-    if forward_pointer(ui, inst, rect, page_id, hovered, select, &events) {
+    if forward_pointer(ui, inst, rect, k, page_id, hovered, select, &events) {
         forward_keys(ui, inst, page_id, &events);
     }
 }
 
 /// The pointer and the wheel, to the page; a press on its `<select>`
 /// opens the options in Oak instead. True when the page has the focus.
-fn forward_pointer(ui: &mut Ui, inst: &Arc<Instance>, rect: Rect, page_id: Id, hovered: bool, select: Option<&browser::Select>, events: &[egui::Event]) -> bool {
+#[allow(clippy::too_many_arguments)]
+fn forward_pointer(ui: &mut Ui, inst: &Arc<Instance>, rect: Rect, k: f32, page_id: Id, hovered: bool, select: Option<&browser::Select>, events: &[egui::Event]) -> bool {
     let ptr_id = page_id.with("pointer");
     let mut ptr = ui.data(|d| d.get_temp::<Pointer>(ptr_id)).unwrap_or_default();
     let (time, down) = ui.input(|i| {
@@ -334,7 +683,7 @@ fn forward_pointer(ui: &mut Ui, inst: &Arc<Instance>, rect: Rect, page_id: Id, h
             | (i.pointer.button_down(egui::PointerButton::Middle) as i64) << 2;
         (i.time, down)
     });
-    let css = |p: egui::Pos2| (p - rect.min).to_pos2();
+    let css = |p: egui::Pos2| ((p - rect.min) / k).to_pos2();
     let mods_now = ui.input(|i| i.modifiers);
     let mut focused = ui.memory(|m| m.has_focus(page_id));
     for e in events {
@@ -375,13 +724,14 @@ fn forward_pointer(ui: &mut Ui, inst: &Arc<Instance>, rect: Rect, page_id: Id, h
             }
             egui::Event::MouseWheel { unit, delta, modifiers, .. } => {
                 let Some(at) = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)) else { continue };
-                let k = match unit {
+                let per = match unit {
                     egui::MouseWheelUnit::Point => 1.0,
                     egui::MouseWheelUnit::Line => 40.0,
                     egui::MouseWheelUnit::Page => rect.height(),
                 };
-                // egui's up is positive; the page's down is.
-                inst.wheel(css(at), -delta.x * k, -delta.y * k, browser::modifier_bits(*modifiers));
+                // egui's up is positive; the page's down is. The page
+                // moves as far on screen as the wheel says.
+                inst.wheel(css(at), -delta.x * per / k, -delta.y * per / k, browser::modifier_bits(*modifiers));
             }
             _ => {}
         }
@@ -474,12 +824,13 @@ fn dialog_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, d: &bro
     }
 }
 
-/// A `<select>`'s options, under it.
-fn select_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, id: Id, s: &OpenSelect) {
+/// A `<select>`'s options, under it (`k` points per CSS pixel).
+fn select_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, k: f32, id: Id, s: &OpenSelect) {
     let [x, y, w, h] = s.select.rect;
+    let (x, y, w, h) = (x * k, y * k, w * k, h * k);
     let at = rect.min + vec2(x, y + h);
     let mut picked = None;
-    let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
+    let area = egui::Area::new(id.with("area")).order(egui::Order::Tooltip).fixed_pos(at).show(ui.ctx(), |ui| {
         egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.line)).inner_margin(Margin::same(4)).show(ui, |ui| {
             ui.set_min_width(w.max(120.0));
             ScrollArea::vertical().max_height((rect.bottom() - at.y - 10.0).max(120.0)).show(ui, |ui| {
@@ -507,7 +858,7 @@ fn select_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, id: Id,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_hover_test::{Headless, click, conv_json, press, run_frame};
+    use crate::app_hover_test::{Headless, click, conv_json, key, run_frame};
 
     /// A screencast can arrive at CSS resolution even on a HiDPI screen.
     /// Its image must fill the same rectangle that receives page input.
@@ -531,51 +882,129 @@ mod tests {
         }
     }
 
-    /// The pane keeps its width from frame to frame, and the width the
-    /// user drags it to (it used to shrink back to its minimum, 40 points
-    /// a frame, as its contents didn't claim the whole of it). Starts a
-    /// real browser.
+    /// The preview sits in the room between the column and the minimap
+    /// when there is some, in the viewport's shape, and over the
+    /// transcript's corner when there isn't; never past either edge.
+    #[test]
+    fn preview_fits_beside_the_column_or_over_it() {
+        let size = (DEFAULT_W_TEST, DEFAULT_H_TEST);
+        for (w, h) in [(1920.0, 1000.0), (1500.0, 900.0), (1280.0, 720.0), (1000.0, 700.0), (700.0, 500.0), (2560.0, 1400.0)] {
+            let view = Rect::from_min_size(egui::pos2(0.0, 66.0), vec2(w, h - 66.0 - 120.0));
+            let f = chat_view::Frame::new(view);
+            let right = f.map.map_or(f.track.left(), |m| m.left());
+            let (r, over) = preview_layout(view, f.col, right, view.top() + 12.0, size);
+            assert!(r.right() <= right - 13.0 && r.top() >= view.top(), "{w}x{h}: {r:?}");
+            assert!(((r.width() / r.height()) - 16.0 / 9.0).abs() < 0.02, "{w}x{h}: keeps the viewport's shape");
+            if over {
+                assert!(right - 14.0 - (f.col.max + 20.0) < PREVIEW_MIN_W, "{w}x{h}: over the column though there was room");
+                assert!(r.left() >= view.left(), "{w}x{h}");
+            } else {
+                assert!(r.left() >= f.col.max + 19.0, "{w}x{h}: overlaps the column: {r:?} {:?}", f.col);
+                assert!(r.width() <= PREVIEW_MAX_W + 0.5, "{w}x{h}");
+            }
+        }
+        // A wide window has the room; a narrow one doesn't.
+        let wide = Rect::from_min_size(egui::pos2(0.0, 66.0), vec2(1920.0, 800.0));
+        let f = chat_view::Frame::new(wide);
+        assert!(!preview_layout(wide, f.col, f.map.unwrap().left(), 78.0, size).1);
+        // A tall phone viewport is narrow and tall, at most its height.
+        let (r, _) = preview_layout(wide, f.col, f.map.unwrap().left(), 78.0, (390, 844));
+        assert!(r.height() <= 300.0 && r.width() < r.height());
+    }
+
+    /// The lightbox shows the whole viewport, in its shape, inside the
+    /// window, never above 1:1, at every window size.
+    #[test]
+    fn lightbox_fits_the_window() {
+        for (w, h) in [(1920.0, 1080.0), (1280.0, 720.0), (800.0, 600.0), (3840.0, 2160.0), (600.0, 1000.0)] {
+            let area = Rect::from_min_max(egui::pos2(0.0, TITLE_H), egui::pos2(w, h));
+            for size in [(1920, 1080), (390, 844), (1280, 800), (4096, 200)] {
+                let (frame, page, k) = lightbox_layout(area, size);
+                assert!(area.contains_rect(frame), "{w}x{h} {size:?}: {frame:?}");
+                assert!(page.bottom() + CAPTION_H <= area.bottom(), "{w}x{h} {size:?}: room for the caption");
+                assert!(k <= 1.0);
+                assert!((page.width() - size.0 as f32 * k).abs() < 0.01 && (page.height() - size.1 as f32 * k).abs() < 0.01);
+                // As large as it can be: one side fills its room (or it is 1:1).
+                let room = area.shrink2(vec2((area.width() * 0.03).max(24.0), (area.height() * 0.03).max(20.0)));
+                let fills = (page.width() - room.width()).abs() < 1.0 || (page.height() - (room.height() - BAR_H - CAPTION_H)).abs() < 1.0;
+                assert!(fills || k == 1.0, "{w}x{h} {size:?}: {page:?} in {room:?}");
+            }
+        }
+    }
+
+    /// The model's cursor glides from where it was to where it goes and
+    /// stays there.
+    #[test]
+    fn agent_pointer_glides_and_arrives() {
+        let ptr = browser::AgentPointer { from: egui::pos2(0.0, 0.0), to: egui::pos2(100.0, 50.0), at: std::time::Instant::now(), glide: std::time::Duration::from_millis(200) };
+        let (start, moving) = ptr.now();
+        assert!(moving && start.x < 30.0);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert_eq!(ptr.now(), (egui::pos2(100.0, 50.0), false));
+    }
+
+    const DEFAULT_W_TEST: u32 = browser::DEFAULT_W;
+    const DEFAULT_H_TEST: u32 = browser::DEFAULT_H;
+
+    /// The whole app with a browser the model opened: it fades in as a
+    /// preview between the transcript's column and the minimap; a click
+    /// expands it, and a click on the page is the page's; Ctrl+Shift+B
+    /// takes it back to the preview; closed, it fades out. Starts a real
+    /// browser.
     #[test]
     #[ignore]
-    fn whole_app_pane_keeps_its_width() {
-        const ID: &str = "pane-width-test";
+    fn whole_app_preview_expands_and_fades() {
+        const ID: &str = "preview-test";
         let messages = serde_json::json!([{"role":"user","content":[{"type":"text","text":"hi"}]}]);
-        let (_dir, mut h, mut app) = Headless::start("pane-width", &[conv_json(ID, "T", messages)]);
+        let (_dir, mut h, mut app) = Headless::start("browser-preview", &[conv_json(ID, "T", messages)]);
         h.screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1920.0, 1000.0));
         app.open(ID.into());
-        browser::open(ID, &h.ctx);
-        // Runs a frame; the pane's left edge (the address field is 100
-        // points into it).
-        let run = |h: &mut Headless, app: &mut App, events: Vec<egui::Event>| {
-            h.events(app, events);
-            h.ctx.read_response(Id::unique(("browser-address", ID))).unwrap().rect.left() - 100.0
-        };
-        for _ in 0..8 {
-            assert_eq!(run(&mut h, &mut app, vec![]), 1920.0 - PANE_DEFAULT_W);
-        }
-        let (y, x0) = (500.0, 1920.0 - PANE_DEFAULT_W);
-        let button = |x: f32, pressed| press(egui::pos2(x, y), egui::PointerButton::Primary, pressed);
-        run(&mut h, &mut app, vec![egui::Event::PointerMoved(egui::pos2(x0, y))]);
-        run(&mut h, &mut app, vec![button(x0, true)]);
-        for k in 1..=10 {
-            run(&mut h, &mut app, vec![egui::Event::PointerMoved(egui::pos2(x0 - 20.0 * k as f32, y))]);
-        }
-        run(&mut h, &mut app, vec![button(x0 - 200.0, false)]);
-        for _ in 0..8 {
-            assert_eq!(run(&mut h, &mut app, vec![]), x0 - 200.0);
-        }
-        // A press on the page is still the page's (not the edge's).
-        let inst = browser::get(ID).unwrap();
+        h.events(&mut app, vec![]);
+        let inst = browser::open(ID, &h.ctx);
+        let preview = |h: &Headless| h.ctx.read_response(state_id(ID).with("preview")).map(|r| r.rect);
+        let alpha = |h: &Headless| h.ctx.data(|d| d.get_temp::<ViewState>(state_id(ID))).map_or(0.0, |s| s.alpha);
+        h.events(&mut app, vec![]);
+        assert!(preview(&h).is_some(), "no preview");
+        assert!(alpha(&h) < 1.0, "it fades in");
         let start = std::time::Instant::now();
-        while inst.view.lock().unwrap().status != Status::Ready {
+        while inst.view.lock().unwrap().status != Status::Ready || alpha(&h) < 1.0 {
             assert!(start.elapsed().as_secs() < 30, "the browser didn't start");
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.events(&mut app, vec![]);
         }
-        let mid = egui::pos2(1500.0, y);
-        for e in click(mid, egui::PointerButton::Primary) {
-            run(&mut h, &mut app, vec![e]);
+        // Beside the column, left of the minimap, near the top.
+        let r = preview(&h).unwrap();
+        let view = h.ctx.data(|d| d.get_temp::<ViewState>(state_id(ID))).unwrap().beside.unwrap();
+        let f = chat_view::Frame::new(view);
+        assert!(r.left() > f.col.max && r.right() < f.map.unwrap().left(), "{r:?} {:?} {:?}", f.col, f.map);
+        assert!(r.top() < view.top() + 20.0);
+        // A click expands it; the page then takes up most of the window.
+        for e in click(r.center(), egui::PointerButton::Primary) {
+            h.events(&mut app, vec![e]);
         }
-        assert!(h.ctx.memory(|m| m.has_focus(Id::unique(("browser-page", ID)))));
+        for _ in 0..30 {
+            h.events(&mut app, vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let page = h.ctx.read_response(page_id(ID)).expect("no page").rect;
+        assert!(page.width() > 1500.0, "{page:?}");
+        for e in click(page.center(), egui::PointerButton::Primary) {
+            h.events(&mut app, vec![e]);
+        }
+        assert!(h.ctx.memory(|m| m.has_focus(page_id(ID))));
+        // Ctrl+Shift+B: back to the preview, the page without the focus.
+        h.events(&mut app, vec![key(Key::B, Modifiers::COMMAND | Modifiers::SHIFT)]);
+        assert!(!h.ctx.memory(|m| m.has_focus(page_id(ID))));
+        assert!(!h.ctx.data(|d| d.get_temp::<ViewState>(state_id(ID))).unwrap().expanded);
+        // Closed: it fades out, then goes.
         browser::close(ID);
+        h.events(&mut app, vec![]);
+        assert!(alpha(&h) > 0.0);
+        let start = std::time::Instant::now();
+        while alpha(&h) > 0.0 {
+            assert!(start.elapsed().as_secs() < 2, "it didn't fade out");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.events(&mut app, vec![]);
+        }
     }
 }

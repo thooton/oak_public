@@ -1,12 +1,14 @@
 //! Retained side chats are ordinary Sessions with a `side_chat_of` link, not
 //! subagents: they never report back or inherit running work. The bubble
-//! reopens the same fork in the right-hand pane, sharing its space with the
-//! browser. It draws the normal transcript and composer controls, without
+//! reopens the same fork in a resizable right-hand pane. It draws the normal transcript and composer controls, without
 //! the session box.
 //! Drafts, queued edits, reverts, tasks, shutdown and files use the same paths
 //! as other conversations. Closing the pane only hides it.
 
 use super::*;
+
+/// The pane's width until the user drags its edge.
+const PANE_DEFAULT_W: f32 = 640.0;
 
 pub(crate) const FORK_MESSAGE: &str = "The session was forked to be placed in a \"side chat\". This is only a chat for asking questions or requesting small changes, so do not continue work as you were before it was forked. Only make changes to the project if the user explicitly requests so.";
 
@@ -66,18 +68,17 @@ impl App {
         self.side_deleting = false;
         self.side_focus = true;
         self.side_active = true;
-        self.side_browser = false;
     }
 
-    /// Immediately left of the browser's globe. Right-click also offers
+    /// In the title bar, left of the window's buttons. Right-click also offers
     /// deletion when the retained chat's pane is closed.
     pub(crate) fn side_chat_toggle(&mut self, ui: &mut Ui, t: &Theme) {
         let Some(source) = self.browser_conv() else { return };
         let r = ui.max_rect();
-        let rect = Rect::from_min_size(egui::pos2(r.right() - 3.0 * 36.0 - 76.0, r.top()), vec2(36.0, r.height()));
+        let rect = Rect::from_min_size(egui::pos2(r.right() - 3.0 * 36.0 - 40.0, r.top()), vec2(36.0, r.height()));
         let resp = ui.interact(rect, Id::unique("side-chat-toggle"), Sense::click());
         let side = self.side_chat_for(&source);
-        let open = side.is_some() && self.side_chat == side && !self.side_browser;
+        let open = side.is_some() && self.side_chat == side;
         if resp.hovered() {
             ui.painter().rect_filled(rect, 0.0, t.panel);
         }
@@ -96,7 +97,6 @@ impl App {
                 if ui.button("Delete side chat").clicked() {
                     self.side_chat = Some(id);
                     self.side_deleting = true;
-                    self.side_browser = false;
                     ui.close();
                 }
             });
@@ -104,7 +104,7 @@ impl App {
     }
 
     /// Only the source's selected tab shows its side chat. Other tabs keep
-    /// their ordinary layout and browser, without changing the retained fork.
+    /// their ordinary layout, without changing the retained fork.
     pub(crate) fn shown_side_chat(&self) -> Option<String> {
         let source = self.browser_conv()?;
         let id = self.side_chat.as_ref()?;
@@ -112,7 +112,7 @@ impl App {
     }
 
     pub(crate) fn side_chat_focused(&self) -> bool {
-        self.side_active && !self.side_browser && self.shown_side_chat().is_some()
+        self.side_active && self.shown_side_chat().is_some()
     }
 
     pub(crate) fn close_side_chat(&mut self) {
@@ -121,64 +121,41 @@ impl App {
         self.side_active = false;
     }
 
-    /// One resizable right-hand pane. Switching its tabs leaves the browser
-    /// running and the side chat's session and draft untouched.
+    /// The side chat's resizable right-hand pane, when it is open.
     pub(crate) fn conversation_pane(&mut self, ui: &mut Ui, t: &Theme) {
-        let side = self.shown_side_chat();
-        let inst = self.browser_conv().and_then(|c| browser::get(&c));
-        if side.is_none() && inst.is_none() { return; }
-        if inst.is_none() { self.side_browser = false; }
+        let Some(side) = self.shown_side_chat() else { return };
         let max = (ui.max_rect().width() - 380.0).max(320.0);
-        egui::Panel::right("browser-pane")
-            .resizable(true).default_size(browser_view::PANE_DEFAULT_W.min(max)).size_range(320.0..=max)
+        egui::Panel::right("side-chat-pane")
+            .resizable(true).default_size(PANE_DEFAULT_W.min(max)).size_range(320.0..=max)
             .frame(egui::Frame::new().fill(t.bg))
             .show(ui, |ui| {
                 let r = ui.max_rect();
                 ui.expand_to_include_rect(r);
                 ui.painter().vline(r.left(), r.y_range(), Stroke::new(1.0, t.line));
                 if ui.input(|i| i.pointer.any_pressed()) {
-                    self.side_active = ui.rect_contains_pointer(r) && !self.side_browser;
+                    self.side_active = ui.rect_contains_pointer(r);
                 }
-                let target = if self.side_active && !self.side_browser { side.clone() } else {
+                let target = if self.side_active { Some(side.clone()) } else {
                     match &self.screen { Screen::Chat(id) => Some(id.clone()), Screen::New => None }
                 };
                 find::keyboard_target(ui.ctx(), target);
-                if let Some(id) = side.as_deref() {
-                    self.side_chat_bar(ui, t, id, inst.is_some());
-                }
-                if let Some(id) = side.as_deref().filter(|_| !self.side_browser) {
-                    self.side_chat_contents(ui, t, id);
-                } else if let Some(inst) = &inst {
-                    browser_view::pane(ui, t, inst);
-                }
+                self.side_chat_bar(ui, t, &side);
+                self.side_chat_contents(ui, t, &side);
             });
     }
 
-    fn side_chat_bar(&mut self, ui: &mut Ui, t: &Theme, id: &str, browser: bool) {
+    fn side_chat_bar(&mut self, ui: &mut Ui, t: &Theme, id: &str) {
         egui::Panel::top("side-chat-bar").exact_size(34.0)
             .frame(egui::Frame::new().fill(t.panel)).show(ui, |ui| {
                 let r = ui.max_rect();
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(8.0);
-                    if ui.selectable_label(!self.side_browser, "Side chat").clicked() {
-                        self.side_browser = false;
-                        self.side_active = true;
-                        self.side_focus = true;
-                    }
-                    if browser && ui.selectable_label(self.side_browser, "Browser").clicked() {
-                        self.side_browser = true;
-                        self.side_active = false;
-                    }
-                });
-                if !self.side_browser {
-                    let close = Rect::from_min_size(egui::pos2(r.right() - 34.0, r.top() + 2.0), vec2(30.0, 30.0));
-                    let delete = close.translate(vec2(-30.0, 0.0));
-                    if widgets::icon_button(ui, t, delete, Id::unique(("side-delete", id)), "Delete chat", paint_delete) {
-                        self.side_deleting = true;
-                    }
-                    if widgets::icon_button(ui, t, close, Id::unique(("side-close", id)), "Close side chat", widgets::draw_x) {
-                        self.close_side_chat();
-                    }
+                ui.painter().text(egui::pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, "Side chat", FontId::proportional(13.0), t.ink2);
+                let close = Rect::from_min_size(egui::pos2(r.right() - 34.0, r.top() + 2.0), vec2(30.0, 30.0));
+                let delete = close.translate(vec2(-30.0, 0.0));
+                if widgets::icon_button(ui, t, delete, Id::unique(("side-delete", id)), "Delete chat", paint_delete) {
+                    self.side_deleting = true;
+                }
+                if widgets::icon_button(ui, t, close, Id::unique(("side-close", id)), "Close side chat", widgets::draw_x) {
+                    self.close_side_chat();
                 }
             });
     }

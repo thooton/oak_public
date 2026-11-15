@@ -29,7 +29,8 @@ belongs in its file's opening comment.
 You need a recent stable Rust (edition 2024). Oak runs on Windows 10/11 with
 [Git for Windows](https://gitforwindows.org/) (commands run in Git Bash) and on Linux with X11 or
 Wayland (commands run in `bash`). Optional, for the agent's tools: Chrome, Chromium, Brave or Edge
-(FETCH `render`, SCREENSHOT, the browser pane), and on Linux Xvfb, xdotool and ImageMagick
+(FETCH `render`, SCREENSHOT, the BROWSER kit), `curl` on the PATH (SEARCH for images without
+a key; Windows and Git for Windows bring one), and on Linux Xvfb, xdotool and ImageMagick
 (testing GUI apps off-screen).
 
 ```sh
@@ -58,10 +59,10 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
   `OAK_API_BASE` and a scratch `OAK_DIR`). Build them with `--release`.
 - Against the real services, signed in (a small cost): `live_rolling`, `live_images`,
   `live_agents`, `live_freebuff` (`OAK_TEST_PROMPT`, `OAK_TEST_FOLDER`) and `live_cloud_list`
-  (read only), `live_rewrite` and `live_search`. `live_hidden_desktop` (Windows, after `cargo build`)
+  (read only), `live_rewrite`, `live_search` and `live_images_search` (`OAK_TEST_QUERY`). `live_hidden_desktop` (Windows, after `cargo build`)
   opens Oak on a hidden desktop.
 - Whole-app tests that open a window: `whole_app_close_with_a_task`, `whole_app_tab_shortcuts`,
-  `whole_app_pane_keeps_its_width`. `upgrade_real_conversations` loads a copy of real
+  `whole_app_preview_expands_and_fades` (starts a real browser). `upgrade_real_conversations` loads a copy of real
   conversations (`OAK_UPGRADE_FROM`).
 - Plugins, headless, each alone (plugins load once per process):
   `the_example_plugins_draw_in_the_window` (after `cargo build -p oak-hello`, with
@@ -118,7 +119,7 @@ login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
 size, place and maximized state), `seats.json` (which account each
-conversation is on), `tasks/` and `task-output/` (background tasks), `browser/` (the browser pane's
+conversation is on), `tasks/` and `task-output/` (background tasks), `browser/` (the browsers'
 profiles), `plugins/` (plugins to load, and what they keep is beside it under names of their
 own), `bin/` (programs for the agent's commands: the bundled ripgrep, `src/toolbin.rs`),
 `usage.jsonl` and `crash.log`. Files are written to a temporary file and renamed over
@@ -232,6 +233,22 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
   `{{#unix}}`, `{{#main}}`, `{{#agent}}`, `{{#full}}`, `{{#local}}`, `{{#goal}}` and kit blocks are kept only where they apply, and
   comments are dropped (`build.rs`, `src/agent/prompt.rs`). It is compiled in: a change takes a
   rebuild. It calls the model Oak, whichever lab made it.
+- SEARCH (`src/tools/search.rs`) asks one provider, the next when it fails or finds nothing:
+  Google (through Serper) only when `SERPER_API_KEY` is set, then Firecrawl, Parallel, Exa and
+  Tavily, which need no key (`FIRECRAWL_API_KEY`, `PARALLEL_API_KEY`, `EXA_API_KEY` and
+  `TAVILY_API_KEY` are used when set; `OAK_SEARCH_PROVIDER` puts one first). One that says its
+  rate limit is reached goes last for 15 minutes. A result is a title, a link and a summary of up
+  to 500 characters; `max_results` is 1-20 and `page` (up to 5) reads on; `site:` in every query
+  keeps the results to those sites.
+- SEARCH with `images` (`src/tools/image_search.rs`) searches for images instead, with the same
+  objective, queries, `max_results` (1-24, default 12) and `page`: it returns one picture, a sheet of up to 24
+  thumbnails laid out like Google Images in the Oak theme's colors (columns, each thumbnail at its
+  own height with rounded corners), each with its number (large, oak green), its title and the
+  start of its link under it, and each one's title, size and site as text. SEARCH with `image` (and nothing else) shows one in full by
+  its number (or any image by its URL) with its link and its page's, and saves the file in the
+  scratchpad's `images` folder. The numbers count up through the conversation. The images come
+  from Google (Serper, with `SERPER_API_KEY`) or else from Brave's image search page, fetched
+  with `curl`; no browser is used.
 - A reply's tool calls run in parallel, each as soon as it has streamed in, waiting only for calls
   on a file it touches, and for ASK and CD, which run on their own (`src/agent/tool_calls.rs`).
 - CD switches the conversation's working folder for the rest of the session (relative paths,
@@ -300,10 +317,9 @@ same prompt. Its tab has Oak's tree, its Home row says "folder, super agent", an
 `go_new` takes `super` to pick it. Oak's own choices win over a plugin's `NewKind` of the same id,
 as built-in roles do over plugin roles (`add_roles`), so a plugin can't replace either.
 
-**Side chats** (`src/side_chat.rs`). The message bubble immediately left of the browser icon opens
-this conversation's side chat from the right within Oak, with only its transcript and message box.
-It shares the browser's resizable pane; when both are open, the pane's tabs switch between them
-without stopping either. The usual attachment, pause and ultrapause buttons sit by the message box.
+**Side chats** (`src/side_chat.rs`). The message bubble in the title bar, left of the window's buttons,
+opens this conversation's side chat in a resizable pane on the right within Oak, with only its
+transcript and message box. The usual attachment, pause and ultrapause buttons sit by the message box.
 The first opening snapshots the saved conversation (including smart context and notes) and adds:
 'The session was forked to be placed in a "side chat". This is only a chat for asking questions or requesting small changes, so do not continue work as you were before it was forked. Only make changes to the project if the user explicitly requests so.'
 It waits for a question; the original keeps working independently. A side chat shares the working
@@ -324,9 +340,14 @@ transcript or a plugin's chat scrolls it as browsers do (`src/autoscroll.rs`): t
 below the ring left where it was pressed, the faster; letting go after moving with the button held
 ends it, and after a plain click it runs until the next click, Esc or the wheel. The clicks it
 takes reach nothing else, so the text selection stays, and a middle click on a tab still closes
-it. The browser pane
-(Ctrl+Shift+B, `src/browser.rs`) is a real Chromium page per
-conversation that the user and the model (the BROWSER kit, when the user asks) both use. The Usage page
+it. The browser (`src/browser.rs`, its view `src/browser_view.rs`) is a real Chromium page per
+conversation that only the model opens and closes (the BROWSER kit's open and close, when the user
+asks); there is no button for it. It fades in and out as it does, and while it is open a
+see-through preview sits beside the transcript, between the column and the minimap (over the
+transcript's corner when there is no room). A click on it, or Ctrl+Shift+B, expands it over the
+window as an image opens, where the user uses the page; the X, a click beside it, Ctrl+Shift+B or
+Esc go back. Its viewport is its own (1920x1080 CSS pixels until the model resizes it), scaled to
+fit either way, and the model's pointer shows on it as Oak's green cursor. The Usage page
 (`src/usage_view.rs`) charts API-priced cost per 1% of the plan limits, from this machine's usage log
 (`usage.jsonl`; a plugin can add the records other machines made, `oak_sdk::Host::usage_set_shared`). Every text field has a right-click menu (Cut,
 Copy, Paste, Select all; `src/text_menu.rs`) that keeps the selection and the field's focus; a
@@ -337,7 +358,8 @@ in the box Up only moves the cursor.
 
 **Testing GUI apps off-screen.** `oak --window` (Windows, `src/winctl.rs`) runs a program on a
 hidden desktop and drives it without touching your screen: `"$OAK" --window launch -- app.exe`,
-then `shot`, `click`, `type`, `key`, `close` (`"$OAK" --window help` lists them). On Linux the
+then `shot`, `record` (frames for a video), `click`, `type`, `key`, `close` (`"$OAK" --window help`
+lists them). On Linux the
 prompt points the agent at Xvfb, xdotool and ImageMagick instead.
 
 ## Cloud sessions

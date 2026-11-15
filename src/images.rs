@@ -69,6 +69,12 @@ fn encode(img: &DynamicImage, prefer_jpeg: bool) -> Result<Image, String> {
     Ok(Image { media_type: "image/jpeg", data: b64(&jpeg(img)?), width, height })
 }
 
+/// A picture Oak drew itself (a sheet of thumbnails), as a JPEG: far
+/// smaller than a PNG of photographs.
+pub fn encode_jpeg(img: &DynamicImage) -> Result<Image, String> {
+    encode(img, true)
+}
+
 fn shrink(img: DynamicImage) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     if w.max(h) <= MAX_EDGE {

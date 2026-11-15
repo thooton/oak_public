@@ -2,23 +2,35 @@
 //! pages, each with its title, link and a short summary, and no page text:
 //! the model FETCHes the pages worth reading, as a person clicks results.
 //!
-//! The providers are opencode's keyless ones (Firecrawl, Parallel, Exa,
-//! Tavily), each brought to the same {url, title, summary, published}
-//! shape. One answers; when it fails or finds nothing, the next is tried.
-//! OAK_SEARCH_PROVIDER puts one first; FIRECRAWL_API_KEY, PARALLEL_API_KEY,
-//! EXA_API_KEY and TAVILY_API_KEY are used when set.
+//! The providers are Google (through Serper, only with SERPER_API_KEY: no
+//! Google search works without a key) and opencode's keyless ones
+//! (Firecrawl, Parallel, Exa, Tavily), each brought to the same {url,
+//! title, summary, published} shape. One answers; when it fails or finds
+//! nothing, the next is tried, and one that says its rate limit is reached
+//! (Firecrawl's keyless one is a few searches a day for an address) goes
+//! last for a while. OAK_SEARCH_PROVIDER puts one first; FIRECRAWL_API_KEY,
+//! PARALLEL_API_KEY, EXA_API_KEY and TAVILY_API_KEY are used when set.
+//!
+//! `page` reads on: the providers have no cursor, so each is asked for
+//! everything up to the page's end and the earlier pages are left out.
 
 use crate::tools::Head;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use super::one_line;
 
 /// Results returned when the call doesn't say (opencode asks for 8).
 pub const DEFAULT_RESULTS: usize = 10;
 pub const MAX_RESULTS: usize = 20;
-/// A result's summary, at most: a search engine's snippet.
-const SUMMARY_CHARS: usize = 240;
+/// The last page that can be asked for.
+pub const MAX_PAGE: usize = 5;
+/// A result's summary, at most: a few sentences, enough to tell whether
+/// the page is worth a FETCH (a search engine's own snippet is shorter).
+const SUMMARY_CHARS: usize = 500;
+/// How long a provider that said its rate limit is reached goes last.
+const REST: Duration = Duration::from_secs(15 * 60);
 /// One provider's request, at most.
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// The line closing a result list, which also tells the model what next.
@@ -35,18 +47,24 @@ pub struct Hit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Provider {
+pub(super) enum Provider {
+    /// Google's results, through Serper.
+    Serper,
     Firecrawl,
     Parallel,
     Exa,
     Tavily,
 }
 
-const PROVIDERS: [Provider; 4] = [Provider::Firecrawl, Provider::Parallel, Provider::Exa, Provider::Tavily];
+const PROVIDERS: [Provider; 5] = [Provider::Serper, Provider::Firecrawl, Provider::Parallel, Provider::Exa, Provider::Tavily];
+
+/// The providers that said their rate limit is reached, and when.
+static RESTING: Mutex<Vec<(Provider, Instant)>> = Mutex::new(vec![]);
 
 impl Provider {
     fn name(self) -> &'static str {
         match self {
+            Provider::Serper => "Google",
             Provider::Firecrawl => "Firecrawl",
             Provider::Parallel => "Parallel",
             Provider::Exa => "Exa",
@@ -54,14 +72,30 @@ impl Provider {
         }
     }
 
-    fn key(self) -> Option<String> {
+    pub(super) fn key(self) -> Option<String> {
         let var = match self {
+            Provider::Serper => "SERPER_API_KEY",
             Provider::Firecrawl => "FIRECRAWL_API_KEY",
             Provider::Parallel => "PARALLEL_API_KEY",
             Provider::Exa => "EXA_API_KEY",
             Provider::Tavily => "TAVILY_API_KEY",
         };
         std::env::var(var).ok().filter(|k| !k.trim().is_empty())
+    }
+
+    /// Whether it said its rate limit is reached less than `REST` ago.
+    fn resting(self) -> bool {
+        RESTING.lock().unwrap().iter().any(|(p, at)| *p == self && at.elapsed() < REST)
+    }
+
+    /// Notes a rate limit in `error`, so the next searches try it last.
+    fn rest_after(self, error: &str) {
+        let e = error.to_lowercase();
+        if e.contains("limit") || e.contains("429") || e.contains("credits") {
+            let mut resting = RESTING.lock().unwrap();
+            resting.retain(|(p, _)| *p != self);
+            resting.push((self, Instant::now()));
+        }
     }
 
     /// Up to `limit` results for each query, best first.
@@ -76,6 +110,7 @@ impl Provider {
                         .iter()
                         .map(|q| {
                             s.spawn(move || match self {
+                                Provider::Serper => serper(q, limit),
                                 Provider::Firecrawl => firecrawl(q, limit),
                                 Provider::Exa => exa(q, objective, limit),
                                 _ => tavily(q, limit),
@@ -95,12 +130,35 @@ impl Provider {
 }
 
 /// The providers in the order they are tried: OAK_SEARCH_PROVIDER's
-/// first, then those with a key, then the rest.
+/// first ("google" or "serper" for Google), then those with a key, then
+/// the rest; those resting after a rate limit last. Google only with its key.
 fn order() -> Vec<Provider> {
-    let chosen = std::env::var("OAK_SEARCH_PROVIDER").unwrap_or_default().to_lowercase();
-    let mut list = PROVIDERS.to_vec();
-    list.sort_by_key(|p| (p.name().to_lowercase() != chosen.trim(), p.key().is_none()));
+    let chosen = std::env::var("OAK_SEARCH_PROVIDER").unwrap_or_default().trim().to_lowercase();
+    let chosen = if chosen == "serper" { "google".to_string() } else { chosen };
+    let mut list: Vec<Provider> = PROVIDERS.into_iter().filter(|p| *p != Provider::Serper || p.key().is_some()).collect();
+    list.sort_by_key(|p| (p.resting(), p.name().to_lowercase() != chosen, p.key().is_none()));
     list
+}
+
+/// The sites every query is limited to with `site:` (none unless each
+/// query names one): not every provider keeps to them by itself.
+fn sites(queries: &[String]) -> Vec<String> {
+    let of = |q: &String| -> Vec<String> {
+        q.split_whitespace()
+            .filter_map(|w| w.strip_prefix("site:"))
+            .map(|s| s.split('/').next().unwrap_or(s).trim_start_matches("www.").to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let each: Vec<Vec<String>> = queries.iter().map(of).collect();
+    if each.iter().any(Vec::is_empty) { vec![] } else { each.concat() }
+}
+
+/// Whether `url` is on one of `sites` (or a subdomain of one).
+fn on_site(url: &str, sites: &[String]) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#', ':']).next().unwrap_or(rest).to_lowercase();
+    sites.iter().any(|s| host == *s || host.ends_with(&format!(".{s}")))
 }
 
 pub fn search(input: &Value) -> Result<String, String> {
@@ -120,24 +178,36 @@ pub fn search(input: &Value) -> Result<String, String> {
         }
         queries.push(objective.clone());
     }
+    let objective = if objective.is_empty() { queries.join(", ") } else { objective };
     let objective = if objective.is_empty() { queries.join("; ") } else { objective };
     let limit = input["max_results"].as_u64().map_or(DEFAULT_RESULTS, |n| (n as usize).clamp(1, MAX_RESULTS));
+    let page = input["page"].as_u64().map_or(1, |n| (n as usize).clamp(1, MAX_PAGE));
+    // The pages before this one, and everything up to its end.
+    let (skip, want) = ((page - 1) * limit, page * limit);
+    let sites = sites(&queries);
 
     let mut failures = vec![];
     for p in order() {
-        match p.search(&objective, &queries, limit) {
-            Ok(runs) => {
-                let hits = merge(runs, limit);
+        match p.search(&objective, &queries, want) {
+            Ok(mut runs) => {
+                if !sites.is_empty() {
+                    runs.iter_mut().for_each(|run| run.retain(|h| on_site(&h.url, &sites)));
+                }
+                let hits: Vec<Hit> = merge(runs, want).into_iter().skip(skip).collect();
                 if !hits.is_empty() {
-                    return Ok(format_results(&objective, p.name(), &hits));
+                    let more = (hits.len() == limit && page < MAX_PAGE).then_some(page + 1);
+                    return Ok(format_results(&objective, p.name(), &hits, skip, more));
                 }
                 failures.push(format!("{}: no results", p.name()));
             }
-            Err(e) => failures.push(format!("{}: {e}", p.name())),
+            Err(e) => {
+                p.rest_after(&e);
+                failures.push(format!("{}: {e}", p.name()));
+            }
         }
     }
     if failures.iter().all(|f| f.ends_with(": no results")) {
-        return Ok("No search results found. Try different queries.".into());
+        return Ok(if page > 1 { format!("No more results: page {page} is past the last. Try different queries.") } else { "No search results found. Try different queries.".into() });
     }
     Err(format!("Search failed ({})", failures.join("; ")))
 }
@@ -149,10 +219,17 @@ pub fn search(input: &Value) -> Result<String, String> {
 ///    https://example.com/page
 ///    2024-05-01, A sentence or two about the page.
 /// ```
-pub fn format_results(objective: &str, provider: &str, hits: &[Hit]) -> String {
-    let mut out = format!("{} result{} for \"{}\" (via {provider}):\n", hits.len(), crate::plural(hits.len()), one_line(objective));
+///
+/// `skip`: how many results came before these (on earlier pages), so the
+/// numbers carry on; `more`: the page to ask for next, when there may be one.
+pub fn format_results(objective: &str, provider: &str, hits: &[Hit], skip: usize, more: Option<usize>) -> String {
+    let mut out = if skip == 0 {
+        format!("{} result{} for \"{}\" (via {provider}):\n", hits.len(), crate::plural(hits.len()), one_line(objective))
+    } else {
+        format!("Results {}-{} for \"{}\" (via {provider}):\n", skip + 1, skip + hits.len(), one_line(objective))
+    };
     for (i, h) in hits.iter().enumerate() {
-        out.push_str(&format!("\n{}. {}\n   {}\n", i + 1, one_line(&h.title), h.url));
+        out.push_str(&format!("\n{}. {}\n   {}\n", skip + i + 1, one_line(&h.title), h.url));
         let line = match (&h.published, h.summary.is_empty()) {
             (Some(d), false) => format!("{d}, {}", h.summary),
             (Some(d), true) => d.clone(),
@@ -163,6 +240,9 @@ pub fn format_results(objective: &str, provider: &str, hits: &[Hit]) -> String {
         }
     }
     out.push('\n');
+    if let Some(page) = more {
+        out.push_str(&format!("For more results, call SEARCH again with page={page}. "));
+    }
     out.push_str(FOOTER);
     out
 }
@@ -346,13 +426,13 @@ fn hit(url: &str, title: Option<&str>, text: &str, published: Option<&str>) -> O
 /// One client for every search: a clone shares its connection pool, so a
 /// search soon after another to the same provider skips the new
 /// connection and TLS handshake (about 300 ms of each).
-fn client() -> reqwest::blocking::Client {
+pub(super) fn client() -> reqwest::blocking::Client {
     static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
         std::sync::LazyLock::new(|| reqwest::blocking::Client::builder().timeout(TIMEOUT).user_agent("oak/0.1").build().unwrap_or_default());
     CLIENT.clone()
 }
 
-fn http_error(status: reqwest::StatusCode) -> String {
+pub(super) fn http_error(status: reqwest::StatusCode) -> String {
     match status.as_u16() {
         429 => "rate limited (HTTP 429)".into(),
         401 | 403 => format!("not authorized (HTTP {})", status.as_u16()),
@@ -379,9 +459,16 @@ fn mcp(url: &str, tool: &str, args: Value, key: Option<String>) -> Result<Value,
     }
     let result = msg["result"].clone();
     if result["isError"].as_bool() == Some(true) {
-        return Err(one_line(&mcp_text(&result)).head(300));
+        return Err(brief(&mcp_text(&result)));
     }
     Ok(result)
+}
+
+/// A provider's error as one short line: its first line only. The rest is
+/// the provider's advice to whoever reads it (sign up here, tell the user
+/// this, stop the task), which is not for the model to act on.
+fn brief(error: &str) -> String {
+    one_line(error.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("unknown error")).head(160)
 }
 
 /// The JSON-RPC answer in a body that is plain JSON or an SSE stream.
@@ -396,9 +483,54 @@ fn mcp_text(result: &Value) -> String {
     result["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n")
 }
 
+/// Google, through Serper: Google's own results and snippets, ten to a
+/// page, so `limit` results take a request for each ten.
+fn serper(query: &str, limit: usize) -> Result<Vec<Hit>, String> {
+    let key = Provider::Serper.key().ok_or("no SERPER_API_KEY")?;
+    let mut hits = vec![];
+    for page in 1..=limit.div_ceil(10) {
+        match serper_call("search", json!({"q": query, "page": page}), &key) {
+            Ok(v) => {
+                let found = parse_serper(&v);
+                if found.is_empty() {
+                    break;
+                }
+                hits.extend(found);
+            }
+            Err(e) if hits.is_empty() => return Err(e),
+            Err(_) => break,
+        }
+    }
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+/// One Serper request: `kind` is "search" or "images".
+pub(super) fn serper_call(kind: &str, body: Value, key: &str) -> Result<Value, String> {
+    let resp = client()
+        .post(format!("https://google.serper.dev/{kind}"))
+        .header("X-API-KEY", key.trim())
+        .json(&body)
+        .send()
+        .map_err(|e| if e.is_timeout() { "timed out".into() } else { e.to_string() })?;
+    if !resp.status().is_success() {
+        return Err(http_error(resp.status()));
+    }
+    resp.json().map_err(|e| e.to_string())
+}
+
+fn parse_serper(v: &Value) -> Vec<Hit> {
+    v["organic"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| hit(r["link"].as_str()?, r["title"].as_str(), r["snippet"].as_str().unwrap_or(""), r["date"].as_str()))
+        .collect()
+}
+
 /// Firecrawl: a search engine's own results and snippets.
 fn firecrawl(query: &str, limit: usize) -> Result<Vec<Hit>, String> {
-    let result = mcp("https://mcp.firecrawl.dev/v2/mcp", "firecrawl_search", json!({"query": query, "limit": limit}), Provider::Firecrawl.key())?;
+    let result = mcp("https://mcp.firecrawl.dev/v2/mcp", "firecrawl_search", json!({"query": query, "limit": limit.min(100)}), Provider::Firecrawl.key())?;
     parse_firecrawl(&mcp_text(&result))
 }
 
@@ -461,7 +593,7 @@ fn tavily(query: &str, limit: usize) -> Result<Vec<Hit>, String> {
     let mut req = client()
         .post("https://api.tavily.com/search")
         .header("X-Client-Name", "oak")
-        .json(&json!({"query": query, "search_depth": "basic", "max_results": limit}));
+        .json(&json!({"query": query, "search_depth": "basic", "max_results": limit.min(20)}));
     req = match Provider::Tavily.key() {
         Some(key) => req.bearer_auth(key),
         None => req.header("X-Tavily-Access-Mode", "keyless"),
@@ -536,12 +668,16 @@ mod tests {
         for p in PROVIDERS {
             match p.search("How to set a timeout on a reqwest blocking client", &queries, DEFAULT_RESULTS) {
                 Ok(runs) => {
-                    let text = format_results("reqwest blocking timeout", p.name(), &merge(runs, DEFAULT_RESULTS));
+                    let text = format_results("reqwest blocking timeout", p.name(), &merge(runs, DEFAULT_RESULTS), 0, Some(2));
                     println!("{text}\n[{} chars]\n", text.len());
-                    assert!(text.len() < 6_000);
+                    assert!(text.len() < 9_000);
                 }
                 Err(e) => println!("{}: {e}\n", p.name()),
             }
+        }
+        // The tool itself: a second page, and queries kept to a site.
+        for input in [json!({"objective": "reqwest timeout", "queries": queries, "max_results": 5, "page": 2}), json!({"objective": "reqwest timeout", "queries": ["site:docs.rs reqwest timeout"], "max_results": 5})] {
+            println!("{}\n", search(&input).unwrap_or_else(|e| e));
         }
     }
 
@@ -551,12 +687,47 @@ mod tests {
             Hit { url: "https://a.example/x".into(), title: "A\ntitle".into(), summary: "About A.".into(), published: Some("2024-01-02".into()) },
             Hit { url: "https://b.example".into(), title: "B".into(), summary: String::new(), published: None },
         ];
-        let text = format_results("find things", "Firecrawl", &hits);
+        let text = format_results("find things", "Firecrawl", &hits, 0, None);
         assert!(text.starts_with("2 results for \"find things\" (via Firecrawl):\n\n1. A title\n   https://a.example/x\n   2024-01-02, About A.\n\n2. B\n"), "{text}");
         assert_eq!(
             parse_results(&text).unwrap(),
             [("A title".to_string(), "https://a.example/x".to_string(), "2024-01-02, About A.".to_string()), ("B".into(), "https://b.example".into(), String::new())]
         );
         assert!(parse_results("No search results found.").is_none());
+        // A later page: the numbers carry on, and the footer says how to read on.
+        let text = format_results("find things", "Parallel", &hits, 10, Some(3));
+        assert!(text.starts_with("Results 11-12 for \"find things\" (via Parallel):\n\n11. A title\n"), "{text}");
+        assert!(text.ends_with(&format!("\n\nFor more results, call SEARCH again with page=3. {FOOTER}")), "{text}");
+        assert_eq!(parse_results(&text).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn site_queries_keep_to_their_sites() {
+        let q = |s: &str| s.to_string();
+        assert_eq!(sites(&[q("site:docs.rs reqwest timeout"), q("timeout site:www.GitHub.com/seanmonstar")]), ["docs.rs", "github.com"]);
+        // One query without a site: nothing is filtered.
+        assert!(sites(&[q("site:docs.rs reqwest"), q("reqwest timeout")]).is_empty());
+        let s = vec![q("docs.rs"), q("github.com")];
+        assert!(on_site("https://docs.rs/reqwest", &s) && on_site("http://gist.github.com:443/x", &s));
+        assert!(!on_site("https://notgithub.com/x", &s) && !on_site("https://example.com/docs.rs", &s));
+    }
+
+    #[test]
+    fn provider_errors_are_one_line_and_rate_limits_rest() {
+        let e = brief("\nFirecrawl's daily limit without an account was reached.\n\nFix: Create an API key at https://x\nStop here and tell the user.");
+        assert_eq!(e, "Firecrawl's daily limit without an account was reached.");
+        assert!(!Provider::Tavily.resting());
+        Provider::Tavily.rest_after("HTTP 500");
+        assert!(!Provider::Tavily.resting());
+        Provider::Tavily.rest_after(&e);
+        assert!(Provider::Tavily.resting());
+        assert_eq!(order().last(), Some(&Provider::Tavily));
+        RESTING.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn serper_parses() {
+        let v = json!({"organic": [{"title": "Apple", "link": "https://www.apple.com/", "snippet": "Discover the innovative world of Apple.", "date": "1 day ago", "position": 1}], "credits": 1});
+        assert_eq!(parse_serper(&v), vec![Hit { url: "https://www.apple.com/".into(), title: "Apple".into(), summary: "Discover the innovative world of Apple.".into(), published: None }]);
     }
 }

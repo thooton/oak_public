@@ -74,7 +74,7 @@ impl Worker {
         self.tasks.get(id).ok_or(format!("No task {id}."))
     }
 
-    /// READ on an image file, or SCREENSHOT: tools whose result is an image.
+    /// READ on an image file, SCREENSHOT, or SEARCH for images: calls whose result is an image.
     fn image_tool(&self, name: &str, input: &Value) -> Option<(Result<Vec<Value>, String>, bool)> {
         let folder = self.conv.lock().unwrap().folder.clone();
         match name {
@@ -86,6 +86,12 @@ impl Worker {
                 let save = input["path"].as_str().map(|p| tools::resolve(&folder, p));
                 let input = input.clone();
                 Some(self.abandonable("Screenshot", move || crate::web::screenshot(&input, save)))
+            }
+            "SEARCH" if tools::wants_images(input) => {
+                // The images' index and those seen in full live in the scratchpad.
+                let dir = scratchpad(&mut self.conv.lock().unwrap()).join("images");
+                let input = input.clone();
+                Some(self.abandonable("The image search", move || tools::images(&input, &dir)))
             }
             _ => None,
         }
@@ -339,11 +345,11 @@ impl Worker {
     fn load(&self, call: &Value, input: &Value, stop: &str) -> (Value, bool) {
         let fail = |e: String| (result_block(call, json!(e), true), false);
         let kit = input["name"].as_str().unwrap_or("").trim().to_uppercase();
-        let (agent, label, conv, mode, loaded) = {
+        let (agent, label, mode, loaded) = {
             let c = self.conv.lock().unwrap();
             let agent = c.parent.is_some();
             let label = agent.then(|| agent_label(c.agent_id, &c.title));
-            (agent, label, c.id.clone(), crate::prefix::mode(c.provider(), &c.model), c.prefix.kits.contains(&kit))
+            (agent, label, crate::prefix::mode(c.provider(), &c.model), c.prefix.kits.contains(&kit))
         };
         let kits = tools::kits_for(agent);
         if !kits.contains(&kit.as_str()) {
@@ -357,9 +363,6 @@ impl Worker {
                 return fail("WINDOW is instructions only: it has no tool to call.".into());
             }
             return self.run_call(&json!({"id": call["id"], "name": kit, "input": inner}), stop);
-        }
-        if kit == "BROWSER" && !crate::browser::is_open(&conv) {
-            return fail(crate::browser::CLOSED.into());
         }
         if loaded {
             return (result_block(call, json!(format!("{kit} is loaded already.")), false), false);
@@ -382,10 +385,9 @@ impl Worker {
     }
 
     /// A BROWSER call (`canon`: its action's tool and input, if the action
-    /// is one). With the pane closed every call fails the same way, help
-    /// too, so the model learns nothing of the browser until the user opens
-    /// it; with it open, help (or a call without a known action) gives the
-    /// actions.
+    /// is one). Open starts the conversation's browser and close ends it;
+    /// the other actions fail while it is closed. Help (or a call without a
+    /// known action) gives the actions.
     fn browser_call(&self, call: &Value, canon: Option<(&str, &Value)>) -> (Value, bool) {
         let (conv, folder, agent) = {
             let c = self.conv.lock().unwrap();
@@ -394,9 +396,6 @@ impl Worker {
         let fail = |e: String| (result_block(call, json!(e), true), false);
         if agent {
             return fail("BROWSER isn't available to a subagent.".into());
-        }
-        if !crate::browser::is_open(&conv) {
-            return fail(crate::browser::CLOSED.into());
         }
         let Some((name, input)) = canon.filter(|(n, _)| *n != "BROWSER_HELP") else {
             let help = tools::browser_help();
@@ -407,6 +406,26 @@ impl Worker {
         };
         if let Err(e) = tools::validate(name, input) {
             return fail(format!("Invalid input: {e}"));
+        }
+        match name {
+            "BROWSER_OPEN" => {
+                let (ctx, input) = (self.ctx.clone(), input.clone());
+                let (r, interrupted) = self.abandonable("Opening the browser", move || crate::browser::model_open(&conv, &ctx, &input, &folder));
+                return match r {
+                    Ok(s) => (result_block(call, json!(s), false), interrupted),
+                    Err(e) => (result_block(call, json!(e), true), interrupted),
+                };
+            }
+            "BROWSER_CLOSE" => {
+                return match crate::browser::model_close(&conv) {
+                    Ok(s) => (result_block(call, json!(s), false), false),
+                    Err(e) => fail(e),
+                };
+            }
+            _ => {}
+        }
+        if !crate::browser::is_open(&conv) {
+            return fail(crate::browser::CLOSED.into());
         }
         if name == "BROWSER_SCREENSHOT" {
             let (r, interrupted) = self.abandonable("Screenshot", move || crate::browser::screenshot(&conv));

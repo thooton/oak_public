@@ -9,7 +9,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 mod defs;
 pub use defs::{browser_help, chat_definitions, definitions_with_kits, kit_help, kit_of, kits_for};
+mod image_search;
 mod search;
+pub use image_search::{count as image_count, images, wanted as wants_images};
 pub use search::{parse_results as search_results, search};
 
 pub const MAX_OUTPUT: usize = 30_000;
@@ -64,16 +66,18 @@ const FAMILIES: &[(&str, &[(&str, &str)])] = &[
     ("GOAL", &[("justify", "GOAL_JUSTIFICATION"), ("finish", "GOAL_FINISH")]),
     ("AGENT", &[("new", "AGENT_NEW"), ("send", "AGENT_SEND"), ("wait", "AGENT_WAIT"), ("list", "AGENT_LIST"), ("set", "AGENT_SET"), ("pause", "AGENT_PAUSE"), ("resume", "AGENT_RESUME"), ("stop", "AGENT_STOP"), ("delete", "AGENT_DELETE")]),
     ("BROWSER", &[
+        ("open", "BROWSER_OPEN"), ("close", "BROWSER_CLOSE"),
         ("goto", "BROWSER_GOTO"), ("back", "BROWSER_BACK"), ("forward", "BROWSER_FORWARD"), ("reload", "BROWSER_RELOAD"),
-        ("read", "BROWSER_READ"), ("click", "BROWSER_CLICK"), ("type", "BROWSER_TYPE"), ("key", "BROWSER_KEY"),
-        ("scroll", "BROWSER_SCROLL"), ("screenshot", "BROWSER_SCREENSHOT"), ("eval", "BROWSER_EVAL"),
+        ("read", "BROWSER_READ"), ("click", "BROWSER_CLICK"), ("hover", "BROWSER_HOVER"), ("drag", "BROWSER_DRAG"),
+        ("type", "BROWSER_TYPE"), ("key", "BROWSER_KEY"), ("scroll", "BROWSER_SCROLL"), ("wait", "BROWSER_WAIT"),
+        ("screenshot", "BROWSER_SCREENSHOT"), ("eval", "BROWSER_EVAL"), ("resize", "BROWSER_RESIZE"),
         ("dialog", "BROWSER_DIALOG"), ("upload", "BROWSER_UPLOAD"), ("help", "BROWSER_HELP"),
     ]),
 ];
 
 /// Whether a tool OAK runs is only for a session the user started: those
-/// in MAIN_ONLY, and the browser's (the pane belongs to the conversation
-/// the user opened it in).
+/// in MAIN_ONLY, and the browser's (it belongs to the conversation it
+/// was opened in).
 pub fn main_only(tool: &str) -> bool {
     MAIN_ONLY.contains(&tool) || tool.starts_with("BROWSER_")
 }
@@ -158,7 +162,7 @@ pub fn definitions(agent: bool) -> Value {
 /// What a model on the user's own llama.cpp server gets (`local`): the
 /// basics for simple jobs, as it is small, slow and has a small context.
 /// No notes, heartbeats, progress meters, subagents (it serves one request
-/// at a time) or SCREENSHOT (it sees no images); GOAL and REQUEST_ASK only
+/// at a time), SCREENSHOT or SEARCH's images (it sees no images); GOAL and REQUEST_ASK only
 /// while a goal is set, so that one can be finished.
 pub const LOCAL_TOOLS: [&str; 13] = [
     "READ", "WRITE", "EDIT", "EXECUTE", "TASK_NEW", "TASK_GET_NEW_OUTPUT", "TASK_WAIT", "TASK_LIST", "TASK_DELETE", "SEARCH", "FETCH", "ASK", "DISPLAY",
@@ -302,7 +306,7 @@ const ALIASES: &[(&str, &str, &[&str])] = &[
 /// from other agents' file tools (`file_path`, `old_str`, `oldText`, …),
 /// and values of the wrong shape that are unambiguous: an array sent as
 /// JSON text or as its lone item, "true"/"false" for a boolean, digits in
-/// a string for an integer.
+/// a string for an integer, a number for a string.
 pub fn repair(name: &str, mut input: Value) -> Value {
     let defs = defs::run_definitions(false, false, false, false);
     // A family's call is repaired as its action's tool (its `action` kept).
@@ -338,6 +342,7 @@ pub fn repair(name: &str, mut input: Value) -> Value {
                     _ => None,
                 },
                 (Some("integer"), Value::String(s)) => s.trim().parse::<i64>().ok().map(|n| json!(n)),
+                (Some("string"), Value::Number(n)) => Some(json!(n.to_string())),
                 _ => None,
             };
             if let Some(f) = fixed {
@@ -753,6 +758,28 @@ fn line_ranges(r: &[(usize, usize)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SEARCH is one tool for pages and images: a search for pages still
+    /// checks as before, one image in full needs no queries (its number
+    /// may come as a number), and a local model, which sees no images,
+    /// gets it without them.
+    #[test]
+    fn search_takes_images_too() {
+        assert!(validate("SEARCH", &json!({"objective": "x", "queries": ["x"], "page": 2})).is_ok());
+        assert!(validate("SEARCH", &json!({"queries": ["x"], "images": true, "max_results": 24})).is_ok());
+        let image = repair("SEARCH", json!({"image": 14}));
+        assert_eq!(image, json!({"image": "14"}));
+        assert!(validate("SEARCH", &image).is_ok() && wants_images(&image));
+        assert!(validate("SEARCH", &json!({"images": "yes"})).is_err());
+        let search = |local: bool| definitions_as(false, false, local, false).as_array().unwrap().iter().find(|d| d["name"] == "SEARCH").cloned().unwrap();
+        let (full, local) = (search(false), search(true));
+        assert!(full["input_schema"]["properties"]["image"].is_object() && full["description"].as_str().unwrap().contains("`images`"));
+        assert_eq!(full["input_schema"]["required"], json!([]));
+        assert!(local["input_schema"]["properties"]["images"].is_null() && local["input_schema"]["properties"]["image"].is_null());
+        assert_eq!(local["input_schema"]["required"], json!(["objective", "queries"]));
+        assert!(!local["description"].as_str().unwrap().contains("image"));
+        assert!(definitions_as(false, false, false, false).as_array().unwrap().iter().all(|d| d["name"] != "IMAGES"));
+    }
 
     /// CD's path: relative to the folder, `~`, `.` and `..` resolved, and
     /// an MSYS drive path on Windows.

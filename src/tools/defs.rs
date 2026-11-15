@@ -26,8 +26,38 @@ pub fn run_definitions(agent: bool, spawner: bool, local: bool, goal: bool) -> V
             let n = d["name"].as_str().unwrap_or("");
             LOCAL_TOOLS.contains(&n) || (goal && GOAL_TOOLS.contains(&n))
         });
+        // It sees no images: SEARCH finds pages only.
+        if let Some(d) = all.iter_mut().find(|d| d["name"] == "SEARCH") {
+            *d = search_tool(false);
+        }
     }
     all
+}
+
+/// SEARCH: for pages, and with `images` for images too (a search for
+/// them, and one of them in full), which a call can then ask for without
+/// an objective or queries.
+fn search_tool(images: bool) -> Value {
+    let mut description = "Search the web, like a search engine: returns a ranked list of pages, each with its title, link and a summary of a few sentences (not the page text). FETCH the links worth reading. Give the objective in plain words and one or more keyword queries; the queries run in parallel and their results are merged. A query may keep to one site with site:example.com.".to_string();
+    let mut properties = json!({
+        "objective": {"type": "string", "description": "What you are trying to find out"},
+        "queries": {"type": "array", "items": {"type": "string"}, "description": "1-5 keyword queries"},
+        "max_results": {"type": "integer", "description": "How many results, 1-20 (default 10)"},
+        "page": {"type": "integer", "description": format!("2 to {}: the results after those of the page before, for the same queries and max_results", search::MAX_PAGE)},
+    });
+    if images {
+        description.push_str(" With `images` it searches for images instead, e.g. screenshots of an app's UI to work from: returns one picture, a sheet of the results' thumbnails, each with its number, title and the start of its link under it, and each one's title, size and site as text. `image` then shows one of them in full, with its link and its page's, and saves its file in the scratchpad's `images` folder (READ shows it again, DISPLAY shows it to the user).");
+        properties["max_results"]["description"] = json!(format!("How many results, 1-20 (default 10); images, 1-{} (default {})", image_search::MAX_IMAGES, image_search::DEFAULT_IMAGES));
+        properties["images"] = json!({"type": "boolean", "description": "Search for images instead of pages, with the same objective and queries, e.g. \"Blender 4 compositor node editor screenshot\""});
+        properties["image"] = json!({"type": "string", "description": "Instead of a search (no objective or queries): the number of an image on a sheet, or any image's URL, to see it in full"});
+    }
+    let required: &[&str] = if images { &[] } else { &["objective", "queries"] };
+    json!({
+        "name": "SEARCH",
+        "description": description,
+        "input_schema": {"type": "object", "properties": properties, "required": required},
+        "eager_input_streaming": true,
+    })
 }
 
 /// The tools a session gets with `kits` loaded: a kit's tools only once it
@@ -67,7 +97,7 @@ pub fn kits_for(agent: bool) -> Vec<&'static str> {
 /// The kits: what each is, as LOAD's description says.
 const KITS: &[(&str, &str)] = &[
     ("AGENT", "subagents (only when the user asks for them)"),
-    ("BROWSER", "Oak's browser pane (only when the user explicitly asks you to use the browser tool)"),
+    ("BROWSER", "Oak's browser (only when the user explicitly asks you to use the browser tool)"),
     ("WINDOW", "trying a GUI app on a hidden desktop, without touching the user's screen"),
 ];
 
@@ -176,13 +206,13 @@ fn families(tools: Vec<Value>, agent: bool) -> Vec<Value> {
 }
 
 /// What BROWSER is, before its actions.
-const BROWSER_INTRO: &str = "Drives the page in Oak's browser pane; the user sees and uses it at the same time. One page. Coordinates are viewport CSS pixels, as in its screenshots. Only use it when the user explicitly asks you to use the browser tool.";
+const BROWSER_INTRO: &str = "Oak's browser: a real Chromium page, which exists from action=open to action=close. The user sees it as a preview beside the transcript and can expand it to use it at the same time. One page. Coordinates are viewport CSS pixels, as in its screenshots. Only use it when the user explicitly asks you to use the browser tool.";
 
 /// BROWSER action=help: each action, what it does and its fields.
 pub fn browser_help() -> String {
     let defs = definitions_with(false);
     let mut out = String::from(
-        "BROWSER drives the page in Oak's browser pane; the user sees and uses it at the same time. One page. Coordinates are viewport CSS pixels, as in its screenshots. Fields go beside `action`.\n",
+        "BROWSER drives Oak's browser: a real Chromium page, which exists from action=open to action=close (the other actions fail while it is closed). The user sees it as a preview beside the transcript and can expand it to use it at the same time. One page. Coordinates are viewport CSS pixels, as in its screenshots. Fields go beside `action`.\n",
     );
     let Some((_, actions)) = FAMILIES.iter().find(|(f, _)| *f == "BROWSER") else { return out };
     for (action, tool) in actions.iter().filter(|(a, _)| *a != "help") {
@@ -247,10 +277,7 @@ fn definitions_with(agent: bool) -> Value {
         tool("TASK_LIST", "the tasks: ID, running time, status, start of the command", json!({}), &[]),
         tool("TASK_DELETE", "stop task `id` (SIGINT, then SIGKILL after 2 seconds) and remove it",
             json!({"id": {"type": "integer"}}), &["id"]),
-        tool("SEARCH", "Search the web, like a search engine: returns a ranked list of pages, each with its title, link and a short summary (not the page text). FETCH the links worth reading. Give the objective in plain words and one or more keyword queries; the queries run in parallel and their results are merged.",
-            json!({"objective": {"type": "string", "description": "What you are trying to find out"},
-                   "queries": {"type": "array", "items": {"type": "string"}, "description": "1-5 keyword queries"},
-                   "max_results": {"type": "integer", "description": "How many results, 1-20 (default 10)"}}), &["objective", "queries"]),
+        search_tool(true),
         tool("NOTE_NEW", "save `text`; returns its ID",
             json!({"text": {"type": "string"}}), &["text"]),
         tool("NOTE_UPDATE", "replace note `id`'s text, in full, so it holds the current state of what it tracks",
@@ -304,21 +331,35 @@ fn definitions_with(agent: bool) -> Value {
         tool("AGENT_RESUME", "let paused agent `id` carry on", json!({"id": {"type": "integer"}}), &["id"]),
         tool("ACCOUNTS", "The OpenRouter credit, now: how much is left, of how much was bought, and spent through Oak since it started.",
             json!({}), &[]),
+        tool("BROWSER_OPEN", "start the browser (the user sees it fade in beside the transcript), then go to `url` if given; `width`,`height` set the viewport (default 1920x1080)",
+            json!({"url": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &[]),
+        tool("BROWSER_CLOSE", "end the browser (it fades out); the other actions fail until open", json!({}), &[]),
         tool("BROWSER_GOTO", "open `url`", json!({"url": {"type": "string"}}), &["url"]),
         tool("BROWSER_BACK", "go back", json!({}), &[]),
         tool("BROWSER_FORWARD", "go forward", json!({}), &[]),
         tool("BROWSER_RELOAD", "reload", json!({}), &[]),
         tool("BROWSER_READ", "the page as text, its interactive elements numbered [ref kind \"label\"]; `start` reads on in a long page",
             json!({"start": {"type": "integer"}}), &[]),
-        tool("BROWSER_CLICK", "click element `ref` (from read) or the point `x`,`y`",
+        tool("BROWSER_CLICK", "click element `ref` (from read) or the point `x`,`y`; `button` left (default), right or middle; `clicks` 2 for a double click",
             json!({"ref": {"type": "integer"},
-                   "x": {"type": "number"}, "y": {"type": "number"}}), &[]),
+                   "x": {"type": "number"}, "y": {"type": "number"},
+                   "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                   "clicks": {"type": "integer"}}), &[]),
+        tool("BROWSER_HOVER", "rest the pointer on element `ref` or the point `x`,`y` (menus and tooltips that open on hover)",
+            json!({"ref": {"type": "integer"}, "x": {"type": "number"}, "y": {"type": "number"}}), &[]),
+        tool("BROWSER_DRAG", "press on `ref` or `x`,`y`, move to `to_ref` or `to_x`,`to_y` and let go (sliders, sortable lists, drag and drop, selecting text)",
+            json!({"ref": {"type": "integer"}, "x": {"type": "number"}, "y": {"type": "number"},
+                   "to_ref": {"type": "integer"}, "to_x": {"type": "number"}, "to_y": {"type": "number"}}), &[]),
         tool("BROWSER_TYPE", "type `text` where the focus is, or into element `ref` (replacing its value; for a select, picks the option reading `text`)",
             json!({"text": {"type": "string"}, "ref": {"type": "integer"}}), &["text"]),
         tool("BROWSER_KEY", "press `key`, e.g. Enter, Escape, Tab, ArrowDown, PageDown, Control+a",
             json!({"key": {"type": "string"}}), &["key"]),
-        tool("BROWSER_SCROLL", "scroll by `dy` pixels (default most of a screen down; negative is up), at `x`,`y` if given",
-            json!({"dy": {"type": "number"}, "x": {"type": "number"}, "y": {"type": "number"}}), &[]),
+        tool("BROWSER_SCROLL", "scroll by `dy` pixels (default most of a screen down; negative is up) and/or `dx` across, at `x`,`y` if given; or bring element `ref` into view",
+            json!({"dy": {"type": "number"}, "dx": {"type": "number"}, "x": {"type": "number"}, "y": {"type": "number"}, "ref": {"type": "integer"}}), &[]),
+        tool("BROWSER_WAIT", "wait until `text` shows on the page (with `gone`, until it no longer does), or without `text` until the page has loaded; at most `timeout` seconds (default 10, up to 60)",
+            json!({"text": {"type": "string"}, "gone": {"type": "boolean"}, "timeout": {"type": "integer"}}), &[]),
+        tool("BROWSER_RESIZE", "set the viewport to `width` x `height` CSS pixels (200 to 4096); `mobile` lays the page out as a phone's, with touch",
+            json!({"width": {"type": "integer"}, "height": {"type": "integer"}, "mobile": {"type": "boolean"}}), &["width", "height"]),
         tool("BROWSER_SCREENSHOT", "see the viewport", json!({}), &[]),
         tool("BROWSER_EVAL", "run JavaScript `script` in the page; returns its value (promises awaited)",
             json!({"script": {"type": "string"}}), &["script"]),

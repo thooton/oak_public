@@ -120,7 +120,15 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         "WebSearch" => s("query"),
         "Agent" | "Task" => s("description"),
         "TodoWrite" => format!("{} to-dos", input["todos"].as_array().map_or(0, Vec::len)),
-        "SEARCH" => s("objective"),
+        // One image in full: its number on a sheet, or its link.
+        "SEARCH" if input["image"].is_string() || input["image"].is_number() => {
+            let image = input["image"].as_str().map_or_else(|| input["image"].to_string(), |i| i.trim().to_string());
+            if image.starts_with("http") { image } else { format!("image {image}") }
+        }
+        "SEARCH" => {
+            let about = if s("objective").is_empty() { input["queries"][0].as_str().unwrap_or("").to_string() } else { s("objective") };
+            if input["images"] == true { format!("images: {about}") } else { about }
+        }
         "TASK_GET_NEW_OUTPUT" | "TASK_DELETE" => format!("task {}", input["id"]),
         "TASK_WAIT" => format!("task {}, up to {}s", input["id"], input["timeout"]),
         "NOTE_NEW" => s("text"),
@@ -132,9 +140,32 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         "PROGRESS_SET" => format!("{}, every {}", s("label"), agent::every(input["interval_minutes"].as_u64().unwrap_or(0))),
         "PROGRESS_REMOVE" => format!("meter {}", input["id"]),
         "FETCH" | "SCREENSHOT" | "BROWSER_GOTO" => s("url"),
-        "BROWSER_CLICK" => match input["ref"].as_u64() {
-            Some(n) => format!("[{n}]"),
-            None => format!("{}, {}", input["x"], input["y"]),
+        "BROWSER_OPEN" => match (input["url"].as_str(), input["width"].as_u64(), input["height"].as_u64()) {
+            (url, Some(w), Some(h)) => format!("{}{w}x{h}", url.map(|u| format!("{u}, ")).unwrap_or_default()),
+            (url, ..) => url.unwrap_or("").to_string(),
+        },
+        "BROWSER_RESIZE" => format!("{}x{}{}", input["width"], input["height"], if input["mobile"] == true { ", mobile" } else { "" }),
+        "BROWSER_CLICK" | "BROWSER_HOVER" => {
+            let at = match input["ref"].as_u64() {
+                Some(n) => format!("[{n}]"),
+                None => format!("{}, {}", input["x"], input["y"]),
+            };
+            match (input["button"].as_str().filter(|b| *b != "left"), input["clicks"].as_u64().filter(|c| *c > 1)) {
+                (None, None) => at,
+                (b, c) => format!("{at} ({}{})", b.map(|b| format!("{b} ")).unwrap_or_default(), c.map_or("click".into(), |c| format!("x{c}"))),
+            }
+        }
+        "BROWSER_DRAG" => {
+            let end = |r: &str, x: &str, y: &str| match input[r].as_u64() {
+                Some(n) => format!("[{n}]"),
+                None => format!("{}, {}", input[x], input[y]),
+            };
+            format!("{} → {}", end("ref", "x", "y"), end("to_ref", "to_x", "to_y"))
+        }
+        "BROWSER_WAIT" => match input["text"].as_str() {
+            Some(t) if input["gone"] == true => format!("until {t:?} is gone"),
+            Some(t) => format!("for {t:?}"),
+            None => "for the page to load".into(),
         },
         "BROWSER_TYPE" => match input["ref"].as_u64() {
             Some(n) => format!("[{n}] {}", s("text")),
@@ -142,7 +173,12 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         },
         "BROWSER_KEY" => s("key"),
         "BROWSER_EVAL" => crate::tools::one_line(&s("script")),
-        "BROWSER_SCROLL" if input["dy"].is_number() => format!("{} px", input["dy"]),
+        "BROWSER_SCROLL" if input["ref"].is_u64() => format!("to [{}]", input["ref"]),
+        "BROWSER_SCROLL" if input["dy"].is_number() || input["dx"].is_number() => match (input["dx"].as_f64(), input["dy"].as_f64()) {
+            (Some(dx), Some(dy)) => format!("{dx}, {dy} px"),
+            (Some(dx), None) => format!("{dx} px across"),
+            (None, dy) => format!("{} px", dy.unwrap_or(0.0)),
+        },
         "BROWSER_UPLOAD" => input["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(", "),
         "AGENT_NEW" => s("name"),
         "AGENT_SEND" => {
@@ -1420,7 +1456,11 @@ pub(crate) fn line_span(name: &str, input: &Value, result: Option<&ToolOut>) -> 
         }
         // How many results a SEARCH found.
         "SEARCH" => {
-            let n = crate::tools::search_results(&ok?.text)?.len();
+            let text = &ok?.text;
+            if let Some(n) = crate::tools::image_count(text) {
+                return Some(format!("{n} image{}", crate::plural(n)));
+            }
+            let n = crate::tools::search_results(text)?.len();
             Some(format!("{n} result{}", crate::plural(n)))
         }
         _ => None,

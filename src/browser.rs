@@ -1,14 +1,18 @@
-//! The browser pane: a real Chromium per conversation, beside the chat,
-//! that the user and the model both use.
+//! The browser: a real Chromium per conversation that the model opens and
+//! closes (BROWSER action=open and close) and the user watches and uses.
 //!
-//! Nothing runs until the user opens a conversation's pane: that starts a
-//! headless Chromium on the conversation's own profile (cookies, logins and
-//! storage stay on disk until the conversation is deleted) and drives its
-//! one page over the DevTools protocol. The page's frames stream into the
-//! pane (a screencast, only while the pane is on screen), and the user's
-//! pointer, wheel and keys go to the page as input events, as the model's
-//! clicks and keys do. Closing the pane ends the browser; BROWSER calls
-//! fail while it is closed. Popups and new tabs open in the one page.
+//! Nothing runs until the model opens a conversation's browser: that starts
+//! a headless Chromium on the conversation's own profile (cookies, logins
+//! and storage stay on disk until the conversation is deleted) and drives
+//! its one page over the DevTools protocol. Its viewport is its own size
+//! (1920x1080 CSS pixels unless the model resizes it), not the window's:
+//! the view (`browser_view.rs`) scales it down to a preview beside the
+//! transcript, or to the lightbox the user expands it into. The page's
+//! frames stream in (a screencast, at the size shown, only while it is on
+//! screen), and the user's pointer, wheel and keys go to the page as input
+//! events, as the model's clicks and keys do. Closing ends the browser;
+//! the other calls fail while it is closed. Popups and new tabs open in the
+//! one page.
 
 use crate::cdp::{Cdp, Listener};
 use base64::Engine as _;
@@ -32,15 +36,27 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 /// The most text one read returns (the rest with `start`).
 const READ_MAX: usize = 30_000;
-/// The pane counts as on screen this long after it was last drawn; past
+/// The view counts as on screen this long after it was last drawn; past
 /// that the screencast stops until it is drawn again.
 const SHOWN_GRACE: Duration = Duration::from_millis(700);
 /// Where a search typed in the address bar goes.
 const SEARCH_URL: &str = "https://duckduckgo.com/?q=";
 
-/// Why a call fails while the pane is closed.
-pub(crate) const CLOSED: &str =
-    "The browser pane is closed, so there is no browser. Only the user can open it (the globe button in Oak's title bar, or Ctrl+Shift+B); ask them to if you need it.";
+/// Why a call fails while the browser is closed.
+pub(crate) const CLOSED: &str = "The browser is closed: open it with BROWSER action=open first.";
+/// The viewport until the model resizes it, CSS pixels.
+pub(crate) const DEFAULT_W: u32 = 1920;
+pub(crate) const DEFAULT_H: u32 = 1080;
+/// The viewport sizes the model may ask for, CSS pixels.
+const MIN_SIDE: u32 = 200;
+const MAX_SIDE: u32 = 4096;
+/// How long a drag's pointer takes from start to end, and in how many moves.
+const DRAG_MOVES: u32 = 16;
+const DRAG_TIME: Duration = Duration::from_millis(320);
+/// The longest `wait` waits.
+const WAIT_MAX_S: u64 = 60;
+/// How long the model's pointer takes to glide to where it goes, in the view.
+const GLIDE: Duration = Duration::from_millis(260);
 
 // ------------------------------------------------------------------ state
 
@@ -83,6 +99,26 @@ pub(crate) struct Select {
     pub(crate) disabled: bool,
 }
 
+/// The model's pointer (CSS pixels): it glides from `from` to `to`,
+/// starting at `at`, over `glide`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AgentPointer {
+    pub(crate) from: egui::Pos2,
+    pub(crate) to: egui::Pos2,
+    pub(crate) at: Instant,
+    pub(crate) glide: Duration,
+}
+
+impl AgentPointer {
+    /// Where it is now, and whether it is still on its way.
+    pub(crate) fn now(&self) -> (egui::Pos2, bool) {
+        let t = if self.glide.is_zero() { 1.0 } else { (self.at.elapsed().as_secs_f32() / self.glide.as_secs_f32()).min(1.0) };
+        // Eased out: quick to leave, gentle to arrive.
+        let e = 1.0 - (1.0 - t).powi(3);
+        (self.from + (self.to - self.from) * e, t < 1.0)
+    }
+}
+
 /// Who acted last: a file chooser opens for the user only after their own input.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum Actor {
@@ -91,7 +127,7 @@ enum Actor {
     Agent,
 }
 
-/// What the pane shows, and what the model is told after its next call.
+/// What the view shows, and what the model is told after its next call.
 #[derive(Default)]
 pub(crate) struct View {
     pub(crate) status: Status,
@@ -101,7 +137,7 @@ pub(crate) struct View {
     pub(crate) back: bool,
     pub(crate) forward: bool,
     pub(crate) dialog: Option<Dialog>,
-    /// The newest frame, until the pane uploads it.
+    /// The newest frame, until the view uploads it.
     pub(crate) frame: Option<egui::ColorImage>,
     /// The page's cursor where the pointer is.
     pub(crate) cursor: egui::CursorIcon,
@@ -109,6 +145,8 @@ pub(crate) struct View {
     pub(crate) select: Option<Select>,
     /// Where the model last clicked (CSS pixels), and when.
     pub(crate) agent_at: Option<(egui::Pos2, Instant)>,
+    /// The model's pointer, which the view draws gliding to where it went.
+    pub(crate) agent_ptr: Option<AgentPointer>,
     /// A line over the page for a moment (a download, a crash).
     pub(crate) notice: Option<(String, Instant)>,
     pub(crate) chooser: Option<Chooser>,
@@ -137,13 +175,15 @@ impl View {
     }
 }
 
-/// The viewport, as the page lays out: CSS pixels, and device pixels per
-/// CSS pixel (the screen's scale, so the page is sharp).
+/// The viewport, as the page lays out: CSS pixels, device pixels per CSS
+/// pixel (as many as the expanded view shows, so it is sharp there), and
+/// whether it passes for a phone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Viewport {
     w: u32,
     h: u32,
     scale: f32,
+    mobile: bool,
 }
 
 /// One conversation's browser.
@@ -164,8 +204,12 @@ pub(crate) struct Instance {
     target: Mutex<String>,
     main_frame: Mutex<String>,
     viewport: Mutex<Viewport>,
-    /// When the pane last drew it.
+    /// When the view last drew it.
     drawn: Mutex<Instant>,
+    /// The largest frames the view wants (device pixels): what it shows them at.
+    cast: Mutex<[u32; 2]>,
+    /// When it was opened (the view fades it in).
+    pub(crate) opened: Instant,
     pub(crate) texture: Mutex<Option<egui::TextureHandle>>,
     /// Pointer positions to read the page's cursor at.
     probe: Mutex<Option<Sender<(f32, f32)>>>,
@@ -186,7 +230,7 @@ fn profile_dir(conv: &str) -> PathBuf {
     profiles_dir().join(name)
 }
 
-/// The browser of conversation `conv`, if its pane is open.
+/// The browser of conversation `conv`, if it is open.
 pub(crate) fn get(conv: &str) -> Option<Arc<Instance>> {
     OPEN.lock().unwrap().get(conv).cloned()
 }
@@ -195,9 +239,9 @@ pub(crate) fn is_open(conv: &str) -> bool {
     OPEN.lock().unwrap().contains_key(conv)
 }
 
-/// Opens conversation `conv`'s pane: its browser starts in the background.
-pub(crate) fn open(conv: &str, ctx: &egui::Context) {
-    open_with(conv, ctx, profile_dir(conv));
+/// Opens conversation `conv`'s browser: it starts in the background.
+pub(crate) fn open(conv: &str, ctx: &egui::Context) -> Arc<Instance> {
+    open_with(conv, ctx, profile_dir(conv))
 }
 
 fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf) -> Arc<Instance> {
@@ -219,8 +263,10 @@ fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf) -> Arc<Instance>
         port: AtomicU16::new(0),
         target: Mutex::new(String::new()),
         main_frame: Mutex::new(String::new()),
-        viewport: Mutex::new(Viewport { w: 1280, h: 800, scale: ctx.pixels_per_point().max(1.0) }),
+        viewport: Mutex::new(Viewport { w: DEFAULT_W, h: DEFAULT_H, scale: 1.0, mobile: false }),
         drawn: Mutex::new(Instant::now()),
+        cast: Mutex::new([DEFAULT_W, DEFAULT_H]),
+        opened: Instant::now(),
         texture: Mutex::new(None),
         probe: Mutex::new(None),
         agent: AtomicUsize::new(0),
@@ -235,7 +281,7 @@ fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf) -> Arc<Instance>
     inst
 }
 
-/// Closes conversation `conv`'s pane: its browser ends (in the background).
+/// Closes conversation `conv`'s browser: it ends (in the background).
 pub(crate) fn close(conv: &str) {
     let inst = OPEN.lock().unwrap().remove(conv);
     if let Some(inst) = inst {
@@ -243,26 +289,27 @@ pub(crate) fn close(conv: &str) {
     }
 }
 
-/// Opens the pane if it is closed, closes it if it is open.
-pub(crate) fn toggle(conv: &str, ctx: &egui::Context) {
-    if is_open(conv) { close(conv) } else { open(conv, ctx) }
-}
-
-/// Starts conversation `conv`'s browser again (after it failed or quit).
+/// Starts conversation `conv`'s browser again (after it failed or quit),
+/// at the same size.
 pub(crate) fn restart(conv: &str, ctx: &egui::Context) {
     let old = OPEN.lock().unwrap().remove(conv);
     let ctx = ctx.clone();
     let conv = conv.to_string();
     std::thread::spawn(move || {
+        let mut size = None;
         if let Some(old) = old {
+            size = Some(*old.viewport.lock().unwrap());
             old.shutdown();
         }
-        open(&conv, &ctx);
+        let inst = open(&conv, &ctx);
+        if let Some(vp) = size {
+            inst.resize(vp.w, vp.h, vp.mobile);
+        }
         ctx.request_repaint();
     });
 }
 
-/// Closes the panes of conversations `keep` says no to (their tabs closed).
+/// Closes the browsers of conversations `keep` says no to (their tabs closed).
 pub(crate) fn retain(keep: impl Fn(&str) -> bool) {
     let gone: Vec<String> = OPEN.lock().unwrap().keys().filter(|c| !keep(c)).cloned().collect();
     for c in gone {
@@ -399,7 +446,7 @@ impl Instance {
         let cdp = self.open_page(port)?;
         let events = cdp.listen();
         self.set_up_page(&cdp)?;
-        // The pane may have resized while Chromium was starting. Apply
+        // The viewport may have changed while Chromium was starting. Apply
         // its latest size and publish the page under the same lock, so a
         // draw cannot update the size before there is a page to send it to.
         {
@@ -515,8 +562,9 @@ fn http_json(port: u16, method: &str, path: &str) -> Result<Value, String> {
 fn apply_viewport(cdp: &Cdp, vp: Viewport) {
     cdp.send(
         "Emulation.setDeviceMetricsOverride",
-        json!({"width": vp.w, "height": vp.h, "deviceScaleFactor": vp.scale, "mobile": false, "screenWidth": vp.w, "screenHeight": vp.h}),
+        json!({"width": vp.w, "height": vp.h, "deviceScaleFactor": vp.scale, "mobile": vp.mobile, "screenWidth": vp.w, "screenHeight": vp.h}),
     );
+    cdp.send("Emulation.setTouchEmulationEnabled", json!({"enabled": vp.mobile}));
 }
 
 /// The browser's thread: starts it, then follows its page until it is closed.
@@ -526,7 +574,7 @@ fn run(inst: Arc<Instance>) {
         Err(e) => {
             if !inst.is_closed() {
                 inst.update_view(|v| v.status = Status::Failed(e));
-                // What did start goes, but the pane stays open to say why.
+                // What did start goes, but the view stays to say why.
                 inst.shutdown_process();
             }
             return;
@@ -549,7 +597,8 @@ fn run(inst: Arc<Instance>) {
         }
     });
     inst.refresh_history();
-    let mut casting = false;
+    // The frames' size while they stream.
+    let mut casting: Option<[u32; 2]> = None;
     loop {
         if inst.is_closed() {
             return;
@@ -560,17 +609,20 @@ fn run(inst: Arc<Instance>) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        // Frames only while the pane is on screen.
+        // Frames only while the view is on screen, at the size it shows
+        // them (the preview's small, the expanded view's large).
         let shown = inst.drawn.lock().unwrap().elapsed() < SHOWN_GRACE;
-        if shown != casting
+        let want = shown.then(|| *inst.cast.lock().unwrap());
+        if want != casting
             && let Some(page) = inst.page()
         {
-            if shown {
-                page.send("Page.startScreencast", json!({"format": "jpeg", "quality": 85, "maxWidth": 8192, "maxHeight": 8192, "everyNthFrame": 1}));
-            } else {
+            if casting.is_some() {
                 page.send("Page.stopScreencast", json!({}));
             }
-            casting = shown;
+            if let Some([w, h]) = want {
+                page.send("Page.startScreencast", json!({"format": "jpeg", "quality": 85, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1}));
+            }
+            casting = want;
         }
     }
     if !inst.is_closed() {
@@ -585,7 +637,7 @@ fn run(inst: Arc<Instance>) {
 }
 
 impl Instance {
-    /// Ends the process without marking the pane closed (it shows why).
+    /// Ends the process without marking it closed (it shows why).
     fn shutdown_process(&self) {
         if let Some(page) = self.page.lock().unwrap().take() {
             page.close();
@@ -600,7 +652,7 @@ impl Instance {
         let _ = std::fs::remove_file(self.profile.join("oak.pid"));
     }
 
-    /// Changes the pane's view, then repaints it.
+    /// Changes the view, then repaints it.
     fn update_view(&self, f: impl FnOnce(&mut View)) {
         f(&mut self.view.lock().unwrap());
         self.ctx.request_repaint();
@@ -744,7 +796,7 @@ impl Instance {
         }
     }
 
-    /// The page's cursor (and `<select>`) at a point, for the pane.
+    /// The page's cursor (and `<select>`) at a point, for the view.
     fn read_cursor(&self, (x, y): (f32, f32)) {
         let Some(page) = self.page() else { return };
         if self.view.lock().unwrap().dialog.is_some() {
@@ -820,19 +872,46 @@ pub(crate) fn modifier_bits(m: egui::Modifiers) -> i64 {
 }
 
 impl Instance {
-    /// The pane drew it this frame, at `w` x `h` points with `scale`
-    /// pixels per point: the page is laid out to fit.
-    pub(crate) fn drawn_at(&self, w: f32, h: f32, scale: f32) {
+    /// The view drew it this frame, its frames `cast` device pixels at
+    /// most; `scale`: the device pixels per CSS pixel the expanded view
+    /// would show (the page renders at that many, at least 1).
+    pub(crate) fn shown(&self, scale: f32, cast: [u32; 2]) {
         *self.drawn.lock().unwrap() = Instant::now();
-        let vp = Viewport { w: w.round().max(100.0) as u32, h: h.round().max(100.0) as u32, scale };
+        // Steps of a quarter, so a window being resized doesn't re-render the page each frame.
+        let scale = ((scale * 4.0).round() / 4.0).clamp(1.0, 3.0);
+        // Steps of 64 pixels, for the same reason.
+        let cast = cast.map(|s| (s.div_ceil(64) * 64).clamp(64, 8192));
+        *self.cast.lock().unwrap() = cast;
+        self.set_viewport(|v| v.scale = scale);
+    }
+
+    /// The viewport's size in CSS pixels, and whether it passes for a phone.
+    pub(crate) fn viewport_css(&self) -> (u32, u32) {
+        let v = self.viewport.lock().unwrap();
+        (v.w, v.h)
+    }
+
+    /// Changes the viewport (and the page, if it is up, follows).
+    fn set_viewport(&self, f: impl FnOnce(&mut Viewport)) {
         let mut cur = self.viewport.lock().unwrap();
+        let mut vp = *cur;
+        f(&mut vp);
         if *cur != vp {
             *cur = vp;
-            drop(cur);
+            // (Under the lock, so start() can't publish its page between.)
             if let Some(page) = self.page() {
                 apply_viewport(&page, vp);
             }
+            drop(cur);
+            self.ctx.request_repaint();
         }
+    }
+
+    /// The model sets the viewport: `w` x `h` CSS pixels.
+    fn resize(&self, w: u32, h: u32, mobile: bool) {
+        self.set_viewport(|v| {
+            (v.w, v.h, v.mobile) = (w.clamp(MIN_SIDE, MAX_SIDE), h.clamp(MIN_SIDE, MAX_SIDE), mobile);
+        });
     }
 
     fn user(&self) -> Option<Arc<Cdp>> {
@@ -1292,9 +1371,12 @@ const HELPERS_JS: &str = r#"
     if (!el.isConnected) throw new Error('Element ' + n + ' is no longer on the page (it changed since the read); read it again.');
     return el;
   };
-  // The middle of `el` in the top page's viewport, scrolled into view.
+  // The middle of `el` in the top page's viewport, scrolled into view
+  // (only when it isn't in view: a visible element stays where it is).
   const pointOf = (el) => {
-    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const b = el.getBoundingClientRect();
+    const seen = el.ownerDocument === document && b.width > 0 && b.height > 0 && b.top >= 0 && b.left >= 0 && b.bottom <= innerHeight && b.right <= innerWidth;
+    if (!seen) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
     const rs = Array.from(el.getClientRects()).filter((r) => r.width > 0 && r.height > 0);
     if (!rs.length) return null;
     const r = rs[0];
@@ -1447,7 +1529,20 @@ const FILE_INPUT_JS: &str = r#"(() => {
   return el;
 })()"#;
 
+/// Whether __TEXT__ is in the page's text (the top document's, frames it can reach included).
+const WAIT_JS: &str = r#"(() => {
+  const want = __TEXT__;
+  const has = (d) => { try { if (d.body && d.body.innerText.includes(want)) return true; for (const f of d.querySelectorAll('iframe, frame')) { const cd = f.contentDocument; if (cd && has(cd)) return true; } } catch (e) {} return false; };
+  return has(document);
+})()"#;
+
 const SCROLL_JS: &str = r#"(() => { const se = document.scrollingElement || document.documentElement; return [Math.round(scrollY), Math.round(se ? se.scrollHeight : 0), innerHeight]; })()"#;
+
+/// `s` with its first letter a capital.
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
 
 fn script(js: &str) -> String {
     js.replace("__HELPERS__", HELPERS_JS)
@@ -1478,7 +1573,7 @@ impl Instance {
                     continue;
                 }
                 Status::Starting => return Err("The browser is still starting; try again in a moment.".into()),
-                Status::Failed(e) | Status::Quit(e) => return Err(format!("{e} The user can restart it from the pane.")),
+                Status::Failed(e) | Status::Quit(e) => return Err(format!("{e} Close it and open it again (or the user can restart it from the expanded view).")),
             }
             return self.page().ok_or_else(|| "The browser isn't running.".into());
         }
@@ -1542,16 +1637,61 @@ impl Instance {
         out
     }
 
-    /// The model clicks at (x, y), CSS pixels.
-    fn click_at(&self, page: &Cdp, x: f64, y: f64) {
+    /// The model's pointer goes to (x, y), CSS pixels: the page gets the
+    /// move (with `buttons` held), and the view glides it there over `glide`
+    /// (from the middle the first time).
+    fn agent_move(&self, page: &Cdp, x: f64, y: f64, buttons: i64, glide: Duration) {
+        let to = egui::pos2(x as f32, y as f32);
+        let (w, h) = self.viewport_size();
         self.update_view(|v| {
             v.actor = Actor::Agent;
-            v.agent_at = Some((egui::pos2(x as f32, y as f32), Instant::now()));
+            let from = v.agent_ptr.map_or(egui::pos2(w as f32 / 2.0, h as f32 / 2.0), |p| p.now().0);
+            v.agent_ptr = Some(AgentPointer { from, to, at: Instant::now(), glide });
         });
-        let ev = |kind: &str, buttons: i64| json!({"type": kind, "x": x, "y": y, "button": if kind == "mouseMoved" { "none" } else { "left" }, "buttons": buttons, "clickCount": 1});
-        page.send("Input.dispatchMouseEvent", ev("mouseMoved", 0));
-        page.send("Input.dispatchMouseEvent", ev("mousePressed", 1));
-        page.send("Input.dispatchMouseEvent", ev("mouseReleased", 0));
+        let button = if buttons & 1 != 0 { "left" } else if buttons & 2 != 0 { "right" } else if buttons & 4 != 0 { "middle" } else { "none" };
+        page.send("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y, "button": button, "buttons": buttons}));
+    }
+
+    /// The model clicks `button` (left, right or middle) at (x, y), CSS
+    /// pixels, `clicks` times in a row (2: a double click).
+    fn click_at(&self, page: &Cdp, x: f64, y: f64, button: &str, clicks: i64) {
+        self.agent_move(page, x, y, 0, GLIDE);
+        // The ring shows as the pointer arrives.
+        self.update_view(|v| v.agent_at = Some((egui::pos2(x as f32, y as f32), Instant::now() + GLIDE / 2)));
+        let bit = match button {
+            "right" => 2,
+            "middle" => 4,
+            _ => 1,
+        };
+        for n in 1..=clicks {
+            page.send("Input.dispatchMouseEvent", json!({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": bit, "clickCount": n}));
+            page.send("Input.dispatchMouseEvent", json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": 0, "clickCount": n}));
+        }
+    }
+
+    /// A point the model names: element `ref_key` (from read; scrolled into
+    /// view) or the point `x_key`,`y_key`. The point, and what is there.
+    fn target(&self, page: &Cdp, input: &Value, ref_key: &str, x_key: &str, y_key: &str) -> Result<(f64, f64, String), String> {
+        let n = input[ref_key].as_u64().or_else(|| input[ref_key].as_str().and_then(|s| s.trim().trim_matches(['[', ']']).parse().ok()));
+        match (n, input[x_key].as_f64(), input[y_key].as_f64()) {
+            (Some(n), _, _) => {
+                let r = self.eval(page, &script(POINT_JS).replace("__N__", &n.to_string()), CALL_TIMEOUT)?;
+                if let Some(e) = r["error"].as_str() {
+                    return Err(e.to_string());
+                }
+                Ok((r["x"].as_f64().unwrap_or(0.0), r["y"].as_f64().unwrap_or(0.0), format!("[{n} {}]", r["desc"].as_str().unwrap_or(""))))
+            }
+            (None, Some(x), Some(y)) => {
+                let (w, h) = self.viewport_size();
+                if x < 0.0 || y < 0.0 || x >= w as f64 || y >= h as f64 {
+                    return Err(format!("({x}, {y}) is outside the viewport ({w}x{h}); scroll first, or use a ref."));
+                }
+                let js = script(AT_POINT_JS).replace("__X__", &x.to_string()).replace("__Y__", &y.to_string());
+                let what = self.eval(page, &js, CALL_TIMEOUT).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+                Ok((x, y, format!("({x}, {y}), on {what}")))
+            }
+            _ => Err(format!("Give `{ref_key}` (from read), or `{x_key}` and `{y_key}`.")),
+        }
     }
 
     fn viewport_size(&self) -> (u32, u32) {
@@ -1613,15 +1753,38 @@ impl Instance {
                 Ok(self.report(&format!("Pressed {}.", str_of("key").trim())))
             }
             "BROWSER_SCROLL" => {
+                // To an element: into view.
+                if ref_of(input).is_some() {
+                    let (_, _, what) = self.target(&page, input, "ref", "x", "y")?;
+                    std::thread::sleep(Duration::from_millis(150));
+                    let s = self.eval(&page, SCROLL_JS, CALL_TIMEOUT)?;
+                    return Ok(self.report(&format!("Scrolled {what} into view. The page is at {} of {} px (viewport height {}).", s[0], s[1], s[2])));
+                }
                 let (w, h) = self.viewport_size();
-                let dy = input["dy"].as_f64().unwrap_or(h as f64 * 0.8);
+                let dx = input["dx"].as_f64().unwrap_or(0.0);
+                let dy = input["dy"].as_f64().unwrap_or(if dx == 0.0 { h as f64 * 0.8 } else { 0.0 });
                 let x = input["x"].as_f64().unwrap_or(w as f64 / 2.0);
                 let y = input["y"].as_f64().unwrap_or(h as f64 / 2.0);
-                page.send("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y}));
-                page.send("Input.dispatchMouseEvent", json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": 0, "deltaY": dy}));
+                self.agent_move(&page, x, y, 0, GLIDE);
+                page.send("Input.dispatchMouseEvent", json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy}));
                 std::thread::sleep(Duration::from_millis(350));
                 let s = self.eval(&page, SCROLL_JS, CALL_TIMEOUT)?;
-                Ok(self.report(&format!("Scrolled {dy} px. The page is at {} of {} px (viewport height {}).", s[0], s[1], s[2])))
+                let by = if dx == 0.0 { format!("{dy} px") } else { format!("{dx} px across, {dy} px down") };
+                Ok(self.report(&format!("Scrolled {by}. The page is at {} of {} px (viewport height {}).", s[0], s[1], s[2])))
+            }
+            "BROWSER_HOVER" => self.hover(&page, input, navs),
+            "BROWSER_DRAG" => self.drag(&page, input, navs),
+            "BROWSER_WAIT" => self.wait(&page, input, navs),
+            "BROWSER_RESIZE" => {
+                let (w, h) = self.viewport_size();
+                let nw = input["width"].as_u64().map_or(w, |v| v as u32);
+                let nh = input["height"].as_u64().map_or(h, |v| v as u32);
+                let mobile = input["mobile"].as_bool().unwrap_or(false);
+                self.resize(nw, nh, mobile);
+                // A moment for the page to lay itself out again.
+                std::thread::sleep(Duration::from_millis(300));
+                let (w, h) = self.viewport_size();
+                Ok(self.report(&format!("The viewport is {w}x{h} CSS px{}.", if mobile { ", as a phone (touch, mobile layout)" } else { "" })))
             }
             "BROWSER_EVAL" => {
                 let text = match self.eval(&page, str_of("script"), CALL_TIMEOUT)? {
@@ -1678,30 +1841,89 @@ impl Instance {
         Ok(out + &self.notes())
     }
 
-    /// BROWSER click, on a ref or at a point.
+    /// BROWSER click, on a ref or at a point: `button`, `clicks` times.
     fn click(&self, page: &Cdp, input: &Value, navs: u64) -> Result<String, String> {
-        let (x, y, what) = match (ref_of(input), input["x"].as_f64(), input["y"].as_f64()) {
-            (Some(n), _, _) => {
-                let r = self.eval(page, &script(POINT_JS).replace("__N__", &n.to_string()), CALL_TIMEOUT)?;
-                if let Some(e) = r["error"].as_str() {
-                    return Err(e.to_string());
-                }
-                (r["x"].as_f64().unwrap_or(0.0), r["y"].as_f64().unwrap_or(0.0), format!("[{n} {}]", r["desc"].as_str().unwrap_or("")))
-            }
-            (None, Some(x), Some(y)) => {
-                let (w, h) = self.viewport_size();
-                if x < 0.0 || y < 0.0 || x >= w as f64 || y >= h as f64 {
-                    return Err(format!("({x}, {y}) is outside the viewport ({w}x{h}); scroll first, or click a ref."));
-                }
-                let js = script(AT_POINT_JS).replace("__X__", &x.to_string()).replace("__Y__", &y.to_string());
-                let what = self.eval(page, &js, CALL_TIMEOUT).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
-                (x, y, format!("({x}, {y}), on {what}"))
-            }
-            _ => return Err("Give `ref` (from read), or `x` and `y`.".into()),
-        };
-        self.click_at(page, x, y);
+        let (x, y, what) = self.target(page, input, "ref", "x", "y")?;
+        let button = input["button"].as_str().unwrap_or("left");
+        if !["left", "right", "middle"].contains(&button) {
+            return Err(format!("Unknown button `{button}`: use left, right or middle."));
+        }
+        let clicks = input["clicks"].as_i64().unwrap_or(1).clamp(1, 3);
+        self.click_at(page, x, y, button, clicks);
         self.settle(navs);
-        Ok(self.report(&format!("Clicked {what}.")))
+        let how = match (button, clicks) {
+            ("left", 1) => "Clicked".to_string(),
+            ("left", 2) => "Double-clicked".to_string(),
+            ("left", 3) => "Triple-clicked".to_string(),
+            (b, 1) => format!("{}-clicked", capitalized(b)),
+            (b, n) => format!("{}-clicked {n} times", capitalized(b)),
+        };
+        Ok(self.report(&format!("{how} {what}.")))
+    }
+
+    /// BROWSER hover: the pointer rests on a ref or a point (menus and
+    /// tooltips that open on hover).
+    fn hover(&self, page: &Cdp, input: &Value, navs: u64) -> Result<String, String> {
+        let (x, y, what) = self.target(page, input, "ref", "x", "y")?;
+        self.agent_move(page, x, y, 0, GLIDE);
+        self.settle(navs);
+        Ok(self.report(&format!("The pointer is over {what}.")))
+    }
+
+    /// BROWSER drag: the left button pressed on one ref or point, moved in
+    /// steps to another, and let go there (sliders, sortable lists, drag
+    /// and drop, selecting text).
+    fn drag(&self, page: &Cdp, input: &Value, navs: u64) -> Result<String, String> {
+        let (_, _, from) = self.target(page, input, "ref", "x", "y")?;
+        let (x1, y1, to) = self.target(page, input, "to_ref", "to_x", "to_y")?;
+        // Bringing the end into view may have moved the start: again (it
+        // only scrolls when out of view).
+        let (x0, y0, _) = self.target(page, input, "ref", "x", "y")?;
+        self.agent_move(page, x0, y0, 0, GLIDE);
+        page.send("Input.dispatchMouseEvent", json!({"type": "mousePressed", "x": x0, "y": y0, "button": "left", "buttons": 1, "clickCount": 1}));
+        std::thread::sleep(Duration::from_millis(60));
+        self.update_view(|v| v.agent_ptr = Some(AgentPointer { from: egui::pos2(x0 as f32, y0 as f32), to: egui::pos2(x1 as f32, y1 as f32), at: Instant::now(), glide: DRAG_TIME }));
+        for i in 1..=DRAG_MOVES {
+            let k = f64::from(i) / f64::from(DRAG_MOVES);
+            let (x, y) = (x0 + (x1 - x0) * k, y0 + (y1 - y0) * k);
+            page.send("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1}));
+            std::thread::sleep(DRAG_TIME / DRAG_MOVES);
+        }
+        page.send("Input.dispatchMouseEvent", json!({"type": "mouseReleased", "x": x1, "y": y1, "button": "left", "buttons": 0, "clickCount": 1}));
+        self.settle(navs);
+        Ok(self.report(&format!("Dragged from {from} to {to}.")))
+    }
+
+    /// BROWSER wait: until `text` shows on the page (or, with `gone`, no
+    /// longer does), or without it until the page has loaded; at most
+    /// `timeout` seconds.
+    fn wait(&self, page: &Cdp, input: &Value, navs: u64) -> Result<String, String> {
+        let timeout = Duration::from_secs(input["timeout"].as_u64().unwrap_or(10).clamp(1, WAIT_MAX_S));
+        let t = Instant::now();
+        let Some(text) = input["text"].as_str().filter(|s| !s.is_empty()) else {
+            while self.view.lock().unwrap().loading && t.elapsed() < timeout && self.dialog_open().is_none() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            self.settle(navs);
+            return Ok(self.report(if self.view.lock().unwrap().loading { "Still loading." } else { "The page has loaded." }));
+        };
+        let gone = input["gone"].as_bool().unwrap_or(false);
+        let js = WAIT_JS.replace("__TEXT__", &serde_json::to_string(text).unwrap_or_default());
+        loop {
+            if let Some(d) = self.dialog_open() {
+                return Err(d);
+            }
+            // (A page between documents has no body for a moment: not there.)
+            let there = self.eval(page, &js, Duration::from_secs(5)).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+            if there != gone {
+                let done = if gone { format!("{text:?} is gone, after {:.1}s.", t.elapsed().as_secs_f32()) } else { format!("{text:?} is on the page, after {:.1}s.", t.elapsed().as_secs_f32()) };
+                return Ok(self.report(&done));
+            }
+            if t.elapsed() >= timeout {
+                return Err(format!("{text:?} {} after {}s.", if gone { "is still on the page" } else { "didn't show on the page" }, timeout.as_secs()) + &self.notes());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     /// BROWSER type: text into the focused element, or into a ref (which
@@ -1777,7 +1999,37 @@ impl Instance {
     }
 }
 
-/// Runs a BROWSER call (but screenshot) for conversation `conv`.
+/// BROWSER open for conversation `conv`: starts its browser (the view fades
+/// it in), at `width` x `height` if given, and goes to `url` if given, once
+/// it is ready.
+pub(crate) fn model_open(conv: &str, ctx: &egui::Context, input: &Value, folder: &Path) -> Result<String, String> {
+    let was_open = is_open(conv);
+    let inst = open_with(conv, ctx, profile_dir(conv));
+    let _busy = Busy::new(&inst);
+    if input["width"].is_u64() || input["height"].is_u64() || input["mobile"].is_boolean() {
+        let (w, h) = inst.viewport_size();
+        let (w, h) = (input["width"].as_u64().map_or(w, |v| v as u32), input["height"].as_u64().map_or(h, |v| v as u32));
+        inst.resize(w, h, input["mobile"].as_bool().unwrap_or(false));
+    }
+    inst.ready()?;
+    if input["url"].as_str().is_some_and(|u| !u.trim().is_empty()) {
+        return inst.call("BROWSER_GOTO", input, folder).map(|r| format!("{}{r}", if was_open { "It was open already. " } else { "" }));
+    }
+    let (w, h) = inst.viewport_size();
+    Ok(inst.report(&format!("{} The viewport is {w}x{h} CSS px.", if was_open { "It was open already." } else { "Opened the browser." })))
+}
+
+/// BROWSER close for conversation `conv`: its browser ends (the view fades
+/// it out).
+pub(crate) fn model_close(conv: &str) -> Result<String, String> {
+    if !is_open(conv) {
+        return Ok("The browser was closed already.".into());
+    }
+    close(conv);
+    Ok("Closed the browser.".into())
+}
+
+/// Runs a BROWSER call (but open, close and screenshot) for conversation `conv`.
 pub(crate) fn tool(conv: &str, name: &str, input: &Value, folder: &Path) -> Result<String, String> {
     let inst = get(conv).ok_or(CLOSED)?;
     let _busy = Busy::new(&inst);
@@ -1791,7 +2043,7 @@ pub(crate) fn screenshot(conv: &str) -> Result<Vec<Value>, String> {
     inst.screenshot()
 }
 
-/// Counts a call of the model's as running, for the pane, while it lives.
+/// Counts a call of the model's as running, for the view, while it lives.
 struct Busy(Arc<Instance>);
 
 impl Busy {
@@ -1851,11 +2103,11 @@ mod tests {
         assert_eq!(key_info("Q", false).unwrap().key, "q");
     }
 
-    /// Changing the pane during launch must not leave Chromium at the
-    /// launch size. Subsequent resizes and scale changes keep CSS input
-    /// coordinates and the viewport in sync too.
+    /// Resizing during launch must not leave Chromium at the launch size.
+    /// Later resizes (the model's) and scale changes (the view's) keep CSS
+    /// input coordinates and the viewport in sync too.
     #[test]
-    fn viewport_tracks_pane_during_startup_and_resize() {
+    fn viewport_follows_resizes_during_startup_and_after() {
         if find_browser().is_none() {
             eprintln!("no browser: skipped");
             return;
@@ -1870,24 +2122,27 @@ mod tests {
             assert!(start.elapsed() < START_TIMEOUT, "browser did not launch");
             std::thread::sleep(Duration::from_millis(1));
         }
-        inst.drawn_at(600.0, 900.0, 1.25);
+        assert_eq!(inst.viewport_css(), (DEFAULT_W, DEFAULT_H));
+        inst.resize(600, 900, false);
+        inst.shown(1.25, [300, 450]);
         while inst.view.lock().unwrap().status != Status::Ready {
             assert!(start.elapsed() < START_TIMEOUT, "browser did not become ready");
             std::thread::sleep(Duration::from_millis(10));
         }
         let page = inst.page().unwrap();
-        let check = |w, h, scale| {
+        let check = |w: u32, h: u32, scale: f32| {
             let got = page.call("Runtime.evaluate", json!({
                 "expression": "[innerWidth, innerHeight, devicePixelRatio]", "returnByValue": true
             })).unwrap();
             let value = &got["result"]["value"];
-            assert_eq!(value[0].as_u64(), Some(w));
-            assert_eq!(value[1].as_u64(), Some(h));
+            assert_eq!(value[0].as_u64(), Some(u64::from(w)));
+            assert_eq!(value[1].as_u64(), Some(u64::from(h)));
             assert_eq!(value[2].as_f64(), Some(f64::from(scale)));
         };
         check(600, 900, 1.25);
         for (w, h, scale) in [(800, 600, 1.0), (450, 750, 1.5), (640, 480, 2.0)] {
-            inst.drawn_at(w as f32, h as f32, scale);
+            inst.resize(w, h, false);
+            inst.shown(scale, [w, h]);
             check(w, h, scale);
         }
         // A CSS point near the bottom right must still hit its DOM target.
@@ -1992,6 +2247,90 @@ mod tests {
         // Closed: the calls fail.
         close(&conv);
         assert_eq!(tool(&conv, "BROWSER_READ", &json!({}), &folder).unwrap_err(), CLOSED);
+        std::thread::sleep(Duration::from_secs(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The page with what the newer actions act on: a hover menu, a
+    /// slider, a box dragged by mouse events, a drag and drop target,
+    /// double and right clicks, text that shows later, a far element.
+    const PAGE2: &str = r#"<title>Actions</title><style>#menu{display:none}#hov:hover+#menu{display:block}body{margin:0}</style>
+      <button id="hov" style="position:absolute;left:20px;top:20px;width:100px;height:30px">Menu</button><div id="menu" style="position:absolute;left:20px;top:52px">Opened menu</div>
+      <input id="r" type="range" min="0" max="100" value="0" style="position:absolute;left:200px;top:20px;width:300px">
+      <div id="box" style="position:absolute;left:20px;top:120px;width:40px;height:40px;background:red"></div>
+      <div id="src" draggable="true" style="position:absolute;left:20px;top:220px;width:60px;height:40px;background:blue">src</div>
+      <div id="dst" style="position:absolute;left:300px;top:220px;width:100px;height:60px;background:#eee">dst</div>
+      <button id="dbl" style="position:absolute;left:20px;top:320px" ondblclick="out.textContent='double'" oncontextmenu="event.preventDefault();out.textContent='right'">Twice</button>
+      <p id="out" style="position:absolute;left:20px;top:360px">none</p>
+      <div id="far" style="position:absolute;left:20px;top:3000px">Far away</div>
+      <script>
+        let drag = null;
+        box.onmousedown = e => drag = [e.clientX - box.offsetLeft, e.clientY - box.offsetTop];
+        onmousemove = e => { if (drag) { box.style.left = (e.clientX - drag[0]) + 'px'; box.style.top = (e.clientY - drag[1]) + 'px'; } };
+        onmouseup = () => drag = null;
+        dst.ondragover = e => e.preventDefault();
+        dst.ondrop = e => { e.preventDefault(); dst.textContent = 'dropped'; };
+        setTimeout(() => { const p = document.createElement('p'); p.textContent = 'Arrived later'; document.body.append(p); }, 800);
+      </script>"#;
+
+    /// Hover, drag (a slider, a box moved by mouse events, HTML drag and
+    /// drop), double and right clicks, wait, scrolling to a ref, resize and
+    /// a phone's viewport, on a real browser. Skipped without one.
+    #[test]
+    fn newer_actions_on_a_real_page() {
+        if find_browser().is_none() {
+            eprintln!("no browser: skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("oak-browser-actions-test-{}", std::process::id()));
+        let ctx = egui::Context::default();
+        let conv = format!("actions-test-{}", std::process::id());
+        let inst = open_with(&conv, &ctx, dir.join("profile"));
+        let folder = dir.clone();
+        let call = |name: &str, input: Value| {
+            let r = tool(&conv, name, &input, &folder);
+            println!("== {name} {input}\n{}", match &r { Ok(s) => s.clone(), Err(e) => format!("ERR {e}") });
+            r
+        };
+        let eval = |js: &str| call("BROWSER_EVAL", json!({"script": js})).unwrap();
+        assert_eq!(inst.viewport_size(), (DEFAULT_W, DEFAULT_H));
+        call("BROWSER_GOTO", json!({"url": format!("data:text/html,{}", PAGE2.replace('#', "%23"))})).unwrap();
+        // Text that shows later; text that is gone.
+        let r = call("BROWSER_WAIT", json!({"text": "Arrived later", "timeout": 5})).unwrap();
+        assert!(r.contains("is on the page"), "{r}");
+        assert!(call("BROWSER_WAIT", json!({"text": "Arrived later", "gone": true, "timeout": 1})).unwrap_err().contains("still on the page"));
+        // Hover opens the menu, and the model's pointer is there.
+        call("BROWSER_HOVER", json!({"x": 70, "y": 35})).unwrap();
+        assert_eq!(eval("getComputedStyle(menu).display"), "block");
+        assert_eq!(inst.view.lock().unwrap().agent_ptr.map(|p| p.to), Some(egui::pos2(70.0, 35.0)));
+        // Drags: the slider to its end, the box by 200 px, src onto dst.
+        call("BROWSER_DRAG", json!({"x": 205, "y": 30, "to_x": 520, "to_y": 30})).unwrap();
+        assert_eq!(eval("r.value"), "100");
+        call("BROWSER_DRAG", json!({"x": 40, "y": 140, "to_x": 240, "to_y": 160})).unwrap();
+        assert_eq!(eval("box.style.left + ' ' + box.style.top"), "220px 140px");
+        call("BROWSER_DRAG", json!({"x": 50, "y": 240, "to_x": 350, "to_y": 250})).unwrap();
+        let dropped = eval("dst.textContent");
+        println!("HTML drag and drop: {dropped}");
+        // Double and right clicks.
+        call("BROWSER_CLICK", json!({"x": 40, "y": 330, "clicks": 2})).unwrap();
+        assert_eq!(eval("out.textContent"), "double");
+        call("BROWSER_CLICK", json!({"x": 40, "y": 330, "button": "right"})).unwrap();
+        assert_eq!(eval("out.textContent"), "right");
+        // Scrolling across, and to a ref far down.
+        let read = call("BROWSER_READ", json!({})).unwrap();
+        assert!(read.contains("Far away"));
+        let r = call("BROWSER_SCROLL", json!({"dx": 0, "dy": 0})).unwrap();
+        assert!(r.contains("Scrolled"));
+        // Resize, and a phone.
+        let r = call("BROWSER_RESIZE", json!({"width": 800, "height": 600})).unwrap();
+        assert!(r.contains("800x600"), "{r}");
+        assert_eq!(eval("innerWidth + 'x' + innerHeight"), "800x600");
+        call("BROWSER_RESIZE", json!({"width": 390, "height": 844, "mobile": true})).unwrap();
+        // (Without a viewport meta tag a phone lays the page out 980 px wide, as Chrome on one does.)
+        assert_eq!(eval("screen.width + 'x' + screen.height + ' ' + navigator.maxTouchPoints + ' ' + matchMedia('(pointer: coarse)').matches"), "390x844 1 true");
+        assert!(call("BROWSER_RESIZE", json!({"width": 50, "height": 99999})).unwrap().contains("200x4096"));
+        assert!(dropped == "dropped", "HTML drag and drop didn't drop: {dropped}");
+        close(&conv);
         std::thread::sleep(Duration::from_secs(2));
         let _ = std::fs::remove_dir_all(&dir);
     }

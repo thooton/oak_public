@@ -40,7 +40,10 @@ pub fn fetch(input: &Value) -> Result<String, String> {
             let text = String::from_utf8_lossy(&bytes);
             return Err(format!("HTTP {status} from {final_url}\n{}", page_text(&text, &final_url).head(2000)));
         }
-        if bytes[..bytes.len().min(4096)].contains(&0) || kind.starts_with("image/") || kind.contains("pdf") || kind.contains("octet-stream") {
+        if kind.starts_with("image/") || image::guess_format(&bytes).is_ok() {
+            return Err(format!("{final_url} is an image, not text: SEARCH with `image` set to this url shows it."));
+        }
+        if bytes[..bytes.len().min(4096)].contains(&0) || kind.contains("pdf") || kind.contains("octet-stream") {
             return Err(format!(
                 "{final_url} is not text ({}, {} bytes). Download it with curl in EXECUTE (READ shows image files).",
                 if kind.is_empty() { "unknown type" } else { &kind },

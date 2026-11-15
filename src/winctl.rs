@@ -117,6 +117,10 @@ the user's screen, mouse, keyboard or focus.
       start it with TASK action=new, and TASK action=delete closes the app.
   list                      Windows on the desktop: id, process, size, title.
   shot FILE.png             Screenshot of the window's client area.
+  record DIR SECONDS [FPS]  Screenshots in a row (default 30 a second) into
+                            DIR as 00000.bmp, 00001.bmp...: a video's frames
+                            (ffmpeg -framerate FPS -i DIR/%05d.bmp out.mp4).
+                            Stops early when DIR/stop exists.
   click X Y [--right] [--double]
   move X Y                  Move the pointer (hover).
   drag X1 Y1 X2 Y2 [--right]
@@ -241,6 +245,42 @@ fn run(args: &[String]) -> Result<i32, String> {
             let path = o.rest.first().ok_or("shot: give a file name, e.g. shot out.png")?;
             let (width, height) = shot(w, std::path::Path::new(path))?;
             println!("Saved {width}x{height} screenshot of {} to {path}", title(w));
+            return Ok(0);
+        }
+        "record" => {
+            let dir = std::path::Path::new(o.rest.first().ok_or("record: give a folder for the frames")?);
+            let secs = n(1)?.max(1) as f64;
+            let fps = o.rest.get(2).map_or(Ok(30), |_| n(2))?.clamp(1, 120) as f64;
+            std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make {}: {e}", dir.display()))?;
+            let (start, every) = (Instant::now(), Duration::from_secs_f64(1.0 / fps));
+            let total = (secs * fps).round() as u32;
+            // Files are written on another thread, so a slow disk doesn't
+            // slow the captures.
+            let (tx, rx) = std::sync::mpsc::channel::<(u32, std::sync::Arc<(u32, u32, Vec<u8>)>)>();
+            let out = dir.to_path_buf();
+            let writer = std::thread::spawn(move || -> Result<(), String> {
+                for (i, f) in rx {
+                    write_bmp(&out.join(format!("{i:05}.bmp")), f.0, f.1, &f.2)?;
+                }
+                Ok(())
+            });
+            let mut count = 0u32;
+            while count < total && !dir.join("stop").exists() {
+                if let Some(wait) = (start + every * count).checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+                // Each frame of the video is the first capture at or after
+                // its time: one that came late fills the frames it missed.
+                let slot = ((start.elapsed().as_secs_f64() * fps).round() as u32).min(total - 1);
+                let frame = std::sync::Arc::new(capture(w)?);
+                while count <= slot {
+                    tx.send((count, frame.clone())).map_err(|_| "The writer stopped.")?;
+                    count += 1;
+                }
+            }
+            drop(tx);
+            writer.join().map_err(|_| "The writer panicked.")??;
+            println!("Recorded {count} frames ({fps} a second) of {} to {}", title(w), dir.display());
             return Ok(0);
         }
         "click" => {
@@ -586,6 +626,35 @@ fn named_key(name: &str) -> Result<(u8, Option<u16>), String> {
 /// Captures the window's client area (as composed, so GPU-drawn content is
 /// included) to a PNG. Returns its size.
 fn shot(w: Hwnd, path: &std::path::Path) -> Result<(u32, u32), String> {
+    let (cw, ch, mut px) = capture(w)?;
+    for p in px.chunks_exact_mut(4) {
+        p.swap(0, 2); // BGRA -> RGBA
+        p[3] = 255;
+    }
+    let img = image::RgbaImage::from_raw(cw, ch, px).ok_or("bad image size")?;
+    img.save_with_format(path, image::ImageFormat::Png).map_err(|e| format!("Couldn't save {}: {e}", path.display()))?;
+    Ok((cw, ch))
+}
+
+/// A 32-bit top-down BMP of `px` (BGRA rows): quick to write, for `record`.
+fn write_bmp(path: &std::path::Path, w: u32, h: u32, px: &[u8]) -> Result<(), String> {
+    let mut out = Vec::with_capacity(54 + px.len());
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(54 + px.len() as u32).to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(-(h as i32)).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(&[0; 24]);
+    out.extend_from_slice(px);
+    std::fs::write(path, out).map_err(|e| format!("Couldn't save {}: {e}", path.display()))
+}
+
+/// The window's client area: its size and its pixels (BGRA rows, top down).
+fn capture(w: Hwnd) -> Result<(u32, u32, Vec<u8>), String> {
     let (cw, ch) = client_size(w);
     if cw <= 0 || ch <= 0 {
         return Err("The window has no client area (minimized?).".into());
@@ -622,13 +691,7 @@ fn shot(w: Hwnd, path: &std::path::Path) -> Result<(u32, u32), String> {
             return Err(format!("Couldn't capture the window: {}", std::io::Error::last_os_error()));
         }
     }
-    for p in px.chunks_exact_mut(4) {
-        p.swap(0, 2); // BGRA -> RGBA
-        p[3] = 255;
-    }
-    let img = image::RgbaImage::from_raw(cw as u32, ch as u32, px).ok_or("bad image size")?;
-    img.save_with_format(path, image::ImageFormat::Png).map_err(|e| format!("Couldn't save {}: {e}", path.display()))?;
-    Ok((cw as u32, ch as u32))
+    Ok((cw as u32, ch as u32, px))
 }
 
 /// Git Bash turns arguments that look like Unix paths into Windows ones

@@ -418,6 +418,11 @@ pub fn install_fonts(ctx: &egui::Context) {
     install_face(ctx, PLEX);
 }
 
+/// IBM Plex Sans, Oak's own face, regular and bold: also what the captions
+/// of SEARCH's sheet of images are drawn in.
+pub const PLEX_REGULAR: &[u8] = include_bytes!("../assets/IBMPlexSans-Regular.ttf");
+pub const PLEX_BOLD: &[u8] = include_bytes!("../assets/IBMPlexSans-Bold.ttf");
+
 /// The fonts: the face `face` names (with real bold and italics) for
 /// everything, egui's monospace font (Hack) only for code: the `CODE`
 /// family, and the Monospace text style. Nerd Font symbols (built in) are
@@ -427,8 +432,8 @@ pub fn install_fonts(ctx: &egui::Context) {
 pub fn install_face(ctx: &egui::Context, face: &str) -> bool {
     let mut defs = FontDefinitions::default();
     let plex: [&'static [u8]; 4] = [
-        include_bytes!("../assets/IBMPlexSans-Regular.ttf"),
-        include_bytes!("../assets/IBMPlexSans-Bold.ttf"),
+        PLEX_REGULAR,
+        PLEX_BOLD,
         include_bytes!("../assets/IBMPlexSans-Italic.ttf"),
         include_bytes!("../assets/IBMPlexSans-BoldItalic.ttf"),
     ];
