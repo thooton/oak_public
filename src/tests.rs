@@ -328,6 +328,50 @@ fn find_in_a_conversation() {
     s.delete();
 }
 
+/// In a long tool loop whose old output a cold moment cleared, the line
+/// "above tool output is cleared" is drawn between the last call whose
+/// output the model sees cleared and the first whose it still sees (it was
+/// drawn after the whole run of calls, below output that wasn't cleared).
+#[test]
+fn cleared_tool_output_line_at_the_boundary() {
+    use serde_json::json;
+    let (ctx, t) = test_ctx(false, false);
+    let big = "y".repeat(7_000);
+    let mut messages = vec![json!({"role": "user", "content": [{"type": "text", "text": "go"}]})];
+    for i in 0..30 {
+        messages.push(json!({"role": "assistant", "content": [{"type": "tool_call", "id": format!("t{i}"), "name": "EXECUTE", "input": {"command": format!("echo round-{i}"), "summary": format!("Round {i}")}}]}));
+        messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": format!("t{i}"), "content": big}]}));
+    }
+    messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": "All rounds done."}]}));
+    let mut conv = store::Conversation { id: format!("unit-test-cleared-line-{}", api::now_ms()), folder: std::env::temp_dir(), messages: messages.into(), ..Default::default() };
+    let all = conv.messages.to_vec();
+    assert!(conv.rolling.clear_cold(&all));
+    let cleared = conv.rolling.cleared_calls(&all);
+    let last_cleared = (0..30).rev().find(|i| cleared.contains(format!("t{i}").as_str())).unwrap();
+    assert!(last_cleared < 25 && !cleared.contains(format!("t{}", last_cleared + 1).as_str()), "{last_cleared}");
+    let id = conv.id.clone();
+    let s = agent::Session::start(conv, ctx.clone());
+    let mut list = vlist::List::default();
+    let mut editing = None;
+    let mut time = 0.0;
+    let (mut texts, mut lines) = (vec![], vec![]);
+    for _ in 0..4 {
+        let out = run_frame(&ctx, vec2(1000.0, 900.0), &mut time, 0.1, vec![], |ui| {
+            chat_view(ui, &t, &id, &s, &mut list, &mut editing, false);
+        });
+        texts = out.shapes.iter().filter_map(|s| if let egui::Shape::Text(x) = &s.shape { Some((x.galley.text().to_string(), x.pos.y)) } else { None }).collect::<Vec<_>>();
+        // The marker's line, in its blue.
+        lines = out.shapes.iter().filter_map(|s| if let egui::Shape::LineSegment { points, stroke } = &s.shape { (stroke.color == chat_view::CLEARED_BLUE).then_some(points[0].y) } else { None }).collect::<Vec<_>>();
+    }
+    let y = |text: &str| texts.iter().find(|x| x.0.contains(text)).map(|x| x.1);
+    assert!(y("above tool output is cleared").is_some() && lines.len() == 1, "one marker: {lines:?} {texts:?}");
+    let (line, Some(above), Some(below)) = (lines[0], y(&format!("Round {last_cleared}")), y(&format!("Round {}", last_cleared + 1))) else {
+        panic!("the rounds around the line in view: {texts:?}");
+    };
+    assert!(above < line && line < below, "the line ({line}) between round {last_cleared} ({above}) and the next ({below})");
+    s.delete();
+}
+
 /// Copying a selection over a reply copies the list numbers, not the code
 /// block's language; Ctrl+A in a reply's selection selects the whole reply
 /// (not one paragraph), and Ctrl+C copies it as it reads.

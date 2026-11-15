@@ -351,6 +351,21 @@ impl State {
         by_summary.max(self.cold_clearing().map_or(0, |c| c.to))
     }
 
+    /// Where old tool output in `messages` stops being cleared, as the
+    /// transcript shows it: the first message whose tool calls' results
+    /// requests still send (the calls are shown with their results), when
+    /// old output before it is cleared. READs superseded later are cleared
+    /// past it too (`Clearing::sup`).
+    pub fn cleared_until(&self, messages: &[Value]) -> Option<usize> {
+        let Bounds { cut, to, .. } = bounds(messages, self.active(), self.cold_clearing());
+        if to <= cut {
+            return None;
+        }
+        // Results at `to` answer the calls just before it, which aren't cleared.
+        let answers = |k: usize| messages[k]["role"] == "user" && has_tool_result(&messages[k]);
+        Some(if to < messages.len() && to > cut && answers(to) && messages[to - 1]["role"] == "assistant" { to - 1 } else { to })
+    }
+
     /// `messages` (the transcript) as requests send them (`view`).
     pub fn view(&self, messages: &[Value]) -> Vec<Value> {
         view_with(messages, self.active(), self.cold_clearing())
@@ -509,18 +524,37 @@ fn read_key(input: &Value) -> String {
     format!("{path}|{}|{}", input["offset"], input["limit"])
 }
 
-/// The tool calls whose output the view clears: old output in the part a
-/// summary or a cold moment cleared (`Summary::clear`, `Clearing::to`), and
-/// READs a later identical READ superseded (`Clearing::sup`).
-/// Borrowed from `messages`, in one pass over them: the transcript takes it
-/// every frame.
-fn cleared_set<'a>(messages: &'a [Value], summary: Option<&Summary>, cold: Option<&Clearing>) -> Ids<'a> {
+/// Where the view clears old tool output (`cleared_set`), in messages of
+/// the transcript it is for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bounds {
+    /// Where the verbatim part starts (0 without a summary in use).
+    cut: usize,
+    /// Old output in messages `cut..to` is cleared.
+    to: usize,
+    /// READs a later identical one superseded in `cut..sup` are cleared.
+    sup: usize,
+}
+
+/// `Bounds` of `messages` with `summary` and `cold` (as `State` keeps
+/// them, perhaps from before a revert made the transcript shorter).
+fn bounds(messages: &[Value], summary: Option<&Summary>, cold: Option<&Clearing>) -> Bounds {
     let n = messages.len();
     let s = in_use(messages, summary);
     let cut = s.map_or(0, |s| s.cut);
     let cold = cold.filter(|c| c.base == cut);
     let to = s.map_or(cut, |s| s.clear).max(cold.map_or(0, |c| c.to)).min(n).max(cut);
     let sup = cold.map_or(cut, |c| c.sup.min(n).max(cut));
+    Bounds { cut, to, sup }
+}
+
+/// The tool calls whose output the view clears: old output in the part a
+/// summary or a cold moment cleared (`Summary::clear`, `Clearing::to`), and
+/// READs a later identical READ superseded (`Clearing::sup`).
+/// Borrowed from `messages`, in one pass over them: the transcript takes it
+/// every frame.
+fn cleared_set<'a>(messages: &'a [Value], summary: Option<&Summary>, cold: Option<&Clearing>) -> Ids<'a> {
+    let Bounds { cut, to, sup } = bounds(messages, summary, cold);
     // Nothing cleared: no calls to name.
     if to == cut && sup == cut {
         return Default::default();
@@ -1412,11 +1446,21 @@ mod tests {
         assert_eq!((out(27), out(28)), (big.clone(), big.clone()));
         let to = s.cleared_to();
         assert!(to > 1 && to < 2 + 2 * 22, "{to}");
+        // The transcript marks it at the first call whose output is sent:
+        // the one the results at `to` answer, if they are results.
+        let first_kept = if m[to]["role"] == "user" { to - 1 } else { to };
+        assert_eq!(s.cleared_until(&m), Some(first_kept));
+        assert!(m[first_kept]["role"] == "assistant" && out((first_kept - 1) / 2) == big && out((first_kept - 1) / 2 - 1) == CLEARED);
+        // Cleared to past the end (the transcript reverted since): to its end.
+        s.cold.to = m.len() + 5;
+        assert_eq!(s.cleared_until(&m), Some(m.len()));
+        s.cold.to = to;
         assert_eq!(s.cleared_calls(&m).len(), (0..30).filter(|&i| out(i) == CLEARED).count());
         // Nothing new to clear: no change (the next request can read the cache).
         assert!(!s.clear_cold(&m));
         // Another summary's view: that clearing is not in it.
         s.summary = Some(Summary { cut: 3, text: "s".into(), made_at: 0, clear: 3 });
         assert_eq!(s.cleared_to(), 3);
+        assert_eq!(s.cleared_until(&m), None, "nothing cleared after its cut");
     }
 }

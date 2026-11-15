@@ -662,6 +662,17 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
     (out, msgs, results)
 }
 
+/// The item (of `conv_items`' `items`, from messages `msgs`) where old tool
+/// output stops being cleared (`rolling::State::cleared_until`), when the
+/// output of a call shown before it is: the transcript starts a unit there
+/// (`units_split`) and marks it with a line.
+pub(crate) fn cleared_split(conv: &Conversation, items: &[Item], msgs: &[usize], results: &Results) -> Option<usize> {
+    let until = conv.rolling.cleared_until(&conv.messages)?;
+    let at = msgs.partition_point(|&m| m < until).min(items.len());
+    let cleared = |x: &Item| matches!(x, Item::Tool(b, _) | Item::Display(b, _) if results.get(b["id"].as_str().unwrap_or("")).is_some_and(|r| r.cleared));
+    (at > 0 && items[..at].iter().rev().any(cleared)).then_some(at)
+}
+
 /// The reply streaming in (`live`), added to the items and messages
 /// `conv_items` gave.
 pub(crate) fn push_live<'a>(out: &mut Vec<Item<'a>>, msgs: &mut Vec<usize>, conv: &Conversation, live: &'a Live) {
@@ -1731,11 +1742,17 @@ pub(crate) fn transcript_view(ui: &mut Ui, t: &Theme, conv: &Conversation, live:
 /// The transcript in units: a run of tool calls and thinking (shown as one
 /// block), or any other single item.
 pub(crate) fn units(items: &[Item]) -> Vec<std::ops::Range<usize>> {
+    units_split(items, None)
+}
+
+/// `units`, with one starting at item `split` (where old tool output stops
+/// being cleared, `cleared_split`) even in the middle of a run.
+pub(crate) fn units_split(items: &[Item], split: Option<usize>) -> Vec<std::ops::Range<usize>> {
     let work = |x: &Item| matches!(x, Item::Thinking(..) | Item::Tool(..));
     let mut out = vec![];
     let mut i = 0;
     while i < items.len() {
-        let end = if work(&items[i]) { (i..items.len()).find(|&j| !work(&items[j])).unwrap_or(items.len()) } else { i + 1 };
+        let end = if work(&items[i]) { (i + 1..items.len()).find(|&j| !work(&items[j]) || Some(j) == split).unwrap_or(items.len()) } else { i + 1 };
         out.push(i..end);
         i = end;
     }

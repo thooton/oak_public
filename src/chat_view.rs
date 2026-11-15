@@ -124,13 +124,14 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
     let mut built = None;
     let mut fresh = None;
     {
-        let (items, msgs, results, units, mut sigs) = if let Some(early) = &live.early {
+        let (items, msgs, results, units, mut sigs, split) = if let Some(early) = &live.early {
             let (items, msgs, mut results) = items_at(&conv, &live);
             crate::transcript::add_results(&mut results, early);
-            let units = units(&items);
+            let split = transcript::cleared_split(&conv, &items, &msgs, &results);
+            let units = transcript::units_split(&items, split);
             let sigs: Vec<u64> = units.iter().map(|u| unit_sig(&items[u.clone()], &results)).collect();
             let (items, msgs, results) = fresh.insert((items, msgs, results));
-            (&items[..], &msgs[..], &*results, units, sigs)
+            (&items[..], &msgs[..], &*results, units, sigs, split)
         } else {
             built.insert(Built::take(id, &conv)).frame(&conv, &live)
         };
@@ -175,8 +176,9 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         // regardless of the banner's open state.
         let cut = |_: &Ui| items.iter().rev().find_map(|i| if let Item::Summary { cut, .. } = i { Some(unit_of(*cut)) } else { None });
         // Where old tool output stops being cleared (by a summary or at a
-        // cold moment), when any is.
-        let cleared = results.values().any(|r| r.cleared).then(|| unit_of(conv.rolling.cleared_to())).filter(|&u| u < units.len());
+        // cold moment), when any above is: a unit starts there, even
+        // within a run of tool calls (`cleared_split`).
+        let cleared = marker_unit(&units, items.len(), split);
         // File links in replies are relative to the working folder (a chat
         // has none).
         crate::markdown::set_link_base(ui.ctx(), (!conv.chat).then_some(conv.folder.as_path()));
@@ -196,6 +198,14 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         s.answer_ask_request(accept);
     }
     action
+}
+
+/// The unit the line marking cleared tool output goes over: the one that
+/// starts at `split` (`transcript::cleared_split`), or the transcript's end
+/// after the `len` items when all their old output is cleared.
+fn marker_unit(units: &[Range<usize>], len: usize, split: Option<usize>) -> Option<usize> {
+    let s = split?;
+    if s >= len { Some(units.len()) } else { units.iter().position(|u| u.start == s) }
 }
 
 #[cfg(test)]
@@ -240,6 +250,9 @@ struct Built {
     /// Of those units, the ones that show what isn't in the conversation: a
     /// rewrite (Unslop), or a command with no result yet whose output grows.
     volatile: Vec<usize>,
+    /// The item where old tool output stops being cleared, which starts a
+    /// unit (`transcript::cleared_split`).
+    split: Option<usize>,
 }
 
 impl Built {
@@ -255,7 +268,8 @@ impl Built {
         let (mut items, msgs, results) = transcript::conv_items(conv);
         transcript::mark_turn_ends(&mut items, 0, false);
         let len = items.len();
-        let all = units(&items);
+        let split = transcript::cleared_split(conv, &items, &msgs, &results);
+        let all = transcript::units_split(&items, split);
         let last = items.iter().rposition(|x| !matches!(x, Item::Mark(_)));
         let kept = last.and_then(|l| all.iter().position(|u| u.contains(&l))).unwrap_or(0);
         let tail = all.get(kept).map_or(len, |u| u.start);
@@ -268,13 +282,14 @@ impl Built {
         // the same place (in the `Arc` its revision belongs to), so they are
         // as good as borrowed from it then (`frame`).
         let (items, results) = unsafe { (std::mem::transmute::<Vec<Item<'_>>, Vec<Item<'static>>>(items), std::mem::transmute::<transcript::Results<'_>, transcript::Results<'static>>(results)) };
-        Built { rev, used: 0, items, msgs, results, len, tail, units, sigs, volatile }
+        Built { rev, used: 0, items, msgs, results, len, tail, units, sigs, volatile, split }
     }
 
     /// This frame's items (with `live`'s reply streaming in), each one's
-    /// message, the tool results, the units and their signatures.
+    /// message, the tool results, the units and their signatures, and the
+    /// item where old tool output stops being cleared.
     #[allow(clippy::type_complexity)]
-    fn frame<'f>(&'f mut self, conv: &'f store::SharedGuard, live: &'f Live) -> (&'f [Item<'f>], &'f [usize], &'f transcript::Results<'f>, Vec<Range<usize>>, Vec<u64>) {
+    fn frame<'f>(&'f mut self, conv: &'f store::SharedGuard, live: &'f Live) -> (&'f [Item<'f>], &'f [usize], &'f transcript::Results<'f>, Vec<Range<usize>>, Vec<u64>, Option<usize>) {
         // The conversation the items were worked out from, unchanged.
         assert_eq!(conv.rev(), self.rev);
         let conv: &'f Conversation = conv;
@@ -301,14 +316,15 @@ impl Built {
         transcript::mark_turn_ends(items, self.tail, live.busy);
         let mut units = Vec::with_capacity(self.units.len() + 8);
         units.extend_from_slice(&self.units);
-        units.extend(transcript::units(&items[self.tail..]).into_iter().map(|u| u.start + self.tail..u.end + self.tail));
+        let split = self.split.and_then(|s| s.checked_sub(self.tail));
+        units.extend(transcript::units_split(&items[self.tail..], split).into_iter().map(|u| u.start + self.tail..u.end + self.tail));
         let mut sigs = Vec::with_capacity(units.len() + 1);
         sigs.extend_from_slice(&self.sigs);
         for &u in &self.volatile {
             sigs[u] = unit_sig(&items[units[u].clone()], results);
         }
         sigs.extend(units[self.units.len()..].iter().map(|u| unit_sig(&items[u.clone()], results)));
-        (items, &self.msgs, results, units, sigs)
+        (items, &self.msgs, results, units, sigs, self.split)
     }
 
     /// Kept for the next frame, drawn in pass `pass`, without the reply.
@@ -329,7 +345,7 @@ impl Built {
 }
 
 /// The line marking where old tool output stops being cleared.
-const CLEARED_BLUE: Color32 = Color32::from_rgb(0x6f, 0xa8, 0xe8);
+pub(crate) const CLEARED_BLUE: Color32 = Color32::from_rgb(0x6f, 0xa8, 0xe8);
 
 /// A line where a part of the transcript ends (`top`, the top of the first
 /// unit after it): where the summarized part ends (in the accent), or the
@@ -379,11 +395,85 @@ mod tests {
     use super::*;
 
     /// What a frame shows, worked out from scratch (`items_at`).
-    fn fresh(conv: &Conversation, live: &Live) -> (Vec<Range<usize>>, Vec<u64>, Vec<usize>) {
+    fn fresh(conv: &Conversation, live: &Live) -> (Vec<Range<usize>>, Vec<u64>, Vec<usize>, Option<usize>) {
         let (items, msgs, results) = items_at(conv, live);
-        let units = units(&items);
+        let split = transcript::cleared_split(conv, &items, &msgs, &results);
+        let units = transcript::units_split(&items, split);
         let sigs = units.iter().map(|u| unit_sig(&items[u.clone()], &results)).collect();
-        (units, sigs, msgs)
+        (units, sigs, msgs, split)
+    }
+
+    /// A tool loop: a message, `rounds` calls each with a long output, and
+    /// the reply's text.
+    fn tool_loop(rounds: usize) -> Conversation {
+        let big = "y".repeat(7_000);
+        let mut m = vec![serde_json::json!({"role": "user", "content": [{"type": "text", "text": "go"}]})];
+        for i in 0..rounds {
+            m.push(serde_json::json!({"role": "assistant", "content": [{"type": "reasoning", "text": format!("think {i}")}, {"type": "tool_call", "id": format!("t{i}"), "name": "EXECUTE", "input": {"command": format!("step {i}"), "summary": format!("Round {i}")}}]}));
+            m.push(serde_json::json!({"role": "user", "content": [{"type": "tool_result", "call_id": format!("t{i}"), "content": big}]}));
+        }
+        m.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Done."}]}));
+        Conversation { messages: m.into(), ..Default::default() }
+    }
+
+    /// The marker of cleared tool output goes between the last call whose
+    /// output is cleared and the first whose isn't, in the middle of the
+    /// run of calls they are in (not after the run, at the reply's text),
+    /// wherever the clearing ends: at a call or at its result, by a cold
+    /// moment or a summary (one from before a revert shortened the
+    /// transcript too), with a reply streaming in or not.
+    #[test]
+    fn cleared_marker_is_at_the_last_cleared_call() {
+        let mut conv = tool_loop(30);
+        let n = conv.messages.len();
+        let check = |conv: &Conversation, live: &Live, what: &str| {
+            let (items, msgs, results) = items_at(conv, live);
+            let split = transcript::cleared_split(conv, &items, &msgs, &results);
+            let cleared = conv.rolling.cleared_calls(&conv.messages);
+            // The calls after the summary's cut (those before it are summarized).
+            let base = conv.rolling.base();
+            let calls: Vec<(usize, bool)> = items
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| msgs[i] >= base)
+                .filter_map(|(i, x)| if let Item::Tool(b, _) = x { b["id"].as_str().map(|id| (i, cleared.contains(id))) } else { None })
+                .collect();
+            let Some(split) = split else {
+                assert!(calls.iter().all(|c| !c.1), "{what}: no marker, none cleared");
+                return;
+            };
+            assert!(calls.iter().any(|c| c.0 < split && c.1), "{what}: one cleared above");
+            assert!(calls.iter().all(|&(i, c)| c == (i < split)), "{what}: cleared above {split} only: {calls:?}");
+            let units = transcript::units_split(&items, split.into());
+            let at = marker_unit(&units, items.len(), Some(split)).expect("a unit starts at the marker");
+            if at == units.len() {
+                assert_eq!(calls.iter().filter(|c| !c.1).count(), 0, "{what}: at the end, all cleared");
+                return;
+            }
+            // (Past the transcript's end, it is before the reply streaming in.)
+            assert!(at > 0 && (msgs[split] >= conv.messages.len() || matches!(items[units[at - 1].start], Item::Thinking(..) | Item::Tool(..))), "{what}: within the run");
+        };
+        let live = Live::default();
+        let mut streaming = Live::default();
+        streaming.busy = true;
+        streaming.blocks = vec![serde_json::json!({"type": "reasoning", "text": "more"}), serde_json::json!({"type": "tool_call", "id": "live", "name": "READ", "input": {}})];
+        assert!(conv.rolling.clear_cold(&conv.messages));
+        check(&conv, &live, "cold moment");
+        check(&conv, &streaming, "cold moment, streaming");
+        for to in 2..n {
+            conv.rolling.cold = rolling::Clearing { base: 0, to, sup: 0 };
+            check(&conv, &live, &format!("cold to {to}"));
+            check(&conv, &streaming, &format!("cold to {to}, streaming"));
+        }
+        conv.rolling.cold = rolling::Clearing::default();
+        for clear in [6, 7, 30, 31, n + 10] {
+            conv.rolling.summary = Some(rolling::Summary { cut: 3, text: "s".into(), made_at: 0, clear });
+            check(&conv, &live, &format!("summary clearing to {clear}"));
+            check(&conv, &streaming, &format!("summary clearing to {clear}, streaming"));
+        }
+        // None cleared: no marker.
+        conv.rolling.summary = Some(rolling::Summary { cut: 3, text: "s".into(), made_at: 0, clear: 3 });
+        assert_eq!(fresh(&conv, &live).3, None);
     }
 
     /// The kept items give a frame what working them out again would, with
@@ -408,7 +498,7 @@ mod tests {
             live(true, vec![serde_json::json!({"type": "reasoning", "text": "hm"}), serde_json::json!({"type": "tool_call", "id": "c9", "name": "READ", "input": {}})]),
         ];
         let builds = || BUILDS.get();
-        for change in 0..4 {
+        for change in 0..7 {
             match change {
                 // The reply's rewrite streams in, a few words a frame.
                 0 => {
@@ -426,19 +516,45 @@ mod tests {
                     c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "tool_call", "id": "late", "name": "EXECUTE", "input": {"command": "ls"}}]}));
                     c.messages.push(serde_json::json!({"role": "user", "content": [{"type": "tool_result", "call_id": "late", "content": "a\nb"}, {"type": "text", "text": "Thanks"}]}));
                 }
-                _ => {
+                3 => {
                     shared.lock().unwrap().messages.truncate(4);
                 }
+                // A tool loop, its old output cleared at a cold moment: the
+                // marker within it, kept.
+                4 => {
+                    let mut c = shared.lock().unwrap();
+                    let looped = tool_loop(30);
+                    c.marks.clear();
+                    c.messages = looped.messages;
+                    let messages = c.messages.to_vec();
+                    assert!(c.rolling.clear_cold(&messages));
+                }
+                // Its reply's text gone: the marker in the last run.
+                5 => {
+                    let mut c = shared.lock().unwrap();
+                    let n = c.messages.len();
+                    c.messages.truncate(n - 1);
+                }
+                // Cleared to past the end (a summary from before a revert):
+                // the marker before the reply streaming in.
+                _ => {
+                    let mut c = shared.lock().unwrap();
+                    c.rolling.cold = Default::default();
+                    c.rolling.summary = Some(rolling::Summary { cut: 3, text: "s".into(), made_at: 0, clear: 500 });
+                }
+            }
+            if change >= 4 {
+                assert!(fresh(&shared.lock().unwrap(), &lives[0]).3.is_some(), "change {change}: a marker");
             }
             let before = builds();
             for (i, live) in lives.iter().enumerate() {
                 unslop::set_job_text("kept-early", &"early ".repeat(i));
                 unslop::set_job_text("kept-latest", &"latest ".repeat(i));
                 let conv = shared.lock().unwrap();
-                let (units, sigs, msgs) = fresh(&conv, live);
+                let (units, sigs, msgs, split) = fresh(&conv, live);
                 let mut b = Built::take(id, &conv);
-                let (items, kept_msgs, _, kept_units, kept_sigs) = b.frame(&conv, live);
-                assert_eq!((&kept_units, &kept_sigs, kept_msgs), (&units, &sigs, &msgs[..]), "change {change}");
+                let (items, kept_msgs, _, kept_units, kept_sigs, kept_split) = b.frame(&conv, live);
+                assert_eq!((&kept_units, &kept_sigs, kept_msgs, kept_split), (&units, &sigs, &msgs[..], split), "change {change}");
                 assert_eq!(items.len(), msgs.len());
                 b.put_back(id, 0);
             }
