@@ -1279,7 +1279,9 @@ fn version_label(ui: &mut Ui, t: &Theme, head: Rect) {
     let right = head.right() - 12.0 - w - 4.0;
     let button = Rect::from_center_size(egui::pos2(right - BUTTON / 2.0, head.center().y), vec2(BUTTON, BUTTON));
     let build = if update::is_release() { "release" } else { "local build" };
-    let state = if s.checking {
+    let state = if let Err(why) = update::source() {
+        why.to_string()
+    } else if s.checking {
         "Looking for an update…".to_string()
     } else {
         match (&s.phase, &s.checked) {
@@ -1291,7 +1293,10 @@ fn version_label(ui: &mut Ui, t: &Theme, head: Rect) {
     };
     let resp = ui
         .interact(button, Id::unique("home-version-refresh"), Sense::click())
-        .on_hover_text(format!("Oak {} ({build}, commit {})\n{state}\nCheck for updates", update::VERSION, update::COMMIT));
+        .on_hover_text(match update::source() {
+            Ok(repo) => format!("Oak {} ({build}, commit {})\nUpdates from github.com/{repo}\n{state}\nCheck for updates", update::VERSION, update::COMMIT),
+            Err(_) => format!("Oak {} ({build}, commit {})\n{state}", update::VERSION, update::COMMIT),
+        });
     if resp.hovered() {
         p.rect_filled(button, 3.0, t.tool_hover);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

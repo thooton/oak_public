@@ -92,14 +92,16 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 - The version is MAJOR.MINOR from `Cargo.toml` and the number of commits as the patch
   (`build.rs`), so every commit on master is a version. Other builds are marked `-dev`;
   `OAK_BUILD_VERSION` sets any version (to try the updater). `oak --version` prints it.
-- Oak updates itself (`src/update.rs`) from the GitHub repository it was built in
-  (`GITHUB_REPOSITORY` in CI, or `OAK_UPDATE_REPO`, at build time; a build that names none looks
-  for no updates). It looks for a release at start and every ten minutes, and the refresh button
-  by the version on Home looks at once. For a private repository it signs in with the GitHub
-  login the machine already has (`OAK_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, `gh auth token`,
-  then git's saved login). "Update available" downloads the build, checks its SHA-256 and swaps
-  the executable; "Restart to update" restarts into it (pausing conversations at work to resume
-  after). `OAK_NO_UPDATE=1` turns it off.
+- Oak updates itself (`src/update.rs`) from this repository's releases, github.com/thooton/oak_public,
+  whatever built it (`build.rs`; `OAK_UPDATE_REPO` at build time names another repository, or
+  `none`). It looks for a release at start and every ten minutes, and the refresh button by the
+  version on Home looks at once; its tooltip names the repository. It asks GitHub anonymously, and
+  only if GitHub turns that down (a private repository, a rate limit) again with the GitHub login
+  the machine already has (`OAK_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, `gh auth token`, then
+  git's saved login). "Update available" downloads the build, checks its SHA-256 and swaps the
+  executable; "Restart to update" restarts into it (pausing conversations at work to resume
+  after). `OAK_NO_UPDATE=1` turns it off. `OAK_UPDATE_API` points it at a stand-in for GitHub's API
+  (to try it against a fake or a relay; no login is sent there).
 - An update replaces Oak alone. Plugins aren't part of it and don't need rebuilding for it: the
   plugin interface only grows.
 - `linux/package.sh` makes `target/dist/oak-linux-x86_64.tar.gz`: unpack it anywhere and run

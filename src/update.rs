@@ -11,15 +11,18 @@
 //! dialog when conversations are at work, so they pause and resume) and
 //! starts the new build (`restart`, `relaunch_if_asked`).
 //!
-//! Oak asks GitHub's API directly, for the repository the build was made
-//! in (`OAK_UPDATE_REPO`, else `GITHUB_REPOSITORY`, when it was built: a
-//! build that names none looks for no updates). For a private repository
-//! it signs in with the GitHub login the machine already has for git
+//! Oak asks GitHub's API directly, for Oak's public repository,
+//! thooton/oak_public, wherever the build was made (build.rs; a build with
+//! `OAK_UPDATE_REPO` set names another, or "none"). It asks anonymously,
+//! which is all a public repository needs. Only when GitHub turns that
+//! down (404, as it answers for a private repository, or a rate limit) does
+//! it look for the GitHub login the machine already has for git
 //! (`github_token`: `GITHUB_TOKEN`, `gh auth token`, or git's stored
-//! credential for github.com, never prompting); with none it asks
-//! anonymously, which is enough for a public one. The asset itself comes
-//! from GitHub's storage, which the API redirects to (the token isn't sent
-//! there).
+//! credential for github.com, never prompting) and ask again with it. The
+//! asset itself comes from GitHub's storage, which the API redirects to
+//! (the token isn't sent there). `OAK_UPDATE_API` points it at another
+//! server in GitHub's shape, to try the updater against a fake; no token is
+//! ever sent there.
 //!
 //! Plugins aren't part of an update: their interface is stable
 //! (`docs/PLUGINS.md`), so the ones installed keep running in the new Oak.
@@ -44,8 +47,10 @@ use std::time::{Duration, Instant};
 pub(crate) const VERSION: &str = env!("OAK_VERSION");
 /// The commit it was built from (short hash).
 pub(crate) const COMMIT: &str = env!("OAK_COMMIT");
-/// The GitHub repository the releases come from.
+/// The GitHub repository the releases come from (empty: none).
 const REPO: &str = env!("OAK_UPDATE_REPO");
+/// GitHub's API.
+const GITHUB_API: &str = "https://api.github.com";
 
 /// The release asset with this machine's build, if there is one.
 const ASSET: Option<&str> = if cfg!(all(windows, target_arch = "x86_64")) {
@@ -119,13 +124,27 @@ fn exe() -> Option<&'static PathBuf> {
     EXE.get_or_init(|| std::env::current_exe().ok().and_then(|p| p.canonicalize().ok().or(Some(p)))).as_ref()
 }
 
+/// Where this build looks for updates ("thooton/oak_public"), or why it
+/// looks for none.
+pub(crate) fn source() -> Result<&'static str, &'static str> {
+    if std::env::var_os("OAK_NO_UPDATE").is_some() {
+        Err("Updates are off (OAK_NO_UPDATE).")
+    } else if REPO.is_empty() {
+        Err("This build looks for no updates (built with OAK_UPDATE_REPO=none).")
+    } else if ASSET.is_none() {
+        Err("Releases have no build for this platform.")
+    } else {
+        Ok(REPO)
+    }
+}
+
 /// At start: notes where Oak's executable is, removes what an earlier
 /// update left (Windows), and looks for a release now and then. Not under
 /// test, or with `OAK_NO_UPDATE` set, or where there is no build to update to.
 pub(crate) fn start(ctx: &egui::Context) {
     let Some(exe) = exe() else { return };
     remove_leftovers(exe);
-    if cfg!(test) || std::env::var_os("OAK_NO_UPDATE").is_some() || ASSET.is_none() || REPO.is_empty() {
+    if cfg!(test) || source().is_err() {
         return;
     }
     let ctx = ctx.clone();
@@ -142,7 +161,7 @@ pub(crate) fn start(ctx: &egui::Context) {
 pub(crate) fn check_soon(ctx: &egui::Context) {
     {
         let mut s = STATUS.lock().unwrap();
-        if ASSET.is_none() || REPO.is_empty() || s.checking {
+        if source().is_err() || s.checking {
             return;
         }
         s.asked = Some(Instant::now());
@@ -188,26 +207,35 @@ fn next_phase(phase: &Phase, found: Option<Release>) -> Phase {
 }
 
 /// The latest release, when it is newer than this build and has a build
-/// for this machine. Looks for the machine's GitHub login first (it may
-/// have signed in since the last look).
+/// for this machine.
 fn latest() -> Result<Option<Release>, String> {
-    *TOKEN.lock().unwrap() = github_token();
     let resp = github(&format!("/repos/{REPO}/releases/latest"), "application/vnd.github+json", Duration::from_secs(30));
     let v: serde_json::Value = match resp {
         Ok(r) => r.json().map_err(|e| format!("GitHub's answer couldn't be read: {}", api::error_chain(&e)))?,
         // Signed in: no release yet. Not signed in: GitHub says the same
         // of a private repository.
         Err(e) if e.contains("HTTP 404") && TOKEN.lock().unwrap().is_some() => return Ok(None),
-        Err(e) if e.contains("HTTP 404") => return Err(NO_LOGIN.into()),
+        Err(e) if e.contains("HTTP 404") => return Err(format!("GitHub shows no release in {REPO}. {NO_LOGIN}")),
         Err(e) => return Err(e),
     };
     Ok(release_from(&v, VERSION))
 }
 
-const NO_LOGIN: &str = "GitHub shows no release, and this machine has no GitHub login for Oak to use (a private repository needs one). Sign in with `gh auth login` (or let git save its login for github.com, as a push does), or set GITHUB_TOKEN.";
+const NO_LOGIN: &str = "If it is private, Oak needs this machine's GitHub login: sign in with `gh auth login` (or let git save its login for github.com, as a push does), or set GITHUB_TOKEN.";
 
-/// The machine's GitHub login, found by the last look for a release.
+/// The machine's GitHub login, once GitHub has turned down a request
+/// without it and taken it (a private repository, or a rate limit).
 static TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+/// Where GitHub's API is: `OAK_UPDATE_API` (a fake, to try the updater),
+/// else GitHub's own.
+fn api_base() -> String {
+    #[cfg(test)]
+    if let Some(base) = tests::API.lock().unwrap().clone() {
+        return base;
+    }
+    std::env::var("OAK_UPDATE_API").ok().map(|s| s.trim().trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| GITHUB_API.into())
+}
 
 /// A GitHub token this machine already has: `OAK_GITHUB_TOKEN`,
 /// `GITHUB_TOKEN` or `GH_TOKEN`, then the GitHub CLI's (`gh auth token`),
@@ -304,14 +332,16 @@ pub(crate) fn newer(candidate: &str, current: &str) -> bool {
     }
 }
 
-/// A GET from GitHub's API (`path` from its root), with the machine's
-/// GitHub login when it has one (and without, if GitHub turns that down).
-/// Errors say "HTTP <code>". A redirect to another host (an asset's
-/// download) is followed without the token.
+/// A GET from GitHub's API (`path` from its root): without a login, unless
+/// GitHub has turned that down before and taken the machine's; when GitHub
+/// turns it down now (404, 403 or 429), again with the machine's login if
+/// it has one and GitHub takes it. Errors say "HTTP <code>". A redirect to
+/// another host (an asset's download) is followed without the token.
 fn github(path: &str, accept: &str, timeout: Duration) -> Result<reqwest::blocking::Response, String> {
+    let base = api_base();
     let send = |token: Option<&str>| {
         let mut req = api::http()
-            .get(format!("https://api.github.com{path}"))
+            .get(format!("{base}{path}"))
             .timeout(timeout)
             .header("Accept", accept)
             .header("User-Agent", format!("oak/{VERSION}"))
@@ -321,12 +351,25 @@ fn github(path: &str, accept: &str, timeout: Duration) -> Result<reqwest::blocki
         }
         req.send().map_err(|e| format!("GitHub couldn't be reached: {}", api::error_chain(&e)))
     };
-    let token = TOKEN.lock().unwrap().clone();
+    // Never a token for anything but GitHub.
+    let official = base == GITHUB_API;
+    let token = TOKEN.lock().unwrap().clone().filter(|_| official);
     let mut resp = send(token.as_deref())?;
-    if resp.status().as_u16() == 401 && token.is_some() {
+    let code = resp.status().as_u16();
+    if code == 401 && token.is_some() {
         // A stale or wrong login: as if there were none.
         *TOKEN.lock().unwrap() = None;
         resp = send(None)?;
+    } else if matches!(code, 403 | 404 | 429)
+        && token.is_none()
+        && official
+        && let Some(t) = github_token()
+    {
+        let again = send(Some(&t))?;
+        if again.status().as_u16() != 401 {
+            *TOKEN.lock().unwrap() = Some(t);
+            resp = again;
+        }
     }
     let status = resp.status();
     if !status.is_success() {
@@ -360,7 +403,10 @@ pub(crate) fn install(ctx: &egui::Context) {
             }
             ctx.request_repaint();
         };
-        let done = download_and_replace(&release, &progress);
+        let done = match exe() {
+            Some(exe) => download_and_replace(&release, exe, &progress),
+            None => Err("Oak's executable couldn't be found.".into()),
+        };
         STATUS.lock().unwrap().phase = match done {
             Ok(()) => Phase::Ready(release),
             Err(e) => Phase::Failed(release, e),
@@ -369,8 +415,7 @@ pub(crate) fn install(ctx: &egui::Context) {
     });
 }
 
-fn download_and_replace(r: &Release, progress: &dyn Fn(f32)) -> Result<(), String> {
-    let exe = exe().ok_or("Oak's executable couldn't be found.")?;
+fn download_and_replace(r: &Release, exe: &Path, progress: &dyn Fn(f32)) -> Result<(), String> {
     let sum_id = r.sum.ok_or("The release has no SHA-256 sum for this build.")?;
     let sum = String::from_utf8_lossy(&download(sum_id, &|_| {})?).split_whitespace().next().unwrap_or_default().to_lowercase();
     let bytes = download(r.asset, progress)?;
@@ -481,6 +526,110 @@ pub(crate) fn relaunch_if_asked() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    /// Where `api_base` points under test (a fake GitHub), when set.
+    pub(super) static API: Mutex<Option<String>> = Mutex::new(None);
+
+    /// A tiny HTTP server on 127.0.0.1: `answer` maps a request's path and
+    /// headers to its status, headers and body. Returns its address.
+    fn serve(answer: impl Fn(&str, &str) -> (u16, Vec<(String, String)>, Vec<u8>) + Send + 'static) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut first = String::new();
+                if reader.read_line(&mut first).is_err() {
+                    continue;
+                }
+                let path = first.split_whitespace().nth(1).unwrap_or_default().to_string();
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    headers.push_str(&line.to_ascii_lowercase());
+                }
+                let (code, extra, body) = answer(&path, &headers);
+                let mut out = conn;
+                let mut head = format!("HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+                for (k, v) in extra {
+                    head.push_str(&format!("{k}: {v}\r\n"));
+                }
+                head.push_str("\r\n");
+                let _ = out.write_all(head.as_bytes());
+                let _ = out.write_all(&body);
+            }
+        });
+        addr
+    }
+
+    /// The whole flow against a fake GitHub in GitHub's shape: the latest
+    /// release found and offered, its asset and sum fetched through the
+    /// API's redirects to another host (storage), the sum checked, and the
+    /// executable replaced; a download that doesn't match its sum changes
+    /// nothing.
+    #[test]
+    fn an_update_is_found_downloaded_checked_and_put_in_place() {
+        let (Some(name), false) = (ASSET, REPO.is_empty()) else { return };
+        let good = b"the new oak".to_vec();
+        let sum = api::hex(&Sha256::digest(&good));
+        let storage = serve(move |path, headers| {
+            assert!(!headers.contains("authorization:"), "no login goes to storage");
+            match path {
+                "/blob/7" => (200, vec![], good.clone()),
+                "/blob/8" => (200, vec![], format!("{sum}  {name}\n").into_bytes()),
+                "/blob/9" => (200, vec![], format!("{}  {name}\n", "0".repeat(64)).into_bytes()),
+                _ => (404, vec![], b"{}".to_vec()),
+            }
+        });
+        let api_addr = serve(move |path, headers| {
+            assert!(!headers.contains("authorization:"), "no login goes anywhere but GitHub");
+            let latest = format!("/repos/{REPO}/releases/latest");
+            if path == latest {
+                let v = serde_json::json!({
+                    "tag_name": "v99.0.0",
+                    "body": "Notes",
+                    "html_url": "https://example.invalid/v99.0.0",
+                    "assets": [{"id": 7, "name": name}, {"id": 8, "name": format!("{name}.sha256")}],
+                });
+                return (200, vec![], v.to_string().into_bytes());
+            }
+            match path.strip_prefix(&format!("/repos/{REPO}/releases/assets/")) {
+                Some(id) if headers.contains("accept: application/octet-stream") => (302, vec![("Location".into(), format!("{storage}/blob/{id}"))], vec![]),
+                _ => (404, vec![], br#"{"message": "Not Found"}"#.to_vec()),
+            }
+        });
+        *API.lock().unwrap() = Some(api_addr);
+
+        let r = latest().expect("the look works").expect("a newer release");
+        assert_eq!((r.version.as_str(), r.asset, r.sum), ("99.0.0", 7, Some(8)));
+
+        let dir = std::env::temp_dir().join(format!("oak-update-flow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(if cfg!(windows) { "oak.exe" } else { "oak" });
+        std::fs::write(&exe, b"old").unwrap();
+
+        let bad = Release { sum: Some(9), ..r.clone() };
+        let e = download_and_replace(&bad, &exe, &|_| {}).unwrap_err();
+        assert!(e.contains("doesn't match"), "{e}");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old", "nothing changed");
+
+        download_and_replace(&r, &exe, &|_| {}).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"the new oak");
+        *API.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn updates_come_from_the_public_repository() {
+        if std::env::var("OAK_UPDATE_REPO").is_err() {
+            assert_eq!(REPO, "thooton/oak_public");
+        }
+    }
 
     #[test]
     fn versions_compare_by_their_numbers() {

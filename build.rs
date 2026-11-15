@@ -50,9 +50,11 @@ fn main() {
 /// updater against an older version, say).
 ///
 /// Sets `OAK_VERSION`, `OAK_COMMIT` (short hash, or "unknown") and
-/// `OAK_UPDATE_REPO` (owner/name on GitHub the updater looks at).
+/// `OAK_UPDATE_REPO` (owner/name on GitHub the updater looks at: Oak's
+/// public repository, wherever the build is made, unless `OAK_UPDATE_REPO`
+/// names another; "none" builds one that looks for no updates).
 fn version() {
-    for var in ["OAK_RELEASE", "OAK_BUILD_VERSION", "OAK_UPDATE_REPO", "GITHUB_REPOSITORY"] {
+    for var in ["OAK_RELEASE", "OAK_BUILD_VERSION", "OAK_UPDATE_REPO"] {
         println!("cargo:rerun-if-env-changed={var}");
     }
     let git = |args: &[&str]| -> Option<String> {
@@ -81,17 +83,20 @@ fn version() {
             format!("{major}.{minor}.{count}{}", if release { "" } else { "-dev" })
         }
     };
-    let repo = std::env::var("OAK_UPDATE_REPO")
-        .or_else(|_| std::env::var("GITHUB_REPOSITORY"))
-        .ok()
-        .filter(|r| !r.trim().is_empty())
-        // (None: a build that doesn't say where its releases are looks
-        // for no updates, `src/update.rs`.)
-        .unwrap_or_default();
+    let repo = match std::env::var("OAK_UPDATE_REPO").map(|r| r.trim().to_string()) {
+        Ok(r) if r == "none" => String::new(),
+        Ok(r) if !r.is_empty() => r,
+        // Not where the build was made (GITHUB_REPOSITORY): the private
+        // repository's CI builds Oak too, to load its plugins into.
+        _ => UPDATE_REPO.to_string(),
+    };
     println!("cargo:rustc-env=OAK_VERSION={version}");
     println!("cargo:rustc-env=OAK_COMMIT={commit}");
     println!("cargo:rustc-env=OAK_UPDATE_REPO={repo}");
 }
+
+/// Where Oak's releases are (`.github/workflows/client.yml` publishes them).
+const UPDATE_REPO: &str = "thooton/oak_public";
 
 const RG_REPO: &str = "https://github.com/BurntSushi/ripgrep";
 
