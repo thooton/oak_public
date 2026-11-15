@@ -60,8 +60,8 @@ pub(crate) fn cloud_new_info(ui: &mut Ui, t: &Theme, provider: cloud::Provider) 
     let about = provider.about();
     if !about.is_empty() {
         wrap(ui, &about, t.ink2);
+        ui.add_space(22.0);
     }
-    ui.add_space(22.0);
     if cloud::starting() {
         working(ui, t, "Starting the cloud session…");
     } else if let Some(why) = provider.unavailable() {

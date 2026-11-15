@@ -12,12 +12,6 @@ pub(crate) const CHAT_KIND: &str = "chat";
 /// The New screen's choice for a super agent, as `oak_sdk` hosts name it.
 pub(crate) const SUPER_KIND: &str = "super";
 
-/// What the New screen says a chat is.
-const CHAT_INFO: &str = "A conversation with the model, not about a project: it can search the web and read pages, and has no access to your files, commands or browser.";
-
-/// What the New screen says a super agent is.
-const SUPER_INFO: &str = "A conversation that coordinates: it plans the work and gives it to agents of its own, subagents working in the folder on this computer, with the model below. Your other conversations don't see it.";
-
 /// What the New screen starts on this machine (`App::new_here`).
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub(crate) enum Here {
@@ -74,14 +68,12 @@ impl App {
                 return;
             }
             if self.new_here == Here::Super {
-                caption(ui, SUPER_INFO, t.ink3);
-                ui.add_space(16.0);
                 caption(ui, "Name", t.ink3);
                 crate::text_menu::add(ui, TextEdit::singleline(&mut self.new_super_name).desired_width(ui.available_width()).char_limit(40).hint_text("e.g. Release train"));
                 ui.add_space(16.0);
                 self.local_rows(ui, t);
                 ui.add_space(16.0);
-                if ui.button("Create").on_hover_text("Makes it and opens its tab; or write its first message below").clicked() {
+                if ui.button("Create").on_hover_text("Or send its first message below").clicked() {
                     let ctx = ui.ctx().clone();
                     self.start_conversation(String::new(), vec![], None, &ctx);
                 }
@@ -89,8 +81,6 @@ impl App {
                 return;
             }
             if self.new_here == Here::Chat {
-                caption(ui, CHAT_INFO, t.ink3);
-                ui.add_space(16.0);
                 self.model_rows(ui, t);
                 ui.add_space(16.0);
                 self.effort_row(ui, t);
@@ -124,8 +114,8 @@ impl App {
             let here = !self.new_cloud && kind.is_none();
             let choices = [
                 (Here::Folder, "Local folder".to_string(), "Runs on this machine"),
-                (Here::Chat, "Chat".to_string(), "Just a conversation: web search and fetch, no files or commands"),
-                (Here::Super, format!("{} Super agent", agent::prompt::role(agent::prompt::SUPER_ROLE).icon), "A conversation that runs agents of its own in a folder on this machine, giving each a task"),
+                (Here::Chat, "Chat".to_string(), "Web search and fetch only; no access to files, commands or the browser"),
+                (Here::Super, format!("{} Super agent", agent::prompt::role(agent::prompt::SUPER_ROLE).icon), "Runs subagents in a folder on this machine"),
             ];
             for (h, label, tip) in choices {
                 if ui.selectable_label(here && self.new_here == h, label).on_hover_text(tip).clicked() {

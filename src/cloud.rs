@@ -129,7 +129,7 @@ impl Provider {
     pub fn about(self) -> String {
         match self.backend() {
             Some(b) => b.about(),
-            None => "A Claude Code session in Anthropic's cloud, on one of your Claude accounts: it carries on while this computer is off.".to_string(),
+            None => String::new(),
         }
     }
 
