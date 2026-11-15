@@ -52,12 +52,12 @@ fn said(conv: &Conversation) -> Vec<Msg> {
         let user = |messages: &mut Vec<Msg>, user_at: &mut Option<usize>| -> usize {
             if *user_at != Some(at) {
                 *user_at = Some(at);
-                messages.push(Msg { kind: "user".into(), time: -1, key: at as u64, ..Default::default() });
+                messages.push(Msg { kind: "user".into(), time: -1, key: crate::hash_of(&(at, i)), ..Default::default() });
             }
             messages.len() - 1
         };
         match item {
-            Item::UserText(text, _, time, _) => {
+            Item::UserText(text, end, time, _) => {
                 let m = user(&mut messages, &mut user_at);
                 let m = &mut messages[m];
                 if !m.text.is_empty() {
@@ -67,12 +67,21 @@ fn said(conv: &Conversation) -> Vec<Msg> {
                 if let Some(t) = time {
                     m.time = *t;
                 }
+                // Several messages sent while the agent works can share
+                // one API turn. Keep their bubbles, times and attachments
+                // separate, using the transcript's message boundaries.
+                if end.is_some() {
+                    user_at = None;
+                }
             }
-            Item::Image(b, _) => {
+            Item::Image(b, end) => {
                 let m = user(&mut messages, &mut user_at);
                 messages[m].images.push(Pic { name: b["_oak_file"].as_str().unwrap_or_default().to_string(), block: Some((*b).clone()), failed: None });
+                if end.is_some() {
+                    user_at = None;
+                }
             }
-            Item::File(b, _) => {
+            Item::File(b, end) => {
                 let m = user(&mut messages, &mut user_at);
                 let name = b["_oak_file"].as_str().or(b["name"].as_str()).unwrap_or("file");
                 let m = &mut messages[m];
@@ -80,6 +89,9 @@ fn said(conv: &Conversation) -> Vec<Msg> {
                     m.text.push('\n');
                 }
                 m.text.push_str(&format!("[{name}]"));
+                if end.is_some() {
+                    user_at = None;
+                }
             }
             Item::Text(text, key, at, ..) => {
                 user_at = None;
@@ -327,7 +339,7 @@ fn local_controls(ui: &mut Ui, t: &Theme, w: f32, bottom: f32, key: &str, info: 
     // a local conversation's provider switching, goals, meters, heartbeats,
     // folder actions or navigation back to its parent.
     crate::look::panel_box(ui, t, w, 8, 2.0, |ui| {
-        let label = if info.goal.is_empty() { "Local controls" } else { "Local controls · Goal" };
+        let label = if info.goal.is_empty() { "Local controls" } else { "Local controls (Goal)" };
         egui::CollapsingHeader::new(label).id_salt(("local-super-controls", key))
             .open(editing.as_ref().map(|_| true)).show(ui, |ui| {
                 crate::session_box::session_rows(ui, t, info, editing, act);
@@ -384,6 +396,39 @@ mod tests {
         let sub = Conversation { role: agent::prompt::SUPER_ROLE.into(), parent: Some("k".into()), agent_id: 1, ..Default::default() };
         assert!(!is_super(&sub) && is_super_agent(&sub));
         assert!(!is_super(&Conversation::default()));
+    }
+
+    #[test]
+    fn saved_super_agents_keep_message_boundaries_and_attachments() {
+        let mut c = Conversation { role: agent::prompt::SUPER_ROLE.into(), ..Default::default() };
+        // Messages received during a turn share an API user message,
+        // but each attachment still belongs to its own message.
+        c.messages = vec![json!({"role": "user", "content": [
+            {"type": "image", "_oak_file": "first.png"},
+            {"type": "text", "text": "First request", "_oak_at": 1000},
+            {"type": "text", "text": "Second request", "_oak_at": 2000000},
+            {"type": "image", "_oak_file": "last.png"}
+        ]})].into();
+        // No migration or new persisted fields are needed for this UI.
+        let saved = serde_json::to_vec(&c).unwrap();
+        let restored: Conversation = serde_json::from_slice(&saved).unwrap();
+        assert!(is_super(&restored));
+        let chat = chat_of("restored", &restored, &Live::default());
+        let msgs = &chat.messages;
+        assert_eq!(msgs.len(), 3);
+        assert_eq!((msgs[0].text.as_str(), msgs[0].time), ("First request", 1000));
+        assert_eq!(msgs[0].images[0].name, "first.png");
+        assert_eq!((msgs[1].text.as_str(), msgs[1].time), ("Second request", 2000000));
+        assert!(msgs[1].images.is_empty());
+        assert!(msgs[2].text.is_empty());
+        assert_eq!(msgs[2].images[0].name, "last.png");
+        assert_ne!(msgs[0].key, msgs[1].key);
+        assert_ne!(msgs[1].key, msgs[2].key);
+
+        c.parent = Some("boss".into());
+        c.agent_id = 3;
+        let sub: Conversation = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
+        assert!(is_super_agent(&sub) && !is_super(&sub));
     }
 
     #[test]
