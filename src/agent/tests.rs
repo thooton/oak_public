@@ -1064,3 +1064,15 @@ fn execute_returns_when_its_command_exits() {
     });
     w.tasks.kill_all();
 }
+
+#[test]
+fn phase_reads_oaks_own_block_types() {
+    let mut l = Live { busy: true, ..Live::default() };
+    assert_eq!(l.phase().0, "requesting");
+    l.blocks = vec![json!({"type": "reasoning", "text": "hm", "by": "claude"})];
+    assert_eq!(l.phase(), ("thinking", String::new()));
+    l.blocks.push(json!({"type": "text", "text": "So"}));
+    assert_eq!(l.phase().0, "writing");
+    l.blocks.push(json!({"type": "tool_call", "id": "t", "name": "READ", "input": {}}));
+    assert_eq!(l.phase(), ("tool", "READ".to_string()));
+}

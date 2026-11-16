@@ -391,7 +391,9 @@ impl Live {
     /// What the session is doing, in a word, for plugins
     /// (`oak_sdk::host::Doing::phase`), and the tool it is on ("" when none).
     pub fn phase(&self) -> (&'static str, String) {
-        let last_tool = || self.blocks.iter().rev().find(|b| b["type"] == "tool_use").and_then(|b| b["name"].as_str()).unwrap_or("").to_string();
+        // The blocks are Oak's own (`reasoning`, `text`, `tool_call`), not
+        // a provider's.
+        let last_tool = || self.blocks.iter().rev().find(|b| b["type"] == "tool_call").and_then(|b| b["name"].as_str()).unwrap_or("").to_string();
         if !self.busy {
             return ("idle", String::new());
         }
@@ -411,9 +413,9 @@ impl Live {
             return ("compacting", String::new());
         }
         match self.blocks.last().and_then(|b| b["type"].as_str()) {
-            Some("thinking" | "redacted_thinking") => ("thinking", String::new()),
+            Some("reasoning") => ("thinking", String::new()),
             Some("text") => ("writing", String::new()),
-            Some("tool_use" | "server_tool_use") => ("tool", last_tool()),
+            Some("tool_call") => ("tool", last_tool()),
             _ => ("requesting", String::new()),
         }
     }
