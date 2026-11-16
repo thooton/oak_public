@@ -541,6 +541,13 @@ impl App {
 
 impl eframe::App for App {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // On `oak --window`'s hidden desktop Windows says the pointer left
+        // right after every move (the real cursor is never over the
+        // window), which would leave no hover and cut drags short.
+        static HIDDEN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("OAK_HIDDEN_DESKTOP").is_some());
+        if *HIDDEN {
+            raw.events.retain(|e| !matches!(e, egui::Event::PointerGone));
+        }
         if cfg!(all(unix, not(target_os = "macos"))) {
             speed_up_touchpad(raw, self.settings.touchpad_speed);
         }

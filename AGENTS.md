@@ -417,7 +417,11 @@ in the box Up only moves the cursor.
 **Testing GUI apps off-screen.** `oak --window` (Windows, `src/winctl.rs`) runs a program on a
 hidden desktop and drives it without touching your screen: `"$OAK" --window launch -- app.exe`,
 then `shot`, `record` (frames for a video), `click`, `type`, `key`, `close` (`"$OAK" --window help`
-lists them). On Linux the
+lists them). The window there is never under the real cursor, so Windows tells the app the pointer
+left after every move: `launch` sets `OAK_HIDDEN_DESKTOP` for the app, and Oak then ignores
+egui's `PointerGone` (`raw_input_hook` in `src/lib.rs`) so hover and drags work; and every press,
+release and wheel message follows a fresh move (`point_at`), as winit forgets the position at
+each leave and would drop them. On Linux the
 prompt points the agent at Xvfb, xdotool and ImageMagick instead.
 
 ## Cloud sessions

@@ -136,6 +136,11 @@ Coordinates are pixels in the window's client area, the same as in the
 screenshot. Commands act on the largest window on the desktop; pass
 --window ID (from list) for another one, e.g. a dialog. Input commands
 wait --wait MS (default 300) afterwards so the app can repaint before a shot.
+
+A window on a hidden desktop is never under the real cursor, so Windows tells
+the app the pointer left right after each move; an app that drops the
+pointer then shows no hover and can lose a drag. Launched apps get
+OAK_HIDDEN_DESKTOP set (to the desktop's name) and can ignore it: Oak does.
 ";
 
 fn wide(s: &str) -> Vec<u16> {
@@ -290,29 +295,28 @@ fn run(args: &[String]) -> Result<i32, String> {
         }
         "move" => {
             let (x, y) = (n(0)?, n(1)?);
-            under_cursor(w, x, y);
-            post(w, WM_MOUSEMOVE, 0, xy(x, y));
+            point_at(w, x, y, 0);
         }
         "drag" => {
             let (x1, y1, x2, y2) = (n(0)?, n(1)?, n(2)?, n(3)?);
             let (down, up, held) = if flag("--right") { (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON) } else { (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON) };
-            under_cursor(w, x1, y1);
-            post(w, WM_MOUSEMOVE, 0, xy(x1, y1));
+            point_at(w, x1, y1, 0);
             post(w, down, held, xy(x1, y1));
             // Slow enough that even a debug build sees the moves over
             // several frames (all in one frame, a drag reads as a click).
             for i in 1..=20 {
                 let (x, y) = (x1 + (x2 - x1) * i / 20, y1 + (y2 - y1) * i / 20);
                 std::thread::sleep(Duration::from_millis(40));
+                under_cursor(w, x, y);
                 post(w, WM_MOUSEMOVE, held, xy(x, y));
             }
             std::thread::sleep(Duration::from_millis(40));
+            point_at(w, x2, y2, held);
             post(w, up, 0, xy(x2, y2));
         }
         "scroll" => {
             let (x, y, lines) = (n(0)?, n(1)?, n(2)?);
-            under_cursor(w, x, y);
-            post(w, WM_MOUSEMOVE, 0, xy(x, y));
+            point_at(w, x, y, 0);
             // The wheel message carries screen coordinates.
             let mut at = [x, y];
             unsafe { ClientToScreen(w, &mut at) };
@@ -446,16 +450,23 @@ fn under_cursor(w: Hwnd, x: i32, y: i32) {
     }
 }
 
+/// Brings the pointer to client point x,y: the window under the real
+/// cursor, then a move there, from a pixel off. After the hidden desktop's
+/// "pointer left" the app knows no position, and a move to where it was
+/// before is dropped as no move (winit), so a press or release would come
+/// with no position and be ignored; every button or wheel message follows
+/// this.
+fn point_at(w: Hwnd, x: i32, y: i32, buttons: usize) {
+    under_cursor(w, x, y);
+    post(w, WM_MOUSEMOVE, buttons, xy(x + 1, y));
+    post(w, WM_MOUSEMOVE, buttons, xy(x, y));
+}
+
 fn click(w: Hwnd, x: i32, y: i32, right: bool, double: bool) {
     let (down, up, mk, dbl) =
         if right { (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON, WM_RBUTTONDOWN) } else { (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON, WM_LBUTTONDBLCLK) };
-    under_cursor(w, x, y);
     let at = xy(x, y);
-    // A move a pixel off first: winit drops a move to where the pointer
-    // already was, and after the hidden desktop's "pointer left" the app
-    // would then ignore the click (a second click on the same spot).
-    post(w, WM_MOUSEMOVE, 0, xy(x + 1, y));
-    post(w, WM_MOUSEMOVE, 0, at);
+    point_at(w, x, y, 0);
     post(w, down, mk, at);
     post(w, up, 0, at);
     if double {
@@ -771,6 +782,9 @@ fn launch(o: &Opts) -> Result<i32, String> {
     si.hStdOutput = std::io::stdout().as_raw_handle() as HANDLE;
     si.hStdError = std::io::stderr().as_raw_handle() as HANDLE;
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    // The app inherits our environment: this tells it where it runs (see
+    // HELP). SAFETY: no other thread of ours reads the environment.
+    unsafe { std::env::set_var("OAK_HIDDEN_DESKTOP", &o.desktop) };
     let ok = unsafe {
         CreateProcessW(
             std::ptr::null(),
