@@ -558,11 +558,19 @@ impl Queued {
 }
 
 
+/// A pause that was waiting for a request when OAK closed holds: the
+/// conversation starts paused. True when it changed.
+fn hold_queued_pause(conv: &mut Conversation) -> bool {
+    let queued = std::mem::take(&mut conv.pause_queued);
+    conv.paused |= queued;
+    queued
+}
+
 impl Session {
     pub fn start(mut conv: Conversation, ctx: eframe::egui::Context) -> Session {
         // Closed while a tool ran: its call has no result, which the API
         // refuses, so it gets one saying so.
-        let changed = answer_lost_calls(&mut conv);
+        let changed = answer_lost_calls(&mut conv) | hold_queued_pause(&mut conv);
         // Paused when OAK closed, with the transcript ending in a user turn
         // (tool results or a message the model hasn't answered): the turn
         // carries on once the session is resumed, as it would have without
@@ -760,6 +768,7 @@ impl Session {
         self.paused.store(on, Ordering::SeqCst);
         let mut c = self.conv.lock().unwrap();
         c.paused = on;
+        c.pause_queued = false;
         c.save();
         drop(c);
         self.wake();
@@ -773,6 +782,11 @@ impl Session {
         let mut l = self.live.lock().unwrap();
         if l.requesting {
             l.pause_queued = true;
+            drop(l);
+            // (Saved, so that it outlasts OAK closing before it takes hold.)
+            let mut c = self.conv.lock().unwrap();
+            c.pause_queued = self.live.lock().unwrap().pause_queued;
+            c.save();
             return true;
         }
         drop(l);

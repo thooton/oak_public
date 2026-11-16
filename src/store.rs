@@ -490,6 +490,11 @@ pub struct Conversation {
     /// Paused by the user: nothing is sent until resumed.
     #[serde(default)]
     pub paused: bool,
+    /// A pause waiting for the request under way to end
+    /// (`Session::request_pause`): if OAK closes first, the conversation
+    /// starts paused, as it would have been.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pause_queued: bool,
     /// For a subagent: the conversation that started it (AGENT_NEW), and
     /// its number there. None for a session the user started.
     #[serde(default)]

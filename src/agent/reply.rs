@@ -422,6 +422,7 @@ impl Worker {
             self.paused.store(true, Ordering::SeqCst);
             let mut c = self.conv.lock().unwrap();
             c.paused = true;
+            c.pause_queued = false;
             c.save();
         }
     }

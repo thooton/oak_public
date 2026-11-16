@@ -140,9 +140,13 @@ fn pause_waits_for_the_request() {
     w.set(|l| l.requesting = true);
     assert!(s.request_pause());
     assert!(s.pause_queued() && !s.paused.load(Ordering::SeqCst));
+    // Saved, a queued pause holds if OAK closes before it takes hold.
+    let mut saved = s.conv.lock().unwrap().clone();
+    assert!(saved.pause_queued && !saved.paused);
+    assert!(hold_queued_pause(&mut saved) && saved.paused && !saved.pause_queued);
     // The request ends: paused now, and the queue is done with.
     w.end_request();
-    assert!(paused() && !s.pause_queued());
+    assert!(paused() && !s.pause_queued() && !s.conv.lock().unwrap().pause_queued);
     // Resumed, and queued again, the second press pauses at once.
     s.set_paused(false);
     w.set(|l| l.requesting = true);

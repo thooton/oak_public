@@ -322,7 +322,8 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
   (`src/changes.rs`). Instruction files (CLAUDE.md, AGENTS.md) and project memory are off for now
   (`src/instructions.rs`).
 - Messages sent while Oak works are queued for its next request. Pause lets the request and
-  commands under way finish; ultrapause stops everything at once. A pause survives a restart. Reverting
+  commands under way finish; ultrapause stops everything at once. A pause survives a restart, even one
+  still waiting for its request when Oak closed. Reverting
   (a message's icon, or right-click inside a reply) takes the conversation back, not the files.
 - A safety classifier's refusal is retried as failed requests are, then every minute and a half;
   there is no fallback to another model. Titles come from OpenRouter's title model when there is
