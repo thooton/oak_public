@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn kept_items_match_fresh_ones() {
         let mut conv: Conversation = serde_json::from_value(crate::frame_bench::long_conversation("kept", 6)).unwrap();
-        conv.marks.push(store::Mark { at: conv.messages.len(), kind: store::MarkKind::GoalContinued, text: "x".into(), time: 0, done: 0, sent: String::new() });
+        conv.marks.push(store::Mark { at: conv.messages.len(), kind: store::MarkKind::GoalContinued, text: "x".into(), time: 0, done: 0, sent: String::new(), scope: String::new() });
         let shared = store::Shared::new(conv);
         let id = "kept-items-test";
         let live = |busy: bool, blocks: Vec<Value>| {

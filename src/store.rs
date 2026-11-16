@@ -761,12 +761,16 @@ pub struct Mark {
     /// empty for lines the model isn't told about. See `sent_parts`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sent: String,
+    /// For a limit: the model whose own quota it is ("Fable") when the
+    /// accounts still had room for other models; empty for a plan-wide limit.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
 }
 
 impl Mark {
     /// A line at `at`, not done, sent with nothing.
     pub fn new(at: usize, kind: MarkKind, text: impl Into<String>, time: i64) -> Self {
-        Mark { at, kind, text: text.into(), time, done: 0, sent: String::new() }
+        Mark { at, kind, text: text.into(), time, done: 0, sent: String::new(), scope: String::new() }
     }
 }
 

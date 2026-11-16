@@ -1431,13 +1431,19 @@ impl Worker {
 
     /// Notes that the usage limit was reached: a line in the transcript
     /// (or the waiting one, with the new reset time) and the time to wait for.
+    /// When only the model's own quota (Fable's weekly allowance) is used
+    /// up, the line names it, so room on the plan doesn't read as a mistake.
     fn record_limit(&self, at: i64) {
         let mut c = self.conv.lock().unwrap();
         c.limit_wait = Some(at);
+        let scope = if c.provider() == api::Provider::Claude { api::limit_scope(&c.id, &c.model).unwrap_or_default() } else { "" };
         match c.marks.iter_mut().rev().find(|m| m.kind == MarkKind::Limit && m.text.is_empty()) {
-            Some(m) => m.time = at,
+            Some(m) => {
+                m.time = at;
+                m.scope = scope.into();
+            }
             None => {
-                add_mark(&mut c, MarkKind::Limit, String::new(), String::new(), at);
+                add_mark(&mut c, MarkKind::Limit, String::new(), String::new(), at).scope = scope.into();
             }
         }
         self.save(c);

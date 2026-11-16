@@ -202,7 +202,10 @@ can't read.
   its 5-hour and weekly limits below 100% (a reset used here or anywhere else), and waiting
   sessions try again then. Shared 5-hour/weekly limits apply to every Claude model; model-scoped
   quotas (including Fable's `limits[].scope.model`, even with a null id) apply only to that family.
-  Refusals without a shared-window claim stay with the requested family, and cloud refusals with
+  They hold on every plan: Max includes Fable but caps it too, and a used-up allowance is refused
+  with claim `seven_day_overage_included` (headers `..-7d_oi-..`) while the 5-hour and weekly
+  windows still have room. Waiting on only such a quota, the transcript's wait line names it ("All
+  accounts at their Fable limit", `api::limit_scope`) and says other models have room. Refusals without a shared-window claim stay with the requested family, and cloud refusals with
   no known scope never disable desktop models. A scoped refusal clears only after a newer reading
   shows both shared room and that family's own room, or its reset passes. Legacy account-wide
   refusals retain the early-reset recognition above. Waiting sessions recheck eligibility for their

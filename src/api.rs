@@ -446,6 +446,25 @@ pub(crate) fn room_for(conv: &str, model: &str) -> bool {
     cands.iter().any(|c| c.usable)
 }
 
+/// When this conversation can't send on `model`, whether that is only the
+/// model's own quota (Fable's weekly allowance, or a refusal of that model
+/// alone): its name when an account it may use has shared room, so other
+/// models could run now. None when the shared windows are used up too.
+/// Anthropic enforces Fable's allowance on Max as well as Pro (a used-up
+/// one is refused with claim `seven_day_overage_included`), so it is named,
+/// never skipped.
+pub(crate) fn limit_scope(conv: &str, model: &str) -> Option<&'static str> {
+    let now = now_ms();
+    let seat = crate::rotation::seat(Provider::Claude, conv);
+    let a = ACCOUNTS.lock().unwrap();
+    model_only_limit(a.list.iter().filter(|s| rotation_on() || seat.as_ref().is_none_or(|seat| *seat == s.id.to_string())), model, now)
+}
+
+fn model_only_limit<'a>(mut list: impl Iterator<Item = &'a Stored>, model: &str, now: i64) -> Option<&'static str> {
+    let scoped = list.any(|s| s.blocked_for("", now) == 0 && s.blocked_for(model, now) > 0);
+    if scoped { limits::family_name(model) } else { None }
+}
+
 /// A rejected request holds only its requested family unless the server
 /// explicitly identifies a shared window. Never infer scope from reset time.
 fn note_limited(id: u64, model: &str, h: &reqwest::header::HeaderMap, at: i64) {

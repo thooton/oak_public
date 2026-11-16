@@ -1063,7 +1063,16 @@ fn limit_box(ui: &mut Ui, t: &Theme, m: &Mark) {
         (_, false) => format!("Oak stopped waiting at {}. The limit resets at {}.", clock(m.done), clock(m.time)),
         (_, true) => format!("Oak stopped waiting at {}. The first account resets at {}.", clock(m.done), clock(m.time)),
     };
-    let title = if all { "All accounts at usage limit" } else { "Usage limit reached" };
+    // Only the model's own quota (Fable's weekly allowance): say so, since
+    // the plan's 5h and week bars still show room for the other models.
+    let (title, detail) = match (m.scope.as_str(), all) {
+        ("", true) => ("All accounts at usage limit".to_string(), detail),
+        ("", false) => ("Usage limit reached".to_string(), detail),
+        (s, all) => (
+            if all { format!("All accounts at their {s} limit") } else { format!("{s} limit reached") },
+            if waiting { format!("{detail} Other models have room.") } else { detail },
+        ),
+    };
     ui.add_space(6.0);
     egui::Frame::new()
         .fill(t.panel)

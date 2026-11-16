@@ -614,7 +614,7 @@ fn revert_into_a_reply_keeps_what_came_before() {
             json!({"role": "user", "content": [result("a"), result("b"), result("c"), oak::text("note")]}),
             json!({"role": "assistant", "content": [thinking.clone(), oak::text("done")]}),
         ].into(),
-        marks: vec![Mark { at: 3, kind: MarkKind::Effort, text: "low".into(), time: 0, done: 0, sent: String::new() }],
+        marks: vec![Mark { at: 3, kind: MarkKind::Effort, text: "low".into(), time: 0, done: 0, sent: String::new(), scope: String::new() }],
         ..Default::default()
     };
     // Before call b: a and its result stay.

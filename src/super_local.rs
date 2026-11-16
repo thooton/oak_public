@@ -99,7 +99,11 @@ fn said(conv: &Conversation) -> Vec<Msg> {
             }
             Item::Mark(m) if m.kind == MarkKind::Failed || (m.kind == MarkKind::Limit && m.done == 0) => {
                 user_at = None;
-                let text = if m.kind == MarkKind::Limit { "Usage limit reached; waiting for it to reset".to_string() } else { m.text.clone() };
+                let text = match m.kind {
+                    MarkKind::Limit if m.scope.is_empty() => "Usage limit reached; waiting for it to reset".to_string(),
+                    MarkKind::Limit => format!("{} limit reached (other models have room); waiting for it to reset", m.scope),
+                    _ => m.text.clone(),
+                };
                 messages.push(Msg { kind: "error".into(), time: if m.time > 0 { m.time } else { -1 }, text, key: i as u64, ..Default::default() });
             }
             _ => {}

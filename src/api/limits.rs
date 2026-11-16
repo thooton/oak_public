@@ -25,6 +25,17 @@ fn family(model: &str) -> &str {
     model
 }
 
+/// The model family's name as users see it ("Fable"), None for an unknown model.
+pub(super) fn family_name(model: &str) -> Option<&'static str> {
+    Some(match family(model) {
+        "opus" => "Opus",
+        "sonnet" => "Sonnet",
+        "haiku" => "Haiku",
+        "fable" => "Fable",
+        _ => return None,
+    })
+}
+
 fn scope(label: &str) -> Option<&str> {
     match label {
         "5h" | "Week" => Some(""),
