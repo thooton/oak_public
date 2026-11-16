@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 5
+#define OAK_API_VERSION 6
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -604,6 +604,11 @@ struct OakHooks {
     OakBody providers_top;
     /* Oak is closing. */
     OakDo exiting;
+    /* Draws in a message box's bottom left corner, above Oak's
+     * Settings link (where a plugin's switches go): one row, at the
+     * width of the box's corner.
+     */
+    OakBody composer_corner;
 };
 
 /* A response's flags. */
@@ -1419,6 +1424,39 @@ struct OakApi {
      * false when none were picked.
      */
     bool (*pick_files)(OakStr filter, OakStr extensions, OakSink out, void *out_user);
+
+    /* A conversation of this machine's, as JSON {id, title, folder, model,
+     * provider, effort, role, chat, busy, status, error, reply}: nothing
+     * (false) when there is none under `key`. `status` is what Oak says it
+     * is doing (a refusal's retry says so in it), `error` a sentence on a
+     * failed turn, and `reply` the text of its last message when that is
+     * the model's.
+     */
+    bool (*app_session)(OakStr key, OakSink out, void *out_user);
+
+    /* Switches conversation `key` to model `model` of provider `provider`
+     * (an id `app_conversations` gives), as its model picker does, without
+     * asking. False with `error` set when there is no such conversation.
+     */
+    bool (*app_set_model)(OakStr key, OakStr provider, OakStr model, OakSink error, void *error_user);
+
+    /* Sends conversation `key` a message from the user, as the message box
+     * does. False with `error` set when there is no such conversation.
+     */
+    bool (*app_send)(OakStr key, OakStr text, OakSink error, void *error_user);
+
+    /* Stops what conversation `key` is doing, as its interrupt does: the
+     * turn ends and what it queued waits. False with `error` set when there
+     * is no such conversation.
+     */
+    bool (*app_interrupt)(OakStr key, OakSink error, void *error_user);
+
+    /* Asks conversation `key` to answer its last turn again, as resuming a
+     * paused one does: for a transcript that ends in a message from the
+     * user that nothing woke to answer (a plugin's own handoff, say).
+     * False with `error` set when there is no such conversation.
+     */
+    bool (*app_resume)(OakStr key, OakSink error, void *error_user);
 };
 
 /* Text from a C string, and from a literal. */

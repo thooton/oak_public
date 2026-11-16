@@ -597,12 +597,13 @@ pub(crate) struct Hooks {
     frame: Option<OakDo>,
     providers_top: Option<OakBody>,
     exiting: Option<OakDo>,
+    composer_corner: Option<OakBody>,
     user: User,
 }
 
 impl Hooks {
     pub(crate) fn new(d: &OakHooks) -> Hooks {
-        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, user: User(d.user) }
+        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, composer_corner: d.composer_corner, user: User(d.user) }
     }
 
     pub(crate) fn started(&self, _ctx: &egui::Context) {
@@ -621,6 +622,15 @@ impl Hooks {
 
     pub(crate) fn providers_top(&self, ui: &mut Ui, app: &mut App) {
         api::draw(self.providers_top, self.user, ui, app);
+    }
+
+    pub(crate) fn composer_corner(&self, ui: &mut Ui, app: &mut App) {
+        api::draw(self.composer_corner, self.user, ui, app);
+    }
+
+    /// Whether it draws above a message box's Settings link.
+    pub(crate) fn has_composer_corner(&self) -> bool {
+        self.composer_corner.is_some()
     }
 
     pub(crate) fn exiting(&self) {

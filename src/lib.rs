@@ -823,4 +823,6 @@ mod tests;
 #[cfg(test)]
 mod app_hover_test;
 #[cfg(test)]
+mod handoff_test;
+#[cfg(test)]
 mod frame_bench;

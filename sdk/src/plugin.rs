@@ -16,7 +16,8 @@
 //! - `Vault`: somewhere else logins and keys are kept;
 //! - `SettingsSection`: rows on the Settings page;
 //! - `Gate`: a screen that comes before everything (signing in somewhere);
-//! - `Hooks`: at startup, every frame, at exit.
+//! - `Hooks`: at startup, every frame, at the top of Home's Providers, in a
+//!   message box's corner, at exit.
 //!
 //! Parts are `Send + Sync` and take `&self`: a plugin keeps what changes
 //! behind its own locks (or in statics; the library is never unloaded).
@@ -349,6 +350,11 @@ pub trait Hooks: Send + Sync {
     fn frame(&self, _ctx: &egui::Context, _app: &mut dyn App) {}
     /// Draws at the top of Home's Providers column (a connection's state).
     fn providers_top(&self, _ui: &mut Ui, _app: &mut dyn App) {}
+    /// Draws in a message box's bottom left corner, above Oak's Settings
+    /// link: where a plugin puts switches for what it does to every
+    /// message. Keep it one row tall, or two at most: the room above the
+    /// link is small, and the box grows (upwards) to make it.
+    fn composer_corner(&self, _ui: &mut Ui, _app: &mut dyn App) {}
     /// Oak is closing.
     fn exiting(&self) {}
 }
@@ -629,6 +635,10 @@ unsafe extern "C" fn hooks_providers_top(user: *mut c_void, ui: *mut OakUi) {
     outer(|| (), || unsafe { part::<Life>(user) }.providers_top(&mut Ui::raw(ui), &mut Window::default()))
 }
 
+unsafe extern "C" fn hooks_composer_corner(user: *mut c_void, ui: *mut OakUi) {
+    outer(|| (), || unsafe { part::<Life>(user) }.composer_corner(&mut Ui::raw(ui), &mut Window::default()))
+}
+
 unsafe extern "C" fn hooks_exiting(user: *mut c_void) {
     outer(|| (), || unsafe { part::<Life>(user) }.exiting())
 }
@@ -774,7 +784,16 @@ impl Registrar {
 
     /// Calls at startup, every frame, at exit.
     pub fn hooks(&mut self, hooks: impl Hooks + 'static) {
-        let d = OakHooks { size: size_of::<OakHooks>(), flags: 0, user: keep::<Life>(Box::new(hooks)), started: Some(hooks_started), frame: Some(hooks_frame), providers_top: Some(hooks_providers_top), exiting: Some(hooks_exiting) };
+        let d = OakHooks {
+            size: size_of::<OakHooks>(),
+            flags: 0,
+            user: keep::<Life>(Box::new(hooks)),
+            started: Some(hooks_started),
+            frame: Some(hooks_frame),
+            providers_top: Some(hooks_providers_top),
+            exiting: Some(hooks_exiting),
+            composer_corner: Some(hooks_composer_corner),
+        };
         unsafe { (api().add_hooks)(&d) };
     }
 }

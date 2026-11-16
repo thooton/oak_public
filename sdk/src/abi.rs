@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 5;
+pub const OAK_API_VERSION: u32 = 6;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -698,6 +698,10 @@ c_structs! {
         pub providers_top: Option<OakBody>,
         /// Oak is closing.
         pub exiting: Option<OakDo>,
+        /// Draws in a message box's bottom left corner, above Oak's
+        /// Settings link (where a plugin's switches go): one row, at the
+        /// width of the box's corner.
+        pub composer_corner: Option<OakBody>,
     }
 }
 
@@ -1391,6 +1395,32 @@ c_api! {
     /// file" is offered too. `out` gets JSON as `take_files` gives it;
     /// false when none were picked.
     fn pick_files(filter: OakStr, extensions: OakStr, out: OakSink, out_user: *mut c_void) -> bool;
+
+    // Version 6.
+
+    /// A conversation of this machine's, as JSON {id, title, folder, model,
+    /// provider, effort, role, chat, busy, status, error, reply}: nothing
+    /// (false) when there is none under `key`. `status` is what Oak says it
+    /// is doing (a refusal's retry says so in it), `error` a sentence on a
+    /// failed turn, and `reply` the text of its last message when that is
+    /// the model's.
+    fn app_session(key: OakStr, out: OakSink, out_user: *mut c_void) -> bool;
+    /// Switches conversation `key` to model `model` of provider `provider`
+    /// (an id `app_conversations` gives), as its model picker does, without
+    /// asking. False with `error` set when there is no such conversation.
+    fn app_set_model(key: OakStr, provider: OakStr, model: OakStr, error: OakSink, error_user: *mut c_void) -> bool;
+    /// Sends conversation `key` a message from the user, as the message box
+    /// does. False with `error` set when there is no such conversation.
+    fn app_send(key: OakStr, text: OakStr, error: OakSink, error_user: *mut c_void) -> bool;
+    /// Stops what conversation `key` is doing, as its interrupt does: the
+    /// turn ends and what it queued waits. False with `error` set when there
+    /// is no such conversation.
+    fn app_interrupt(key: OakStr, error: OakSink, error_user: *mut c_void) -> bool;
+    /// Asks conversation `key` to answer its last turn again, as resuming a
+    /// paused one does: for a transcript that ends in a message from the
+    /// user that nothing woke to answer (a plugin's own handoff, say).
+    /// False with `error` set when there is no such conversation.
+    fn app_resume(key: OakStr, error: OakSink, error_user: *mut c_void) -> bool;
 }
 
 /// The C header: everything declared above, in C.

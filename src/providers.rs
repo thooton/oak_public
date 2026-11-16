@@ -73,6 +73,11 @@ impl Kind {
         }
     }
 
+    /// `id`'s provider, as stored data has it. None: no provider has it.
+    pub fn from_id(id: &str) -> Option<Kind> {
+        Kind::ALL.iter().copied().find(|k| k.id() == id)
+    }
+
     /// As Oak shows it.
     pub fn name(self) -> &'static str {
         match self {

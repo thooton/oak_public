@@ -24,7 +24,7 @@ A plugin can add:
 | A vault | `Vault` | `OakVault` | Somewhere else logins and keys are kept and renewed, for several machines. One at most. |
 | Rows on Settings | `SettingsSection` | `OakSettings` | |
 | A screen before everything | `Gate` | `OakGate` | Shown instead of the app while it says it is shut (a sign-in). |
-| Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, at exit. |
+| Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, in a message box's bottom left corner, at exit. |
 
 Two examples to copy: `plugins/hello` (Rust: a Home tab, a theme, a Settings row, a system
 prompt) and `plugins/hello-c/hello.c` (C, one file: a Home tab with a button and a text field).
@@ -141,6 +141,13 @@ What a plugin works with:
 - **`&mut dyn App`** is the window, on the UI thread: the theme in use, opening and closing tabs,
   going Home, to the New screen, to Settings or to a plugin's page, the message box's text and attachments, files pasted or dropped on the window and the system's file picker, the hint over it, this
   machine's conversations, starting one, drawing a transcript or a cloud list as Oak draws its own.
+  A plugin can also work a conversation it is shown: `session(key)` says what it is, what it is
+  doing and how its last turn went (its status, in which Oak says when a safety classifier
+  declined a reply), `set_model` switches it without the picker's question, `send` writes to it as
+  the message box does, `interrupt` stops its turn and `resume` has it answer its last message
+  again. A conversation started from `NewConversation` may name a folder, model, provider, effort
+  and chat of its own, so a plugin can carry work on where another conversation was, on the model
+  it ran.
 - **`oak_sdk::host()`** is Oak's services, from any thread: HTTP with Oak's client
   (`oak_sdk::Request`), Oak's folder, private files, repaints, the usage log, the cloud engine's
   names and accounts, a JSON blackboard plugins tell each other things through (`shared`,

@@ -70,6 +70,11 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
   (whatever `OAK_PLUGINS` holds); docs/PLUGINS.md has both. The interface's own tests are in
   `sdk/src/abi.rs` (the header and the record of each version are current, and no version
   breaks an earlier one) and `src/plugins/api.rs` (the SDK against Oak's table, in process).
+  `handoff_in_a_whole_app` runs the private repository's classifier-avoidance plugin against
+  `bench/tools/fake_refusal.py` and `fake_deepseek.py` there (both ports are its arguments):
+  a refusal is handed to DeepSeek for a note, and a new conversation on the refused model
+  picks the work up from it. It needs `REFUSELESS_API_KEY`, and `OAK_API_BASE`,
+  `REFUSELESS_BASE_URL` and `OAK_PLUGINS` (the plugins' build folder).
 
 To use the app on a virtual display (Linux), with a scratch config folder:
 
@@ -167,6 +172,9 @@ A click on the session box's folder opens it in the system's file manager; its r
 has Open folder and Copy path (a folder that no longer exists can only be copied).
 Settings is the gear in the bottom left corner; its Theme and Font rows show once a plugin adds a
 choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings.
+The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
+plugin draws one row there, `plugins::COMPOSER_CORNER_H` tall, and the message box makes room for
+it under the buttons (`composer::links_room`) whenever a plugin registers the hook.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.

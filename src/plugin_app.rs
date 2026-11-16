@@ -3,6 +3,7 @@
 //! the New screen while it draws.
 
 use super::*;
+use crate::App;
 use oak_sdk::chat::Chat;
 use oak_sdk::host::NewConversation;
 
@@ -95,12 +96,88 @@ impl App {
 
     pub(crate) fn plugin_start_conversation(&mut self, new: NewConversation) -> Result<String, String> {
         let Some(ctx) = crate::plugins::context() else { return Err("Oak's window isn't up yet.".into()) };
-        self.hint = None;
-        let role = if new.role.is_empty() { self.settings.role.clone() } else { new.role };
-        match self.start_conversation_as(new.text, new.files, None, Some((role, new.title)), &ctx) {
-            Some(id) => Ok(id),
-            None => Err(self.hint.clone().unwrap_or_else(|| "The conversation couldn't start.".into())),
+        // A plugin that names its own folder, model, effort or role starts
+        // a conversation of those, whatever the New screen's rows were set
+        // to; otherwise it starts what they show, as the New screen would.
+        let custom = !new.folder.trim().is_empty() || !new.model.trim().is_empty() || !new.provider.trim().is_empty() || !new.effort.trim().is_empty() || new.chat;
+        if !custom {
+            self.hint = None;
+            let role = if new.role.is_empty() { self.settings.role.clone() } else { new.role };
+            return match self.start_conversation_as(new.text, new.files, None, Some((role, new.title)), &ctx) {
+                Some(id) => Ok(id),
+                None => Err(self.hint.clone().unwrap_or_else(|| "The conversation couldn't start.".into())),
+            };
         }
+        let role = if new.role.is_empty() { self.settings.role.clone() } else { new.role.clone() };
+        match self.start_conversation_with(new, role, &ctx) {
+            Ok(id) => Ok(id),
+            Err(why) => {
+                self.hint = Some(why.clone());
+                Err(why)
+            }
+        }
+    }
+
+    /// Starts a conversation a plugin names the folder, model, effort and
+    /// role of (`NewConversation`), opens its tab, and sends its message.
+    /// Ok is its id.
+    fn start_conversation_with(&mut self, new: NewConversation, role: String, ctx: &egui::Context) -> Result<String, String> {
+        let folder = if new.chat {
+            std::path::PathBuf::new()
+        } else {
+            let typed = if new.folder.trim().is_empty() { self.settings.folder.trim() } else { new.folder.trim() };
+            if typed.is_empty() {
+                return Err("Folder required".into());
+            }
+            let folder = instructions::expand_home(typed, &instructions::user_home());
+            if !folder.is_dir() {
+                return Err(format!("Folder not found: {}", folder.display()));
+            }
+            folder
+        };
+        let (provider, model) = if new.model.trim().is_empty() {
+            let provider = self.settings.provider.unwrap_or_else(|| api::Provider::of(&self.settings.model));
+            (provider, self.settings.model.clone())
+        } else {
+            let provider = if new.provider.trim().is_empty() { api::Provider::of(&new.model) } else { providers::Kind::from_id(new.provider.trim()).ok_or_else(|| format!("Oak doesn't know the provider {}.", new.provider.trim()))? };
+            (provider, new.model.trim().to_string())
+        };
+        if model.is_empty() {
+            return Err("Model required".into());
+        }
+        if let Some(why) = agent::chat_refuses_provider(new.chat, provider) {
+            return Err(why);
+        }
+        let effort = if new.effort.trim().is_empty() { self.settings.effort.clone() } else { new.effort.trim().to_string() };
+        let now = api::now_ms();
+        let mut conv = Conversation {
+            id: now.to_string(),
+            title: String::new(),
+            folder,
+            provider: Some(provider),
+            model: model.clone(),
+            effort: agent::effort_for(&model, &effort),
+            role: if new.chat { String::new() } else { agent::prompt::role(&role).id.to_string() },
+            chat: new.chat,
+            messages: Default::default(),
+            last_message_at: now,
+            next_task_id: 0,
+            rolling: rolling::State { off: !self.settings.rolling, ..Default::default() },
+            ..Default::default()
+        };
+        if !new.title.is_empty() {
+            conv.title = new.title.head(60);
+            conv.titled = true;
+        }
+        let id = conv.id.clone();
+        let s = Session::start(conv, ctx.clone());
+        if !new.text.is_empty() || !new.files.is_empty() {
+            s.send(new.text, new.files);
+        }
+        self.sessions.insert(id.clone(), s);
+        self.open(id.clone());
+        self.hint = None;
+        Ok(id)
     }
 
     /// Draws a transcript a plugin has, as a conversation's is drawn.
@@ -121,6 +198,63 @@ impl App {
         if let Some(key) = cloud_list_view(ui, &t, provider) {
             App::open(self, key);
         }
+    }
+
+    /// A conversation of this machine's, as a plugin sees it: what it is,
+    /// what it is doing and how its last turn went. None: no session has
+    /// `key`.
+    pub(crate) fn plugin_session(&self, key: &str) -> Option<oak_sdk::host::Session> {
+        let s = self.sessions.get(key)?;
+        let c = s.conv.lock().unwrap();
+        let live = s.live.lock().unwrap();
+        Some(oak_sdk::host::Session {
+            id: key.to_string(),
+            title: c.title.clone(),
+            folder: c.folder.display().to_string(),
+            model: c.model.clone(),
+            provider: c.provider().id().to_string(),
+            effort: c.effort.clone(),
+            role: c.role.clone(),
+            chat: c.chat,
+            busy: live.busy,
+            status: live.status.clone(),
+            error: live.error.clone(),
+            reply: crate::agent::reply_text(&c),
+        })
+    }
+
+    /// Switches a conversation's model, as its picker does (a `Command`,
+    /// which the worker takes next), but without asking.
+    pub(crate) fn plugin_set_model(&mut self, key: &str, provider: &str, model: &str) -> Result<(), String> {
+        let Some(s) = self.sessions.get(key) else { return Err(format!("There is no conversation {key}.")) };
+        let provider = providers::Kind::from_id(provider).ok_or_else(|| format!("Oak doesn't know the provider {provider}."))?;
+        if model.trim().is_empty() {
+            return Err("No model was named.".into());
+        }
+        s.command(Command::Model(provider, model.to_string()));
+        Ok(())
+    }
+
+    /// Sends a conversation a message, as its message box does.
+    pub(crate) fn plugin_send(&mut self, key: &str, text: &str) -> Result<(), String> {
+        let Some(s) = self.sessions.get(key) else { return Err(format!("There is no conversation {key}.")) };
+        s.send(text.to_string(), vec![]);
+        Ok(())
+    }
+
+    /// Stops what a conversation is doing, as its interrupt does.
+    pub(crate) fn plugin_interrupt(&mut self, key: &str) -> Result<(), String> {
+        let Some(s) = self.sessions.get(key) else { return Err(format!("There is no conversation {key}.")) };
+        s.interrupt();
+        Ok(())
+    }
+
+    /// Asks a conversation to answer its last turn, as resuming a paused
+    /// one does.
+    pub(crate) fn plugin_resume(&mut self, key: &str) -> Result<(), String> {
+        let Some(s) = self.sessions.get(key) else { return Err(format!("There is no conversation {key}.")) };
+        s.resume_next();
+        Ok(())
     }
 }
 

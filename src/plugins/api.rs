@@ -419,6 +419,15 @@ unsafe fn give_result(r: Result<String, String>, out: OakSink, user: *mut c_void
     }
 }
 
+/// The same, when what worked has nothing to say.
+unsafe fn give_done(r: Result<(), String>, out: OakSink, user: *mut c_void) -> bool {
+    give_result(r.map(|()| String::new()), out, user)
+}
+
+/// Why a call that needs the window couldn't be made: Oak has none up (a
+/// plugin's thread, before the first frame, or after the last).
+const NO_WINDOW: &str = "Oak's window isn't there.";
+
 fn headers_from(lines: &str) -> Vec<(String, String)> {
     lines.lines().filter_map(|l| l.split_once(':')).map(|(n, v)| (n.trim().to_string(), v.trim().to_string())).collect()
 }
@@ -751,6 +760,49 @@ impl HostApi for Oak {
     unsafe extern "C" fn app_cloud_list(ui: *mut OakUi, backend: OakStr) {
         let ui = ui_of(ui);
         app(|a| a.plugin_cloud_list(ui, str_of(backend)));
+    }
+
+    unsafe extern "C" fn app_session(key: OakStr, out: OakSink, out_user: *mut c_void) -> bool {
+        let key = str_of(key);
+        match app(|a| a.plugin_session(key)) {
+            Some(Some(s)) => {
+                give_text(out, out_user, &serde_json::to_string(&s).unwrap_or_default());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    unsafe extern "C" fn app_set_model(key: OakStr, provider: OakStr, model: OakStr, error: OakSink, error_user: *mut c_void) -> bool {
+        let (key, provider, model) = (str_of(key), str_of(provider), str_of(model));
+        match app(|a| a.plugin_set_model(key, provider, model)) {
+            Some(r) => give_done(r, error, error_user),
+            None => give_result(Err(NO_WINDOW.into()), error, error_user),
+        }
+    }
+
+    unsafe extern "C" fn app_send(key: OakStr, text: OakStr, error: OakSink, error_user: *mut c_void) -> bool {
+        let (key, text) = (str_of(key), str_of(text));
+        match app(|a| a.plugin_send(key, text)) {
+            Some(r) => give_done(r, error, error_user),
+            None => give_result(Err(NO_WINDOW.into()), error, error_user),
+        }
+    }
+
+    unsafe extern "C" fn app_interrupt(key: OakStr, error: OakSink, error_user: *mut c_void) -> bool {
+        let key = str_of(key);
+        match app(|a| a.plugin_interrupt(key)) {
+            Some(r) => give_done(r, error, error_user),
+            None => give_result(Err(NO_WINDOW.into()), error, error_user),
+        }
+    }
+
+    unsafe extern "C" fn app_resume(key: OakStr, error: OakSink, error_user: *mut c_void) -> bool {
+        let key = str_of(key);
+        match app(|a| a.plugin_resume(key)) {
+            Some(r) => give_done(r, error, error_user),
+            None => give_result(Err(NO_WINDOW.into()), error, error_user),
+        }
     }
 
     // ---- laying out

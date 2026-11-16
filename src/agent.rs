@@ -528,6 +528,10 @@ pub struct Session {
     paused: Arc<AtomicBool>,
     /// Deleted (AGENT_DELETE): everything the worker does stops, and it ends.
     deleted: Arc<AtomicBool>,
+    /// The last turn is to be answered: the worker takes up a transcript
+    /// that ends in the user's message (a conversation just opened, or one
+    /// a plugin asks to resume).
+    resume: Arc<AtomicBool>,
     wake: Sender<()>,
     /// The session's background tasks, shared with its worker (the UI
     /// lists them).
@@ -607,6 +611,7 @@ impl Session {
             live: Arc::default(),
             interrupt: Arc::default(),
             deleted: Arc::default(),
+            resume: Arc::new(AtomicBool::new(resume)),
             wake: wake.clone(),
             tasks,
         };
@@ -616,6 +621,7 @@ impl Session {
             interrupt: s.interrupt.clone(),
             paused: s.paused.clone(),
             deleted: s.deleted.clone(),
+            resume: s.resume.clone(),
             wake_rx: Mutex::new(wake_rx),
             wake,
             tasks: s.tasks.clone(),
@@ -625,7 +631,6 @@ impl Session {
             warm: Mutex::new(None),
             marks: Mutex::default(),
             files: Mutex::default(),
-            resume: AtomicBool::new(resume),
         };
         (s, w)
     }
@@ -748,6 +753,14 @@ impl Session {
         }
         l.queued.retain(|q| !q.is_empty());
         drop(l);
+        self.wake();
+    }
+
+    /// Says the conversation's last turn is to be answered: the worker
+    /// takes up a transcript that ends in the user's message (a
+    /// conversation just opened, or one whose turn a plugin wants run).
+    pub fn resume_next(&self) {
+        self.resume.store(true, Ordering::SeqCst);
         self.wake();
     }
 
@@ -944,9 +957,8 @@ struct Worker {
     marks: Mutex<Vec<(MarkKind, String, String)>>,
     /// The files the model read, wrote or edited, as it last saw them.
     files: Mutex<changes::Tracked>,
-    /// The session started paused with an unanswered user turn (OAK
-    /// closed while paused): it carries on once the session is resumed.
-    resume: AtomicBool,
+    /// The last turn is to be answered (see `Session::resume`).
+    resume: Arc<AtomicBool>,
 }
 
 enum Reply {
@@ -994,7 +1006,7 @@ fn last_is(c: &Conversation, role: &str) -> bool {
 }
 
 /// The text of the model's last reply, if the transcript ends in one.
-fn reply_text(c: &Conversation) -> Option<String> {
+pub(crate) fn reply_text(c: &Conversation) -> Option<String> {
     let m = c.messages.last().filter(|m| m["role"] == "assistant")?;
     let texts: Vec<&str> = m["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect();
     Some(texts.join("\n\n"))

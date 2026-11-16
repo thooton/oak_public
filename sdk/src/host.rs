@@ -229,6 +229,19 @@ pub struct NewConversation {
     pub text: String,
     /// The message's attachments, as the message box holds them.
     pub files: Vec<Value>,
+    /// Where it runs (empty: the folder picked in Settings). A plugin may
+    /// name one its own choice of folder didn't, to carry a conversation
+    /// on where another was.
+    pub folder: String,
+    /// The model it runs on, and who serves it: an id `App::conversations`
+    /// gives, or empty for the one picked in Settings. Its provider is
+    /// worked out from the model unless `provider` says which.
+    pub model: String,
+    pub provider: String,
+    /// Its effort ("high"; empty: the one picked in Settings).
+    pub effort: String,
+    /// A chat: no folder, no project, only the web's tools.
+    pub chat: bool,
 }
 
 /// Oak's services, for any thread.
@@ -471,6 +484,48 @@ pub trait App {
     /// The list of backend `id`'s cloud sessions, as Home's Cloud tab
     /// shows Oak's own: a click opens the session.
     fn cloud_list(&mut self, ui: &mut Ui, backend: &str);
+    /// A conversation of this machine's (`Session`), under its key. None:
+    /// there is none.
+    fn session(&self, key: &str) -> Option<Session>;
+    /// Switches conversation `key` to model `model` of provider `provider`,
+    /// as its model picker does but without asking. Err: why it couldn't.
+    fn set_model(&mut self, key: &str, provider: &str, model: &str) -> Result<(), String>;
+    /// Sends conversation `key` a message from the user, as the message box
+    /// does. Err: why it couldn't.
+    fn send(&mut self, key: &str, text: &str) -> Result<(), String>;
+    /// Stops what conversation `key` is doing, as its interrupt does. Err:
+    /// why it couldn't.
+    fn interrupt(&mut self, key: &str) -> Result<(), String>;
+    /// Asks conversation `key` to answer its last turn, as resuming a paused
+    /// one does (a transcript that ends in a message from the user that
+    /// nothing woke to answer). Err: why it couldn't.
+    fn resume(&mut self, key: &str) -> Result<(), String>;
+}
+
+/// A conversation of this machine's, as `App::session` shows it: what it
+/// is, what it is doing, and how its last turn went.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Session {
+    pub id: String,
+    pub title: String,
+    pub folder: String,
+    pub model: String,
+    /// Who serves `model`.
+    pub provider: String,
+    pub effort: String,
+    pub role: String,
+    /// A chat: no folder, no project.
+    pub chat: bool,
+    /// A turn is under way.
+    pub busy: bool,
+    /// What it is doing now ("Retry 2/4 in 8s after: a safety classifier
+    /// declined the request (category cyber: …)", say).
+    pub status: String,
+    /// What went wrong in its last turn, when it failed.
+    pub error: Option<String>,
+    /// The text of its last message, when that is the model's.
+    pub reply: Option<String>,
 }
 
 /// Files to attach (`App::take_files`, `App::pick_files`).
@@ -639,6 +694,34 @@ impl App for Window {
     fn cloud_list(&mut self, ui: &mut Ui, backend: &str) {
         self.settle();
         unsafe { (api().app_cloud_list)(ui.as_raw(), s(backend)) };
+    }
+
+    fn session(&self, key: &str) -> Option<Session> {
+        let (there, json) = text_from(|out, user| unsafe { (api().app_session)(s(key), out, user) });
+        if !there {
+            return None;
+        }
+        serde_json::from_str(&json).ok()
+    }
+
+    fn set_model(&mut self, key: &str, provider: &str, model: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_set_model)(s(key), s(provider), s(model), out, user) }).map(drop)
+    }
+
+    fn send(&mut self, key: &str, text: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_send)(s(key), s(text), out, user) }).map(drop)
+    }
+
+    fn interrupt(&mut self, key: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_interrupt)(s(key), out, user) }).map(drop)
+    }
+
+    fn resume(&mut self, key: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_resume)(s(key), out, user) }).map(drop)
     }
 }
 
