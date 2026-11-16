@@ -337,6 +337,10 @@ struct App {
     home_buttons_rect: Option<egui::Rect>,
     /// The wallpaper playing on Home (`wallpaper.rs`).
     wallpaper: Option<wallpaper::Player>,
+    /// Settings' wallpaper grid is open, and the one under the pointer
+    /// playing in its tile.
+    wallpaper_picker: bool,
+    wallpaper_hover: Option<wallpaper::Player>,
     /// The New screen starts a cloud session.
     new_cloud: bool,
     /// What the New screen starts on this machine, when it starts neither

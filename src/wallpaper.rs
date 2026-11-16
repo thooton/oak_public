@@ -2,6 +2,9 @@
 //! folder in Oak's folder (PNG, JPEG, GIF or WebP; an animated GIF or WebP
 //! plays, looping), picked on Settings.
 //!
+//! Settings shows them as a grid of thumbnails (`thumbnail`: each file's
+//! first frame, cropped to 16:9, decoded on a thread of its own once).
+//!
 //! A `Player` decodes its file's frames on a thread of its own, two ahead
 //! of the screen, and Home shows each when its time comes, reusing one
 //! texture. While Home isn't shown the thread waits on the full queue,
@@ -11,10 +14,11 @@
 use eframe::egui;
 use image::AnimationDecoder;
 use std::io::Cursor;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The files the folder's list offers.
 const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
@@ -28,32 +32,94 @@ pub(crate) fn folder() -> PathBuf {
     crate::store::dir().join("wallpapers")
 }
 
-/// Wallpaper files: (file name, name shown).
-type Files = Vec<(String, String)>;
+/// A file's size and time.
+type Stamp = (u64, Option<SystemTime>);
+
+/// A file in the wallpapers folder.
+#[derive(Clone)]
+pub(crate) struct Wallpaper {
+    pub(crate) file: String,
+    /// As the list shows it (`display_name`).
+    pub(crate) name: String,
+    /// Its size and time, so a file replaced gets a new thumbnail.
+    stamp: Stamp,
+}
 
 /// The folder's pictures, by name. Read again when the last look is older
 /// than three seconds.
-pub(crate) fn list() -> Files {
-    static SEEN: Mutex<Option<(Instant, Files)>> = Mutex::new(None);
+pub(crate) fn list() -> Vec<Wallpaper> {
+    static SEEN: Mutex<Option<(Instant, Vec<Wallpaper>)>> = Mutex::new(None);
     let mut seen = SEEN.lock().unwrap();
     if let Some((at, list)) = &*seen
         && at.elapsed() < Duration::from_secs(3)
     {
         return list.clone();
     }
-    let mut list: Files = std::fs::read_dir(folder())
+    let mut list: Vec<Wallpaper> = std::fs::read_dir(folder())
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let file = e.file_name().to_string_lossy().into_owned();
             let ext = extension(Path::new(&file));
-            EXTENSIONS.contains(&ext.as_str()).then(|| (file.clone(), display_name(&file)))
+            let meta = e.metadata().ok()?;
+            (EXTENSIONS.contains(&ext.as_str()) && meta.is_file()).then(|| Wallpaper { name: display_name(&file), stamp: (meta.len(), meta.modified().ok()), file })
         })
         .collect();
-    list.sort_by_key(|a| a.1.to_lowercase());
+    list.sort_by_key(|w| w.name.to_lowercase());
     *seen = Some((Instant::now(), list.clone()));
     list
+}
+
+enum Thumb {
+    Loading,
+    Ready(egui::TextureHandle),
+    Failed,
+}
+
+/// `w`'s thumbnail: its first frame cropped to 16:9, at most 480 wide.
+/// None while it is decoded (on a thread of its own; a repaint follows)
+/// and when the file can't be read.
+pub(crate) fn thumbnail(ctx: &egui::Context, w: &Wallpaper) -> Option<egui::TextureHandle> {
+    static THUMBS: Mutex<Option<HashMap<String, (Stamp, Thumb)>>> = Mutex::new(None);
+    let mut thumbs = THUMBS.lock().unwrap();
+    let thumbs = thumbs.get_or_insert_default();
+    match thumbs.get(&w.file) {
+        Some((stamp, Thumb::Ready(t))) if *stamp == w.stamp => return Some(t.clone()),
+        Some((stamp, _)) if *stamp == w.stamp => return None,
+        _ => {}
+    }
+    thumbs.insert(w.file.clone(), (w.stamp, Thumb::Loading));
+    let (ctx, file, stamp) = (ctx.clone(), w.file.clone(), w.stamp);
+    let _ = std::thread::Builder::new().name("wallpaper-thumbnail".into()).spawn(move || {
+        let thumb = match first_frame(&folder().join(&file)) {
+            Some((image, options)) => Thumb::Ready(ctx.load_texture(format!("wallpaper-thumbnail-{file}"), image, options)),
+            None => Thumb::Failed,
+        };
+        if let Some(thumbs) = THUMBS.lock().unwrap().as_mut()
+            && thumbs.get(&file).is_some_and(|(s, _)| *s == stamp)
+        {
+            thumbs.insert(file, (stamp, thumb));
+        }
+        ctx.request_repaint();
+    });
+    None
+}
+
+/// `path`'s first frame, cropped to 16:9 about its middle and shrunk to
+/// 480 wide when wider (pixel art stays as it is, to be drawn sharp).
+fn first_frame(path: &Path) -> Option<(egui::ColorImage, egui::TextureOptions)> {
+    let img = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let (cw, ch) = if w * 9 > h * 16 { (h * 16 / 9, h) } else { (w, w * 9 / 16) };
+    let mut img = image::imageops::crop_imm(&img, (w - cw) / 2, (h - ch) / 2, cw.max(1), ch.max(1)).to_image();
+    let pixel_art = w as usize <= PIXEL_ART_W;
+    if img.width() > 480 {
+        img = image::imageops::resize(&img, 480, 270, image::imageops::FilterType::Triangle);
+    }
+    let size = [img.width() as usize, img.height() as usize];
+    let options = if pixel_art { egui::TextureOptions::NEAREST } else { egui::TextureOptions::LINEAR };
+    Some((egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), options))
 }
 
 /// A file's name as the list shows it: "twilight-forest.webp" is

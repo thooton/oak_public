@@ -149,35 +149,126 @@ impl App {
     }
 
     /// The Wallpaper row: Home's background, Oak's forest or a picture from
-    /// the wallpapers folder (which a button opens, made when missing).
+    /// the wallpapers folder. The button (the one picked, small) opens the
+    /// grid to pick another from.
     fn wallpaper_row(&mut self, ui: &mut Ui, t: &Theme) {
         let list = crate::wallpaper::list();
-        let shown = if self.settings.wallpaper.is_empty() { "Forest".to_string() } else { crate::wallpaper::display_name(&self.settings.wallpaper) };
+        let now = list.iter().find(|w| w.file == self.settings.wallpaper);
         caption(ui, "Wallpaper", t.ink3);
-        ui.horizontal(|ui| {
-            let mut pick = None;
-            egui::ComboBox::from_id_salt("wallpaper").selected_text(shown).width(260.0).height(420.0).show_ui(ui, |ui| {
-                if ui.selectable_label(self.settings.wallpaper.is_empty(), "Forest").clicked() {
-                    pick = Some(String::new());
-                }
-                for (file, name) in &list {
-                    if ui.selectable_label(self.settings.wallpaper == *file, name).clicked() {
-                        pick = Some(file.clone());
+        let name = now.map_or("Forest", |w| &w.name).to_string();
+        let tex = match now {
+            Some(w) => crate::wallpaper::thumbnail(ui.ctx(), w),
+            None => Some(crate::home::picture(ui.ctx(), &mut self.pictures, "forest-home")),
+        };
+        let (rect, resp) = ui.allocate_exact_size(vec2(260.0, 40.0), Sense::click());
+        let p = ui.painter();
+        p.rect_filled(rect, 4.0, if resp.hovered() { t.tool_hover } else { t.panel2 });
+        p.rect_stroke(rect, 4.0, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+        let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(57.0, 32.0));
+        match &tex {
+            Some(tex) => crate::home::paint_cover(p, thumb, tex, Color32::WHITE),
+            None => {
+                p.rect_filled(thumb, 2.0, t.bg);
+            }
+        }
+        p.text(egui::pos2(thumb.right() + 10.0, rect.center().y), Align2::LEFT_CENTER, name, FontId::proportional(13.0), t.ink);
+        p.text(egui::pos2(rect.right() - 10.0, rect.center().y), Align2::RIGHT_CENTER, "Change", FontId::proportional(12.0), t.ink3);
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            self.wallpaper_picker = true;
+        }
+        ui.end_row();
+        if self.wallpaper_picker {
+            self.wallpaper_picker(ui.ctx(), t, &list);
+        }
+    }
+
+    /// The wallpapers as a grid, three to a row: the forest, then the
+    /// folder's; the one under the pointer plays. A click picks one and
+    /// closes it, as do Esc, the X and a click outside.
+    fn wallpaper_picker(&mut self, ctx: &egui::Context, t: &Theme, list: &[crate::wallpaper::Wallpaper]) {
+        const TILE: egui::Vec2 = vec2(224.0, 126.0);
+        const GAP: f32 = 12.0;
+        let mut pick = None;
+        let mut close = false;
+        let mut hovered = None;
+        let modal = crate::widgets::dialog("wallpaper-picker", t).show(ctx, |ui| {
+            ui.set_width(TILE.x * 3.0 + GAP * 2.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Wallpaper").size(16.0).color(t.ink));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    let (x, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+                    crate::widgets::draw_x(ui.painter(), x.shrink(7.0), if resp.hovered() { t.ink } else { t.ink3 });
+                    close |= resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                    let folder = crate::wallpaper::folder();
+                    let tip = format!("PNG, JPEG, GIF or WebP files put in\n{}\nshow here. Animated GIF and WebP play.", folder.display());
+                    if ui.button("Open folder").on_hover_text(tip).clicked() {
+                        let _ = std::fs::create_dir_all(&folder);
+                        let _ = open::that_detached(&folder);
                     }
+                });
+            });
+            ui.add_space(8.0);
+            let max_h = (ctx.content_rect().height() * 0.75 - 60.0).max(TILE.y + 30.0);
+            // (The forest's tile first.)
+            let rows = (list.len() + 1).div_ceil(3) as f32;
+            let full = rows * (TILE.y + 30.0);
+            ScrollArea::vertical().id_salt("wallpaper-grid").max_height(max_h).min_scrolled_height(full.min(max_h)).auto_shrink([false, true]).show(ui, |ui| {
+                let tiles: Vec<Option<&crate::wallpaper::Wallpaper>> = std::iter::once(None).chain(list.iter().map(Some)).collect();
+                for row in tiles.chunks(3) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = GAP;
+                        for w in row {
+                            let file = w.map_or(String::new(), |w| w.file.clone());
+                            let (rect, resp) = ui.allocate_exact_size(TILE + vec2(0.0, 24.0), Sense::click());
+                            let pic = Rect::from_min_size(rect.min, TILE);
+                            let hover = resp.hovered();
+                            if hover && w.is_some() {
+                                hovered = Some(file.clone());
+                            }
+                            let playing = self.wallpaper_hover.as_mut().filter(|p| hover && p.file == file).and_then(|p| p.frame(ui.ctx())).cloned();
+                            let tex = playing.or_else(|| match w {
+                                Some(w) => crate::wallpaper::thumbnail(ui.ctx(), w),
+                                None => Some(crate::home::picture(ui.ctx(), &mut self.pictures, "forest-home")),
+                            });
+                            let p = ui.painter();
+                            match &tex {
+                                Some(tex) => crate::home::paint_cover(p, pic, tex, Color32::WHITE),
+                                None => {
+                                    p.rect_filled(pic, 0.0, t.bg);
+                                }
+                            }
+                            let chosen = self.settings.wallpaper == file;
+                            let stroke = if chosen { Stroke::new(2.0, t.accent) } else if hover { Stroke::new(1.0, t.ink3) } else { Stroke::new(1.0, t.line) };
+                            p.rect_stroke(pic, 0.0, stroke, egui::StrokeKind::Inside);
+                            let name = w.map_or("Forest", |w| &w.name);
+                            let label = egui::pos2(pic.left() + 2.0, pic.bottom() + 12.0);
+                            p.text(label, Align2::LEFT_CENTER, name, FontId::proportional(12.5), if chosen || hover { t.ink } else { t.ink2 });
+                            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                pick = Some(file);
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
                 }
             });
-            if let Some(file) = pick.filter(|f| *f != self.settings.wallpaper) {
+        });
+        // The one under the pointer plays; the player goes with the pointer.
+        match hovered {
+            Some(file) if self.wallpaper_hover.as_ref().is_none_or(|p| p.file != file) => self.wallpaper_hover = Some(crate::wallpaper::Player::new(&file)),
+            None => self.wallpaper_hover = None,
+            _ => {}
+        }
+        if let Some(file) = pick {
+            if file != self.settings.wallpaper {
                 self.settings.wallpaper = file;
                 store::save_settings(&self.settings);
             }
-            let folder = crate::wallpaper::folder();
-            let tip = format!("PNG, JPEG, GIF or WebP files put in\n{}\nshow in the list. Animated GIF and WebP play.", folder.display());
-            if ui.button("Open folder").on_hover_text(tip).clicked() {
-                let _ = std::fs::create_dir_all(&folder);
-                let _ = open::that_detached(&folder);
-            }
-        });
-        ui.end_row();
+            close = true;
+        }
+        if close || modal.should_close() {
+            self.wallpaper_picker = false;
+            self.wallpaper_hover = None;
+        }
     }
 
     /// The Font row: IBM Plex Sans, and those plugins add (one is fetched
