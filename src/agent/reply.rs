@@ -493,6 +493,7 @@ impl Worker {
             let (drawn, viewport) = {
                 let mut l = self.live.lock().unwrap();
                 s.apply(&mut l, batch, ev);
+                l.mark_phase();
                 (l.drawn, l.drawn_viewport.unwrap_or(eframe::egui::ViewportId::ROOT))
             };
             if !s.rewrites.is_empty() {

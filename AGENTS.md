@@ -372,7 +372,15 @@ under it when there are any. A subagent's model switches in place, from its pick
 agent's AGENT action=set: its conversation and work carry on, a request under way finishes on the
 model it started on (the box says it is switching until then, AGENT_LIST and set's reply too), and
 the next request, with that one's tool results, goes to the new model with the "Your underlying
-model is now" line appended; a switch to another provider asks first, as the session box does. A collapsed "Local controls"
+model is now" line appended; a switch to another provider asks first, as the session box does.
+Each session has a pulse (`src/agent/pulse.rs`), as the command center's workers do: its phase
+from its status line (its model writing, its tools running, waiting on a retry, a usage limit, an
+answer or its agents, summarizing; idle, paused) and since when, its last progress (its model's
+reply or a tool's result going into the transcript, by tool name, never a command; kept with the
+conversation as `progress_at`/`progress`, never sent) and what holds it up, only as known (the wait
+its status line names, or the error its last turn ended on). A subagent's box shows it under its
+state, its row on the super agent's list on hover, and AGENT_LIST in its state and last progress
+columns, so "working" doesn't pass for progress. A collapsed "Local controls"
 section keeps provider/model/effort switching, goals, progress meters, heartbeats, folder actions
 and parent navigation available without crowding the shared layout. It still
 runs here: its subagents are conversations of their own. Oak's own choices win over a plugin's `NewKind` of the same id,

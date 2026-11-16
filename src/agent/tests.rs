@@ -1551,3 +1551,43 @@ fn group_pause_picks_by_model() {
         assert!(!on_model(word, model, kind), "{word} {model}");
     }
 }
+
+/// A session's pulse: its last progress (a reply, a tool's result by its
+/// tool's name), kept with the conversation; a wait its status line names
+/// is what blocks it, and so is the error its last turn ended on.
+#[test]
+fn the_pulse_says_progress_and_blockers() {
+    let (w, s) = idle_worker("pulse", Conversation::default());
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!((p.phase, p.progress_at, p.blocker.as_str()), (super::pulse::IDLE, 0, ""));
+    w.set(|l| {
+        l.busy = true;
+        l.status = "Waiting for the model".into();
+    });
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!(p.phase, super::pulse::MODEL);
+    assert!(p.since > 0 && p.detail(api::now_ms()).ends_with("no progress yet"), "{p:?}");
+
+    w.push("assistant", vec![json!({"type": "tool_call", "id": "e1", "name": "EXECUTE", "input": {"command": "echo hush", "summary": "Say"}})]);
+    assert_eq!(s.conv.lock().unwrap().progress, "Its model replied with 1 tool call");
+    w.set(|l| l.status = "Running Say".into());
+    w.push("user", vec![oak::tool_result(&json!("e1"), json!("hush"), false)]);
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!((p.phase, p.progress.as_str()), (super::pulse::TOOLS, "EXECUTE returned"));
+    assert!(!format!("{p:?}").contains("echo hush"));
+
+    w.set(|l| l.status = "Retry 1/5 in 3s after: HTTP 529".into());
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!((p.phase, p.blocker.as_str()), (super::pulse::WAITING, "Retry 1/5 in 3s after: HTTP 529"));
+
+    w.set(|l| {
+        l.busy = false;
+        l.status.clear();
+        l.error = Some("Anthropic answered HTTP 500:\n overloaded".into());
+    });
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!((p.phase, p.blocker.as_str()), (super::pulse::BLOCKED, "Its last turn ended on an error: Anthropic answered HTTP 500: overloaded"));
+    // The last progress is saved with the conversation.
+    let saved = serde_json::to_value(&*s.conv.lock().unwrap()).unwrap();
+    assert_eq!(saved["progress"], "EXECUTE returned");
+}

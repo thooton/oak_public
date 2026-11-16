@@ -6,6 +6,7 @@
 //! here, as any conversation does: its subagents are conversations of
 //! their own, in their own tabs.
 
+use crate::agent::pulse::Pulse;
 use crate::agent::{self, Live};
 use crate::session_box::{AgentState, BoxActions, model_label};
 use crate::store::{Conversation, MarkKind};
@@ -241,13 +242,16 @@ impl App {
             (b, provider, agents)
         };
         let mut b = b;
+        let now = crate::api::now_ms();
         // The subagents at work first, then the rest, the latest first in each.
         let mut rows: Vec<(AgentRow, String)> = agents
             .into_iter()
             .map(|(n, title, conv)| {
                 let state = self.sessions.get(&conv).map_or(AgentState::Idle, AgentState::of);
                 let report = self.sessions.get(&conv).map(|s| last_reply(&s.conv.lock().unwrap())).unwrap_or_default();
-                (AgentRow { n, title, state: state_word(state).into(), live: true, working: state == AgentState::Working, report, ..Default::default() }, conv)
+                // How long it has been at it, its last progress and what holds it up.
+                let detail = self.sessions.get(&conv).map(Pulse::of).map(|p| [p.detail(now), p.blocked(now)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+                (AgentRow { n, title, state: state_word(state).into(), live: true, working: state == AgentState::Working, report, detail }, conv)
             })
             .collect();
         rows.sort_by_key(|(r, _)| (!r.working, std::cmp::Reverse(r.n)));
@@ -295,6 +299,10 @@ impl App {
     pub(crate) fn local_agent_box(&mut self, ctx: &egui::Context, t: &Theme, area: Rect, key: &str) {
         let Some(s) = self.sessions.get(key) else { return };
         let state = AgentState::of(s);
+        // What it is at, its last progress and what holds it up.
+        let (pulse, now) = (Pulse::of(s), crate::api::now_ms());
+        // (Before its live state is locked below: `pause_on` locks it.)
+        let paused = s.pause_on();
         let models = match &*self.models.lock().unwrap() {
             Some(Ok(list)) => list.clone(),
             _ => vec![],
@@ -326,7 +334,6 @@ impl App {
             if !list.iter().any(|m| m.id == model) {
                 list.insert(0, Model { id: model.clone(), name: self.model_name(&model), efforts: agent::efforts(&model).into_iter().map(String::from).collect() });
             }
-            let paused = s.pause_on();
             let b = AgentBox {
                 icon: Icon::Tree,
                 title: if conv.title.is_empty() { format!("Agent {}", conv.agent_id) } else { conv.title.clone() },
@@ -342,10 +349,15 @@ impl App {
                 pending,
                 pause: if paused { "Lets it carry on where it stopped".into() } else { "Pauses it after the request under way; messages for it wait".into() },
                 paused,
-                ..Default::default()
+                detail: pulse.detail(now),
+                blocker: pulse.blocked(now),
             };
             (b, provider)
         };
+        if b.working {
+            // Its "for 2m" and "40s ago" count on.
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
         crate::unslop::start_notes(&s.conv, ctx);
         let mut info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
         for a in &mut info.agents {

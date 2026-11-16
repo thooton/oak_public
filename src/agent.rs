@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 mod alerts;
 mod memory;
+pub(crate) mod pulse;
 pub(crate) mod prompt;
 mod reply;
 mod rewrite;
@@ -362,6 +363,8 @@ pub struct Live {
     /// paused, as it does no work until resumed.
     tools: usize,
     waiting: usize,
+    /// Its phase (`pulse`) and since when (ms since 1970).
+    phase_at: (&'static str, i64),
 }
 
 /// Counts a tool call in `Live::tools` while it runs (a wait also in
@@ -1223,7 +1226,10 @@ impl Worker {
     }
 
     fn set(&self, f: impl FnOnce(&mut Live)) {
-        f(&mut self.live.lock().unwrap());
+        let mut l = self.live.lock().unwrap();
+        f(&mut l);
+        l.mark_phase();
+        drop(l);
         self.ctx.request_repaint();
     }
 
@@ -1292,6 +1298,15 @@ impl Worker {
             }
         }
         let mut c = self.conv.lock().unwrap();
+        // Its last progress (`pulse`): a reply, or a result of a call in the
+        // last reply.
+        let names: Vec<(String, String)> = match role {
+            "user" => c.messages.iter().rev().find(|m| m["role"] == "assistant").and_then(|m| m["content"].as_array()).into_iter().flatten().filter(|b| oak::is_call(b)).map(|b| (b["id"].as_str().unwrap_or_default().to_string(), b["name"].as_str().unwrap_or_default().to_string())).collect(),
+            _ => vec![],
+        };
+        if let Some(what) = pulse::progress_of(role, &content, &names) {
+            (c.progress_at, c.progress) = (now, what);
+        }
         // (Looked at first: changing the last message redoes its saved JSON.)
         match c.messages.last().filter(|last| last["role"] == role) {
             Some(_) => c.messages.last_mut().unwrap()["content"].as_array_mut().unwrap().append(&mut content),

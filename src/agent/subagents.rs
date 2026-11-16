@@ -241,9 +241,10 @@ impl Worker {
         if contacts.is_empty() {
             return "No agents yet: AGENT action=new starts one.".into();
         }
-        let mut out = String::from("id\tstate\tlast change\tmodel\tname\n");
+        let mut out = String::from("id\tstate\tlast progress\tlast change\tmodel\tname\n");
+        let now = api::now_ms();
         for (id, label, conv) in contacts {
-            let (state, at, model) = match find_session(&conv) {
+            let (state, at, model, progress) = match find_session(&conv) {
                 Some(s) => {
                     let c = s.conv.lock().unwrap();
                     let (at, mut model) = (c.last_message_at, format!("{} ({})", c.model, effort_for(&c.model, &c.effort)));
@@ -252,12 +253,22 @@ impl Worker {
                     if let Some((m, e)) = queued_switch(&s, &now_model, &now_effort) {
                         model += &format!(", switching to {m} ({e}) at its next request");
                     }
-                    (s.state(), at, model)
+                    // What it is at and for how long, what holds it up, and
+                    // its last progress (`pulse`).
+                    let p = super::pulse::Pulse::of(&s);
+                    let mut state = s.state();
+                    if p.phase == super::pulse::BLOCKED && state.starts_with("idle (") {
+                        state = format!("idle ({})", p.blocker);
+                    } else if state.starts_with("working") && p.since > 0 {
+                        state += &format!(" for {}", super::pulse::span(now - p.since));
+                    }
+                    let progress = if p.progress_at > 0 { format!("{} ago: {}", super::pulse::span(now - p.progress_at), p.progress) } else { "-".into() };
+                    (state, at, model, progress)
                 }
-                None => ("not running".into(), 0, "-".into()),
+                None => ("not running".into(), 0, "-".into(), "-".into()),
             };
             let ago = if at > 0 { format!("{} ago", fmt_duration(Duration::from_millis((api::now_ms() - at).max(0) as u64))) } else { "-".into() };
-            out += &format!("{id}\t{state}\t{ago}\t{model}\t{label}\n");
+            out += &format!("{id}\t{state}\t{progress}\t{ago}\t{model}\t{label}\n");
         }
         out
     }

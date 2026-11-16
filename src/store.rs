@@ -396,6 +396,12 @@ pub struct Conversation {
     #[serde(default = "Format::old")]
     pub format: Format,
     pub last_message_at: i64,
+    /// Its last progress (`agent::pulse`): when its model's last reply or
+    /// tool result went in (ms since 1970; 0 none yet), and what it was.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub progress_at: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub progress: String,
     pub next_task_id: u64,
     #[serde(default)]
     pub rolling: crate::rolling::State,
