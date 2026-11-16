@@ -354,6 +354,10 @@ pub struct Live {
     /// Ultrapause: everything stops at once. Running commands are killed,
     /// waits end, and the session is paused until resumed.
     pub ultra: bool,
+    /// The ultrapause is Oak closing with the background tasks left
+    /// running (`ultrapause_keeping_tasks`): a TASK wait doesn't end, so it
+    /// carries on at the next start.
+    closing: bool,
     /// Paused, the worker is holding its next request (`hold_while_paused`,
     /// or a usage-limit wait while paused): nothing runs.
     held: bool,
@@ -560,20 +564,25 @@ impl Queued {
 
 impl Session {
     pub fn start(mut conv: Conversation, ctx: eframe::egui::Context) -> Session {
+        let tasks = Tasks::open(&conv.id);
         // Closed while a tool ran: its call has no result, which the API
-        // refuses, so it gets one saying so.
-        let changed = answer_lost_calls(&mut conv);
+        // refuses, so it gets one saying so. But a TASK wait on a task Oak
+        // still knows carries on (`Worker::carry_on_waits`): its result
+        // comes when it ends, as it would have without the restart.
+        let (mut changed, waits) = answer_lost_calls_but(&mut conv, |call| waits_on_known_task(call, &tasks));
+        changed |= carry_waits(&mut conv, &waits, tasks.closed_ms(), api::now_ms());
         // Paused when OAK closed, with the transcript ending in a user turn
         // (tool results or a message the model hasn't answered): the turn
         // carries on once the session is resumed, as it would have without
         // the restart.
-        let resume = conv.paused && last_is(&conv, "user");
+        let resume = conv.paused && last_is(&conv, "user") && waits.is_empty();
         if changed {
             conv.save();
         }
         // (A copy of a running session's conversation gets watchers of its own.)
         conv.meters.iter_mut().for_each(|m| m.watched = false);
-        let (s, w) = Session::with_worker(conv, ctx, resume);
+        let (s, w) = Session::with_worker(conv, ctx, resume, tasks);
+        *w.open_waits.lock().unwrap() = waits;
         // Rewrites left unfinished when OAK closed carry on; progress meters
         // run again, each when it is next due.
         crate::unslop::start(&s.conv, &w.ctx);
@@ -587,9 +596,8 @@ impl Session {
     }
 
     /// A session for `conv` and the worker sharing its state, not running yet.
-    fn with_worker(conv: Conversation, ctx: eframe::egui::Context, resume: bool) -> (Session, Worker) {
+    fn with_worker(conv: Conversation, ctx: eframe::egui::Context, resume: bool, tasks: Arc<Tasks>) -> (Session, Worker) {
         let (wake, wake_rx) = channel();
-        let tasks = Tasks::open(&conv.id);
         let s = Session {
             paused: Arc::new(AtomicBool::new(conv.paused)),
             conv: Arc::new(store::Shared::new(conv)),
@@ -615,6 +623,7 @@ impl Session {
             marks: Mutex::default(),
             files: Mutex::default(),
             resume: AtomicBool::new(resume),
+            open_waits: Mutex::default(),
         };
         (s, w)
     }
@@ -755,6 +764,7 @@ impl Session {
             l.pause_queued = false;
             if !on {
                 l.ultra = false;
+                l.closing = false;
             }
         }
         self.paused.store(on, Ordering::SeqCst);
@@ -793,9 +803,14 @@ impl Session {
     }
 
     /// Ultrapause for closing OAK with the background tasks left running:
-    /// all else stops at once.
+    /// all else stops at once, but a TASK wait, which carries on at the
+    /// next start (its task keeps running meanwhile).
     pub fn ultrapause_keeping_tasks(&self) {
-        self.live.lock().unwrap().ultra = true;
+        {
+            let mut l = self.live.lock().unwrap();
+            l.ultra = true;
+            l.closing = true;
+        }
         self.set_paused(true);
     }
 
@@ -930,6 +945,9 @@ struct Worker {
     /// The session started paused with an unanswered user turn (OAK
     /// closed while paused): it carries on once the session is resumed.
     resume: AtomicBool,
+    /// TASK calls whose wait Oak closed on: they run again first thing, for
+    /// what was left of their timeout (`carry_on_waits`).
+    open_waits: Mutex<Vec<Value>>,
 }
 
 enum Reply {
@@ -1006,6 +1024,7 @@ fn add_mark(c: &mut Conversation, kind: MarkKind, text: String, sent: String, ti
 
 impl Worker {
     fn run(self) {
+        self.carry_on_waits();
         loop {
             // Deleted: the turn under way has stopped. Commands it left
             // running as tasks are killed too.
@@ -1846,12 +1865,6 @@ const STOPPED_RESULT: &str = "No result: the user stopped this call before it fi
 /// the transcript (OAK closed or crashed while it ran).
 const LOST_RESULT: &str = "No result: Oak closed while this call was running, so it may not have finished. Check its effects before relying on them, and run it again if needed.";
 
-/// Gives every tool call without a result one (`LOST_RESULT`), so the
-/// transcript is valid again: the APIs refuse a call not answered by a
-/// result in the next message. Calls are saved before they run and
-/// their results after, so closing OAK meanwhile leaves them unanswered.
-/// The results go first in the next user message (where the API wants
-/// them), or in a new one at the end. True if anything changed.
 /// Whether any call in messages kept as JSON has no result, as
 /// `answer_lost_calls` would find; None when they don't read as it expects.
 fn lost_calls_in(messages: &[std::sync::Arc<[u8]>]) -> Option<bool> {
@@ -1912,17 +1925,39 @@ pub(crate) fn look_for_lost_calls(c: &mut Conversation) {
     }
 }
 
+/// Gives every tool call without a result one (`LOST_RESULT`), so the
+/// transcript is valid again: the APIs refuse a call not answered by a
+/// result in the next message. Calls are saved before they run and
+/// their results after, so closing OAK meanwhile leaves them unanswered.
+/// The results go first in the next user message (where the API wants
+/// them), or in a new one at the end. True if anything changed.
 pub(crate) fn answer_lost_calls(c: &mut Conversation) -> bool {
+    answer_lost_calls_but(c, |_| false).0
+}
+
+/// `answer_lost_calls`, except for the calls of the turn under way (the
+/// last reply, with at most its results after it) that `carry_on` picks:
+/// they stay unanswered, to run again, and are returned.
+pub(crate) fn answer_lost_calls_but(c: &mut Conversation, carry_on: impl Fn(&Value) -> bool) -> (bool, Vec<Value>) {
     // Not yet read from its file: looked at there, without parsing it all
     // (every conversation is looked at, at every start).
     if let Some(raw) = c.messages.unread()
         && (c.messages.no_lost_calls || lost_calls_in(&raw) == Some(false))
     {
         c.messages.no_lost_calls = true;
-        return false;
+        return (false, vec![]);
     }
+    let n = c.messages.len();
+    let role = |i: usize| c.messages[i]["role"].clone();
+    let under_way = match n {
+        0 => None,
+        _ if role(n - 1) == "assistant" => Some(n - 1),
+        _ if n >= 2 && role(n - 1) == "user" && role(n - 2) == "assistant" => Some(n - 2),
+        _ => None,
+    };
+    let mut kept = vec![];
     let mut changed = false;
-    for i in 0..c.messages.len() {
+    for i in 0..n {
         // (Looked at in place: every conversation is, at every start, and
         // nearly every call has its result.)
         let m = &c.messages[i];
@@ -1944,7 +1979,10 @@ pub(crate) fn answer_lost_calls(c: &mut Conversation) -> bool {
             Some(_) => continue, // two replies in a row: not something this can mend
             None => vec![],
         };
-        let lost: Vec<Value> = calls().filter(|call| !answered.contains(&&call["id"])).map(|call| result_block(call, json!(LOST_RESULT), true)).collect();
+        let (carried, lost): (Vec<&Value>, Vec<&Value>) =
+            calls().filter(|call| !answered.contains(&&call["id"])).partition(|call| under_way == Some(i) && carry_on(call));
+        kept.extend(carried.into_iter().cloned());
+        let lost: Vec<Value> = lost.into_iter().map(|call| result_block(call, json!(LOST_RESULT), true)).collect();
         if lost.is_empty() {
             continue;
         }
@@ -1961,6 +1999,34 @@ pub(crate) fn answer_lost_calls(c: &mut Conversation) -> bool {
             None => c.messages.push(json!({"role": "user", "content": lost})),
         }
     }
+    (changed, kept)
+}
+
+/// Whether `call` is a TASK wait on one of `tasks` (one Oak closed on can
+/// carry on: the task is still there, running or not).
+fn waits_on_known_task(call: &Value, tasks: &Tasks) -> bool {
+    matches!(tools::canonical(call["name"].as_str().unwrap_or(""), &call["input"]),
+        Ok((name, input)) if name == "TASK_WAIT" && input["id"].as_u64().is_some_and(|id| tasks.get(id).is_some()))
+}
+
+/// At start: the records of the TASK waits Oak closed on (`waits`, their
+/// calls) carry on from `now`, keeping the time waited until Oak closed
+/// (`closed_ms`, when its task records were saved last) and adding the
+/// time it was closed. The records of other waits go. True if they changed.
+fn carry_waits(c: &mut Conversation, waits: &[Value], closed_ms: Option<i64>, now: i64) -> bool {
+    let mut carried = vec![];
+    for call in waits {
+        let id = call["id"].as_str().unwrap_or("");
+        let was = c.task_waits.iter().find(|w| w.call == id).cloned();
+        // (Without a record: since the call came in.)
+        let was = was.unwrap_or_else(|| store::TaskWait { call: id.into(), since: call["_oak_at"].as_i64().unwrap_or(now).min(now), ..Default::default() });
+        // (After a crash the records may predate the wait: then none of it
+        // counts as waited.)
+        let closed = closed_ms.unwrap_or(was.since).clamp(was.since, now);
+        carried.push(store::TaskWait { call: was.call, since: now, waited_ms: was.waited_ms + (closed - was.since), closed_ms: was.closed_ms + (now - closed) });
+    }
+    let changed = carried != c.task_waits;
+    c.task_waits = carried;
     changed
 }
 

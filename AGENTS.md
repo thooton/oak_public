@@ -124,7 +124,7 @@ owner-only on Linux), `window.json` (the window's
 size, place and maximized state), `seats.json` (which account each
 conversation is on), `tasks/` and `task-output/` (background tasks; `tasks/tray.json` is what
 the taskbar widget shows, `tray/` holds its copy of oak.exe), `browser/` (the browsers'
-profiles), `plugins/` (plugins to load, and what they keep is beside it under names of their
+profiles), `browser-profiles/` (the named ones), `plugins/` (plugins to load, and what they keep is beside it under names of their
 own), `bin/` (programs for the agent's commands: the bundled ripgrep, `src/toolbin.rs`),
 `usage.jsonl`, `crash.log` and `startup.log` (how long the last start took, step by step, until
 its first frame was on screen, and the processor time spent by each step: `src/startup.rs`; the
@@ -280,7 +280,12 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
   the first time; clicking it lists the tasks (name, conversation, run time or how it ended, last
   output line; a task opens its output file), its menu opens Oak or hides it. When they have all
   ended it says so in a notification and goes. It runs from a copy of oak.exe (`tray/Oak
-  tasks.exe` in Oak's folder), not oak.exe itself, and not when Oak is restarting. Every
+  tasks.exe` in Oak's folder), not oak.exe itself, and not when Oak is restarting. A
+  TASK wait under way when Oak closes (Pause all and close, or Exit now with the tasks kept) isn't
+  ended or answered with "Oak closed": the next Oak runs it again first thing, for what was left of
+  its timeout (only the time Oak ran counts, `Conversation::task_waits`), and its result says how
+  long Oak was closed; a task that ended meanwhile reports its real running time. Other calls cut
+  off by a close get a result saying so. Every
   command's PATH starts with Oak's `bin/` folder, which holds the ripgrep bundled at build time
   (`src/toolbin.rs`; written there on a run's first command when missing or different), and the
   prompt tells the model to search with `rg` instead of grep. Output over 50,000 characters is saved to the
@@ -381,7 +386,19 @@ see-through preview sits beside the transcript, between the column and the minim
 transcript's corner when there is no room). A click on it, or Ctrl+Shift+B, expands it over the
 window as an image opens, where the user uses the page; the X, a click beside it, Ctrl+Shift+B or
 Esc go back. Its viewport is its own (1920x1080 CSS pixels until the model resizes it), scaled to
-fit either way, and the model's pointer shows on it as Oak's green cursor. The Usage page
+fit either way, and the model's pointer shows on it as Oak's green cursor. It runs on the
+conversation's own profile unless the model opens it on a named one (`open` with `profile`;
+`browser-profiles/<name>`, names in lower case), which every conversation can open, one browser at
+a time: a login made once serves them all, and another conversation's open on it is refused. Opening
+with another `profile` switches (same viewport); open without one keeps the profile it is on. A
+browser closed a moment ago is waited for before another starts on its profile. The model also
+manages its state (`src/browser/state.rs`): cookies (listed; saved as JSON or a Netscape
+cookies.txt that curl reads; loaded from those, Playwright's storage state or extension exports;
+deleted), site data per origin, and overrides with `emulate` (user agent, locale, timezone, location,
+color scheme, offline, extra headers, permissions), which a restart applies again. It reads the
+network log, recorded from open (the newest 500 requests, with headers, posted data and bodies), and
+the console, recorded only from its first `console` call because turning on DevTools' Runtime domain
+is something anti-bot scripts detect. The Usage page
 (`src/usage_view.rs`) charts API-priced cost per 1% of the plan limits, from this machine's usage log
 (`usage.jsonl`; a plugin can add the records other machines made, `oak_sdk::Host::usage_set_shared`). Every text field has a right-click menu (Cut,
 Copy, Paste, Select all; `src/text_menu.rs`) that keeps the selection and the field's focus; a

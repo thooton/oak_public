@@ -1167,6 +1167,9 @@ pub struct Tasks {
     revived: Mutex<Vec<u64>>,
     /// The conversation's id.
     conv: String,
+    /// When the records were last saved before this start (ms since 1970;
+    /// 0 for none): when Oak closed, as it saves them then (`close_all`).
+    closed_ms: i64,
 }
 
 impl Tasks {
@@ -1185,8 +1188,9 @@ impl Tasks {
 
     /// The tasks kept in `file` (stale records dropped, with their output).
     fn load(file: Option<PathBuf>) -> Tasks {
-        let t = Tasks { file, ..Default::default() };
+        let mut t = Tasks { file, ..Default::default() };
         let Some(saved) = t.file.as_deref().and_then(crate::store::read_json::<Saved>) else { return t };
+        t.closed_ms = saved.saved_ms;
         let now = now_ms();
         let mut dropped = false;
         for r in saved.tasks {
@@ -1262,6 +1266,11 @@ impl Tasks {
         if let Some(file) = &self.file {
             let _ = std::fs::remove_file(file);
         }
+    }
+
+    /// When Oak last closed, as the records say (None when there were none).
+    pub fn closed_ms(&self) -> Option<i64> {
+        (self.closed_ms > 0).then_some(self.closed_ms)
     }
 
     /// The tasks left running when Oak closed, for their session to watch

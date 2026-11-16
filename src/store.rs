@@ -511,6 +511,10 @@ pub struct Conversation {
     /// one: that the goal was cleared.
     #[serde(default)]
     pub held: Vec<String>,
+    /// The TASK waits under way, by call: a wait Oak closed on carries on
+    /// at the next start, for what was left of its timeout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_waits: Vec<TaskWait>,
     /// The conversation was deleted (AGENT_DELETE): saving it does nothing,
     /// so its file isn't written again by a worker still winding down.
     #[serde(skip)]
@@ -557,6 +561,22 @@ impl Tokens {
         }
         s
     }
+}
+
+/// A TASK wait under way (`Conversation::task_waits`). Its time counts only
+/// while Oak runs: one Oak closed on goes on at the next start for the rest
+/// of its timeout.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskWait {
+    /// The TASK call's id.
+    pub call: String,
+    /// When the wait began, or carried on after a restart (ms since 1970).
+    pub since: i64,
+    /// How long it had waited before `since`.
+    pub waited_ms: i64,
+    /// How long Oak was closed during it, all told.
+    pub closed_ms: i64,
 }
 
 /// A transcript format (`crate::oak::FORMAT`); a new conversation's is the

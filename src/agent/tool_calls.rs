@@ -32,6 +32,20 @@ impl Worker {
         }
     }
 
+    /// The TASK waits Oak closed on (`open_waits`) run again, first thing,
+    /// for what was left of their timeouts: the session is busy with them
+    /// as with any call, paused or not, and once they end the turn carries
+    /// on (when resumed, if paused), as it would have without the restart.
+    pub(super) fn carry_on_waits(&self) {
+        let calls = std::mem::take(&mut *self.open_waits.lock().unwrap());
+        if calls.is_empty() {
+            return;
+        }
+        self.set(|l| l.busy = true);
+        std::thread::scope(|s| Batch::new(self, s).finish(&calls, ""));
+        self.resume.store(true, Ordering::SeqCst);
+    }
+
     /// When task `id` exits, the model is told (unless it already knows).
     fn tell_exit(&self, id: u64, p: &Arc<Proc>) {
         let (tasks, proc): (Weak<Tasks>, Weak<Proc>) = (Arc::downgrade(&self.tasks), Arc::downgrade(p));
@@ -422,6 +436,14 @@ impl Worker {
                     Err(e) => fail(e),
                 };
             }
+            "BROWSER_PROFILES" => {
+                let input = input.clone();
+                let (r, interrupted) = self.abandonable("The browser call", move || crate::browser::model_profiles(&conv, &input));
+                return match r {
+                    Ok(s) => (result_block(call, json!(s), false), interrupted),
+                    Err(e) => (result_block(call, json!(e), true), interrupted),
+                };
+            }
             _ => {}
         }
         if !crate::browser::is_open(&conv) {
@@ -458,7 +480,7 @@ impl Worker {
 
     /// Runs a tool for call `call_id` (EXECUTE streams its output to the
     /// call's row). The bool is true when the user sent a message.
-    fn tool_for(&self, call_id: &str, name: &str, input: &Value) -> (Result<String, String>, bool) {
+    pub(super) fn tool_for(&self, call_id: &str, name: &str, input: &Value) -> (Result<String, String>, bool) {
         let (folder, agent, spawner) = {
             let c = self.conv.lock().unwrap();
             (c.folder.clone(), c.parent.is_some(), c.spawner)
@@ -476,8 +498,8 @@ impl Worker {
             "EDIT" => tools::edit(&folder, input),
             "TASK_LIST" => Ok(format!("id\ttime\tstatus\tcommand\n{}", self.tasks.list())),
             "TASK_NEW" => crate::guard::check(input["command"].as_str().unwrap(), &folder).and_then(|_| tasks::spawn(input["command"].as_str().unwrap(), &folder)).map(|p| format!("Started task {}.", self.adopt(&p, input["summary"].as_str().unwrap_or("")))),
-            "TASK_GET_NEW_OUTPUT" => self.task(id).map(|p| self.task_output(id, &p, "")),
-            "TASK_WAIT" => return self.task_wait(id, input),
+            "TASK_GET_NEW_OUTPUT" => self.task(id).map(|p| self.task_output(id, &p, "", "")),
+            "TASK_WAIT" => return self.task_wait(call_id, id, input),
             "TASK_DELETE" => match self.tasks.remove(id) {
                 None => Err(format!("No task {id}.")),
                 Some(p) => {
@@ -552,8 +574,9 @@ impl Worker {
     }
 
     /// A task's state and the output it printed since the last read, as
-    /// TASK_GET_NEW_OUTPUT returns them; `waited` goes after the state.
-    fn task_output(&self, id: u64, p: &Proc, waited: &str) -> String {
+    /// TASK_GET_NEW_OUTPUT returns them; `waited` goes after the state, and
+    /// `after` after its sentence.
+    fn task_output(&self, id: u64, p: &Proc, waited: &str, after: &str) -> String {
         // Read the exit first: if it is set, the output is complete.
         let exit = p.exit();
         let (out, more) = p.take_new(MAX_OUTPUT);
@@ -568,13 +591,17 @@ impl Worker {
             }
             None => format!("is running ({took} so far)"),
         };
-        format!("Task {id} {state}{waited}.\n{out}{more}")
+        let after = if after.is_empty() { String::new() } else { format!(" {after}") };
+        format!("Task {id} {state}{waited}.{after}\n{out}{more}")
     }
 
     /// TASK_WAIT: waits for a task to exit, at most the `timeout` the model
     /// gave (up to TASK_WAIT_MAX seconds), then returns its new output. A
-    /// message from the user or an interrupt ends the wait early.
-    fn task_wait(&self, id: u64, input: &Value) -> (Result<String, String>, bool) {
+    /// message from the user or an interrupt ends the wait early. Its time
+    /// counts only while Oak runs: closing Oak with the background tasks
+    /// left running doesn't end it, and it carries on at the next start
+    /// (`carry_on_waits`) for the rest of its timeout.
+    fn task_wait(&self, call_id: &str, id: u64, input: &Value) -> (Result<String, String>, bool) {
         let p = match self.task(id) {
             Ok(p) => p,
             Err(e) => return (Err(e), false),
@@ -583,28 +610,76 @@ impl Worker {
             Some(s @ 1..=TASK_WAIT_MAX) => Duration::from_secs(s),
             _ => return (Err(format!("`timeout` must be from 1 to {TASK_WAIT_MAX} seconds.")), false),
         };
+        // What it waited before (an Oak that closed on it), and since when.
+        let before = self.begin_wait(call_id);
+        let prior = Duration::from_millis((before.waited_ms + (api::now_ms() - before.since)).max(0) as u64);
         let t = Instant::now();
+        let waited = || prior + t.elapsed();
         let waiting = Running::new(&self.live, true);
         let (why, interrupted) = loop {
             if p.exit().is_some() {
                 break (String::new(), false);
             }
-            if self.stopping() {
+            let (ultra, closing) = {
+                let l = self.live.lock().unwrap();
+                (l.ultra, l.closing)
+            };
+            // Oak closing with the tasks left running: the wait stays open.
+            if ultra && !closing {
+                // (The task was killed with the rest: its end, if it shows.)
+                p.wait_exit(Duration::from_secs(1));
+                break ("; the user stopped everything (ultrapause), which ended the wait".to_string(), true);
+            }
+            if self.interrupted() {
                 break ("; the user sent a message, which ended the wait".to_string(), true);
             }
             if self.live.lock().unwrap().ready_count() > 0 {
-                break (format!("; the wait ended after {} because the user sent a message", fmt_duration(t.elapsed())), false);
+                break (format!("; the wait ended after {} because the user sent a message", fmt_duration(waited())), false);
             }
             if !self.conv.lock().unwrap().inbox.is_empty() {
-                break (format!("; the wait ended after {} because a message arrived (it follows)", fmt_duration(t.elapsed())), false);
+                break (format!("; the wait ended after {} because a message arrived (it follows)", fmt_duration(waited())), false);
             }
-            if t.elapsed() >= timeout {
+            if waited() >= timeout {
                 break (format!("; still running after waiting {}s", timeout.as_secs()), false);
             }
             self.wait_a_bit(30);
         };
         drop(waiting);
-        (Ok(self.task_output(id, &p, &why)), interrupted)
+        let after = self.end_wait(call_id).filter(|w| w.closed_ms > 0).map_or(String::new(), |w| {
+            // (The task's state says whether it kept running, ended or was
+            // stopped meanwhile.)
+            let closed = fmt_duration(Duration::from_millis(w.closed_ms as u64));
+            match p.exit() {
+                None => format!("(Oak was closed for {closed} during this wait; the task kept running, and the wait carried on when Oak started again, the time Oak was closed not counting toward the timeout.)"),
+                Some(_) if p.status() == tasks::STOPPED_ON_CLOSE => format!("(Oak was closed for {closed} during this wait.)"),
+                Some(_) => format!("(Oak was closed for {closed} during this wait, which carried on when Oak started again.)"),
+            }
+        });
+        (Ok(self.task_output(id, &p, &why, &after)), interrupted)
+    }
+
+    /// The record of the TASK wait of call `call` (`Conversation::task_waits`):
+    /// the one kept from before Oak closed, or a new one (none for no call).
+    fn begin_wait(&self, call: &str) -> store::TaskWait {
+        let mut c = self.conv.lock().unwrap();
+        if let Some(w) = c.task_waits.iter().find(|w| w.call == call) {
+            return w.clone();
+        }
+        let w = store::TaskWait { call: call.into(), since: api::now_ms(), ..Default::default() };
+        if !call.is_empty() {
+            c.task_waits.push(w.clone());
+            c.save();
+        }
+        w
+    }
+
+    /// The wait of call `call` is over: its record goes.
+    fn end_wait(&self, call: &str) -> Option<store::TaskWait> {
+        let mut c = self.conv.lock().unwrap();
+        let i = c.task_waits.iter().position(|w| w.call == call && !call.is_empty())?;
+        let w = c.task_waits.remove(i);
+        c.save();
+        Some(w)
     }
 
     fn execute(&self, call_id: &str, input: &Value, folder: &std::path::Path) -> (Result<String, String>, bool) {

@@ -71,7 +71,10 @@ const FAMILIES: &[(&str, &[(&str, &str)])] = &[
         ("read", "BROWSER_READ"), ("click", "BROWSER_CLICK"), ("hover", "BROWSER_HOVER"), ("drag", "BROWSER_DRAG"),
         ("type", "BROWSER_TYPE"), ("key", "BROWSER_KEY"), ("scroll", "BROWSER_SCROLL"), ("wait", "BROWSER_WAIT"),
         ("screenshot", "BROWSER_SCREENSHOT"), ("eval", "BROWSER_EVAL"), ("resize", "BROWSER_RESIZE"),
-        ("dialog", "BROWSER_DIALOG"), ("upload", "BROWSER_UPLOAD"), ("help", "BROWSER_HELP"),
+        ("dialog", "BROWSER_DIALOG"), ("upload", "BROWSER_UPLOAD"),
+        ("cookies", "BROWSER_COOKIES"), ("set_cookies", "BROWSER_SET_COOKIES"), ("delete_cookies", "BROWSER_DELETE_COOKIES"),
+        ("clear_data", "BROWSER_CLEAR_DATA"), ("emulate", "BROWSER_EMULATE"), ("console", "BROWSER_CONSOLE"), ("network", "BROWSER_NETWORK"),
+        ("profiles", "BROWSER_PROFILES"), ("help", "BROWSER_HELP"),
     ]),
 ];
 

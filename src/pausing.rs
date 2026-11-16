@@ -4,7 +4,8 @@
 //! window with conversations at work asks first: exit now (as an
 //! ultrapause) or pause them all and close once they have, the background
 //! tasks stopped or left running (`tasks::close_all`). The conversations
-//! paused that way are offered for resuming at the next start.
+//! paused that way are offered for resuming at the next start; a TASK wait
+//! they were in carries on then (`Worker::carry_on_waits`), paused or not.
 
 use super::*;
 

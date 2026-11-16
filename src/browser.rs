@@ -13,6 +13,14 @@
 //! events, as the model's clicks and keys do. Closing ends the browser;
 //! the other calls fail while it is closed. Popups and new tabs open in the
 //! one page.
+//!
+//! The model can open it on a named profile instead, shared between
+//! conversations (one browser at a time on each), and manage its cookies,
+//! site data, emulation and what it records (`state.rs`).
+
+mod state;
+
+pub(crate) use state::model_profiles;
 
 use crate::cdp::{Cdp, Listener};
 use base64::Engine as _;
@@ -190,6 +198,16 @@ struct Viewport {
 pub(crate) struct Instance {
     pub(crate) conv: String,
     profile: PathBuf,
+    /// The named profile it runs on; None: the conversation's own.
+    profile_name: Option<String>,
+    /// Chromium's user agent made a plain Chrome's: what emulate resets to.
+    user_agent: Mutex<String>,
+    /// The model's overrides (emulate), applied again after a restart.
+    emulation: Mutex<state::Emulation>,
+    /// The console, once the model has asked for it (recording starts then).
+    console: Mutex<Option<state::Console>>,
+    /// The page's requests.
+    net: Mutex<state::NetLog>,
     ctx: egui::Context,
     pub(crate) view: Mutex<View>,
     /// The page's DevTools session, once it is up.
@@ -239,19 +257,56 @@ pub(crate) fn is_open(conv: &str) -> bool {
     OPEN.lock().unwrap().contains_key(conv)
 }
 
-/// Opens conversation `conv`'s browser: it starts in the background.
-pub(crate) fn open(conv: &str, ctx: &egui::Context) -> Arc<Instance> {
-    open_with(conv, ctx, profile_dir(conv))
+/// Profiles whose browser is still ending (closed, not yet quit): a new one
+/// on the profile waits for it, since Chromium allows one per profile.
+static CLOSING: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn closing(profile: &Path) -> bool {
+    CLOSING.lock().unwrap().get(profile).is_some_and(|n| *n > 0)
 }
 
-fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf) -> Arc<Instance> {
+/// Ends `inst` in the background, its profile counted as closing until it has.
+fn end(inst: Arc<Instance>) {
+    *CLOSING.lock().unwrap().entry(inst.profile.clone()).or_default() += 1;
+    std::thread::spawn(move || {
+        inst.shutdown();
+        let mut c = CLOSING.lock().unwrap();
+        if let Some(n) = c.get_mut(&inst.profile) {
+            *n -= 1;
+            if *n == 0 {
+                c.remove(&inst.profile);
+            }
+        }
+    });
+}
+
+/// Opens conversation `conv`'s browser: it starts in the background.
+pub(crate) fn open(conv: &str, ctx: &egui::Context) -> Arc<Instance> {
+    // (A conversation's own profile is never another's.)
+    open_with(conv, ctx, profile_dir(conv), None, Default::default()).expect("the conversation's own profile")
+}
+
+/// Opens conversation `conv`'s browser on `profile` (named `name`, or the
+/// conversation's own), unless another conversation's browser is on it.
+fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<String>, emulation: state::Emulation) -> Result<Arc<Instance>, String> {
     let mut open = OPEN.lock().unwrap();
     if let Some(i) = open.get(conv) {
-        return i.clone();
+        return Ok(i.clone());
+    }
+    if open.values().any(|i| i.profile == profile) {
+        return Err(format!(
+            "The profile {} is in use by another conversation's browser: close it there first, or open another profile.",
+            name.as_deref().map_or_else(|| profile.display().to_string(), |n| format!("{n:?}"))
+        ));
     }
     let inst = Arc::new(Instance {
         conv: conv.to_string(),
         profile,
+        profile_name: name,
+        user_agent: Mutex::new(String::new()),
+        emulation: Mutex::new(emulation),
+        console: Mutex::new(None),
+        net: Mutex::new(state::NetLog::default()),
         ctx: ctx.clone(),
         view: Mutex::new(View::default()),
         page: Mutex::new(None),
@@ -278,30 +333,35 @@ fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf) -> Arc<Instance>
     if let Err(e) = spawned {
         inst.view.lock().unwrap().status = Status::Failed(format!("Couldn't start a thread for the browser: {e}"));
     }
-    inst
+    Ok(inst)
 }
 
 /// Closes conversation `conv`'s browser: it ends (in the background).
 pub(crate) fn close(conv: &str) {
     let inst = OPEN.lock().unwrap().remove(conv);
     if let Some(inst) = inst {
-        std::thread::spawn(move || inst.shutdown());
+        end(inst);
     }
 }
 
 /// Starts conversation `conv`'s browser again (after it failed or quit),
-/// at the same size.
+/// on the same profile, at the same size, with the same overrides.
 pub(crate) fn restart(conv: &str, ctx: &egui::Context) {
     let old = OPEN.lock().unwrap().remove(conv);
     let ctx = ctx.clone();
     let conv = conv.to_string();
     std::thread::spawn(move || {
-        let mut size = None;
+        let (mut profile, mut name, mut size, mut emulation) = (profile_dir(&conv), None, None, None);
         if let Some(old) = old {
             size = Some(*old.viewport.lock().unwrap());
+            emulation = Some(old.emulation.lock().unwrap().clone());
+            (profile, name) = (old.profile.clone(), old.profile_name.clone());
             old.shutdown();
         }
-        let inst = open(&conv, &ctx);
+        let inst = match open_with(&conv, &ctx, profile, name, emulation.unwrap_or_default()) {
+            Ok(i) => i,
+            Err(_) => open(&conv, &ctx),
+        };
         if let Some(vp) = size {
             inst.resize(vp.w, vp.h, vp.mobile);
         }
@@ -397,6 +457,11 @@ impl Instance {
     fn start(&self) -> Result<Listener, String> {
         let exe = find_browser().ok_or(NO_BROWSER)?;
         std::fs::create_dir_all(&self.profile).map_err(|e| format!("Couldn't make the browser's profile folder: {e}"))?;
+        // A browser closed on this profile a moment ago may not have quit yet.
+        let t = Instant::now();
+        while closing(&self.profile) && t.elapsed() < Duration::from_secs(10) && !self.is_closed() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         reap_stale(&self.profile);
         let vp = *self.viewport.lock().unwrap();
         let mut cmd = Command::new(&exe);
@@ -499,7 +564,8 @@ impl Instance {
     }
 
     /// Readies the page: its events and main frame, a plain Chrome's user
-    /// agent, one page only, file choosers and downloads.
+    /// agent (or the model's overrides), one page only, file choosers,
+    /// downloads, and the network log.
     fn set_up_page(&self, cdp: &Arc<Cdp>) -> Result<(), String> {
         let call = |m: &str, p: Value| cdp.call(m, p).map_err(|e| e.to_string());
         call("Page.enable", json!({}))?;
@@ -507,10 +573,13 @@ impl Instance {
         *self.main_frame.lock().unwrap() = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
         // A plain Chrome's user agent, not HeadlessChrome's.
         if let Ok(v) = call("Browser.getVersion", json!({})) {
-            let ua = v["userAgent"].as_str().unwrap_or("").replace("HeadlessChrome", "Chrome");
-            if !ua.is_empty() {
-                let _ = call("Emulation.setUserAgentOverride", json!({"userAgent": ua}));
-            }
+            *self.user_agent.lock().unwrap() = v["userAgent"].as_str().unwrap_or("").replace("HeadlessChrome", "Chrome");
+        }
+        // (Pages can't tell the Network domain is on, unlike Runtime's.)
+        let _ = call("Network.enable", json!({"maxPostDataSize": state::POST_MAX}));
+        let emulation = self.emulation.lock().unwrap().clone();
+        if let Err(e) = self.apply_emulation(cdp, &emulation) {
+            self.update_view(|v| v.note(format!("The overrides set with emulate couldn't all be applied again: {e}")));
         }
         let _ = call("Page.addScriptToEvaluateOnNewDocument", json!({"source": ONE_PAGE_JS}));
         let _ = call("Page.setInterceptFileChooserDialog", json!({"enabled": true}));
@@ -748,7 +817,8 @@ impl Instance {
                 v.notice("The page crashed. Reload it.".into());
                 v.note("The page crashed; reload it.".into());
             }),
-            _ => {}
+            // The console and the network log.
+            method => self.record(method, p),
         }
     }
 
@@ -1597,6 +1667,43 @@ impl Instance {
         Ok(r["result"]["value"].clone())
     }
 
+    /// The model's script: its value, a promise it evaluates to awaited.
+    /// (REPL mode, which lets it use top-level await and redeclare `let`s,
+    /// hands back such a promise unawaited, as `{}` by value: the object
+    /// is awaited and read out with a second call.)
+    fn eval_model(&self, page: &Cdp, js: &str, timeout: Duration) -> Result<Value, String> {
+        let stop = || self.dialog_open();
+        let error = |r: &Value| -> Option<String> {
+            let e = r.get("exceptionDetails")?;
+            let text = e["exception"]["description"].as_str().or(e["text"].as_str()).unwrap_or("error");
+            let text = text.strip_prefix("Error: ").unwrap_or(text);
+            Some(text.lines().take(6).collect::<Vec<_>>().join("\n"))
+        };
+        let group = "oak-eval";
+        let r = page
+            .call_until("Runtime.evaluate", json!({"expression": js, "objectGroup": group, "awaitPromise": true, "userGesture": true, "replMode": true}), timeout, &stop)
+            .map_err(|e| e.to_string())?;
+        if let Some(e) = error(&r) {
+            return Err(e);
+        }
+        let Some(id) = r["result"]["objectId"].as_str() else {
+            // A primitive comes by value (undefined has none).
+            return Ok(r["result"]["value"].clone());
+        };
+        let v = page.call_until(
+            "Runtime.callFunctionOn",
+            json!({"functionDeclaration": "async function () { return await this; }", "objectId": id, "awaitPromise": true, "returnByValue": true, "userGesture": true}),
+            timeout,
+            &stop,
+        );
+        page.send("Runtime.releaseObjectGroup", json!({"objectGroup": group}));
+        let v = v.map_err(|e| e.to_string())?;
+        if let Some(e) = error(&v) {
+            return Err(e);
+        }
+        Ok(v["result"]["value"].clone())
+    }
+
     /// After an action: waits for what it started (a navigation, a load)
     /// to settle, up to LOAD_TIMEOUT.
     fn settle(&self, navs: u64) {
@@ -1795,7 +1902,7 @@ impl Instance {
                 Ok(self.report(&format!("The viewport is {w}x{h} CSS px{}.", if mobile { ", as a phone (touch, mobile layout)" } else { "" })))
             }
             "BROWSER_EVAL" => {
-                let text = match self.eval(&page, str_of("script"), CALL_TIMEOUT)? {
+                let text = match self.eval_model(&page, str_of("script"), CALL_TIMEOUT)? {
                     Value::Null => "undefined or null".to_string(),
                     Value::String(s) => s,
                     v => serde_json::to_string_pretty(&v).unwrap_or_default(),
@@ -1813,6 +1920,13 @@ impl Instance {
                 Ok(self.report(if accept { "Accepted the dialog." } else { "Dismissed the dialog." }))
             }
             "BROWSER_UPLOAD" => self.upload(&page, input, folder, navs),
+            "BROWSER_COOKIES" => self.cookies(&page, input, folder),
+            "BROWSER_SET_COOKIES" => self.set_cookies(&page, input, folder),
+            "BROWSER_DELETE_COOKIES" => self.delete_cookies(&page, input),
+            "BROWSER_CLEAR_DATA" => self.clear_data(&page, input),
+            "BROWSER_EMULATE" => self.emulate(&page, input),
+            "BROWSER_CONSOLE" => self.console(&page),
+            "BROWSER_NETWORK" => self.network(&page, input, folder),
             _ => Err(format!("Unknown tool {name}")),
         }
     }
@@ -2010,10 +2124,50 @@ impl Instance {
 /// BROWSER open for conversation `conv`: starts its browser (the view fades
 /// it in), at `width` x `height` if given, and goes to `url` if given, once
 /// it is ready.
+/// With `profile`, on that named profile (if the browser is open on another,
+/// it ends and starts again on this one); without, on the one it is open
+/// on, else the conversation's own.
 pub(crate) fn model_open(conv: &str, ctx: &egui::Context, input: &Value, folder: &Path) -> Result<String, String> {
-    let was_open = is_open(conv);
-    let inst = open_with(conv, ctx, profile_dir(conv));
+    let named = match input["profile"].as_str().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => Some(state::profile_name(p)?),
+        None => None,
+    };
+    let mut was_open = is_open(conv);
+    let mut switched = None;
+    if let Some(name) = &named
+        && let Some(cur) = get(conv)
+        && cur.profile_name.as_ref() != Some(name)
+    {
+        // Another conversation's browser on it: refused before this one goes.
+        if OPEN.lock().unwrap().values().any(|i| i.profile == state::named_dir(name)) {
+            return Err(format!("The profile {name:?} is in use by another conversation's browser: close it there first, or open another profile."));
+        }
+        OPEN.lock().unwrap().remove(conv);
+        switched = Some((cur.profile_name.clone(), *cur.viewport.lock().unwrap()));
+        end(cur);
+        was_open = false;
+    }
+    let inst = match (&named, get(conv)) {
+        (_, Some(i)) => i,
+        (Some(n), None) => open_with(conv, ctx, state::named_dir(n), named.clone(), Default::default())?,
+        (None, None) => open(conv, ctx),
+    };
     let _busy = Busy::new(&inst);
+    let mut opened = match &inst.profile_name {
+        Some(n) => format!("Opened the browser on profile {n:?}."),
+        None => "Opened the browser.".to_string(),
+    };
+    if let Some((from, vp)) = switched {
+        inst.resize(vp.w, vp.h, vp.mobile);
+        let from = from.map_or("the conversation's own profile".to_string(), |f| format!("profile {f:?}"));
+        opened = format!("Closed the browser on {from}. {opened}");
+    }
+    if was_open {
+        opened = match &inst.profile_name {
+            Some(n) => format!("It was open already, on profile {n:?}."),
+            None => "It was open already.".to_string(),
+        };
+    }
     if input["width"].is_u64() || input["height"].is_u64() || input["mobile"].is_boolean() {
         let (w, h) = inst.viewport_size();
         let (w, h) = (input["width"].as_u64().map_or(w, |v| v as u32), input["height"].as_u64().map_or(h, |v| v as u32));
@@ -2021,10 +2175,11 @@ pub(crate) fn model_open(conv: &str, ctx: &egui::Context, input: &Value, folder:
     }
     inst.ready()?;
     if input["url"].as_str().is_some_and(|u| !u.trim().is_empty()) {
-        return inst.call("BROWSER_GOTO", input, folder).map(|r| format!("{}{r}", if was_open { "It was open already. " } else { "" }));
+        let before = if opened == "Opened the browser." { String::new() } else { format!("{opened} ") };
+        return inst.call("BROWSER_GOTO", input, folder).map(|r| format!("{before}{r}"));
     }
     let (w, h) = inst.viewport_size();
-    Ok(inst.report(&format!("{} The viewport is {w}x{h} CSS px.", if was_open { "It was open already." } else { "Opened the browser." })))
+    Ok(inst.report(&format!("{opened} The viewport is {w}x{h} CSS px.")))
 }
 
 /// BROWSER close for conversation `conv`: its browser ends (the view fades
@@ -2123,7 +2278,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oak-browser-viewport-test-{}", std::process::id()));
         let ctx = egui::Context::default();
         let conv = format!("viewport-test-{}", std::process::id());
-        let inst = open_with(&conv, &ctx, dir.join("profile"));
+        let inst = open_with(&conv, &ctx, dir.join("profile"), None, Default::default()).unwrap();
         // start() has taken its initial viewport once the child exists.
         let start = Instant::now();
         while inst.child.lock().unwrap().is_none() {
@@ -2192,7 +2347,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oak-browser-test-{}", std::process::id()));
         let ctx = egui::Context::default();
         let conv = format!("test-{}", std::process::id());
-        let inst = open_with(&conv, &ctx, dir.join("profile"));
+        let inst = open_with(&conv, &ctx, dir.join("profile"), None, Default::default()).unwrap();
         let url = format!("data:text/html,{PAGE}");
         let folder = dir.clone();
         // The page's text, past READ's header (whose URL line holds the
@@ -2293,7 +2448,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oak-browser-actions-test-{}", std::process::id()));
         let ctx = egui::Context::default();
         let conv = format!("actions-test-{}", std::process::id());
-        let inst = open_with(&conv, &ctx, dir.join("profile"));
+        let inst = open_with(&conv, &ctx, dir.join("profile"), None, Default::default()).unwrap();
         let folder = dir.clone();
         let call = |name: &str, input: Value| {
             let r = tool(&conv, name, &input, &folder);

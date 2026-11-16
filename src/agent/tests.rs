@@ -116,7 +116,9 @@ impl Drop for Deleting {
 /// for calling its tools directly, and a session sharing its state,
 /// registered so other sessions reach it.
 fn idle_worker(name: &str, conv: Conversation) -> (Worker, Deleting) {
-    let (s, w) = Session::with_worker(unit_conv(name, conv), eframe::egui::Context::default(), false);
+    let conv = unit_conv(name, conv);
+    let tasks = Tasks::open(&conv.id);
+    let (s, w) = Session::with_worker(conv, eframe::egui::Context::default(), false, tasks);
     SESSIONS.lock().unwrap().insert(s.conv.lock().unwrap().id.clone(), s.clone());
     (w, Deleting(s))
 }
@@ -353,6 +355,116 @@ fn lost_calls_answered() {
     c.messages.push(msg("assistant", vec![json!({"type": "text", "text": "hm"}), call("d")]));
     assert!(answer_lost_calls(&mut c));
     assert_eq!((c.messages[6]["role"].as_str(), ids(&c.messages[6])), (Some("user"), vec!["d".to_string()]));
+}
+
+/// A TASK wait Oak closed on, in the turn under way and on a task Oak
+/// still knows, stays unanswered to carry on; the turn's other calls get
+/// the lost result, and so do a wait in an earlier turn and one on a task
+/// Oak doesn't know.
+#[test]
+fn task_waits_left_open_to_carry_on() {
+    let tasks = Tasks::open("");
+    tasks.add(1, tasks::spawn("echo hi", &std::env::temp_dir()).unwrap(), "x");
+    let wait = |id: &str, task: u64| json!({"type": "tool_call", "id": id, "name": "TASK", "input": {"action": "wait", "id": task, "timeout": 60}});
+    let exec = |id: &str| json!({"type": "tool_call", "id": id, "name": "EXECUTE", "input": {}});
+    let result = |id: &str| json!({"type": "tool_result", "call_id": id, "content": "ok"});
+    let msg = |role: &str, content: Vec<Value>| json!({"role": role, "content": content});
+    let ids = |m: &Value| m["content"].as_array().unwrap().iter().map(|b| b["call_id"].as_str().or(b["text"].as_str()).unwrap_or("").to_string()).collect::<Vec<_>>();
+    let mut c = Conversation {
+        messages: vec![
+            msg("assistant", vec![wait("old", 1)]),
+            msg("user", vec![oak::text("next")]),
+            msg("assistant", vec![exec("e"), wait("w", 1), wait("x", 9), exec("f")]),
+            msg("user", vec![result("f")]),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let (changed, kept) = answer_lost_calls_but(&mut c, |call| waits_on_known_task(call, &tasks));
+    assert!(changed);
+    assert_eq!(kept.iter().map(|k| k["id"].as_str().unwrap()).collect::<Vec<_>>(), ["w"]);
+    assert_eq!(ids(&c.messages[1]), ["old", "next"]);
+    assert_eq!(ids(&c.messages[3]), ["e", "x", "f"]);
+    // The reply alone at the end: still the turn under way.
+    let mut c = Conversation { messages: vec![msg("user", vec![oak::text("go")]), msg("assistant", vec![wait("w", 1)])].into(), ..Default::default() };
+    let (changed, kept) = answer_lost_calls_but(&mut c, |call| waits_on_known_task(call, &tasks));
+    assert!(!changed && kept.len() == 1 && c.messages.len() == 2);
+    tasks.kill_all();
+}
+
+/// A carried-on wait keeps the time it waited until Oak closed, and adds
+/// up the time Oak was closed; records of other waits go.
+#[test]
+fn carried_waits_count_only_the_time_oak_ran() {
+    use store::TaskWait;
+    let call = json!({"type": "tool_call", "id": "w", "name": "TASK", "input": {"action": "wait", "id": 1, "timeout": 60}, "_oak_at": 500});
+    let mut c = Conversation {
+        task_waits: vec![TaskWait { call: "w".into(), since: 1_000, waited_ms: 500, closed_ms: 0 }, TaskWait { call: "gone".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    assert!(carry_waits(&mut c, std::slice::from_ref(&call), Some(4_000), 10_000));
+    assert_eq!(c.task_waits, [TaskWait { call: "w".into(), since: 10_000, waited_ms: 3_500, closed_ms: 6_000 }]);
+    // After a crash the records may be older than the stretch: none of it counts.
+    carry_waits(&mut c, std::slice::from_ref(&call), Some(9_000), 12_000);
+    assert_eq!(c.task_waits, [TaskWait { call: "w".into(), since: 12_000, waited_ms: 3_500, closed_ms: 8_000 }]);
+    // Without a record: since the call came in.
+    c.task_waits.clear();
+    carry_waits(&mut c, std::slice::from_ref(&call), Some(2_000), 3_000);
+    assert_eq!(c.task_waits, [TaskWait { call: "w".into(), since: 3_000, waited_ms: 1_500, closed_ms: 1_000 }]);
+    // No waits: no records.
+    assert!(carry_waits(&mut c, &[], None, 4_000) && c.task_waits.is_empty());
+}
+
+/// A wait carried on counts what it waited before toward its timeout and
+/// says Oak was closed meanwhile; closing Oak with the tasks kept doesn't
+/// end a wait, while an ultrapause does.
+#[test]
+fn task_wait_across_a_close() {
+    let (w, _s) = idle_worker("wait-close", Conversation::default());
+    w.tool("TASK_NEW", &json!({"command": "sleep 20", "summary": "x"})).0.unwrap();
+    let wait = json!({"id": 0, "timeout": 60});
+    w.conv.lock().unwrap().task_waits.push(store::TaskWait { call: "w".into(), since: api::now_ms(), waited_ms: 59_000, closed_ms: 3_600_000 });
+    let t = Instant::now();
+    let out = w.tool_for("w", "TASK_WAIT", &wait).0.unwrap();
+    assert!(t.elapsed() < Duration::from_secs(5), "only the second left: {:?}", t.elapsed());
+    assert!(out.starts_with("Task 0 is running") && out.contains("still running after waiting 60s") && out.contains("Oak was closed for 1h00m during this wait"), "{out}");
+    assert!(w.conv.lock().unwrap().task_waits.is_empty(), "its record goes");
+    // Oak closing with the tasks left running: the wait goes on.
+    w.set(|l| (l.ultra, l.closing) = (true, true));
+    let t = Instant::now();
+    let out = w.tool_for("c", "TASK_WAIT", &json!({"id": 0, "timeout": 1})).0.unwrap();
+    assert!(t.elapsed() >= Duration::from_secs(1) && out.contains("still running after waiting 1s") && !out.contains("Oak was closed"), "{out}");
+    // A plain ultrapause ends it.
+    w.set(|l| l.closing = false);
+    let out = w.tool_for("u", "TASK_WAIT", &json!({"id": 0, "timeout": 60})).0.unwrap();
+    assert!(out.contains("ultrapause"), "{out}");
+}
+
+/// At start, a wait Oak closed on runs again first thing: its result joins
+/// the turn's other results, the task's notification is dropped (the
+/// result says it ended), and the turn is to carry on.
+#[test]
+fn open_waits_carry_on_first() {
+    let (w, _s) = idle_worker("carry-on", Conversation::default());
+    w.tool("TASK_NEW", &json!({"command": "echo done", "summary": "x"})).0.unwrap();
+    wait_until("the notification", || !w.live.lock().unwrap().notes.is_empty());
+    let call = json!({"type": "tool_call", "id": "w", "name": "TASK", "input": {"action": "wait", "id": 0, "timeout": 60}});
+    w.push("assistant", vec![json!({"type": "tool_call", "id": "e", "name": "EXECUTE", "input": {}}), call.clone()]);
+    w.push("user", vec![json!({"type": "tool_result", "call_id": "e", "content": "ok"})]);
+    w.conv.lock().unwrap().task_waits.push(store::TaskWait { call: "w".into(), since: api::now_ms(), waited_ms: 1_000, closed_ms: 5_000 });
+    *w.open_waits.lock().unwrap() = vec![call];
+    w.carry_on_waits();
+    let c = w.conv.lock().unwrap();
+    let last = c.messages.last().unwrap();
+    assert_eq!(c.messages.len(), 2);
+    let results: Vec<&str> = last["content"].as_array().unwrap().iter().map(|b| b["call_id"].as_str().unwrap()).collect();
+    assert_eq!(results, ["w", "e"]);
+    let text = last["content"][0]["content"].as_str().unwrap();
+    assert!(text.starts_with("Task 0 exited with code 0") && text.contains("Oak was closed for 5s during this wait"), "{text}");
+    assert!(c.task_waits.is_empty());
+    drop(c);
+    assert!(w.live.lock().unwrap().notes.is_empty(), "the result told of the exit");
+    assert!(w.resume.load(Ordering::SeqCst));
 }
 
 /// A conversation read from its file is looked at without being parsed,

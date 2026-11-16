@@ -140,10 +140,44 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         "PROGRESS_SET" => format!("{}, every {}", s("label"), agent::every(input["interval_minutes"].as_u64().unwrap_or(0))),
         "PROGRESS_REMOVE" => format!("meter {}", input["id"]),
         "FETCH" | "SCREENSHOT" | "BROWSER_GOTO" => s("url"),
-        "BROWSER_OPEN" => match (input["url"].as_str(), input["width"].as_u64(), input["height"].as_u64()) {
-            (url, Some(w), Some(h)) => format!("{}{w}x{h}", url.map(|u| format!("{u}, ")).unwrap_or_default()),
-            (url, ..) => url.unwrap_or("").to_string(),
+        "BROWSER_OPEN" => {
+            let mut parts: Vec<String> = vec![];
+            if let Some(p) = input["profile"].as_str().filter(|p| !p.is_empty()) {
+                parts.push(format!("profile {p}"));
+            }
+            if let Some(u) = input["url"].as_str().filter(|u| !u.is_empty()) {
+                parts.push(u.to_string());
+            }
+            if let (Some(w), Some(h)) = (input["width"].as_u64(), input["height"].as_u64()) {
+                parts.push(format!("{w}x{h}"));
+            }
+            parts.join(", ")
+        }
+        "BROWSER_COOKIES" => {
+            let whose = if input["all"] == true { "all".to_string() } else { s("url") };
+            match input["path"].as_str() {
+                Some(p) => format!("{whose} → {p}").trim().to_string(),
+                None => whose,
+            }
+        }
+        "BROWSER_SET_COOKIES" => match input["cookies"].as_array() {
+            Some(c) => c.iter().filter_map(|c| c["name"].as_str()).collect::<Vec<_>>().join(", "),
+            None => format!("from {}", s("path")),
         },
+        "BROWSER_DELETE_COOKIES" => {
+            let scope = [s("name"), s("domain"), s("url")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(", ");
+            if scope.is_empty() && input["all"] == true { "all".into() } else { scope }
+        }
+        "BROWSER_CLEAR_DATA" => [input["what"].as_str().unwrap_or("all").to_string(), s("origin")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(", "),
+        "BROWSER_EMULATE" => {
+            let keys: Vec<&str> = input.as_object().into_iter().flatten().map(|(k, _)| k.as_str()).collect();
+            keys.join(", ")
+        }
+        "BROWSER_NETWORK" => match input["id"].as_u64() {
+            Some(n) => format!("#{n}{}", input["path"].as_str().map(|p| format!(" → {p}")).unwrap_or_default()),
+            None => s("filter"),
+        },
+        "BROWSER_PROFILES" => input["delete"].as_str().map(|d| format!("delete {d}")).unwrap_or_default(),
         "BROWSER_RESIZE" => format!("{}x{}{}", input["width"], input["height"], if input["mobile"] == true { ", mobile" } else { "" }),
         "BROWSER_CLICK" | "BROWSER_HOVER" => {
             let at = match input["ref"].as_u64() {

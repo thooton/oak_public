@@ -251,7 +251,7 @@ fn definitions_with(agent: bool) -> Value {
             "your subagents: ID, state (working, idle or paused), when it last changed, name",
         )
     };
-    json!([
+    let mut all = json!([
         tool("READ", "Read a text file, with line numbers. Use offset/limit for large files (default: first 2000 lines). Images (PNG, JPEG, GIF, WebP) come back as the image, so you can look at them.",
             json!({"path": {"type": "string", "description": "File path, absolute or relative to the working folder"},
                    "offset": {"type": "integer", "description": "1-based line to start at"},
@@ -331,8 +331,9 @@ fn definitions_with(agent: bool) -> Value {
         tool("AGENT_RESUME", "let paused agent `id` carry on", json!({"id": {"type": "integer"}}), &["id"]),
         tool("ACCOUNTS", "The OpenRouter credit, now: how much is left, of how much was bought, and spent through Oak since it started.",
             json!({}), &[]),
-        tool("BROWSER_OPEN", "start the browser (the user sees it fade in beside the transcript), then go to `url` if given; `width`,`height` set the viewport (default 1920x1080)",
-            json!({"url": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &[]),
+        tool("BROWSER_OPEN", "start the browser (the user sees it fade in beside the transcript), then go to `url` if given; `width`,`height` set the viewport (default 1920x1080). Its profile (cookies, logins, storage) is the conversation's own, or with `profile` a named one any conversation can open (one browser at a time), to keep logins between them; open with another `profile` switches",
+            json!({"url": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"},
+                   "profile": {"type": "string", "description": "A named profile (made on first use)"}}), &[]),
         tool("BROWSER_CLOSE", "end the browser (it fades out); the other actions fail until open", json!({}), &[]),
         tool("BROWSER_GOTO", "open `url`", json!({"url": {"type": "string"}}), &["url"]),
         tool("BROWSER_BACK", "go back", json!({}), &[]),
@@ -374,7 +375,40 @@ fn definitions_with(agent: bool) -> Value {
             json!({"id": {"type": "integer"}}), &["id"]),
         tool("AGENT_DELETE", "delete agent `id` you no longer need: it stops, its tasks are killed and its conversation is removed, with no final reply",
             json!({"id": {"type": "integer"}}), &["id"]),
-    ])
+    ]);
+    // The browser's state and records, before its help (apart: one json!
+    // for them all is past the macro's recursion limit).
+    let more = json!([
+        tool("BROWSER_COOKIES", "the cookies `url` (default the page's) gets, or every site's with `all`; with `path`, saves them there instead (.json, else Netscape cookies.txt for curl -b)",
+            json!({"url": {"type": "string"}, "all": {"type": "boolean"}, "path": {"type": "string", "description": "A file, relative to the working folder"}}), &[]),
+        tool("BROWSER_SET_COOKIES", "set `cookies` (each: name, value, url or domain (default the page's site), path, expires (Unix seconds), httpOnly, secure, sameSite), or load them from the file at `path` (JSON as cookies saves, Playwright's or a browser extension's export, or cookies.txt)",
+            json!({"cookies": {"type": "array", "items": {"type": "object", "properties": {
+                       "name": {"type": "string"}, "value": {"type": "string"}, "url": {"type": "string"}, "domain": {"type": "string"},
+                       "path": {"type": "string"}, "expires": {"type": "number"}, "httpOnly": {"type": "boolean"}, "secure": {"type": "boolean"},
+                       "sameSite": {"type": "string", "enum": ["Strict", "Lax", "None"]}},
+                   "required": ["name", "value"]}},
+                   "path": {"type": "string"}}), &[]),
+        tool("BROWSER_DELETE_COOKIES", "delete cookie `name` (of `url` or `domain`, default the page's site), or without `name` all of `url`'s or `domain`'s, or with `all` every cookie",
+            json!({"name": {"type": "string"}, "url": {"type": "string"}, "domain": {"type": "string"}, "all": {"type": "boolean"}}), &[]),
+        tool("BROWSER_CLEAR_DATA", "clear `origin`'s (default the page's) site data: `what` all (default: cookies and storage), cookies, storage (local and session storage, IndexedDB, caches, service workers), or cache (the HTTP cache, every site's)",
+            json!({"origin": {"type": "string"}, "what": {"type": "string", "enum": ["all", "cookies", "storage", "cache"]}}), &[]),
+        tool("BROWSER_EMULATE", "override, until reset or close: `user_agent`, `locale` (e.g. fr-FR), `timezone` (e.g. Asia/Tokyo), `latitude`,`longitude` (geolocation, permission granted), `color_scheme` light or dark, `offline`, `headers` (sent with every request), `permissions` granted to every site (e.g. notifications, clipboardReadWrite); \"\" clears one, `reset` clears all first. Says what is in effect",
+            json!({"user_agent": {"type": "string"}, "locale": {"type": "string"}, "timezone": {"type": "string"},
+                   "latitude": {"type": "number"}, "longitude": {"type": "number"},
+                   "color_scheme": {"type": "string", "enum": ["light", "dark", ""]}, "offline": {"type": "boolean"},
+                   "headers": {"type": "object", "description": "Header names and values; {} for none"},
+                   "permissions": {"type": "array", "items": {"type": "string"}}, "reset": {"type": "boolean"}}), &[]),
+        tool("BROWSER_CONSOLE", "the page's console messages and uncaught errors, and the browser's (failed loads, blocked content), since the last call. The first call starts recording (with what the current page logged before); sites that look for automation can notice it",
+            json!({}), &[]),
+        tool("BROWSER_NETWORK", "the requests since the browser opened, newest 50 (or those whose method, status, type or URL has `filter`): #id, method, status, type, size, URL; `id` shows one in full (headers, posted data, response body), and with `path` saves its body there",
+            json!({"filter": {"type": "string"}, "id": {"type": "integer"}, "path": {"type": "string"}}), &[]),
+        tool("BROWSER_PROFILES", "the named profiles (works while closed), when each was last used and where; `delete` deletes one no browser is open on",
+            json!({"delete": {"type": "string"}}), &[]),
+    ]);
+    let list = all.as_array_mut().expect("a list");
+    let at = list.iter().position(|d| d["name"] == "BROWSER_HELP").unwrap_or(list.len());
+    list.splice(at..at, more.as_array().cloned().unwrap_or_default());
+    all
 }
 
 /// AGENT new's input: the name and prompt, and the model and effort to
