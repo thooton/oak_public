@@ -406,6 +406,15 @@ fn tool_call_order() {
     // CD goes alone too: what follows it means another folder.
     let calls = [call("READ", json!({"path": "a.rs"})), call("CD", json!({"path": "sub"})), call("READ", json!({"path": "a.rs"})), call("SEARCH", json!({}))];
     assert_eq!(waits_for(&calls, folder), vec![vec![], vec![0], vec![1], vec![1]]);
+    // The browser's calls keep their order, also those made through LOAD
+    // (before BROWSER is in the tool list); loading a kit doesn't wait.
+    let calls = [
+        call("BROWSER", json!({"action": "click", "ref": 1})),
+        call("LOAD", json!({"name": "BROWSER", "input": {"action": "screenshot"}})),
+        call("LOAD", json!({"name": "AGENT"})),
+        call("LOAD", json!({"name": "BROWSER", "input": {"action": "read"}})),
+    ];
+    assert_eq!(waits_for(&calls, folder), vec![vec![], vec![0], vec![], vec![0, 1]]);
 }
 
 /// CD switches the working folder (relative, `..`, `~`), keeps the
@@ -781,6 +790,22 @@ fn a_limit_wait_ends_when_an_account_comes_free() {
     assert!(!limit_over(60_000, 4, 4));
     assert!(limit_over(0, 4, 4));
     assert!(limit_over(60_000, 4, 5));
+}
+
+/// Picking another model while a session waits out one model's limit ends
+/// the wait at once (the change is still only queued then), and the next
+/// request goes on the new model.
+#[test]
+fn a_model_change_ends_a_limit_wait() {
+    let far = api::now_ms() + 24 * 3_600_000;
+    let (w, s) = idle_worker("limit-model", Conversation { model: "claude-fable-5-2".into(), effort: "high".into(), limit_wait: Some(far), ..Default::default() });
+    s.command(Command::Model(api::Provider::Claude, "claude-opus-5-5".into()));
+    let t = Instant::now();
+    assert!(w.wait_for_limit());
+    assert!(t.elapsed() < Duration::from_secs(5), "waited {:?}", t.elapsed());
+    assert!(s.conv.lock().unwrap().limit_wait.is_none());
+    w.take_commands();
+    assert_eq!(s.conv.lock().unwrap().model, "claude-opus-5-5");
 }
 
 /// A chat runs only the web, ASK and notes: every other tool is refused

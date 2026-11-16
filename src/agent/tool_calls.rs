@@ -865,7 +865,7 @@ impl<'scope, 'env> Batch<'scope, 'env> {
             }
         }
         if last && !starting.is_empty() {
-            let names: Vec<&str> = starting.iter().map(|&i| self.calls[i]["name"].as_str().unwrap_or("")).collect();
+            let names: Vec<String> = starting.iter().map(|&i| crate::transcript::shown(&self.calls[i])).collect();
             self.w.set(|l| l.status = format!("Running {}", names.join(", ")));
         }
     }
@@ -968,12 +968,15 @@ pub(crate) fn waits_for(calls: &[Value], folder: &Path) -> Vec<Vec<usize>> {
                 let more = c["input"]["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str());
                 paths.extend(more.map(|p| tools::path_key(&tools::resolve(folder, p.trim()))));
             }
-            // The browser's calls act on one page: in the order they were made.
-            if name == "BROWSER" {
+            // The browser's calls act on one page: in the order they were
+            // made (also those made through LOAD, before BROWSER is in the
+            // tool list).
+            let browser = tools::canonical_name(name, &c["input"]).starts_with("BROWSER");
+            if browser {
                 paths.push("\0browser".into());
             }
             // CD changes what every later call's paths and commands mean.
-            (paths, matches!(name, "WRITE" | "EDIT" | "SCREENSHOT" | "BROWSER"), matches!(name, "ASK" | "CD"))
+            (paths, browser || matches!(name, "WRITE" | "EDIT" | "SCREENSHOT"), matches!(name, "ASK" | "CD"))
         })
         .collect();
     (0..calls.len())

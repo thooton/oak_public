@@ -1491,6 +1491,14 @@ impl Worker {
         }
     }
 
+    /// The model the last queued model change picks, if one is queued.
+    fn queued_model(&self) -> Option<(api::Provider, String)> {
+        self.live.lock().unwrap().commands.iter().rev().find_map(|cmd| match cmd {
+            Command::Model(p, m) => Some((*p, m.clone())),
+            _ => None,
+        })
+    }
+
     /// Waits until a usage limit resets, if one was hit. False if the user
     /// interrupted meanwhile (then OAK stops waiting).
     fn wait_for_limit(&self) -> bool {
@@ -1511,7 +1519,10 @@ impl Worker {
             let left = at + LIMIT_SLACK_MS - api::now_ms();
             // Done at the reset, or at once when the user signed in with
             // another account or one came free early.
-            let ready = {
+            // A model picked meanwhile is only queued (`command`): it takes
+            // effect in `gather_input`, after the wait, so it ends the wait too.
+            let switched = self.queued_model().is_some_and(|m| m != waiting_on);
+            let ready = switched || {
                 let c = self.conv.lock().unwrap();
                 (c.provider(), c.model.clone()) != waiting_on
                     || (c.provider() == api::Provider::Claude && api::room_for(&c.id, &c.model))

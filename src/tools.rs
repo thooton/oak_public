@@ -111,10 +111,27 @@ pub fn canonical(name: &str, input: &Value) -> Result<(String, Value), String> {
     Ok((tool.to_string(), input))
 }
 
+/// A kit's tool called through LOAD (`{"name": "BROWSER", "input": {...}}`,
+/// where tools can't join the list mid-conversation: `crate::prefix`): the
+/// kit's tool and its input. For showing and naming such calls as the tool
+/// they run (the transcript, which results context clearing keeps); running
+/// them stays LOAD's, which checks the kit is loaded.
+fn through_load<'a>(name: &str, input: &'a Value) -> Option<(&'static str, &'a Value)> {
+    if name != "LOAD" {
+        return None;
+    }
+    let inner = input.get("input").filter(|v| v.is_object())?;
+    let kit = input["name"].as_str()?.trim();
+    FAMILIES.iter().map(|(f, _)| *f).find(|f| f.eq_ignore_ascii_case(kit) && defs::kits_for(false).contains(f)).map(|f| (f, inner))
+}
+
 /// The tool a call runs as (`canonical`'s name), without copying its
 /// input: a family's call as its action's tool, any other (or a family
 /// call without a known action) as it is named.
 pub fn canonical_name<'a>(name: &'a str, input: &Value) -> &'a str {
+    if let Some((kit, inner)) = through_load(name, input) {
+        return canonical_name(kit, inner);
+    }
     let Some((_, actions)) = FAMILIES.iter().find(|(f, _)| *f == name) else { return name };
     let action = input["action"].as_str().map(|a| a.trim().to_lowercase());
     action.and_then(|action| actions.iter().find(|(a, _)| *a == action)).map_or(name, |(_, tool)| tool)
@@ -125,6 +142,9 @@ pub fn canonical_name<'a>(name: &'a str, input: &Value) -> &'a str {
 /// yet, or is wrong, stays as it is).
 pub fn canonical_cow<'a>(name: &'a str, input: &'a Value) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, Value>) {
     use std::borrow::Cow;
+    if let Some((kit, inner)) = through_load(name, input) {
+        return canonical_cow(kit, inner);
+    }
     if FAMILIES.iter().any(|(f, _)| *f == name)
         && let Ok((n, i)) = canonical(name, input)
     {
@@ -306,8 +326,12 @@ const ALIASES: &[(&str, &str, &[&str])] = &[
 /// from other agents' file tools (`file_path`, `old_str`, `oldText`, …),
 /// and values of the wrong shape that are unambiguous: an array sent as
 /// JSON text or as its lone item, "true"/"false" for a boolean, digits in
-/// a string for an integer, a number for a string.
+/// a string for an integer, a number for a string. Fields given as null
+/// are taken out, at any depth: no tool tells null from leaving a field
+/// out, and models write it for those they skip (some providers' schemas
+/// ask for every field: `openrouter::sail_schema`).
 pub fn repair(name: &str, mut input: Value) -> Value {
+    drop_nulls(&mut input);
     let defs = defs::run_definitions(false, false, false, false);
     // A family's call is repaired as its action's tool (its `action` kept).
     let name = canonical(name, &input).map(|(n, _)| n).unwrap_or_else(|_| name.to_string());
@@ -351,6 +375,18 @@ pub fn repair(name: &str, mut input: Value) -> Value {
         }
     }
     input
+}
+
+/// `v` without the null fields of the objects in it.
+fn drop_nulls(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            o.retain(|_, x| !x.is_null());
+            o.values_mut().for_each(drop_nulls);
+        }
+        Value::Array(a) => a.iter_mut().for_each(drop_nulls),
+        _ => {}
+    }
 }
 
 /// A path, resolved against the working folder and with native separators
@@ -781,6 +817,18 @@ mod tests {
         assert!(definitions_as(false, false, false, false).as_array().unwrap().iter().all(|d| d["name"] != "IMAGES"));
     }
 
+    /// Fields a model wrote as null are left out, at any depth.
+    #[test]
+    fn repair_drops_nulls() {
+        let task = repair("TASK", json!({"action": "new", "command": "npm run dev", "id": null, "summary": "Dev", "timeout": null}));
+        assert_eq!(task, json!({"action": "new", "command": "npm run dev", "summary": "Dev"}));
+        assert!(validate("TASK", &task).is_ok());
+        let ask = repair("ASK", json!({"questions": [{"question": "Which?", "options": ["a", "b"], "multiple": null}]}));
+        assert_eq!(ask, json!({"questions": [{"question": "Which?", "options": ["a", "b"]}]}));
+        let load = repair("LOAD", json!({"name": "BROWSER", "input": null}));
+        assert_eq!(load, json!({"name": "BROWSER"}));
+    }
+
     /// CD's path: relative to the folder, `~`, `.` and `..` resolved, and
     /// an MSYS drive path on Windows.
     #[test]
@@ -814,10 +862,30 @@ mod tests {
             ("AGENT", json!({"action": "new"})),
             ("READ", json!({"action": "wait"})),
             ("EXECUTE", json!({"command": "ls"})),
+            ("LOAD", json!({"name": "BROWSER", "input": {"action": "click", "ref": 3}})),
+            ("LOAD", json!({"name": "agent", "input": {"action": "wait"}})),
+            ("LOAD", json!({"name": "BROWSER", "input": {"action": "nope"}})),
+            ("LOAD", json!({"name": "BROWSER"})),
+            ("LOAD", json!({"name": "TASK", "input": {"action": "wait"}})),
         ];
         for (name, input) in &calls {
             assert_eq!(canonical_name(name, input), canonical_cow(name, input).0, "{name} {input}");
         }
+    }
+
+    /// A kit's tool called through LOAD (where tools can't join the list
+    /// mid-conversation) is shown and kept as the tool it runs.
+    #[test]
+    fn calls_through_load_are_their_tool() {
+        let call = json!({"name": "BROWSER", "input": {"action": "click", "ref": 3}});
+        let (name, input) = canonical_cow("LOAD", &call);
+        assert_eq!((name.as_ref(), input.as_ref()), ("BROWSER_CLICK", &json!({"ref": 3})));
+        assert_eq!(shown_name(&name), "BROWSER click");
+        assert_eq!(canonical_name("LOAD", &json!({"name": "AGENT", "input": {"action": "wait"}})), "AGENT_WAIT");
+        // Loading a kit, or a name that isn't a kit's, stays LOAD.
+        assert_eq!(canonical_name("LOAD", &json!({"name": "BROWSER"})), "LOAD");
+        assert_eq!(canonical_name("LOAD", &json!({"name": "TASK", "input": {"action": "wait"}})), "LOAD");
+        assert_eq!(canonical_name("LOAD", &json!({"name": "WINDOW", "input": {}})), "LOAD");
     }
 
     /// A kit's tools are there once it is loaded; LOAD offers the others.

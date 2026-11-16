@@ -580,6 +580,88 @@ fn body_for(req: &Request) -> Value {
     body
 }
 
+// Sail Research constrains a tool call's arguments to its schema's
+// properties in the order they are listed, letting the model skip optional
+// ones: once it has written a field, those listed before it can't follow.
+// OAK's schemas go out with their properties in alphabetical order (serde_json
+// keeps objects sorted), so through Sail LOAD's `input` (before `name`),
+// READ's `limit` and `offset` (before `path`), SCREENSHOT's `height`, ASK's
+// `options` and more were dropped, the model meaning to write them. Sail is
+// sent schemas whose every property is required, the optional ones nullable
+// (`sail_schema`): each then has its turn, and the model writes null for
+// those it doesn't use (`tools::repair` takes them out). Other providers get
+// OAK's schemas as they are (some, Fireworks among them, garble calls under
+// the rewritten ones), so the two never meet: a request ranked to Sail goes
+// to Sail alone, and any other request keeps Sail out (`split_sail`).
+
+/// OpenRouter's slug for Sail Research, the start of its endpoints' tags.
+const SAIL: &str = "sail-research";
+
+fn is_sail(tag: &str) -> bool {
+    tag == SAIL || tag.strip_prefix(SAIL).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// `schema` with every property of each object in it required, those that
+/// were optional taking null as well (in their type, and enum if any).
+fn sail_schema(schema: &mut Value) {
+    if let Some(items) = schema.get_mut("items") {
+        sail_schema(items);
+    }
+    let required: Vec<String> = schema["required"].as_array().into_iter().flatten().filter_map(|r| r.as_str().map(String::from)).collect();
+    let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) else { return };
+    for (k, p) in props.iter_mut() {
+        sail_schema(p);
+        if required.contains(k) {
+            continue;
+        }
+        match p.get_mut("type") {
+            Some(Value::String(t)) => {
+                let t = std::mem::take(t);
+                p["type"] = json!([t, "null"]);
+            }
+            Some(Value::Array(ts)) if !ts.contains(&Value::Null) && !ts.contains(&json!("null")) => ts.push(json!("null")),
+            _ => {}
+        }
+        if let Some(e) = p.get_mut("enum").and_then(Value::as_array_mut).filter(|e| !e.contains(&Value::Null)) {
+            e.push(Value::Null);
+        }
+    }
+    let all: Vec<String> = props.keys().cloned().collect();
+    schema["required"] = json!(all);
+}
+
+/// `body` split by Sail Research (above): Some request for Sail alone, with
+/// its schemas, when OAK's ranking puts a Sail endpoint first (as it does
+/// while the conversation stays there); and the request for the others,
+/// which keeps Sail out: what goes when there is no Sail request, or Sail
+/// can't take it.
+fn split_sail(mut body: Value) -> (Option<Value>, Value) {
+    let order: Vec<String> = body["provider"]["order"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(String::from)).collect();
+    let sail = order.first().is_some_and(|t| is_sail(t)).then(|| {
+        let mut s = body.clone();
+        s["provider"]["order"] = json!(order.iter().filter(|t| is_sail(t)).collect::<Vec<_>>());
+        s["provider"]["allow_fallbacks"] = json!(false);
+        for t in s["tools"].as_array_mut().into_iter().flatten() {
+            sail_schema(&mut t["input_schema"]);
+        }
+        s
+    });
+    if body["provider"].is_object() {
+        let rest: Vec<&String> = order.iter().filter(|t| !is_sail(t)).collect();
+        if rest.is_empty() {
+            if let Some(p) = body["provider"].as_object_mut() {
+                // OpenRouter's routing within the filters picks among the rest.
+                p.remove("order");
+                p.remove("allow_fallbacks");
+            }
+        } else {
+            body["provider"]["order"] = json!(rest);
+        }
+        body["provider"]["ignore"] = json!([SAIL]);
+    }
+    (sail, body)
+}
+
 /// Which provider OpenRouter sent a reply to: on its `message_start` event.
 fn provider_of(ev: &Value) -> Option<&str> {
     if ev["type"] != "message_start" {
@@ -594,16 +676,24 @@ fn provider_of(ev: &Value) -> Option<&str> {
 pub fn stream(req: Request, tx: Sender<Sse>) {
     let kind = req.purpose.id().to_string();
     let model_id = req.model.clone();
-    let body = body_for(&req);
+    let (sail, body) = split_sail(body_for(&req));
     let conv = req.seat_conv();
-    let mut resp = open(&body, &conv, &tx);
+    // Sail once, without retries: if it can't take the request, the others
+    // can at once.
+    let mut resp = match &sail {
+        Some(s) => match open(s, &conv, &tx, api::RETRIES) {
+            Err(Some(_)) => open(&body, &conv, &tx, 0),
+            r => r,
+        },
+        None => open(&body, &conv, &tx, 0),
+    };
     // No provider under the ceiling right now (down, or busy): once more
     // through the dearer ones rather than failing.
     if let Err(Some(Sse::Err(e))) = &resp
         && e.contains("No endpoints found")
         && let Some(wider) = with_list_price(&body)
     {
-        resp = open(&wider, &conv, &tx);
+        resp = open(&wider, &conv, &tx, 0);
     }
     let (resp, key_id) = match resp {
         Ok(r) => r,
@@ -642,11 +732,12 @@ fn left_of(k: &provider::Key<Stats>) -> f64 {
 
 /// Sends `body` through conversation `conv`'s key until a response comes
 /// that can be read as a stream; a key out of credits passes the request
-/// to another. Ok has the key's id; Err carries what the receiver gets, or
-/// None when it is gone.
-fn open(body: &Value, conv: &str, tx: &Sender<Sse>) -> Result<(reqwest::blocking::Response, String), Option<Sse>> {
+/// to another. `tries` counts as already made (api::RETRIES: none again).
+/// Ok has the key's id; Err carries what the receiver gets, or None when it
+/// is gone.
+fn open(body: &Value, conv: &str, tx: &Sender<Sse>, tries: u32) -> Result<(reqwest::blocking::Response, String), Option<Sse>> {
     let mut k = KEYS.pick(conv, left_of).map_err(|e| Some(Sse::Err(e)))?;
-    let mut tries: u32 = 0;
+    let mut tries = tries;
     loop {
         let key = k.key.clone();
         let build = || {
@@ -741,6 +832,78 @@ mod tests {
         let start = json!({"type": "message_start", "message": {"provider": "InferenceNet"}});
         assert_eq!(provider_of(&start), Some("InferenceNet"));
         assert_eq!(provider_of(&json!({"type": "message_delta"})), None);
+    }
+
+    /// A request ranked to Sail Research goes to Sail alone with schemas
+    /// whose every field is required (the optional ones nullable), then to
+    /// the others without Sail; any other request keeps Sail out.
+    #[test]
+    fn sail_research_split() {
+        assert!(is_sail("sail-research/fp4") && is_sail("sail-research/fp4/us") && is_sail("sail-research"));
+        assert!(!is_sail("sail-research-two/fp8") && !is_sail("morph/fp8"));
+        let m = &MODELS[0];
+        let tools = crate::tools::definitions_with_kits(false, false, false, &["AGENT".into(), "BROWSER".into(), "GOAL".into()]);
+        let body = |order: &[&str]| {
+            let order: Vec<String> = order.iter().map(|s| s.to_string()).collect();
+            json!({"model": m.id, "tools": tools, "provider": ranked(m, &order)})
+        };
+
+        let (sail, rest) = split_sail(body(&["sail-research/fp4", "morph/fp8", "sail-research/fp4/us", "wafer/us"]));
+        let sail = sail.expect("ranked first: a Sail request");
+        assert_eq!(sail["provider"]["order"], json!(["sail-research/fp4", "sail-research/fp4/us"]));
+        assert_eq!(sail["provider"]["allow_fallbacks"], false);
+        assert!(sail["provider"].get("ignore").is_none());
+        assert_eq!(rest["provider"]["order"], json!(["morph/fp8", "wafer/us"]));
+        assert_eq!((&rest["provider"]["ignore"], &rest["provider"]["allow_fallbacks"]), (&json!([SAIL]), &json!(true)));
+        assert_eq!(rest["tools"], json!(tools), "the others get OAK's schemas");
+        let tool = |b: &Value, n: &str| b["tools"].as_array().unwrap().iter().find(|t| t["name"] == n).unwrap()["input_schema"].clone();
+        let load = tool(&sail, "LOAD");
+        assert_eq!(load["required"], json!(["input", "name"]));
+        assert_eq!(load["properties"]["input"]["type"], json!(["object", "null"]));
+        assert_eq!(load["properties"]["name"], tool(&rest, "LOAD")["properties"]["name"], "required fields as they were");
+        let read = tool(&sail, "READ");
+        assert_eq!((read["required"].clone(), read["properties"]["offset"]["type"].clone()), (json!(["limit", "offset", "path"]), json!(["integer", "null"])));
+        let ask = tool(&sail, "ASK");
+        assert_eq!(ask["properties"]["questions"]["items"]["required"], json!(["multiple", "options", "question"]));
+        assert_eq!(ask["properties"]["questions"]["items"]["properties"]["options"]["type"], json!(["array", "null"]));
+        // Every field of every tool (kits' and a subagent's too) has its
+        // turn: required, and nullable unless it was required already.
+        let agent = crate::tools::definitions_with_kits(true, false, false, &["AGENT".into(), "WINDOW".into()]);
+        for t in tools.iter().chain(&agent) {
+            let mut s = t["input_schema"].clone();
+            sail_schema(&mut s);
+            fn check(before: &Value, after: &Value, tool: &str) {
+                if let Some(items) = before.get("items") {
+                    check(items, &after["items"], tool);
+                }
+                let Some(props) = before["properties"].as_object() else { return };
+                let required = before["required"].as_array().cloned().unwrap_or_default();
+                assert_eq!(after["required"].as_array().unwrap().len(), props.len(), "{tool}");
+                for (k, p) in props {
+                    check(p, &after["properties"][k], tool);
+                    if !required.contains(&json!(k)) {
+                        let ty = &after["properties"][k]["type"];
+                        assert!(ty.as_array().is_some_and(|a| a.contains(&json!("null"))), "{tool}.{k}: {ty}");
+                        if let Some(e) = after["properties"][k]["enum"].as_array() {
+                            assert!(e.contains(&Value::Null), "{tool}.{k}");
+                        }
+                    }
+                }
+            }
+            check(&t["input_schema"], &s, t["name"].as_str().unwrap());
+        }
+
+        // Ranked elsewhere first, or by OpenRouter: no Sail request, Sail kept out.
+        let (none, rest) = split_sail(body(&["morph/fp8", "sail-research/fp4"]));
+        assert!(none.is_none());
+        assert_eq!((&rest["provider"]["order"], &rest["provider"]["ignore"]), (&json!(["morph/fp8"]), &json!([SAIL])));
+        let (none, rest) = split_sail(json!({"model": m.id, "tools": tools, "provider": routing(m)}));
+        assert!(none.is_none() && rest["provider"].get("order").is_none());
+        assert_eq!(rest["provider"]["ignore"], json!([SAIL]));
+        // Sail alone in the order: the rest by OpenRouter's routing.
+        let (sail, rest) = split_sail(body(&["sail-research/fp4"]));
+        assert!(sail.is_some() && rest["provider"].get("order").is_none() && rest["provider"].get("allow_fallbacks").is_none());
+        assert_eq!(rest["provider"]["ignore"], json!([SAIL]));
     }
 
     /// Endpoints as OpenRouter lists them (October 2026's figures, trimmed).
