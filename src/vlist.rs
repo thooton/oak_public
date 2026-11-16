@@ -129,6 +129,12 @@ pub struct List {
     hold: u8,
     /// The units the last frame laid out on screen (first and last).
     shown: (usize, usize),
+    /// The units placed last frame, and the layer they painted on (for
+    /// `scene`).
+    drawn: Option<(egui::LayerId, Vec<Placed>)>,
+    /// Where the list showed, clear of the scroll bar and minimap (its
+    /// owner sets it; `chat_view::Scene`).
+    pub(crate) scene_view: Rect,
     /// Each unit's top, then the total height, rather than summing the
     /// heights above each time (the scroll bar and the minimap ask several
     /// times a frame; a 3000-turn transcript has 9000 units). Only those
@@ -158,6 +164,8 @@ impl Default for List {
             laid: 0,
             hold: 0,
             shown: (0, 0),
+            drawn: None,
+            scene_view: Rect::NOTHING,
             tops: Default::default(),
             est_stale: true,
         }
@@ -426,6 +434,7 @@ impl List {
         }
         let (lo, hi) = (placed.first().map_or(0, |p| p.i), placed.last().map_or(0, |p| p.i));
         self.shown = (lo, hi);
+        self.drawn = Some((ui.layer_id(), placed));
         if self.measure_more(ui, view, off, render) {
             ctx.request_repaint();
         }
@@ -867,6 +876,55 @@ pub(crate) fn as_sketching<R>(f: impl FnOnce() -> R) -> R {
     let r = f();
     SKETCHING.set(false);
     r
+}
+
+/// `List::scene`'s: units with their tops, rows of text with their units.
+pub(crate) type SceneParts = (Vec<(usize, f32)>, Vec<(usize, Rect)>);
+
+impl List {
+    /// The units placed this frame with their tops, and the rows of text
+    /// they painted, within `view`: a row is its unit and where its ink
+    /// runs, from the first letter to the end of the last, between the
+    /// tops and bottoms of the small letters (as `text_ink`'s). Read after
+    /// `show`, as what it painted was moved last.
+    pub(crate) fn scene(&self, ctx: &egui::Context, view: Rect) -> SceneParts {
+        let Some((layer, placed)) = &self.drawn else { return (vec![], vec![]) };
+        let units = placed.iter().map(|p| (p.i, p.top)).collect();
+        let mut rows = vec![];
+        ctx.graphics(|g| {
+            let Some(l) = g.get(*layer) else { return };
+            for p in placed {
+                for c in l.all_entries().skip(p.shapes.0).take(p.shapes.1.saturating_sub(p.shapes.0)) {
+                    let clip = c.clip_rect.intersect(view);
+                    text_rows(&c.shape, &mut |r: Rect| {
+                        let r = Rect::from_x_y_ranges(r.x_range().intersection(clip.x_range()), r.y_range());
+                        if r.width() > 0.0 && r.y_range().intersects(clip.y_range()) {
+                            rows.push((p.i, r));
+                        }
+                    });
+                }
+            }
+        });
+        (units, rows)
+    }
+}
+
+fn text_rows(shape: &Shape, out: &mut dyn FnMut(Rect)) {
+    match shape {
+        Shape::Vec(v) => v.iter().for_each(|s| text_rows(s, out)),
+        Shape::Text(t) => {
+            for pr in &t.galley.rows {
+                let row = &pr.row;
+                let mut ink = row.glyphs.iter().filter(|g| !g.chr.is_whitespace());
+                let Some(first) = ink.next() else { continue };
+                let last = ink.next_back().unwrap_or(first);
+                let (x0, x1) = (t.pos.x + pr.pos.x + first.pos.x, t.pos.x + pr.pos.x + last.pos.x + last.advance_width);
+                let (y0, h) = (t.pos.y + pr.pos.y, row.size.y);
+                out(Rect::from_min_max(pos2(x0, y0 + h * 0.22), pos2(x1, y0 + h * 0.78)));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// How many shapes the layer has so far.

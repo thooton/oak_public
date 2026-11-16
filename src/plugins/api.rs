@@ -1601,6 +1601,12 @@ impl HostApi for Oak {
             give_text(out, out_user, &serde_json::to_string(&a).unwrap_or_default());
         }
     }
+
+    unsafe extern "C" fn app_chat_scene(out: OakSink, out_user: *mut c_void) {
+        if let Some(s) = crate::chat_view::scene_now() {
+            give_text(out, out_user, &serde_json::to_string(&s).unwrap_or_default());
+        }
+    }
 }
 
 fn stroke_kind_of(kind: u32) -> StrokeKind {

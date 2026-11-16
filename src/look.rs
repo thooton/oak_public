@@ -76,11 +76,27 @@ pub fn corner_area(ctx: &egui::Context, name: &str, area: Rect, f: impl FnOnce(&
 /// A box in the session column, `w` wide: `pad_y` above and below what
 /// `f` adds, `gap` between its rows.
 pub fn panel_box(ui: &mut Ui, t: &Theme, w: f32, pad_y: i8, gap: f32, f: impl FnOnce(&mut Ui)) {
-    egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.line)).inner_margin(Margin::symmetric(12, pad_y)).show(ui, |ui| {
+    let r = egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.line)).inner_margin(Margin::symmetric(12, pad_y)).show(ui, |ui| {
         ui.set_width(w - 26.0);
         ui.spacing_mut().item_spacing.y = gap;
         f(ui);
     });
+    BOXES.with_borrow_mut(|b| {
+        if let Some(b) = b {
+            b.push(r.response.rect);
+        }
+    });
+}
+
+thread_local! {
+    static BOXES: std::cell::RefCell<Option<Vec<Rect>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f`, and gives the rects of the `panel_box`es it drew.
+pub fn panel_boxes(f: impl FnOnce()) -> Vec<Rect> {
+    BOXES.set(Some(vec![]));
+    f();
+    BOXES.take().unwrap_or_default()
 }
 
 /// A caption and its value, at the row's two ends.

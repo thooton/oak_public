@@ -261,6 +261,27 @@ pub struct Doing {
     pub at: i64,
 }
 
+/// What the open conversation's transcript shows (`App::chat_scene`), in
+/// points on the page.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatScene {
+    pub conversation: String,
+    /// The transcript, clear of its scroll bar and minimap: x0, y0, x1, y1.
+    pub view: [f32; 4],
+    /// The boxes over it: the session's, notes and tasks.
+    pub solids: Vec<[f32; 4]>,
+    /// The body text's size.
+    pub text_size: f32,
+    /// The transcript's units on screen, and where each starts. A unit
+    /// keeps its number while the transcript scrolls and grows.
+    pub units: Vec<(usize, f32)>,
+    /// Each row of text on screen: its unit, then x0, y0, x1, y1 from its
+    /// first ink to its last, between the tops and bottoms of its small
+    /// letters.
+    pub rows: Vec<(usize, [f32; 4])>,
+}
+
 /// A conversation to start on this machine (`App::start_conversation`):
 /// in the folder and with the model and effort the New screen's rows show
 /// (`App::local_form`).
@@ -493,6 +514,9 @@ pub trait App {
     fn conversations(&self) -> Vec<Conversation>;
     /// What Oak and its conversations are doing now (interface version 4).
     fn activity(&self) -> Activity;
+    /// During `Hooks::chat_scene`, what the transcript shows (interface
+    /// version 4); None at other times.
+    fn chat_scene(&self) -> Option<ChatScene>;
     /// Starts a conversation on this machine and opens its tab. Err: why
     /// it couldn't (the folder is missing, say), also shown as the hint.
     fn start_conversation(&mut self, new: NewConversation) -> Result<String, String>;
@@ -613,6 +637,10 @@ impl App for Window {
 
     fn activity(&self) -> Activity {
         serde_json::from_str(&text_from(|out, user| unsafe { (api().app_activity)(out, user) }).1).unwrap_or_default()
+    }
+
+    fn chat_scene(&self) -> Option<ChatScene> {
+        serde_json::from_str(&text_from(|out, user| unsafe { (api().app_chat_scene)(out, user) }).1).ok()
     }
 
     fn start_conversation(&mut self, new: NewConversation) -> Result<String, String> {

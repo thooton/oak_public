@@ -591,12 +591,13 @@ pub(crate) struct Hooks {
     providers_top: Option<OakBody>,
     exiting: Option<OakDo>,
     home_scene: Option<OakBody>,
+    chat_scene: Option<OakBody>,
     user: User,
 }
 
 impl Hooks {
     pub(crate) fn new(d: &OakHooks) -> Hooks {
-        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, home_scene: d.home_scene, user: User(d.user) }
+        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, home_scene: d.home_scene, chat_scene: d.chat_scene, user: User(d.user) }
     }
 
     pub(crate) fn started(&self, _ctx: &egui::Context) {
@@ -619,6 +620,15 @@ impl Hooks {
 
     pub(crate) fn home_scene(&self, ui: &mut Ui, app: &mut App) {
         api::draw(self.home_scene, self.user, ui, app);
+    }
+
+    /// Whether it draws over transcripts (`chat_scene`).
+    pub(crate) fn has_chat_scene(&self) -> bool {
+        self.chat_scene.is_some()
+    }
+
+    pub(crate) fn chat_scene(&self, ui: &mut Ui, app: &mut App) {
+        api::draw(self.chat_scene, self.user, ui, app);
     }
 
     pub(crate) fn exiting(&self) {

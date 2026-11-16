@@ -221,6 +221,7 @@ impl App {
     /// edits it) and the model's heartbeats. Hidden when the window is too
     /// narrow for it beside the transcript.
     pub(crate) fn session_box(&mut self, ctx: &egui::Context, t: &Theme, area: Rect) {
+        self.session_boxes.clear();
         // A conversation's only, in the top left corner, clear of the transcript.
         let Screen::Chat(id) = &self.screen else { return };
         let id = id.clone();
@@ -263,13 +264,17 @@ impl App {
         let editing = self.goal_edit.as_mut().filter(|g| g.key == key);
         let tasks = self.sessions.get(&key).map(|s| s.tasks.clone());
         let bottom = area.bottom() - GAP;
-        corner_area(ctx, "session-box", area, |ui| {
-            panel_box(ui, t, w, 10, 8.0, |ui| {
-                session_rows(ui, t, &info, editing, &mut act);
+        // Their rects: a plugin drawing over the transcript (`chat_scene`)
+        // has them as solids.
+        self.session_boxes = crate::look::panel_boxes(|| {
+            corner_area(ctx, "session-box", area, |ui| {
+                panel_box(ui, t, w, 10, 8.0, |ui| {
+                    session_rows(ui, t, &info, editing, &mut act);
+                });
+                if let Some(tasks) = tasks {
+                    side_boxes(ui, t, w, bottom, &key, &info, &tasks);
+                }
             });
-            if let Some(tasks) = tasks {
-                side_boxes(ui, t, w, bottom, &key, &info, &tasks);
-            }
         });
         self.box_actions(ctx, t, &key, &info, act);
     }

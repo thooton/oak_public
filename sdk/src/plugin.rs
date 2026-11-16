@@ -348,6 +348,11 @@ pub trait Hooks: Send + Sync {
     /// shows; `ui` is the whole page. Ask for the next frame
     /// (`Context::request_repaint_after`) to move.
     fn home_scene(&self, _ui: &mut Ui, _app: &mut dyn App) {}
+    /// Draws over the open conversation's transcript, every frame it
+    /// shows; `ui` is the transcript's view (clipped to it). What is there
+    /// is `App::chat_scene`. Draw in an `Area` of your own to be above the
+    /// boxes over the transcript and to take the pointer there.
+    fn chat_scene(&self, _ui: &mut Ui, _app: &mut dyn App) {}
     /// Oak is closing.
     fn exiting(&self) {}
 }
@@ -632,6 +637,10 @@ unsafe extern "C" fn hooks_home_scene(user: *mut c_void, ui: *mut OakUi) {
     outer(|| (), || unsafe { part::<Life>(user) }.home_scene(&mut Ui::raw(ui), &mut Window::default()))
 }
 
+unsafe extern "C" fn hooks_chat_scene(user: *mut c_void, ui: *mut OakUi) {
+    outer(|| (), || unsafe { part::<Life>(user) }.chat_scene(&mut Ui::raw(ui), &mut Window::default()))
+}
+
 unsafe extern "C" fn hooks_exiting(user: *mut c_void) {
     outer(|| (), || unsafe { part::<Life>(user) }.exiting())
 }
@@ -777,7 +786,7 @@ impl Registrar {
 
     /// Calls at startup, every frame, at exit.
     pub fn hooks(&mut self, hooks: impl Hooks + 'static) {
-        let d = OakHooks { size: size_of::<OakHooks>(), flags: 0, user: keep::<Life>(Box::new(hooks)), started: Some(hooks_started), frame: Some(hooks_frame), providers_top: Some(hooks_providers_top), exiting: Some(hooks_exiting), home_scene: Some(hooks_home_scene) };
+        let d = OakHooks { size: size_of::<OakHooks>(), flags: 0, user: keep::<Life>(Box::new(hooks)), started: Some(hooks_started), frame: Some(hooks_frame), providers_top: Some(hooks_providers_top), exiting: Some(hooks_exiting), home_scene: Some(hooks_home_scene), chat_scene: Some(hooks_chat_scene) };
         unsafe { (api().add_hooks)(&d) };
     }
 }

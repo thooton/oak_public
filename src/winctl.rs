@@ -123,7 +123,8 @@ the user's screen, mouse, keyboard or focus.
                             Stops early when DIR/stop exists.
   click X Y [--right] [--double]
   move X Y                  Move the pointer (hover).
-  drag X1 Y1 X2 Y2 [--right]
+  drag X1 Y1 X2 Y2 [--right] [--throw]
+                            --throw: quick, let go while still moving.
   scroll X Y LINES          Wheel at X,Y; positive LINES scroll up.
   type TEXT                 Types the text.
   key KEY                   e.g. enter, tab, escape, backspace, delete, up,
@@ -304,14 +305,19 @@ fn run(args: &[String]) -> Result<i32, String> {
             post(w, down, held, xy(x1, y1));
             // Slow enough that even a debug build sees the moves over
             // several frames (all in one frame, a drag reads as a click).
-            for i in 1..=20 {
-                let (x, y) = (x1 + (x2 - x1) * i / 20, y1 + (y2 - y1) * i / 20);
-                std::thread::sleep(Duration::from_millis(40));
+            // A throw: a few frames' worth, let go with no pause at the end.
+            let throw = flag("--throw");
+            let (steps, ms) = if throw { (8, 20) } else { (20, 40) };
+            for i in 1..=steps {
+                let (x, y) = (x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps);
+                std::thread::sleep(Duration::from_millis(ms));
                 under_cursor(w, x, y);
                 post(w, WM_MOUSEMOVE, held, xy(x, y));
             }
-            std::thread::sleep(Duration::from_millis(40));
-            point_at(w, x2, y2, held);
+            if !throw {
+                std::thread::sleep(Duration::from_millis(40));
+                point_at(w, x2, y2, held);
+            }
             post(w, up, 0, xy(x2, y2));
         }
         "scroll" => {

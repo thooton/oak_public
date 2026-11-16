@@ -18,6 +18,57 @@ pub(crate) struct Frame {
     pub map: Option<Rect>,
 }
 
+/// What a plugin drawing over a transcript (`chat_scene`) is told of it
+/// (`app_chat_scene` has the fields), in points on the page.
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct Scene {
+    pub conversation: String,
+    pub view: [f32; 4],
+    pub solids: Vec<[f32; 4]>,
+    pub text_size: f32,
+    pub units: Vec<(usize, f32)>,
+    pub rows: Vec<(usize, [f32; 4])>,
+}
+
+thread_local! {
+    static SCENE: std::cell::RefCell<Option<Scene>> = const { std::cell::RefCell::new(None) };
+}
+
+fn corners(r: Rect) -> [f32; 4] {
+    [r.left(), r.top(), r.right(), r.bottom()]
+}
+
+impl Scene {
+    /// Conversation `id`'s, as `list` showed it this frame, with the boxes
+    /// over it.
+    pub fn of(ctx: &egui::Context, id: &str, list: &vlist::List, solids: &[Rect]) -> Scene {
+        let view = list.scene_view;
+        let (units, rows) = list.scene(ctx, view);
+        let text_size = ctx.global_style().text_styles.get(&egui::TextStyle::Body).map_or(14.0, |f| f.size);
+        Scene {
+            conversation: id.to_string(),
+            view: corners(view),
+            solids: solids.iter().map(|r| corners(*r)).collect(),
+            text_size,
+            units,
+            rows: rows.into_iter().map(|(i, r)| (i, corners(r))).collect(),
+        }
+    }
+
+    /// Runs `f` with this the scene `scene_now` gives.
+    pub fn during<R>(self, f: impl FnOnce() -> R) -> R {
+        SCENE.set(Some(self));
+        let r = f();
+        SCENE.set(None);
+        r
+    }
+}
+
+/// The transcript a plugin's `chat_scene` is drawing over, while it is.
+pub(crate) fn scene_now() -> Option<Scene> {
+    SCENE.with_borrow(|s| s.clone())
+}
+
 impl Frame {
     pub fn new(view: Rect) -> Frame {
         let track = Rect::from_min_max(egui::pos2(view.right() - vlist::BAR_W_HOVER - 2.0, view.top() + 2.0), egui::pos2(view.right() - 2.0, view.bottom() - 2.0));
@@ -79,6 +130,7 @@ impl Frame {
             }
         };
         list.show(ui, view, col, &mut render);
+        list.scene_view = Rect::from_min_max(view.min, egui::pos2(map.map_or(track.left(), |m| m.left()), view.bottom()));
         list.bar_paint(ui, t, track);
         if let Some(map) = map {
             list.map_paint(ui, t, map, col.span(), cut);

@@ -599,6 +599,11 @@ struct OakHooks {
      * (`repaint_after`) to move.
      */
     OakBody home_scene;
+    /* Draws over the open conversation's transcript, every frame it
+     * shows (`ui` is the transcript's view, clipped to it). What is
+     * there (the text's rows, the boxes over it) is `app_chat_scene`.
+     */
+    OakBody chat_scene;
 };
 
 /* A response's flags. */
@@ -1372,6 +1377,18 @@ struct OakApi {
      * message, ms)}]}`. Conversations are this machine's, subagents too.
      */
     void (*app_activity)(OakSink out, void *out_user);
+
+    /* During `chat_scene`, what the transcript shows, as JSON:
+     * `{"conversation", "view": [x0, y0, x1, y1] (the transcript, clear of
+     * its scroll bar and minimap), "solids": [[x0, y0, x1, y1]] (the boxes
+     * over it: the session's, notes, tasks), "text_size" (the body text's,
+     * points), "units": [[unit, top]] (the transcript's units on screen and
+     * where each starts: a unit keeps its number while the transcript
+     * scrolls and grows), "rows": [[unit, x0, y0, x1, y1]] (each row of
+     * text on screen, from its first ink to its last, between the tops and
+     * bottoms of its small letters)}`. Empty outside `chat_scene`.
+     */
+    void (*app_chat_scene)(OakSink out, void *out_user);
 };
 
 /* Text from a C string, and from a literal. */

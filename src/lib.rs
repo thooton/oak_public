@@ -335,6 +335,9 @@ struct App {
     /// `App::activity`).
     home_menu_rect: Option<egui::Rect>,
     home_buttons_rect: Option<egui::Rect>,
+    /// The session box's boxes (session, notes, tasks) as last drawn:
+    /// solids for a plugin drawing over the transcript (`chat_scene`).
+    session_boxes: Vec<egui::Rect>,
     /// The wallpaper playing on Home (`wallpaper.rs`).
     wallpaper: Option<wallpaper::Player>,
     /// Settings' wallpaper grid is open, and the one under the pointer
@@ -651,7 +654,35 @@ impl App {
         self.browser_preview(&ctx, t, central.response.rect);
         let Screen::Chat(id) = &self.screen else { return };
         let id = id.clone();
+        self.chat_scene(ui, &id);
         self.chat_actions(&ctx, &id, central.inner);
+    }
+
+    /// What plugins draw over a conversation's transcript (`chat_scene`):
+    /// a local one's (not a plugin's tab, the cloud's or a super agent's).
+    fn chat_scene(&mut self, ui: &mut Ui, id: &str) {
+        let hooks: Vec<_> = plugins::parts().hooks.iter().filter(|h| h.has_chat_scene()).cloned().collect();
+        if hooks.is_empty() || plugins::tab_kind(id).is_some() || cloud::is_key(id) {
+            return;
+        }
+        let Some(s) = self.sessions.get(id) else { return };
+        if super_local::is_super(&s.conv.lock().unwrap()) {
+            return;
+        }
+        let Some(list) = self.lists.get(id) else { return };
+        if !list.scene_view.is_positive() {
+            return;
+        }
+        let scene = chat_view::Scene::of(ui.ctx(), id, list, &self.session_boxes);
+        let view = list.scene_view;
+        scene.during(|| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(view), |ui| {
+                ui.set_clip_rect(view);
+                for h in &hooks {
+                    h.chat_scene(ui, self);
+                }
+            });
+        });
     }
 
     pub(crate) fn chat_actions(&mut self, ctx: &egui::Context, id: &str, action: Option<QueueAction>) {

@@ -693,6 +693,10 @@ c_structs! {
         /// shows (`ui` is the whole page). Asks for frames of its own
         /// (`repaint_after`) to move.
         pub home_scene: Option<OakBody>,
+        /// Draws over the open conversation's transcript, every frame it
+        /// shows (`ui` is the transcript's view, clipped to it). What is
+        /// there (the text's rows, the boxes over it) is `app_chat_scene`.
+        pub chat_scene: Option<OakBody>,
     }
 }
 
@@ -1351,6 +1355,16 @@ c_api! {
     /// "paused", "shown" (its tab is the one shown), "at" (its latest
     /// message, ms)}]}`. Conversations are this machine's, subagents too.
     fn app_activity(out: OakSink, out_user: *mut c_void);
+    /// During `chat_scene`, what the transcript shows, as JSON:
+    /// `{"conversation", "view": [x0, y0, x1, y1] (the transcript, clear of
+    /// its scroll bar and minimap), "solids": [[x0, y0, x1, y1]] (the boxes
+    /// over it: the session's, notes, tasks), "text_size" (the body text's,
+    /// points), "units": [[unit, top]] (the transcript's units on screen and
+    /// where each starts: a unit keeps its number while the transcript
+    /// scrolls and grows), "rows": [[unit, x0, y0, x1, y1]] (each row of
+    /// text on screen, from its first ink to its last, between the tops and
+    /// bottoms of its small letters)}`. Empty outside `chat_scene`.
+    fn app_chat_scene(out: OakSink, out_user: *mut c_void);
 }
 
 /// The C header: everything declared above, in C.

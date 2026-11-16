@@ -377,7 +377,11 @@ with confirmation; right-clicking the bubble also offers deletion. The side chat
 persisted conversation linked to its source, not a subagent or a Home row; it never reports back. Deleting the source also deletes its side chat.
 
 **Other parts of the window**: the transcript is a virtual list (`src/vlist.rs`) that lays out
-only what is on screen (of a long reply, the parts near it; `src/markdown.rs`); Ctrl+F finds text
+only what is on screen (of a long reply, the parts near it; `src/markdown.rs`); after a local
+conversation's transcript and session box are drawn, plugins draw over it (`Hooks::chat_scene`,
+`App::chat_scene`: `chat_view::Scene` has the view clear of the scroll bar and minimap, the
+session box's boxes, which `look::panel_boxes` collects, and the units on screen with their rows
+of text, which `List::scene` reads from what they painted); Ctrl+F finds text
 in it (`src/find.rs`); Ctrl+A after clicking or selecting text in a message selects the whole message, copied as it reads (`src/select.rs`); replies are markdown, with links
 to files opening them. Right-clicking a chat's text (a transcript, a plugin's chat) offers
 Copy for the selection, which the right-click leaves in place, Copy message, Copy link address over
