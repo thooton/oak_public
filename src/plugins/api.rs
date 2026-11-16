@@ -1589,7 +1589,15 @@ impl HostApi for Oak {
     unsafe extern "C" fn oak_super_agent_box(area: *const OakRect, json: OakStr) -> u32 {
         let Some(ctx) = super::context() else { return 0 };
         let b: crate::super_view::AgentBox = serde_json::from_str(str_of(json)).unwrap_or_default();
-        if crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) { OAK_CLICKED } else { 0 }
+        if crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) == Some(crate::super_view::AgentAction::Stop) { OAK_CLICKED } else { 0 }
+    }
+
+    unsafe extern "C" fn oak_super_agent_box_act(area: *const OakRect, json: OakStr, out: OakSink, out_user: *mut c_void) {
+        let Some(ctx) = super::context() else { return };
+        let b: crate::super_view::AgentBox = serde_json::from_str(str_of(json)).unwrap_or_default();
+        if let Some(act) = crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) {
+            give_text(out, out_user, &serde_json::to_string(&act).unwrap_or_default());
+        }
     }
 }
 
@@ -1773,6 +1781,25 @@ mod tests {
         let mut stopped = false;
         frame(&ctx, &t, &mut time, click(rect_of(&shown, "Stop").center(), Primary), |ui| stopped |= oak_sdk::ui::super_agent_box(ui.ctx(), &t, area, &b));
         assert!(stopped);
+        // Version 4: pickers, Pause, detail, blocker and a switch waiting.
+        let b = json!({"title": "Fix the build", "caption": "Agent 4, run by Delta", "working": true, "state": "Running EXECUTE", "stop": "Stops it",
+            "models": [{"id": "a", "name": "Model A", "efforts": ["low", "high"]}], "model_id": "a", "effort": "high", "model": "unused",
+            "pending": "Switching to Model B after this step", "pause": "Pauses it", "detail": "Running tools for 3m", "blocker": "Blocked: no computer"});
+        let mut got = vec![];
+        let mut draw = |events: Vec<egui::Event>, got: &mut Vec<Option<Value>>| {
+            frame(&ctx, &t, &mut time, events, |ui| got.push(oak_sdk::ui::super_agent_box_act(ui.ctx(), &t, area, &b)))
+        };
+        draw(vec![], &mut got);
+        let shown = draw(vec![], &mut got);
+        for want in ["Model A", "high", "Pause", "Stop", "Running tools for 3m", "Blocked: no computer", "Switching to Model B after this step"] {
+            assert!(shown.iter().any(|(s, _)| s == want), "{want} isn't drawn: {}", texts(&shown));
+        }
+        assert!(!shown.iter().any(|(s, _)| s == "unused"), "pickers in place of the line");
+        draw(click(rect_of(&shown, "Pause").center(), Primary), &mut got);
+        draw(click(rect_of(&shown, "Stop").center(), Primary), &mut got);
+        let acts: Vec<Value> = got.into_iter().flatten().collect();
+        assert_eq!(acts, vec![json!("pause"), json!("stop")]);
+        assert_eq!(serde_json::to_value(crate::super_view::AgentAction::Model("b".into(), "low".into())).unwrap(), json!({"model": ["b", "low"]}));
     }
 
     /// An answer goes over the table by its handle, either way, and its

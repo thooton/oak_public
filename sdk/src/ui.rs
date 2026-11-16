@@ -192,6 +192,16 @@ pub fn super_agent_box(_ctx: &egui::Context, _t: &Theme, area: Rect, b: &Value) 
     unsafe { (api().oak_super_agent_box)(&rect_in(area), s(&b.to_string())) & OAK_CLICKED != 0 }
 }
 
+/// A super agent's agent's corner box as Oak draws its own, with model
+/// pickers, Pause or Resume, and what it is doing in detail
+/// (`oak_super_agent_box_act` in `abi` says what `b` holds): what was done,
+/// if anything (`"stop"`, `"pause"`, `"resume"`, `{"model": [id, effort]}`).
+/// Needs an Oak of interface version 4.
+pub fn super_agent_box_act(_ctx: &egui::Context, _t: &Theme, area: Rect, b: &Value) -> Option<Value> {
+    let (_, out) = crate::rt::text_from(|out, user| unsafe { (api().oak_super_agent_box_act)(&rect_in(area), s(&b.to_string()), out, user) });
+    serde_json::from_str(&out).ok()
+}
+
 /// The bar under a message (`msg`, its rectangle): Copy, and when it was sent.
 pub fn message_bar(ui: &mut Ui, _t: &Theme, msg: Rect, id: Id, copy_text: impl Fn() -> String, at: Option<i64>) {
     let raw = ui.as_raw();

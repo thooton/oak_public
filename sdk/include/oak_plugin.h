@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 3
+#define OAK_API_VERSION 4
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -1353,6 +1353,20 @@ struct OakApi {
      * empty: none), "model"}`. OAK_CLICKED when Stop was pressed.
      */
     uint32_t (*oak_super_agent_box)(const OakRect *area, OakStr json);
+
+    /* `oak_super_agent_box`, with more in it and what was done going to
+     * `out` as JSON: `"stop"`, `"pause"`, `"resume"` or `{"model": [id,
+     * effort]}`; nothing when nothing was. `json` adds to the older box's
+     * (each optional): "models" (as `oak_super_box`'s), "model_id" and
+     * "effort" (it gets model and effort pickers when "models" has
+     * "model_id"; else "model" is shown), "model_tip", "pending" (a switch
+     * waiting for the request under way, under the pickers), "pause"
+     * (Pause's tip; empty: none) and "paused" (the button reads Resume),
+     * "detail" (a line under what it is doing) and "blocker" (what holds
+     * it up, in the error colour). `oak_super_box`'s agents take a
+     * "detail" too, under the report on hover.
+     */
+    void (*oak_super_agent_box_act)(const OakRect *area, OakStr json, OakSink out, void *out_user);
 };
 
 /* Text from a C string, and from a literal. */

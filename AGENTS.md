@@ -358,14 +358,21 @@ task), saved as `"role": "super"`, so its subagents work in its folder on this m
 same prompt. Its tab has Oak's tree, its Home row says "folder, super agent", and `oak_sdk`'s
 `go_new` takes `super` to pick it. It looks as the command center's super agents do (the Oak tab's
 and Delta's), drawn by the one implementation of that look, `src/super_view.rs`, which plugins
-use through `oak_sdk::ui::super_chat`, `super_box` and `super_agent_box` (interface version 3):
+use through `oak_sdk::ui::super_chat`, `super_box` and `super_agent_box` (interface version 3),
+and `super_agent_box_act` (version 4: the agent box's model and effort pickers, Pause or Resume,
+a detail line and what blocks it, and a switch waiting shown under the pickers):
 `src/super_local.rs` makes a super agent's tab a text conversation (the user's messages in deep
 blue bubbles on the right, what it says beside its avatar on the left, in stretches with the day
 and time after a pause, three dots and its status while it works; its tool calls, thinking and
 subagents' messages stay out of it, and its questions show under it), its corner box its name and
 folder, what it is doing with Stop, its model and effort, and its subagents, each opening its tab,
 and a subagent's corner box an agent's (its title, "Agent n, run by" the super agent, its state
-with Stop, its model), each with notes and background tasks under it when there are any. A collapsed "Local controls"
+with Stop and Pause or Resume, its model and effort pickers), each with notes and background tasks
+under it when there are any. A subagent's model switches in place, from its pickers or the super
+agent's AGENT action=set: its conversation and work carry on, a request under way finishes on the
+model it started on (the box says it is switching until then, AGENT_LIST and set's reply too), and
+the next request, with that one's tool results, goes to the new model with the "Your underlying
+model is now" line appended; a switch to another provider asks first, as the session box does. A collapsed "Local controls"
 section keeps provider/model/effort switching, goals, progress meters, heartbeats, folder actions
 and parent navigation available without crowding the shared layout. It still
 runs here: its subagents are conversations of their own. Oak's own choices win over a plugin's `NewKind` of the same id,

@@ -97,11 +97,19 @@ impl Worker {
             let c = s.conv.lock().unwrap();
             (c.model.clone(), c.effort.clone())
         };
-        let model = model.unwrap_or(old_model);
-        let effort = effort_for(&model, &effort.unwrap_or(old_effort));
+        let model = model.unwrap_or(old_model.clone());
+        let effort = effort_for(&model, &effort.unwrap_or(old_effort.clone()));
+        let requesting = s.live.lock().unwrap().requesting;
         s.command(Command::Model(api::Provider::of(&model), model.clone()));
         s.command(Command::Effort(effort.clone()));
-        Ok(format!("{label} goes on {model} at {effort} effort from its next request."))
+        // (Switched between requests: the one under way finishes as it
+        // started, its tool results go back with the next, on the new model,
+        // which is told in a line after the conversation so far.)
+        Ok(if requesting {
+            format!("{label} goes on {model} at {effort} effort after the request under way, which finishes on {old_model} at {} effort. Its conversation and work carry on.", effort_for(&old_model, &old_effort))
+        } else {
+            format!("{label} goes on {model} at {effort} effort from its next request. Its conversation and work carry on.")
+        })
     }
 
     /// AGENT_PAUSE: a subagent pauses after the request under way (as the
@@ -238,8 +246,12 @@ impl Worker {
             let (state, at, model) = match find_session(&conv) {
                 Some(s) => {
                     let c = s.conv.lock().unwrap();
-                    let (at, model) = (c.last_message_at, format!("{} ({})", c.model, c.effort));
+                    let (at, mut model) = (c.last_message_at, format!("{} ({})", c.model, effort_for(&c.model, &c.effort)));
+                    let (now_model, now_effort) = (c.model.clone(), c.effort.clone());
                     drop(c);
+                    if let Some((m, e)) = queued_switch(&s, &now_model, &now_effort) {
+                        model += &format!(", switching to {m} ({e}) at its next request");
+                    }
                     (s.state(), at, model)
                 }
                 None => ("not running".into(), 0, "-".into()),
@@ -338,6 +350,22 @@ impl Worker {
             self.wait_a_bit(30);
         }
     }
+}
+
+/// The model and effort a switch waiting for session `s`'s next request
+/// (AGENT action=set, or the user's pickers) goes to, when it changes
+/// either from `model` at `effort`.
+fn queued_switch(s: &Session, model: &str, effort: &str) -> Option<(String, String)> {
+    let (mut m, mut e) = (model.to_string(), effort.to_string());
+    for cmd in &s.live.lock().unwrap().commands {
+        match cmd {
+            Command::Model(_, x) => m = x.clone(),
+            Command::Effort(x) => e = x.clone(),
+            Command::Goal(..) => {}
+        }
+    }
+    let e = effort_for(&m, &e);
+    (m != model || e != effort_for(model, effort)).then_some((m, e))
 }
 
 /// AGENT new's and set's `model` and `effort`, checked: a model this Oak

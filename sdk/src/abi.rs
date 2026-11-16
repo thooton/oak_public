@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 3;
+pub const OAK_API_VERSION: u32 = 4;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -1332,6 +1332,21 @@ c_api! {
     /// `{"icon", "title", "caption", "working", "state", "stop" (Stop's tip;
     /// empty: none), "model"}`. OAK_CLICKED when Stop was pressed.
     fn oak_super_agent_box(area: *const OakRect, json: OakStr) -> u32;
+
+    // Version 4.
+
+    /// `oak_super_agent_box`, with more in it and what was done going to
+    /// `out` as JSON: `"stop"`, `"pause"`, `"resume"` or `{"model": [id,
+    /// effort]}`; nothing when nothing was. `json` adds to the older box's
+    /// (each optional): "models" (as `oak_super_box`'s), "model_id" and
+    /// "effort" (it gets model and effort pickers when "models" has
+    /// "model_id"; else "model" is shown), "model_tip", "pending" (a switch
+    /// waiting for the request under way, under the pickers), "pause"
+    /// (Pause's tip; empty: none) and "paused" (the button reads Resume),
+    /// "detail" (a line under what it is doing) and "blocker" (what holds
+    /// it up, in the error colour). `oak_super_box`'s agents take a
+    /// "detail" too, under the report on hover.
+    fn oak_super_agent_box_act(area: *const OakRect, json: OakStr, out: OakSink, out_user: *mut c_void);
 }
 
 /// The C header: everything declared above, in C.
