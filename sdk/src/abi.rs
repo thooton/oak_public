@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 4;
+pub const OAK_API_VERSION: u32 = 5;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -337,6 +337,15 @@ c_structs! {
         pub points: f32,
         /// 0: the default.
         pub text_color: u32,
+        /// Version 5. With `OAK_EDIT_MARGIN`: the room around the text,
+        /// inside the frame (or where it would be).
+        pub margin_left: f32,
+        pub margin_right: f32,
+        pub margin_top: f32,
+        pub margin_bottom: f32,
+        /// The least room it takes, however little text it has (0: none).
+        pub min_width: f32,
+        pub min_height: f32,
     }
 
     /// How a container lays out what is drawn in it.
@@ -503,7 +512,7 @@ c_structs! {
     /// A tab on Home.
     pub struct OakHomeTab {
         pub size: u32,
-        /// `OAK_ICON_IS_TEXT`, `OAK_HOME_TAB_LINK`.
+        /// `OAK_ICON_IS_TEXT`, `OAK_HOME_TAB_LINK`, `OAK_HOME_TAB_PAGE`.
         pub flags: u32,
         pub user: *mut c_void,
         /// What `app_go_home` takes.
@@ -787,6 +796,8 @@ c_consts! {
     pub const OAK_EDIT_SMALL = 1 << 8;
     /// Enter doesn't make a newline in a multiline field (Shift+Enter does).
     pub const OAK_EDIT_ENTER_SENDS = 1 << 9;
+    /// Its `margin_*` fields are the room around the text (version 5).
+    pub const OAK_EDIT_MARGIN = 1 << 10;
 
     /// `OakLayout.dir`: where the next widget goes.
     pub const OAK_DIR_RIGHT = 0;
@@ -915,6 +926,10 @@ c_consts! {
     /// What hovering it says while it is disabled.
     pub const OAK_RESPONSE_DISABLED_HOVER_TEXT = 7;
     pub const OAK_RESPONSE_SURRENDER_FOCUS = 8;
+    /// A menu a click on it opens and closes, under it, `value` points
+    /// wide (0: as wide as it is): `body` draws it. The answer has
+    /// `OAK_OPEN` while it is open (version 5).
+    pub const OAK_RESPONSE_MENU = 9;
 
     pub const OAK_CURSOR_DEFAULT = 0;
     pub const OAK_CURSOR_POINTING_HAND = 1;
@@ -976,6 +991,10 @@ c_consts! {
     pub const OAK_INPUT_SCROLL = 3;
     /// Where the main button last went down.
     pub const OAK_INPUT_PRESS_ORIGIN = 4;
+    /// Whether any widget has the keyboard (version 5).
+    pub const OAK_INPUT_FOCUSED = 5;
+    /// Whether files are being dragged over the window (version 5).
+    pub const OAK_INPUT_FILES_HOVERED = 6;
 
     pub const OAK_HTTP_NO_REDIRECTS = 1 << 0;
     /// No proxy: straight to the address (a service on this machine).
@@ -993,6 +1012,11 @@ c_consts! {
     /// does) and `show` isn't called. Oaks before version 2 show it as a
     /// tab.
     pub const OAK_HOME_TAB_LINK = 1 << 1;
+    /// `OakHomeTab`, with `OAK_HOME_TAB_LINK`: a link to a page of the
+    /// plugin's own rather than a tab. A click shows `show` in all of the
+    /// window under the tabs' row, as Settings is shown (no tab lit, no
+    /// message box), until another tab or Home is picked (version 5).
+    pub const OAK_HOME_TAB_PAGE = 1 << 2;
 }
 
 /// A width that takes all there is (`OakTextEdit.width`).
@@ -1347,6 +1371,26 @@ c_api! {
     /// it up, in the error colour). `oak_super_box`'s agents take a
     /// "detail" too, under the report on hover.
     fn oak_super_agent_box_act(area: *const OakRect, json: OakStr, out: OakSink, out_user: *mut c_void);
+
+    // Version 5.
+
+    /// `animate`, taking `seconds` to go from 0 to 1 (linear: the plugin
+    /// eases it as it likes).
+    fn animate_time(id: u64, on: bool, seconds: f32) -> f32;
+    /// Shows Settings; leaving it comes back to what was shown.
+    fn app_go_settings();
+    /// Shows the page of the Home tab `id` (an `OAK_HOME_TAB_PAGE` link).
+    fn app_go_page(id: OakStr);
+    /// What was pasted (pictures) or dropped on the window this frame, as
+    /// the message box would attach it: JSON `{"files": [blocks], "errors":
+    /// [why one couldn't be]}`. False: nothing came. Whoever takes them
+    /// has them: call it only while showing somewhere to attach them.
+    fn take_files(out: OakSink, out_user: *mut c_void) -> bool;
+    /// Asks for files to attach in the system's dialog: `filter` names
+    /// the kinds (`extensions`, one a line; empty: any file), and "Any
+    /// file" is offered too. `out` gets JSON as `take_files` gives it;
+    /// false when none were picked.
+    fn pick_files(filter: OakStr, extensions: OakStr, out: OakSink, out_user: *mut c_void) -> bool;
 }
 
 /// The C header: everything declared above, in C.

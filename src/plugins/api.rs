@@ -323,8 +323,16 @@ unsafe fn field<'a>(text: &'a mut String, e: &OakTextEdit) -> egui::TextEdit<'a>
     if let Some(c) = col_opt(e.text_color) {
         t = t.text_color(c);
     }
-    if on(OAK_EDIT_NO_FRAME) {
-        t = t.frame(egui::Frame::NONE);
+    // (A frame given replaces the margin: a frameless field's goes in its frame.)
+    let m = |v: f32| v.round().clamp(-128.0, 127.0) as i8;
+    let margin = on(OAK_EDIT_MARGIN).then(|| egui::Margin { left: m(e.margin_left), right: m(e.margin_right), top: m(e.margin_top), bottom: m(e.margin_bottom) });
+    match (on(OAK_EDIT_NO_FRAME), margin) {
+        (true, margin) => t = t.frame(egui::Frame::NONE.inner_margin(margin.unwrap_or_default())),
+        (false, Some(margin)) => t = t.margin(margin),
+        (false, None) => {}
+    }
+    if e.min_width > 0.0 || e.min_height > 0.0 {
+        t = t.min_size(vec2(e.min_width.max(0.0), e.min_height.max(0.0)));
     }
     if on(OAK_EDIT_ENTER_SENDS) {
         t = t.return_key(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
@@ -1023,6 +1031,15 @@ impl HostApi for Oak {
                 _ => None,
             }),
             (OAK_RESPONSE_HIGHLIGHT, _) => drop(r.highlight()),
+            (OAK_RESPONSE_MENU, Some(body)) => {
+                let mut popup = egui::Popup::menu(&r);
+                if value > 0 {
+                    popup = popup.width(value as f32);
+                }
+                popup.show(|ui| run(body, user, ui));
+                let open = egui::Popup::is_id_open(&r.ctx, egui::Popup::default_response_id(&r));
+                return if open { flags | OAK_OPEN } else { flags & !OAK_OPEN };
+            }
             _ => {}
         }
         flags
@@ -1278,12 +1295,16 @@ impl HostApi for Oak {
     unsafe extern "C" fn input_get(what: u32, out: *mut OakRect) -> bool {
         let Some(ctx) = super::context() else { return false };
         let point = |p: Option<Pos2>| p.map(|p| OakRect { x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+        if what == OAK_INPUT_FOCUSED {
+            return ctx.memory(|m| m.focused().is_some());
+        }
         let (r, on) = ctx.input(|i| match what {
             OAK_INPUT_POINTER => (point(i.pointer.interact_pos()), true),
             OAK_INPUT_PRESS_ORIGIN => (point(i.pointer.press_origin()), true),
             OAK_INPUT_POINTER_DOWN => (Some(OakRect::default()), i.pointer.primary_down()),
             OAK_INPUT_MODIFIERS => (Some(OakRect { x0: modifiers_out(i.modifiers) as f32, ..Default::default() }), true),
             OAK_INPUT_SCROLL => (Some(OakRect { x0: i.smooth_scroll_delta().x, y0: i.smooth_scroll_delta().y, ..Default::default() }), true),
+            OAK_INPUT_FILES_HOVERED => (Some(OakRect::default()), !i.raw.hovered_files.is_empty()),
             _ => (None, false),
         });
         match r {
@@ -1598,6 +1619,49 @@ impl HostApi for Oak {
         if let Some(act) = crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) {
             give_text(out, out_user, &serde_json::to_string(&act).unwrap_or_default());
         }
+    }
+
+    // ---- version 5
+
+    unsafe extern "C" fn animate_time(id: u64, on: bool, seconds: f32) -> f32 {
+        super::context().map_or(on as u8 as f32, |ctx| ctx.animate_bool_with_time(eid(id), on, seconds.max(0.0)))
+    }
+
+    unsafe extern "C" fn app_go_settings() {
+        app(|a| a.plugin_go_settings());
+    }
+
+    unsafe extern "C" fn app_go_page(id: OakStr) {
+        app(|a| a.plugin_go_page(str_of(id)));
+    }
+
+    unsafe extern "C" fn take_files(out: OakSink, out_user: *mut c_void) -> bool {
+        let Some(ctx) = super::context() else { return false };
+        let mut files = vec![];
+        let errors = crate::composer::take_drops_all(&ctx, &mut files);
+        if files.is_empty() && errors.is_empty() {
+            return false;
+        }
+        give_text(out, out_user, &json!({"files": files, "errors": errors}).to_string());
+        true
+    }
+
+    unsafe extern "C" fn pick_files(filter: OakStr, extensions: OakStr, out: OakSink, out_user: *mut c_void) -> bool {
+        let exts: Vec<&str> = str_of(extensions).lines().map(str::trim).filter(|e| !e.is_empty()).collect();
+        let mut dialog = rfd::FileDialog::new();
+        if !exts.is_empty() {
+            let name = str_of(filter);
+            dialog = dialog.add_filter(if name.is_empty() { "Files" } else { name }, &exts).add_filter("Any file", &["*"]);
+        }
+        let Some(paths) = dialog.pick_files() else { return false };
+        let (mut files, mut errors) = (vec![], vec![]);
+        for path in paths {
+            let mut hint = None;
+            crate::composer::attach_file(&mut files, &mut hint, &path);
+            errors.extend(hint);
+        }
+        give_text(out, out_user, &json!({"files": files, "errors": errors}).to_string());
+        true
     }
 }
 

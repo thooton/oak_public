@@ -13,7 +13,7 @@ A plugin can add:
 
 | Part | Rust trait (`oak_sdk`) | C descriptor | What it is |
 | --- | --- | --- | --- |
-| A tab on Home | `HomeTab` | `OakHomeTab` | A tab beside Conversations and Cloud; the plugin draws the cell. Or a link at the right end of the tabs' row (`link`, `OAK_HOME_TAB_LINK`) that opens one of the plugin's own tabs. |
+| A tab on Home | `HomeTab` | `OakHomeTab` | A tab beside Conversations and Cloud; the plugin draws the cell. Or a link at the right end of the tabs' row (`link`, `OAK_HOME_TAB_LINK`) that opens one of the plugin's own tabs, or a page of its own (`page`, `OAK_HOME_TAB_PAGE`) drawn in all of the window under the tabs' row, as Settings is. |
 | Tabs of its own | `TabKind` | `OakTabKind` | Tabs in the strip under keys the plugin owns: their title and icon, their page, whether they have the message box and what a message sent there does, their corner box. |
 | A choice on the New screen | `NewKind` | `OakNewKind` | Beside Local folder and Cloud: its form, and what the first message starts. |
 | A cloud backend | `CloudBackend` | `OakCloudBackend` | Another service cloud sessions run through: its accounts and its requests. Oak's cloud engine, list and transcript do the rest. |
@@ -139,7 +139,7 @@ What a plugin works with:
   by shape). It covers what Oak's own screens use, not all of egui: no custom fonts, no
   `LayoutJob`, no meshes or custom shaders. What is missing is added to the table's end.
 - **`&mut dyn App`** is the window, on the UI thread: the theme in use, opening and closing tabs,
-  going Home or to the New screen, the message box's text and attachments, the hint over it, this
+  going Home, to the New screen, to Settings or to a plugin's page, the message box's text and attachments, files pasted or dropped on the window and the system's file picker, the hint over it, this
   machine's conversations, starting one, drawing a transcript or a cloud list as Oak draws its own.
 - **`oak_sdk::host()`** is Oak's services, from any thread: HTTP with Oak's client
   (`oak_sdk::Request`), Oak's folder, private files, repaints, the usage log, the cloud engine's
@@ -218,7 +218,7 @@ OAK_PLUGINS=<folder> cargo test --lib every_plugin_draws -- --ignored        # a
 ```
 
 The first also compiles `plugins/hello-c/hello.c` (with `OAK_TEST_CC`, else `CC`, else `gcc` on Windows and `cc` elsewhere). `every_plugin_draws`
-loads whatever `OAK_PLUGINS` holds and draws every Home tab in every theme, Settings, Home's Plugins tab, every
+loads whatever `OAK_PLUGINS` holds and draws every Home tab and plugin page in every theme, Settings, Home's Plugins tab, every
 choice on the New screen, and the tabs `OAK_PLUGIN_TABS` names (keys separated by commas),
 failing if a plugin doesn't load or stops. It runs in a scratch Oak folder, never the user's:
 `OAK_PLUGIN_SEED` names a folder whose files are copied there first (a saved connection to a

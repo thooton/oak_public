@@ -43,8 +43,10 @@ impl App {
     /// left.
     fn chats_head(&mut self, ui: &mut Ui, t: &Theme, head: Rect) {
         let (links_w, link) = link_tabs(ui, t, head);
-        if let Some(key) = link {
-            self.open(key);
+        match link {
+            Some((id, true)) => self.plugin_go_page(&id),
+            Some((key, false)) => self.open(key),
+            None => {}
         }
         let right = (head.right() - links_w).max(head.left());
         let update_w = update_tab(ui, t, Rect::from_min_max(head.min, egui::pos2(right, head.bottom())));
@@ -1130,10 +1132,10 @@ fn home_tabs_inner(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<Strin
 
 /// The plugins' links (`oak_sdk::HomeTab::link`) at the right end of the
 /// tabs' row, styled as tabs (each opens a tab of its own, so none is ever
-/// lit), in the order they registered. Returns their width and the tab key
-/// of the one clicked; in a row too narrow for them and a tab, they aren't
-/// drawn.
-fn link_tabs(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, Option<String>) {
+/// lit), in the order they registered. Returns their width and the id of
+/// the one clicked (a tab key, or with true a page's); in a row too narrow
+/// for them and a tab, they aren't drawn.
+fn link_tabs(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, Option<(String, bool)>) {
     let font = FontId::proportional(12.5);
     let icons = markdown::icon_font(13.0);
     let links: Vec<_> = crate::plugins::parts().home_tabs.iter().filter(|tab| tab.link() && tab.shown() && !tab.id().is_empty()).collect();
@@ -1157,7 +1159,7 @@ fn link_tabs(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, Option<String>) {
         let icon_font = if tab.icon_is_text() { FontId::proportional(14.0) } else { icons.clone() };
         tab_face(ui, t, rect, resp.hovered(), (&tab.icon(), icon_font, color), &tab.label(), color);
         if resp.clicked() {
-            picked = Some(id);
+            picked = Some((id, tab.page()));
         }
     }
     (total + 8.0, picked)

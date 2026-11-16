@@ -25,6 +25,22 @@ impl App {
         }
     }
 
+    /// Shows the page of the Home tab `id`, when it has one.
+    pub(crate) fn plugin_go_page(&mut self, id: &str) {
+        if crate::plugins::parts().home_tabs.iter().any(|tab| tab.page() && tab.id() == id) {
+            self.plugin_page = id.to_string();
+            self.page = Page::Plugin;
+        }
+    }
+
+    /// Shows Settings; its X comes back to what was shown.
+    pub(crate) fn plugin_go_settings(&mut self) {
+        if self.page != Page::Settings {
+            self.settings_from = Some(self.page);
+            self.page = Page::Settings;
+        }
+    }
+
     pub(crate) fn plugin_go_home(&mut self, tab: &str) {
         self.page = Page::Home;
         self.home_list = tab.to_string();

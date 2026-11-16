@@ -93,8 +93,13 @@ pub trait HomeTab: Send + Sync {
     /// row, and a click opens the tab whose key is `id` (as `App::open`
     /// does) instead of showing a cell. `order` doesn't apply to it.
     fn link(&self) -> bool { false }
+    /// A link to a page of the plugin's own rather than to a tab: a click
+    /// shows `show` in all of the window under the tabs' row, as Settings
+    /// is shown (no tab is lit and there is no message box), until
+    /// another tab or Home is picked. Only with `link`.
+    fn page(&self) -> bool { false }
     /// Draws the cell: `ui.max_rect()` is all of it (a link's only in an
-    /// Oak older than links, which shows it as a tab).
+    /// Oak older than links, which shows it as a tab); a page's, the page.
     fn show(&self, ui: &mut Ui, app: &mut dyn App);
 }
 
@@ -652,7 +657,7 @@ impl Registrar {
         let (id, label, icon, tip) = (tab.id(), tab.label(), tab.icon(), tab.tip());
         let d = OakHomeTab {
             size: size_of::<OakHomeTab>(),
-            flags: icon_flags(tab.icon_is_text()) | if tab.link() { OAK_HOME_TAB_LINK } else { 0 },
+            flags: icon_flags(tab.icon_is_text()) | if tab.link() { OAK_HOME_TAB_LINK } else { 0 } | if tab.link() && tab.page() { OAK_HOME_TAB_PAGE } else { 0 },
             id: s(&id),
             label: s(&label),
             icon: s(&icon),

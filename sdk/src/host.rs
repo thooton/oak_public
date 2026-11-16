@@ -434,6 +434,19 @@ pub trait App {
     /// Shows the New screen with `kind` picked (a `NewKind`'s id, a cloud
     /// backend's id, "local", "chat", "super").
     fn go_new(&mut self, kind: &str);
+    /// Shows Settings; leaving it comes back to what was shown (Oak 5).
+    fn go_settings(&mut self);
+    /// Shows the page of the `HomeTab` `id` (one whose `page` is true; Oak 5).
+    fn go_page(&mut self, id: &str);
+    /// What was pasted (pictures) or dropped on the window this frame,
+    /// as image and file blocks the message box would attach, and why any
+    /// couldn't be. Whoever takes them has them: take them only while
+    /// showing somewhere they go (Oak 5).
+    fn take_files(&mut self) -> Attached;
+    /// Asks for files to attach in the system's dialog, offering those
+    /// with `extensions` (named `filter`; none: any file) and any file.
+    /// `None`: none were picked (Oak 5).
+    fn pick_files(&mut self, filter: &str, extensions: &[&str]) -> Option<Attached>;
     /// Says `text` over the message box, in the error color (None clears it).
     fn hint(&mut self, text: Option<String>);
     /// The message box's text. What is changed in it reaches the box when
@@ -458,6 +471,17 @@ pub trait App {
     /// The list of backend `id`'s cloud sessions, as Home's Cloud tab
     /// shows Oak's own: a click opens the session.
     fn cloud_list(&mut self, ui: &mut Ui, backend: &str);
+}
+
+/// Files to attach (`App::take_files`, `App::pick_files`).
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct Attached {
+    /// Image and file blocks, as `App::attachments` holds them.
+    #[serde(default)]
+    pub files: Vec<Value>,
+    /// Why each that couldn't be attached wasn't.
+    #[serde(default)]
+    pub errors: Vec<String>,
 }
 
 /// Oak's window: the `App` a part is given. What the plugin changed in
@@ -536,6 +560,26 @@ impl App for Window {
     fn go_new(&mut self, kind: &str) {
         self.settle();
         unsafe { (api().app_go_new)(s(kind)) };
+    }
+
+    fn go_settings(&mut self) {
+        self.settle();
+        unsafe { (api().app_go_settings)() };
+    }
+
+    fn go_page(&mut self, id: &str) {
+        self.settle();
+        unsafe { (api().app_go_page)(s(id)) };
+    }
+
+    fn take_files(&mut self) -> Attached {
+        let (some, json) = text_from(|out, user| unsafe { (api().take_files)(out, user) });
+        if some { serde_json::from_str(&json).unwrap_or_default() } else { Attached::default() }
+    }
+
+    fn pick_files(&mut self, filter: &str, extensions: &[&str]) -> Option<Attached> {
+        let (some, json) = text_from(|out, user| unsafe { (api().pick_files)(s(filter), s(&extensions.join("\n")), out, user) });
+        some.then(|| serde_json::from_str(&json).unwrap_or_default())
     }
 
     fn hint(&mut self, text: Option<String>) {

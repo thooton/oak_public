@@ -297,22 +297,33 @@ impl App {
 /// Images pasted (Ctrl+V of a screenshot) or files dropped on the window,
 /// added to `files` (`hint` says why one couldn't be).
 pub(crate) fn take_drops(ctx: &egui::Context, files: &mut Vec<Value>, hint: &mut Option<String>) {
+    if let Some(why) = take_drops_all(ctx, files).pop() {
+        *hint = Some(why);
+    }
+}
+
+/// `take_drops`, saying why each that couldn't be attached wasn't.
+pub(crate) fn take_drops_all(ctx: &egui::Context, files: &mut Vec<Value>) -> Vec<String> {
     let (pasted, dropped) = ctx.input(|i| {
         let pasted: Vec<_> = i.events.iter().filter_map(|e| if let egui::Event::PasteImage(img) = e { Some(img.clone()) } else { None }).collect();
         (pasted, i.raw.dropped_files.clone())
     });
+    let mut errors = vec![];
     for img in pasted {
         match images::from_color_image(&img) {
             Ok(i) => files.push(i.block()),
-            Err(e) => *hint = Some(format!("Couldn't attach the pasted image: {e}")),
+            Err(e) => errors.push(format!("Couldn't attach the pasted image: {e}")),
         }
     }
     for f in dropped {
+        let mut hint = None;
         match f.bytes() {
-            Ok(b) => attach(files, hint, f.path(), Ok(b.to_vec())),
-            Err(_) => attach_file(files, hint, f.path()),
+            Ok(b) => attach(files, &mut hint, f.path(), Ok(b.to_vec())),
+            Err(_) => attach_file(files, &mut hint, f.path()),
         }
+        errors.extend(hint);
     }
+    errors
 }
 
 /// Attaches the file at `path` (its bytes, or why they couldn't be read).

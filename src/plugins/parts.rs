@@ -113,6 +113,8 @@ pub(crate) struct HomeTab {
     icon_is_text: bool,
     /// A link at the row's right end that opens the tab `id`.
     link: bool,
+    /// With `link`: it opens a page of its own, which `show` draws.
+    page: bool,
     tip: String,
     order: i32,
     shown: Option<OakAsk>,
@@ -124,7 +126,7 @@ impl HomeTab {
     /// # Safety
     /// `d` is a descriptor a plugin handed over, valid for this call.
     pub(crate) unsafe fn new(d: &OakHomeTab) -> HomeTab {
-        unsafe { HomeTab { id: text(d.id), label: text(d.label), icon: text(d.icon), icon_is_text: d.flags & OAK_ICON_IS_TEXT != 0, link: d.flags & OAK_HOME_TAB_LINK != 0, tip: text(d.tip), order: d.order, shown: d.shown, show: d.show, user: User(d.user) } }
+        unsafe { HomeTab { id: text(d.id), label: text(d.label), icon: text(d.icon), icon_is_text: d.flags & OAK_ICON_IS_TEXT != 0, link: d.flags & OAK_HOME_TAB_LINK != 0, page: d.flags & OAK_HOME_TAB_LINK != 0 && d.flags & OAK_HOME_TAB_PAGE != 0, tip: text(d.tip), order: d.order, shown: d.shown, show: d.show, user: User(d.user) } }
     }
 
     pub(crate) fn id(&self) -> String {
@@ -149,6 +151,11 @@ impl HomeTab {
 
     pub(crate) fn link(&self) -> bool {
         self.link
+    }
+
+    /// A link to a page of the plugin's own (`Page::Plugin`), not to a tab.
+    pub(crate) fn page(&self) -> bool {
+        self.page
     }
 
     pub(crate) fn order(&self) -> i32 {

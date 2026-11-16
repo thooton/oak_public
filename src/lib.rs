@@ -176,6 +176,9 @@ enum Page {
     Chats,
     /// Charts of the usage log, opened from Home's preview.
     Usage,
+    /// A plugin's page (`App::plugin_page`): a link at the right end of
+    /// Home's tabs' row opens it (`oak_sdk::HomeTab::page`).
+    Plugin,
 }
 
 /// A quick hasher (FxHash's step) for what is hashed every frame: the
@@ -323,6 +326,8 @@ struct App {
     /// (`home::LOCAL_TAB`, also when empty), the cloud sessions
     /// (`home::CLOUD_TAB`), or a plugin's tab, by its id.
     home_list: String,
+    /// The Home tab whose page `Page::Plugin` shows, by its id.
+    plugin_page: String,
     /// What Home's conversation search narrows the list to (not kept).
     chat_filter: String,
     /// The New screen starts a cloud session.
@@ -600,6 +605,13 @@ impl eframe::App for App {
                 }
             }
             Page::Chats => self.chats_page(ui, &t, plain),
+            Page::Plugin => match plugins::parts().home_tabs.iter().find(|tab| tab.page() && tab.id() == self.plugin_page).cloned() {
+                Some(tab) => {
+                    central(&mut |ui| tab.show(ui, self));
+                }
+                // (Its plugin is gone.)
+                None => self.page = Page::Home,
+            },
         }
     }
 }

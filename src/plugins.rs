@@ -755,6 +755,10 @@ mod tests {
                 app.home_list = tab.id();
                 frames(&mut app, &format!("Home's {} tab in the {theme} theme", tab.id()));
             }
+            for tab in p.home_tabs.iter().filter(|tab| tab.page()) {
+                app.plugin_go_page(&tab.id());
+                frames(&mut app, &format!("the page {} in the {theme} theme", tab.id()));
+            }
         }
         app.page = Page::Settings;
         frames(&mut app, "Settings");

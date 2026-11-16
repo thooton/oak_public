@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 4
+#define OAK_API_VERSION 5
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -232,6 +232,16 @@ struct OakTextEdit {
     float points;
     /* 0: the default. */
     uint32_t text_color;
+    /* Version 5. With `OAK_EDIT_MARGIN`: the room around the text,
+     * inside the frame (or where it would be).
+     */
+    float margin_left;
+    float margin_right;
+    float margin_top;
+    float margin_bottom;
+    /* The least room it takes, however little text it has (0: none). */
+    float min_width;
+    float min_height;
 };
 
 /* How a container lays out what is drawn in it. */
@@ -402,7 +412,7 @@ struct OakRequest {
 /* A tab on Home. */
 struct OakHomeTab {
     uint32_t size;
-    /* `OAK_ICON_IS_TEXT`, `OAK_HOME_TAB_LINK`. */
+    /* `OAK_ICON_IS_TEXT`, `OAK_HOME_TAB_LINK`, `OAK_HOME_TAB_PAGE`. */
     uint32_t flags;
     void *user;
     /* What `app_go_home` takes. */
@@ -687,6 +697,8 @@ struct OakHooks {
 #define OAK_EDIT_SMALL 256u
 /* Enter doesn't make a newline in a multiline field (Shift+Enter does). */
 #define OAK_EDIT_ENTER_SENDS 512u
+/* Its `margin_*` fields are the room around the text (version 5). */
+#define OAK_EDIT_MARGIN 1024u
 /* `OakLayout.dir`: where the next widget goes. */
 #define OAK_DIR_RIGHT 0u
 #define OAK_DIR_LEFT 1u
@@ -807,6 +819,11 @@ struct OakHooks {
 /* What hovering it says while it is disabled. */
 #define OAK_RESPONSE_DISABLED_HOVER_TEXT 7u
 #define OAK_RESPONSE_SURRENDER_FOCUS 8u
+/* A menu a click on it opens and closes, under it, `value` points
+ * wide (0: as wide as it is): `body` draws it. The answer has
+ * `OAK_OPEN` while it is open (version 5).
+ */
+#define OAK_RESPONSE_MENU 9u
 #define OAK_CURSOR_DEFAULT 0u
 #define OAK_CURSOR_POINTING_HAND 1u
 #define OAK_CURSOR_TEXT 2u
@@ -865,6 +882,10 @@ struct OakHooks {
 #define OAK_INPUT_SCROLL 3u
 /* Where the main button last went down. */
 #define OAK_INPUT_PRESS_ORIGIN 4u
+/* Whether any widget has the keyboard (version 5). */
+#define OAK_INPUT_FOCUSED 5u
+/* Whether files are being dragged over the window (version 5). */
+#define OAK_INPUT_FILES_HOVERED 6u
 #define OAK_HTTP_NO_REDIRECTS 1u
 /* No proxy: straight to the address (a service on this machine). */
 #define OAK_HTTP_DIRECT 2u
@@ -880,6 +901,12 @@ struct OakHooks {
  * tab.
  */
 #define OAK_HOME_TAB_LINK 2u
+/* `OakHomeTab`, with `OAK_HOME_TAB_LINK`: a link to a page of the
+ * plugin's own rather than a tab. A click shows `show` in all of the
+ * window under the tabs' row, as Settings is shown (no tab lit, no
+ * message box), until another tab or Home is picked (version 5).
+ */
+#define OAK_HOME_TAB_PAGE 4u
 
 /* The functions Oak gives a plugin. */
 struct OakApi {
@@ -1367,6 +1394,31 @@ struct OakApi {
      * "detail" too, under the report on hover.
      */
     void (*oak_super_agent_box_act)(const OakRect *area, OakStr json, OakSink out, void *out_user);
+
+    /* `animate`, taking `seconds` to go from 0 to 1 (linear: the plugin
+     * eases it as it likes).
+     */
+    float (*animate_time)(uint64_t id, bool on, float seconds);
+
+    /* Shows Settings; leaving it comes back to what was shown. */
+    void (*app_go_settings)(void);
+
+    /* Shows the page of the Home tab `id` (an `OAK_HOME_TAB_PAGE` link). */
+    void (*app_go_page)(OakStr id);
+
+    /* What was pasted (pictures) or dropped on the window this frame, as
+     * the message box would attach it: JSON `{"files": [blocks], "errors":
+     * [why one couldn't be]}`. False: nothing came. Whoever takes them
+     * has them: call it only while showing somewhere to attach them.
+     */
+    bool (*take_files)(OakSink out, void *out_user);
+
+    /* Asks for files to attach in the system's dialog: `filter` names
+     * the kinds (`extensions`, one a line; empty: any file), and "Any
+     * file" is offered too. `out` gets JSON as `take_files` gives it;
+     * false when none were picked.
+     */
+    bool (*pick_files)(OakStr filter, OakStr extensions, OakSink out, void *out_user);
 };
 
 /* Text from a C string, and from a literal. */
