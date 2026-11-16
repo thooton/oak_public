@@ -233,6 +233,13 @@ can't read.
 - Stable prefix (Settings, on by default; `src/prefix.rs`): the system prompt and tool list stay
   byte for byte as cached; what changes meanwhile (the date, a kit loaded, effort) reaches the model
   after the latest user turn, and the prefix is rebuilt only when the cache is cold anyway.
+  A loaded kit never moves into the prefix at a cold moment: the model's history must not show it
+  loading what it had from the start. Its instructions stay LOAD's result (kept when old tool
+  output is cleared) and its tool joins right after that result (a mid-conversation tool
+  definition; where tools can't be added, it is called through LOAD). Only once a rolling summary
+  covers the LOAD do the kit's prompt block and tool join the system prompt and tool list. A revert
+  to before a LOAD unloads the kit. With the setting off, the tool list has every loaded kit's tool
+  but the system prompt follows the same rule.
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
   the prompt, and is never offered to subagents (it serves one request at a time).
 

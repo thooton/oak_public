@@ -281,19 +281,38 @@ impl Worker {
         }
         // (A model without effort levels goes without.)
         let effort = Some(effort_for(&c.model, &c.effort).to_string()).filter(|e| !e.is_empty());
-        let tools = if c.chat { tools::chat_definitions() } else { tools::definitions_with_kits(agent.is_some(), c.spawner, local, &kits) };
-        let built = crate::prefix::Pin { day: crate::time::today_utc(), kits, effort, tools, folder: c.folder.display().to_string() };
+        let (n, cut) = (c.messages.len(), c.rolling.base());
+        // A kit whose LOAD the view shows stays out of the system prompt and
+        // the prefix's tools (its LOAD's result has its instructions, its
+        // tools join after it); one a summary covers (or loaded with no
+        // LOAD) is in them.
+        let loads = if c.chat { vec![] } else { crate::prefix::loads(&c.messages) };
+        let shown = |k: &String| loads.iter().find(|l| &l.kit == k).filter(|l| l.call >= cut);
+        let defs = |kits: &[String]| if c.chat { tools::chat_definitions() } else { tools::definitions_with_kits(agent.is_some(), c.spawner, local, kits) };
+        let held: Vec<String> = kits.iter().filter(|k| shown(k).is_none()).cloned().collect();
+        let held_tools = defs(&held);
+        let mut joins = vec![];
+        for l in kits.iter().filter_map(shown) {
+            let with = defs(&[held.clone(), vec![l.kit.clone()]].concat());
+            for t in with.iter().filter(|t| !held_tools.iter().any(|h| h["name"] == t["name"])) {
+                let tool = t["name"].as_str().unwrap_or("").to_string();
+                joins.push(crate::prefix::Join { tool, kit: l.kit.clone(), at: l.join, through: l.through });
+            }
+        }
+        let built = crate::prefix::Pin { day: crate::time::today_utc(), kits: kits.clone(), effort, tools: defs(&kits), folder: c.folder.display().to_string() };
+        let base = crate::prefix::Pin { kits: held, tools: held_tools, ..built.clone() };
         // The stable prefix: the date, kits, tools and effort the cache was
         // written with, and messages for what changed since (`crate::prefix`).
         let mode = crate::prefix::mode(provider, &c.model);
-        let (n, cut) = (c.messages.len(), c.rolling.base());
         let pin = match mode {
             Some(mode) => {
                 let add = last_is(&c, "user");
                 let effort_per_message = mode == crate::prefix::Mode::Claude && crate::prefix::supports_effort(&c.model);
-                c.prefix.prepare(crate::prefix::Setup { mode, cold, n, cut, add, effort_per_message, now: built })
+                c.prefix.prepare(crate::prefix::Setup { mode, cold, n, cut, add, effort_per_message, now: built, base, joins })
             }
-            None => built,
+            // Everything as it is now, but the system prompt as the history
+            // has it (the tools must be in the list to be called).
+            None => crate::prefix::Pin { kits: base.kits, ..built },
         };
         // (The folder the cache was written with: a CD's result says the new one.)
         let system = if c.chat {

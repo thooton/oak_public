@@ -229,8 +229,9 @@ fn goal_runs_until_finished() {
 
 /// Kits and notes on a stable prefix (Claude): LOAD adds AGENT's tool in
 /// a system message while the cache is warm, the prompt and tools as
-/// they were; at the next cold moment the tool and its prompt block join
-/// the prefix and the LOAD result and NOTE text are folded.
+/// they were. A cold moment folds the NOTE text but leaves the kit where
+/// its LOAD put it (its instructions the LOAD result, its tool after it);
+/// only a summary that covers the LOAD brings the kit into the prefix.
 #[test]
 fn kits_and_notes_wait_for_a_cold_moment() {
     let (w, s) = idle_worker("kits", Conversation { model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
@@ -266,15 +267,174 @@ fn kits_and_notes_wait_for_a_cold_moment() {
     s.conv.lock().unwrap().effort = "low".into();
     let (r3, ..) = w.request_body();
     assert_eq!((r3.effort.as_deref(), r3.messages.last().unwrap()["effort"].as_str()), (Some("high"), Some("low")));
-    // Cold: everything as it is now, the duplicates folded.
+    // Cold: the date, effort and notes as they are now, the note folded;
+    // the kit stays out of the prefix, its tool right after its LOAD.
     s.conv.lock().unwrap().cache.cold();
     let (r4, ..) = w.request_body();
-    assert!(names(&r4).contains(&"AGENT".to_string()) && r4.system.contains("Subagents (AGENT) suit") && r4.system.contains("[1] the db is postgres"));
+    assert_eq!(r4.tools, r1.tools, "no kit in the prefix");
+    assert!(r4.system.contains("[1] the db is postgres") && !r4.system.contains("Subagents (AGENT) suit"));
     assert_eq!(r4.effort.as_deref(), Some("low"));
-    assert!(r4.messages.iter().all(|m| m["role"] != "system"));
+    let roles: Vec<&str> = r4.messages.iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["user", "assistant", "user", "system"]);
+    assert_eq!(r4.messages[3]["content"], r2.messages.last().unwrap()["content"], "the tool where it joined");
     let flat = serde_json::to_string(&r4.messages).unwrap();
-    assert!(flat.contains("Loaded AGENT: it is in your tools and system prompt now.") && !flat.contains("Subagents (AGENT) suit"));
+    assert!(flat.contains("Loaded AGENT. The AGENT tool is in your tool list now.") && flat.contains("Subagents (AGENT) suit"), "LOAD's result stays");
     assert!(flat.contains(crate::prefix::NOTE_FOLDED) && !flat.contains("the db is postgres"));
+    // Clearing old tool output at a cold moment keeps LOAD's result.
+    {
+        let mut c = s.conv.lock().unwrap();
+        let big = "x".repeat(200_000);
+        c.messages.push(json!({"role": "assistant", "content": [{"type": "tool_call", "id": "e1", "name": "EXECUTE", "input": {"command": "cat big"}}]}));
+        c.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "e1", "content": big}]}));
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("done")]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text("next")]}));
+        let messages = c.messages.clone();
+        c.rolling.clear_cold(&messages);
+        c.cache.cold();
+    }
+    let (r5, ..) = w.request_body();
+    let flat = serde_json::to_string(&r5.messages).unwrap();
+    assert!(flat.contains("Subagents (AGENT) suit") && !r5.system.contains("Subagents (AGENT) suit"));
+    // A summary covers the LOAD: the kit joins the prefix, and no message
+    // adds its tool any more.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.rolling.summary = Some(crate::rolling::Summary { cut: 3, text: "Loaded AGENT, noted the db.".into(), made_at: 1, clear: 3 });
+    }
+    let (r6, ..) = w.request_body();
+    assert!(names(&r6).contains(&"AGENT".to_string()) && r6.system.contains("Subagents (AGENT) suit"));
+    assert!(r6.messages.iter().all(|m| m["role"] != "system"));
+    let flat = serde_json::to_string(&r6.messages).unwrap();
+    assert!(!flat.contains("\"LOAD\"") && !flat.contains("Subagents (AGENT) suit"), "{flat}");
+}
+
+/// A transcript in which the model loaded AGENT (message 1) and BROWSER
+/// (message 3), each result followed by more work.
+fn two_loads() -> Conversation {
+    let load = |id: &str, kit: &str| json!({"role": "assistant", "content": [{"type": "tool_call", "id": id, "name": "LOAD", "input": {"name": kit}}]});
+    let result = |id: &str, kit: &str| json!({"role": "user", "content": [{"type": "tool_result", "call_id": id, "content": format!("Loaded {kit}. The {kit} tool is in your tool list now.\n\n{kit} instructions")}]});
+    Conversation {
+        model: "claude-opus-5-5".into(),
+        effort: "high".into(),
+        messages: vec![
+            json!({"role": "user", "content": [oak::text("go")]}),
+            load("a", "agent"),
+            result("a", "AGENT"),
+            load("b", "BROWSER"),
+            result("b", "BROWSER"),
+            json!({"role": "assistant", "content": [oak::text("both loaded")]}),
+            json!({"role": "user", "content": [oak::text("next")]}),
+        ]
+        .into(),
+        prefix: crate::prefix::State { kits: vec!["AGENT".into(), "BROWSER".into()], ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// Each kit is in the prefix exactly when a summary covers its LOAD;
+/// otherwise its tool is told right after its LOAD's result, at every
+/// renewal, and through a save and reload.
+#[test]
+fn a_kit_joins_the_prefix_only_once_a_summary_covers_its_load() {
+    let (w, s) = idle_worker("two-loads", two_loads());
+    let names = |r: &oak::Request| r.tools.iter().map(|t| t["name"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    let added = |r: &oak::Request| -> Vec<(usize, String)> {
+        let at = |i: usize, m: &Value| m["content"].as_array().unwrap().iter().filter(|b| b["type"] == "tool_definition").map(|b| (i, b["definition"]["name"].as_str().unwrap().to_string())).collect::<Vec<_>>();
+        r.messages.iter().enumerate().filter(|(_, m)| m["role"] == "system").flat_map(|(i, m)| at(i, m)).collect()
+    };
+    // The first request (nothing cached): neither kit in the prefix.
+    let (r1, ..) = w.request_body();
+    assert!(!names(&r1).contains(&"AGENT".to_string()) && !names(&r1).contains(&"BROWSER".to_string()));
+    assert!(!r1.system.contains("Subagents (AGENT) suit") && !r1.system.contains("BROWSER kit"));
+    // Each tool after its LOAD's result, before the reply that follows.
+    assert_eq!(added(&r1), [(3, "AGENT".to_string()), (6, "BROWSER".to_string())]);
+    assert_eq!((r1.messages[2]["role"].as_str(), r1.messages[5]["content"][0]["call_id"].as_str()), (Some("user"), Some("b")));
+    // As sent to Claude: each `tool_addition` right after its LOAD's
+    // result, the tool list and system prompt without either kit.
+    let body = api::claude_body(&r1);
+    let sent: Vec<(String, String)> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["role"].as_str().unwrap().to_string(), m["content"][0]["type"].as_str().unwrap_or("").to_string()))
+        .collect();
+    let at = |role: &str, kind: &str| (role.to_string(), kind.to_string());
+    assert_eq!(&sent[1..7], [at("assistant", "tool_use"), at("user", "tool_result"), at("system", "tool_addition"), at("assistant", "tool_use"), at("user", "tool_result"), at("system", "tool_addition")]);
+    assert_eq!(body["messages"][3]["content"][0]["tool"]["definition"]["name"], "AGENT");
+    assert!(!body["tools"].as_array().unwrap().iter().any(|t| t["name"] == "AGENT" || t["name"] == "BROWSER"));
+    // Cold again (expired, another account): the same request.
+    s.conv.lock().unwrap().cache.cold();
+    let (r2, ..) = w.request_body();
+    assert_eq!((&r2.system, &r2.tools, &r2.messages), (&r1.system, &r1.tools, &r1.messages));
+    // Saved and loaded again: the same request.
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let back: Conversation = serde_json::from_str(&saved).unwrap();
+    let (w2, _s2) = idle_worker("two-loads-reloaded", back);
+    let (r3, ..) = w2.request_body();
+    assert_eq!((&r3.system, &r3.tools, &r3.messages), (&r1.system, &r1.tools, &r1.messages));
+    // A summary covers AGENT's LOAD, not BROWSER's: AGENT joins the
+    // prefix, BROWSER's tool stays after its LOAD.
+    s.conv.lock().unwrap().rolling.summary = Some(crate::rolling::Summary { cut: 3, text: "Loaded AGENT.".into(), made_at: 1, clear: 3 });
+    let (r4, ..) = w.request_body();
+    assert!(names(&r4).contains(&"AGENT".to_string()) && !names(&r4).contains(&"BROWSER".to_string()));
+    assert!(r4.system.contains("Subagents (AGENT) suit"));
+    // The view: the summary, then messages 3.. (BROWSER's LOAD first).
+    assert_eq!(r4.messages[1]["content"][0]["input"]["name"], "BROWSER");
+    assert_eq!(added(&r4), [(3, "BROWSER".to_string())]);
+    // Saved and loaded again, warm: the same request.
+    {
+        let mut c = s.conv.lock().unwrap();
+        let choice = crate::cache_ttl::Choice { ttl: oak::Ttl::FiveMinutes, anchor: None };
+        let base = c.rolling.base();
+        c.cache.record(api::now_ms(), choice, 20_000, r4.messages.len(), base);
+    }
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let back: Conversation = serde_json::from_str(&saved).unwrap();
+    let (w3, _s3) = idle_worker("two-loads-reloaded-again", back);
+    let (r5, ..) = w3.request_body();
+    assert_eq!((&r5.system, &r5.tools, &r5.messages), (&r4.system, &r4.tools, &r4.messages));
+    // A summary that covers both: both in the prefix, no tool messages.
+    s.conv.lock().unwrap().rolling.summary = Some(crate::rolling::Summary { cut: 5, text: "Loaded both.".into(), made_at: 2, clear: 5 });
+    let (r6, ..) = w.request_body();
+    assert!(names(&r6).contains(&"AGENT".to_string()) && names(&r6).contains(&"BROWSER".to_string()));
+    assert!(added(&r6).is_empty() && r6.messages.iter().all(|m| m["role"] != "system"));
+}
+
+/// Where tools can't be added (OpenRouter), a kit loaded in view is
+/// reached through LOAD; one loaded with a Claude model, whose LOAD said
+/// it was in the tool list, is told so in text after its result.
+#[test]
+fn a_kit_loaded_in_view_is_called_through_load_where_tools_cant_be_added() {
+    let (w, s) = idle_worker("two-loads-generic", Conversation { provider: Some(crate::providers::Kind::OpenRouter), model: "openai/gpt-5".into(), ..two_loads() });
+    assert_eq!(crate::prefix::mode(s.conv.lock().unwrap().provider(), "openai/gpt-5"), Some(crate::prefix::Mode::Generic));
+    let (r, ..) = w.request_body();
+    let names: Vec<&str> = r.tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(!names.contains(&"AGENT") && !names.contains(&"BROWSER") && names.contains(&"LOAD"));
+    let flat = serde_json::to_string(&r.messages).unwrap();
+    assert!(flat.contains("The AGENT tool isn't in your tool list here: call it through LOAD, with name=AGENT"), "{flat}");
+    assert!(flat.contains("The BROWSER tool isn't in your tool list here: call it through LOAD, with name=BROWSER"));
+    // A LOAD whose result said so already isn't told again.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages[2]["content"][0]["content"] = json!("Loaded AGENT. Its tool isn't in your tool list: call it through LOAD, with name=AGENT …");
+        c.cache.cold();
+    }
+    let (r, ..) = w.request_body();
+    let flat = serde_json::to_string(&r.messages).unwrap();
+    assert!(!flat.contains("The AGENT tool isn't in your tool list here") && flat.contains("The BROWSER tool isn't in your tool list here"));
+}
+
+/// A revert to before a LOAD unloads its kit, and what was told after
+/// the revert's point goes with it.
+#[test]
+fn a_revert_before_a_load_unloads_its_kit() {
+    let mut c = two_loads();
+    c.prefix.sys.push(crate::prefix::SysMsg { at: 5, kind: "tool:BROWSER".into(), ..Default::default() });
+    c.prefix.sys.push(crate::prefix::SysMsg { at: 3, kind: "tool:AGENT".into(), ..Default::default() });
+    let was = c.messages[3]["content"][0].clone();
+    assert!(revert_to(&mut c, 3, 0, &was));
+    assert_eq!(c.prefix.kits, ["AGENT"]);
+    assert_eq!(c.prefix.sys.iter().map(|m| m.at).collect::<Vec<_>>(), [3]);
 }
 
 /// While a goal is active, ASK needs a REQUEST_ASK the user accepted,
@@ -450,7 +610,7 @@ fn cd_switches_the_working_folder() {
     // The pin keeps the folder the cache was written with.
     let mut p = crate::prefix::State::default();
     let pin = |folder: &Path| crate::prefix::Pin { day: "d".into(), folder: folder.display().to_string(), tools: vec![json!({"name": "READ"})], ..Default::default() };
-    let setup = |n, now| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, cold: false, n, cut: 0, add: true, effort_per_message: true, now };
+    let setup = |n, now: crate::prefix::Pin| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, cold: false, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![] };
     assert_eq!(p.prepare(setup(1, pin(&root))).folder, root.display().to_string());
     assert_eq!(p.prepare(setup(3, pin(&sub))).folder, root.display().to_string());
     assert!(p.sys.is_empty());

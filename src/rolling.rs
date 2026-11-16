@@ -469,8 +469,10 @@ const LEFT: f64 = 0.35;
 const SMALL: usize = 600;
 pub const CLEARED: &str = "[Old tool output, cleared to save context. Run the tool again if you need it.]";
 /// Tools whose output running them again wouldn't bring back: the user's
-/// answers, other agents' messages, a task's output already read.
-const KEPT_TOOLS: &[&str] = &["ASK", "AGENT_NEW", "AGENT_SEND", "AGENT_WAIT", "TASK_WAIT", "TASK_GET_NEW_OUTPUT"];
+/// answers, other agents' messages, a task's output already read, a kit's
+/// instructions (LOAD's result: the kit joins the system prompt only once a
+/// summary covers its LOAD, `crate::prefix`).
+const KEPT_TOOLS: &[&str] = &["LOAD", "ASK", "AGENT_NEW", "AGENT_SEND", "AGENT_WAIT", "TASK_WAIT", "TASK_GET_NEW_OUTPUT"];
 
 
 /// Which tool each call id in `messages` went to.

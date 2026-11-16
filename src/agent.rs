@@ -1823,6 +1823,7 @@ fn revert_to_end(c: &mut Conversation, n: usize) -> bool {
 /// summary that covered it.
 fn cut_messages(c: &mut Conversation, n: usize, changed: usize) {
     c.messages.truncate(n);
+    c.prefix.reverted(&c.messages);
     c.marks.retain(|m| m.at <= changed);
     if c.rolling.summary.as_ref().is_some_and(|s| s.cut > changed) {
         c.rolling.summary = None;

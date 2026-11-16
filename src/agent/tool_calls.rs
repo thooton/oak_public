@@ -375,7 +375,8 @@ impl Worker {
         let tool = match mode {
             _ if kit == "WINDOW" => String::new(),
             Some(crate::prefix::Mode::Generic) => format!(
-                "Its tool isn't in your tool list until Oak next renews the list: until then, call it through LOAD, with name={kit} and the tool's input in `input`, e.g. {{\"name\": \"{kit}\", \"input\": {{\"action\": \"...\"}}}}.\n{}",
+                "Its tool isn't in your tool list: {}, with name={kit} and the tool's input in `input`, e.g. {{\"name\": \"{kit}\", \"input\": {{\"action\": \"...\"}}}}.\n{}",
+                crate::prefix::THROUGH_LOAD,
                 tools::kit_help(&kit, agent)
             ),
             _ => format!("The {kit} tool is in your tool list now."),

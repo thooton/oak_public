@@ -6,15 +6,21 @@
 //! - the date in the system prompt: "Today's date is now …";
 //! - a tool whose definition changed (AGENT's model list follows the
 //!   providers connected), and the tools of a kit loaded meanwhile (LOAD:
-//!   AGENT, BROWSER, WINDOW, and a local model's GOAL);
+//!   AGENT, BROWSER, WINDOW);
 //! - Claude's effort (per-message `output_config`).
 //!
 //! All are held as they were (`Pin`) while the cache lives, and brought up
 //! to date at a moment it is cold anyway (expired, a summary, another
-//! account or model), where rewriting the prefix costs nothing. Then what
-//! the conversation says twice is folded too (`fold`): the result of each
-//! LOAD (the kit is in the prompt and tools now) and the text of each NOTE
-//! call (the session memory has the notes).
+//! account or model), where rewriting the prefix costs nothing. Then the
+//! text of each NOTE call is folded too (`fold`: the session memory has the
+//! notes).
+//!
+//! A loaded kit stays where its LOAD put it, cold moments or not, so the
+//! history the model sees never shows it loading what it had from the
+//! start: its instructions are LOAD's result, and its tools join after that
+//! result (`Join`: a renewal puts their message back there). Only once a
+//! summary covers the LOAD (`loads`, `Setup::base`) do the kit's prompt
+//! block and tools join the prefix, at the renewal that summary brings.
 //!
 //! How the changes go depends on the provider (`Mode`):
 //! - Claude: a mid-conversation system message (`role: "system"`), with
@@ -23,8 +29,8 @@
 //! - Codex: a developer message, and an `additional_tools` item for tools;
 //! - any other (OpenRouter, NodeClub, the user's own server): a text block
 //!   at the end of the user turn they follow. Tools can't be added there, so
-//!   a loaded kit's tools are reached through LOAD (`input`) until the pin is
-//!   renewed.
+//!   a loaded kit's tools are reached through LOAD (`input`) until a summary
+//!   covers the LOAD.
 //!
 //! The messages are kept with the conversation (`SysMsg`, at the transcript
 //! index they come before), so every later request sends them where they
@@ -171,8 +177,70 @@ pub struct Setup {
     pub add: bool,
     /// The effort can change per message (else it isn't held).
     pub effort_per_message: bool,
-    /// What the request would go with without the pin.
+    /// What the request would go with without the pin: every kit loaded.
     pub now: Pin,
+    /// What a renewal holds: `now` with only the kits whose LOAD the view
+    /// doesn't show (a summary covers it, or there is none), and their
+    /// tools.
+    pub base: Pin,
+    /// Where the tools of the kits loaded in view join (`loads`).
+    pub joins: Vec<Join>,
+}
+
+/// A kit's tool that joins the conversation after the kit's LOAD.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Join {
+    pub tool: String,
+    pub kit: String,
+    /// The transcript index after the LOAD's result.
+    pub at: usize,
+    /// The result said to call the tool through LOAD (where tools can't be
+    /// added).
+    pub through: bool,
+}
+
+/// A kit's first LOAD in a transcript.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Load {
+    pub kit: String,
+    /// The message with the call.
+    pub call: usize,
+    /// The message after the one with its result.
+    pub join: usize,
+    /// Its result said to call the kit's tool through LOAD.
+    pub through: bool,
+}
+
+/// What a LOAD's result says where the kit's tool can't join the list.
+pub const THROUGH_LOAD: &str = "call it through LOAD";
+
+/// The kit a LOAD call loads (not one calling a kit's tool through it).
+fn loads_kit(b: &Value) -> Option<String> {
+    (b["type"] == "tool_call" && b["name"] == "LOAD" && b["input"].get("input").is_none_or(Value::is_null))
+        .then(|| b["input"]["name"].as_str().unwrap_or("").trim().to_uppercase())
+        .filter(|k| !k.is_empty())
+}
+
+/// Each kit's first LOAD in `messages` that worked, in order.
+pub fn loads(messages: &[Value]) -> Vec<Load> {
+    let mut out: Vec<Load> = vec![];
+    let mut open: Vec<(Value, String, usize)> = vec![];
+    for (k, m) in messages.iter().enumerate() {
+        for b in m["content"].as_array().into_iter().flatten() {
+            if let Some(kit) = loads_kit(b) {
+                open.push((b["id"].clone(), kit, k));
+            } else if b["type"] == "tool_result"
+                && let Some(i) = open.iter().position(|(id, ..)| *id == b["call_id"])
+            {
+                let (_, kit, call) = open.swap_remove(i);
+                if b["is_error"] != true && !out.iter().any(|l| l.kit == kit) {
+                    let through = b["content"].as_str().is_some_and(|t| t.contains(THROUGH_LOAD));
+                    out.push(Load { kit, call, join: k + 1, through });
+                }
+            }
+        }
+    }
+    out
 }
 
 impl State {
@@ -182,6 +250,43 @@ impl State {
         self.pin = Some(now.clone());
         self.sys.clear();
         self.folded = n;
+    }
+
+    /// After a renewal: the tools of the kits loaded in view, back after
+    /// their LOADs, where they joined (`Join`). Where tools can't be added,
+    /// a tool whose LOAD said it was in the list (the conversation moved
+    /// from a model that takes them) is told in text, to be called through
+    /// LOAD.
+    fn rejoin(&mut self, s: &Setup) {
+        for j in &s.joins {
+            let Some(t) = s.now.tools.iter().find(|t| t["name"] == j.tool.as_str()) else { continue };
+            let msg = SysMsg { at: j.at, kind: format!("tool:{}", j.tool), key: hash(t), ..Default::default() };
+            if s.mode.inline_tools() {
+                self.sys.push(SysMsg { tools: vec![t.clone()], ..msg });
+            } else if !j.through {
+                let text = format!(
+                    "The {} tool isn't in your tool list here: {THROUGH_LOAD}, with name={} and the tool's input in `input`. It is:\n{t}",
+                    j.tool, j.kit
+                );
+                self.sys.push(SysMsg { text, ..msg });
+            }
+        }
+        self.sys.sort_by_key(|m| m.at);
+    }
+
+    /// The transcript was cut back to `messages` (a revert): kits whose
+    /// LOAD went are unloaded, and what was told after the cut goes. A pin
+    /// holding a kit that went is renewed.
+    pub fn reverted(&mut self, messages: &[Value]) {
+        let n = messages.len();
+        let loads = loads(messages);
+        let gone: Vec<String> = self.kits.iter().filter(|k| !loads.iter().any(|l| &l.kit == *k)).cloned().collect();
+        self.kits.retain(|k| !gone.contains(k));
+        self.sys.retain(|m| m.at <= n);
+        self.folded = self.folded.min(n);
+        if self.pin.as_ref().is_some_and(|p| p.kits.iter().any(|k| gone.contains(k))) {
+            self.pin = None;
+        }
     }
 
     /// What the model was last told of `kind` in the view after `cut`.
@@ -195,8 +300,12 @@ impl State {
     pub fn prepare(&mut self, s: Setup) -> Pin {
         // (A pin without tools is from an older Oak, which held less.)
         let old = self.pin.as_ref().is_some_and(|p| p.tools.is_empty() && !s.now.tools.is_empty());
-        if s.cold || self.pin.is_none() || old {
-            self.renew(s.n, &s.now);
+        // A summary covered a kit's LOAD: it joins the prefix now, even
+        // where the cache isn't known to be cold.
+        let covered = self.pin.as_ref().is_some_and(|p| s.base.kits.iter().any(|k| !p.kits.contains(k)));
+        if s.cold || self.pin.is_none() || old || covered {
+            self.renew(s.n, &s.base);
+            self.rejoin(&s);
         }
         if let Some(p) = self.pin.as_mut().filter(|p| p.folder.is_empty()) {
             p.folder = s.now.folder.clone();
@@ -294,9 +403,9 @@ impl State {
     }
 
     /// Folds, in `view` (as for `inject`), what the transcript before the
-    /// last renewal says twice: a LOAD's result (the kit's instructions are
-    /// in the system prompt and tools now) and a NOTE call's text (the
-    /// session memory has the notes).
+    /// last renewal says twice: a NOTE call's text (the session memory has
+    /// the notes), and the result of a LOAD whose kit the pin holds (only a
+    /// pin an older Oak renewed holds a kit whose LOAD is in view).
     pub fn fold(&self, view: &mut [Value], cut: usize, n: usize) {
         if self.folded <= cut {
             return;
@@ -304,6 +413,7 @@ impl State {
         let offset = view.len().saturating_sub(n.saturating_sub(cut));
         let end = (offset + self.folded - cut).min(view.len());
         let mut loads: Vec<(Value, String)> = vec![];
+        let held = self.pin.as_ref().map(|p| p.kits.as_slice()).unwrap_or_default();
         for m in &mut view[offset..end] {
             let Some(content) = m["content"].as_array_mut() else { continue };
             for b in content {
@@ -314,8 +424,8 @@ impl State {
                         if note && b["input"]["text"].is_string() {
                             b["input"]["text"] = json!(NOTE_FOLDED);
                         }
-                        if b["name"] == "LOAD" && b["input"].get("input").is_none() {
-                            loads.push((b["id"].clone(), b["input"]["name"].as_str().unwrap_or("").to_uppercase()));
+                        if let Some(kit) = loads_kit(b).filter(|k| held.contains(k)) {
+                            loads.push((b["id"].clone(), kit));
                         }
                     }
                     Some("tool_result") if b["is_error"] != true => {
@@ -365,7 +475,7 @@ mod tests {
     }
 
     fn setup(mode: Mode, n: usize, now: Pin) -> Setup {
-        Setup { mode, cold: false, n, cut: 0, add: true, effort_per_message: true, now }
+        Setup { mode, cold: false, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![] }
     }
 
     #[test]
@@ -500,7 +610,9 @@ mod tests {
         assert_eq!(out[0]["content"][1]["text"], "<system-reminder>\nd1\ne1\n</system-reminder>");
     }
 
-    /// Before the renewal, LOAD results and NOTE texts are folded.
+    /// Before the renewal, NOTE texts are folded, and the LOAD results of
+    /// kits the pin holds (a pin an older Oak renewed): a kit the pin
+    /// doesn't hold keeps its LOAD's result, its instructions.
     #[test]
     fn fold_before_the_renewal() {
         let call = |id: &str, name: &str, input: Value| json!({"role": "assistant", "content": [{"type": "tool_call", "id": id, "name": name, "input": input}]});
@@ -514,11 +626,95 @@ mod tests {
             call("c", "LOAD", json!({"name": "AGENT"})),
             result("c", "more instructions"),
         ];
+        let before = view.clone();
         let s = State { folded: 5, ..Default::default() };
         s.fold(&mut view, 0, 7);
-        assert_eq!(view[2]["content"][0]["content"], "Loaded BROWSER: it is in your tools and system prompt now.");
+        assert_eq!(view[2]["content"][0]["content"], "long instructions", "not in the prefix");
         assert_eq!(view[3]["content"][0]["input"]["text"], NOTE_FOLDED);
+        let mut view = before;
+        let s = State { folded: 5, pin: Some(Pin { kits: vec!["BROWSER".into(), "AGENT".into()], ..Default::default() }), ..Default::default() };
+        s.fold(&mut view, 0, 7);
+        assert_eq!(view[2]["content"][0]["content"], "Loaded BROWSER: it is in your tools and system prompt now.");
         assert_eq!(view[6]["content"][0]["content"], "more instructions", "after the renewal");
+    }
+
+    /// Each kit's first LOAD that worked, and where its tool joins: after
+    /// its result. Calls through LOAD and failed LOADs don't count.
+    #[test]
+    fn loads_are_found_in_the_transcript() {
+        let call = |id: &str, input: Value| json!({"role": "assistant", "content": [{"type": "tool_call", "id": id, "name": "LOAD", "input": input}]});
+        let result = |id: &str, t: &str, error: bool| json!({"role": "user", "content": [{"type": "tool_result", "call_id": id, "content": t, "is_error": error}]});
+        let messages = vec![
+            m("user", "go"),
+            call("x", json!({"name": "nope"})),
+            result("x", "No kit nope.", true),
+            call("y", json!({"name": "BROWSER", "input": {"action": "open"}})),
+            result("y", "opened", false),
+            call("a", json!({"name": " agent "})),
+            result("a", "Loaded AGENT. Its tool isn't in your tool list: call it through LOAD, with name=AGENT", false),
+            call("b", json!({"name": "AGENT"})),
+            result("b", "AGENT is loaded already.", false),
+            call("c", json!({"name": "BROWSER", "input": null})),
+            result("c", "Loaded BROWSER. The BROWSER tool is in your tool list now.", false),
+        ];
+        assert_eq!(
+            loads(&messages),
+            [Load { kit: "AGENT".into(), call: 5, join: 7, through: true }, Load { kit: "BROWSER".into(), call: 9, join: 11, through: false }]
+        );
+    }
+
+    /// A renewal holds `base` (the kits a summary covers) and puts the
+    /// other kits' tools back where they joined, in order with the rest.
+    #[test]
+    fn a_renewal_puts_kit_tools_back_after_their_loads() {
+        let t = |n: &str| json!({"name": n});
+        let now = Pin { day: "d".into(), kits: vec!["AGENT".into(), "BROWSER".into()], tools: vec![t("READ"), t("AGENT"), t("BROWSER")], ..Default::default() };
+        let base = Pin { kits: vec!["AGENT".into()], tools: vec![t("READ"), t("AGENT")], ..now.clone() };
+        let joins = vec![Join { tool: "BROWSER".into(), kit: "BROWSER".into(), at: 4, through: false }];
+        let mut s = State::default();
+        let pin = s.prepare(Setup { cold: true, base: base.clone(), joins: joins.clone(), ..setup(Mode::Claude, 9, now.clone()) });
+        assert_eq!(pin, base);
+        assert_eq!(s.sys.iter().map(|m| (m.at, m.kind.as_str())).collect::<Vec<_>>(), [(4, "tool:BROWSER")]);
+        assert_eq!(s.sys[0].tools, [t("BROWSER")]);
+        // Warm, nothing changed: nothing more.
+        s.prepare(Setup { base: base.clone(), joins: joins.clone(), ..setup(Mode::Claude, 11, now.clone()) });
+        assert_eq!(s.sys.len(), 1);
+        // Cold again: the same.
+        s.prepare(Setup { cold: true, base: base.clone(), joins: joins.clone(), ..setup(Mode::Claude, 13, now.clone()) });
+        assert_eq!((s.sys.len(), s.sys[0].at), (1, 4));
+        // A summary now covers BROWSER's LOAD too: renewed even though the
+        // cache isn't known to be cold, with both kits held.
+        let s2 = s.prepare(Setup { base: now.clone(), ..setup(Mode::Claude, 15, now.clone()) });
+        assert_eq!(s2, now);
+        assert!(s.sys.is_empty());
+        // Where tools can't be added, a LOAD that said the tool was in the
+        // list gets a text telling to call it through LOAD.
+        let mut g = State::default();
+        g.prepare(Setup { cold: true, base: base.clone(), joins: joins.clone(), ..setup(Mode::Generic, 9, now.clone()) });
+        assert!(g.sys[0].text.starts_with("The BROWSER tool isn't in your tool list here: call it through LOAD, with name=BROWSER"));
+        let mut g = State::default();
+        let through = vec![Join { through: true, ..joins[0].clone() }];
+        g.prepare(Setup { cold: true, base, joins: through, ..setup(Mode::Generic, 9, now) });
+        assert!(g.sys.is_empty());
+    }
+
+    /// A revert unloads the kits whose LOADs it took, drops what was told
+    /// after its point and renews a pin that held such a kit.
+    #[test]
+    fn a_revert_unloads_kits_and_drops_later_messages() {
+        let call = json!({"role": "assistant", "content": [{"type": "tool_call", "id": "a", "name": "LOAD", "input": {"name": "AGENT"}}]});
+        let result = json!({"role": "user", "content": [{"type": "tool_result", "call_id": "a", "content": "Loaded AGENT."}]});
+        let mut s = State {
+            kits: vec!["AGENT".into(), "BROWSER".into()],
+            sys: vec![SysMsg { at: 3, ..Default::default() }, SysMsg { at: 7, ..Default::default() }],
+            folded: 7,
+            pin: Some(Pin { kits: vec!["BROWSER".into()], ..Default::default() }),
+        };
+        s.reverted(&[m("user", "go"), call, result]);
+        assert_eq!(s.kits, ["AGENT"]);
+        assert_eq!(s.sys.len(), 1);
+        assert_eq!(s.folded, 3);
+        assert!(s.pin.is_none());
     }
 
     #[test]
