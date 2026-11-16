@@ -230,16 +230,21 @@ can't read.
 - Effort levels are each model's own (Claude's from the Models API). `max_tokens` is the model's
   maximum. The prompt cache lifetime (Settings, `src/cache_ttl.rs`) is chosen per conversation:
   an hour when a long enough pause is likely, else 5 minutes.
-- Stable prefix (Settings, on by default; `src/prefix.rs`): the system prompt and tool list stay
-  byte for byte as cached; what changes meanwhile (the date, a kit loaded, effort) reaches the model
-  after the latest user turn, and the prefix is rebuilt only when the cache is cold anyway.
-  A loaded kit never moves into the prefix at a cold moment: the model's history must not show it
-  loading what it had from the start. Its instructions stay LOAD's result (kept when old tool
-  output is cleared) and its tool joins right after that result (a mid-conversation tool
-  definition; where tools can't be added, it is called through LOAD). Only once a rolling summary
-  covers the LOAD do the kit's prompt block and tool join the system prompt and tool list. A revert
-  to before a LOAD unloads the kit. With the setting off, the tool list has every loaded kit's tool
-  but the system prompt follows the same rule.
+- The prefix invariant (`src/prefix.rs`, no setting): what a conversation has sent the model (the
+  system prompt as rendered, the session memory and context block, the tools, every message) is
+  never changed; requests only add to it. Smart context acting (a summary replacing the older part)
+  is the only moment it is rebuilt. The cache expiring, another account or model, an effort, date,
+  goal, note or instruction-file change, smart context turned off or on, a save and restart, a
+  newer Oak's prompt text: none of them changes it. What changes reaches the model after the latest
+  user turn ("Today's date is now", "Your underlying model is now", a tool definition, Claude's
+  effort): Claude and Codex as their own mid-conversation messages, which turn themselves off if
+  refused (then, like other providers, as a text note where they were). A loaded kit stays where
+  its LOAD put it: its instructions LOAD's result, its tool right after it (where tools can't be
+  added, called through LOAD). Only once a summary covers the LOAD do the kit's prompt block and tool
+  join the system prompt and tool list. A revert to before a LOAD unloads the kit. A side chat sends
+  what its source sent. Regression tests (`agent::tests::the_prefix_only_grows_*`) check each
+  provider's wire body. Freebuff is the exception the service imposes: its system prompt and tools
+  are its CLI's, dated today; its messages still only grow.
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
   the prompt, and is never offered to subagents (it serves one request at a time).
 
@@ -291,7 +296,9 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
 - Smart context (`src/rolling.rs`): past a trigger (120k tokens by default) the older part is
   summarized in the background, reusing the prompt cache, and the newest ~40k stay verbatim. The
   transcript only grows: a banner marks where a summary was made and a line where its part ends.
-  Old tool output is replaced by a placeholder in requests, and a line marks where that stops.
+  Old tool output is replaced by a placeholder in requests, and a line marks where that stops:
+  only when a summary is made, the one moment what was sent may change. Turning smart context
+  off for a conversation stops new summaries; the one in use stays.
 - Goals: the model keeps working until it calls GOAL finish; "pause goal" stops Oak asking it to
   continue without telling it. While a goal is set, ASK needs the user's yes through REQUEST_ASK.
   An endless goal (the Endless box when editing it) refuses GOAL justify and finish, so it lasts
@@ -354,7 +361,8 @@ as built-in roles do over plugin roles (`add_roles`), so a plugin can't replace 
 **Side chats** (`src/side_chat.rs`). The message bubble in the title bar, left of the window's buttons,
 opens this conversation's side chat in a resizable pane on the right within Oak, with only its
 transcript and message box. The usual attachment, pause and ultrapause buttons sit by the message box.
-The first opening snapshots the saved conversation (including smart context and notes) and adds:
+The first opening snapshots the saved conversation (including smart context, notes, the prefix as
+sent and the scratchpad it names) and adds:
 'The session was forked to be placed in a "side chat". This is only a chat for asking questions or requesting small changes, so do not continue work as you were before it was forked. Only make changes to the project if the user explicitly requests so.'
 It waits for a question; the original keeps working independently. A side chat shares the working
 folder, so any explicitly requested file changes are real, but it inherits no running tasks,

@@ -227,13 +227,12 @@ fn goal_runs_until_finished() {
     assert!(!sent[0]["content"][0].as_object().unwrap().contains_key("_oak_goal"));
 }
 
-/// Kits and notes on a stable prefix (Claude): LOAD adds AGENT's tool in
-/// a system message while the cache is warm, the prompt and tools as
-/// they were. A cold moment folds the NOTE text but leaves the kit where
-/// its LOAD put it (its instructions the LOAD result, its tool after it);
-/// only a summary that covers the LOAD brings the kit into the prefix.
+/// Kits and notes (Claude): LOAD adds AGENT's tool in a system message,
+/// the prompt and tools as they were. A cold cache changes nothing; only a
+/// summary that covers the LOAD brings the kit into the prefix (and the
+/// note into the session memory, its call's text folded).
 #[test]
-fn kits_and_notes_wait_for_a_cold_moment() {
+fn kits_and_notes_wait_for_a_summary() {
     let (w, s) = idle_worker("kits", Conversation { model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
     let names = |r: &oak::Request| r.tools.iter().map(|t| t["name"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
     s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
@@ -267,20 +266,8 @@ fn kits_and_notes_wait_for_a_cold_moment() {
     s.conv.lock().unwrap().effort = "low".into();
     let (r3, ..) = w.request_body();
     assert_eq!((r3.effort.as_deref(), r3.messages.last().unwrap()["effort"].as_str()), (Some("high"), Some("low")));
-    // Cold: the date, effort and notes as they are now, the note folded;
-    // the kit stays out of the prefix, its tool right after its LOAD.
-    s.conv.lock().unwrap().cache.cold();
-    let (r4, ..) = w.request_body();
-    assert_eq!(r4.tools, r1.tools, "no kit in the prefix");
-    assert!(r4.system.contains("[1] the db is postgres") && !r4.system.contains("Subagents (AGENT) suit"));
-    assert_eq!(r4.effort.as_deref(), Some("low"));
-    let roles: Vec<&str> = r4.messages.iter().map(|m| m["role"].as_str().unwrap()).collect();
-    assert_eq!(roles, ["user", "assistant", "user", "system"]);
-    assert_eq!(r4.messages[3]["content"], r2.messages.last().unwrap()["content"], "the tool where it joined");
-    let flat = serde_json::to_string(&r4.messages).unwrap();
-    assert!(flat.contains("Loaded AGENT. The AGENT tool is in your tool list now.") && flat.contains("Subagents (AGENT) suit"), "LOAD's result stays");
-    assert!(flat.contains(crate::prefix::NOTE_FOLDED) && !flat.contains("the db is postgres"));
-    // Clearing old tool output at a cold moment keeps LOAD's result.
+    // Cold (expired, another account), and old tool output: nothing sent
+    // changes, nothing is cleared or folded, the effort stays per message.
     {
         let mut c = s.conv.lock().unwrap();
         let big = "x".repeat(200_000);
@@ -288,13 +275,13 @@ fn kits_and_notes_wait_for_a_cold_moment() {
         c.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "e1", "content": big}]}));
         c.messages.push(json!({"role": "assistant", "content": [oak::text("done")]}));
         c.messages.push(json!({"role": "user", "content": [oak::text("next")]}));
-        let messages = c.messages.clone();
-        c.rolling.clear_cold(&messages);
         c.cache.cold();
     }
-    let (r5, ..) = w.request_body();
-    let flat = serde_json::to_string(&r5.messages).unwrap();
-    assert!(flat.contains("Subagents (AGENT) suit") && !r5.system.contains("Subagents (AGENT) suit"));
+    let (r4, ..) = w.request_body();
+    assert_eq!((&r4.system, &r4.tools, r4.effort.as_deref()), (&r1.system, &r1.tools, Some("high")));
+    assert_eq!(&r4.messages[..r3.messages.len()], &r3.messages[..]);
+    let flat = serde_json::to_string(&r4.messages).unwrap();
+    assert!(flat.contains("the db is postgres") && !flat.contains(crate::prefix::NOTE_FOLDED) && flat.contains(&"x".repeat(200_000)));
     // A summary covers the LOAD: the kit joins the prefix, and no message
     // adds its tool any more.
     {
@@ -303,6 +290,7 @@ fn kits_and_notes_wait_for_a_cold_moment() {
     }
     let (r6, ..) = w.request_body();
     assert!(names(&r6).contains(&"AGENT".to_string()) && r6.system.contains("Subagents (AGENT) suit"));
+    assert!(r6.system.contains("[1] the db is postgres") && r6.effort.as_deref() == Some("low"));
     assert!(r6.messages.iter().all(|m| m["role"] != "system"));
     let flat = serde_json::to_string(&r6.messages).unwrap();
     assert!(!flat.contains("\"LOAD\"") && !flat.contains("Subagents (AGENT) suit"), "{flat}");
@@ -414,11 +402,10 @@ fn a_kit_loaded_in_view_is_called_through_load_where_tools_cant_be_added() {
     assert!(flat.contains("The AGENT tool isn't in your tool list here: call it through LOAD, with name=AGENT"), "{flat}");
     assert!(flat.contains("The BROWSER tool isn't in your tool list here: call it through LOAD, with name=BROWSER"));
     // A LOAD whose result said so already isn't told again.
-    {
-        let mut c = s.conv.lock().unwrap();
-        c.messages[2]["content"][0]["content"] = json!("Loaded AGENT. Its tool isn't in your tool list: call it through LOAD, with name=AGENT …");
-        c.cache.cold();
-    }
+    let mut c = s.conv.lock().unwrap().clone();
+    c.messages[2]["content"][0]["content"] = json!("Loaded AGENT. Its tool isn't in your tool list: call it through LOAD, with name=AGENT …");
+    c.prefix = crate::prefix::State { kits: c.prefix.kits.clone(), ..Default::default() };
+    let (w, _s) = idle_worker("two-loads-generic-said", c);
     let (r, ..) = w.request_body();
     let flat = serde_json::to_string(&r.messages).unwrap();
     assert!(!flat.contains("The AGENT tool isn't in your tool list here") && flat.contains("The BROWSER tool isn't in your tool list here"));
@@ -610,7 +597,7 @@ fn cd_switches_the_working_folder() {
     // The pin keeps the folder the cache was written with.
     let mut p = crate::prefix::State::default();
     let pin = |folder: &Path| crate::prefix::Pin { day: "d".into(), folder: folder.display().to_string(), tools: vec![json!({"name": "READ"})], ..Default::default() };
-    let setup = |n, now: crate::prefix::Pin| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, cold: false, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![] };
+    let setup = |n, now: crate::prefix::Pin| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![] };
     assert_eq!(p.prepare(setup(1, pin(&root))).folder, root.display().to_string());
     assert_eq!(p.prepare(setup(3, pin(&sub))).folder, root.display().to_string());
     assert!(p.sys.is_empty());
@@ -713,30 +700,30 @@ fn start_marks_show_what_the_model_is_given() {
     assert!(!preamble_changed(&c, &reworded));
 }
 
-/// The memory block (goal, notes) changes only when the prompt cache is
-/// being rebuilt anyway: after a summary, or a cold cache.
+/// The memory block (goal, notes) is part of the prefix: it changes only
+/// with a summary, never because the cache expired or went cold.
 #[test]
-fn memory_changes_only_with_the_cache() {
+fn memory_changes_only_with_a_summary() {
     let mut c = Conversation::default();
-    assert_eq!(memory_for_request(&mut c, 0, false), "");
+    assert_eq!(memory_for_request(&mut c, 0), "");
     let (block, mark) = apply_command(&mut c, Command::Goal("ship v2".into(), false));
     let block = block.unwrap();
     assert!(block["text"].as_str().unwrap().starts_with(GOAL_TAG) && is_hidden_block(&block));
     assert_eq!(mark, (MarkKind::Goal, "ship v2".into()));
     memory_tool(&mut c, "NOTE_NEW", &json!({"text": "the db is postgres"}), 0).unwrap();
-    // Requests keep the cache warm: the block stays as it was.
     let ttl = c.cache.ttl_ms();
-    assert_eq!(memory_for_request(&mut c, ttl / 2, false), "", "a pause shorter than the cache's lifetime");
-    assert_eq!(memory_for_request(&mut c, ttl + ttl / 2 - 1_000, false), "");
-    // After a quiet cache lifetime the cache is gone anyway: bring it up to date.
+    assert_eq!(memory_for_request(&mut c, ttl / 2), "", "a pause shorter than the cache's lifetime");
+    // The cache expired, or went cold (another account): the same.
     let later = 2 * ttl + ttl / 2 + 10_000;
-    let m = memory_for_request(&mut c, later, false);
-    assert!(m.contains("# Session memory") && m.contains("ship v2") && m.contains("[1] the db is postgres"), "{m}");
-    // A summary moves the cut, which rewrites the cache too.
-    memory_tool(&mut c, "NOTE_NEW", &json!({"text": "second note"}), 0).unwrap();
-    assert!(!memory_for_request(&mut c, later + 1_000, false).contains("second note"));
+    assert_eq!(memory_for_request(&mut c, later), "");
+    c.cache.cold();
+    assert_eq!(memory_for_request(&mut c, later + 500), "");
+    // A summary moves the cut: brought up to date.
     c.rolling.apply(Summary { cut: 2, text: "s".into(), made_at: 0, ..Default::default() }, 0, Default::default());
-    assert!(memory_for_request(&mut c, later + 2_000, false).contains("[2] second note"));
+    let m = memory_for_request(&mut c, later + 1_000);
+    assert!(m.contains("# Session memory") && m.contains("ship v2") && m.contains("[1] the db is postgres"), "{m}");
+    memory_tool(&mut c, "NOTE_NEW", &json!({"text": "second note"}), 0).unwrap();
+    assert!(!memory_for_request(&mut c, later + 10 * ttl).contains("second note"));
 }
 
 /// Reverting goes back to before a message the user sent: it and all
@@ -1141,4 +1128,181 @@ fn calls_through_load_run_as_their_tool() {
     assert!(text(0).contains("No agent 7.") && !text(0).contains("Invalid input"), "{}", text(0));
     assert!(text(1).contains("No agents yet") && results[1]["is_error"] != true, "{}", text(1));
     assert!(text(2).contains("AGENT is loaded already"), "{}", text(2));
+}
+
+/// `v` without its cache breakpoints, which move with every request and
+/// are no part of what the model reads.
+fn without_breakpoints(mut v: Value) -> Value {
+    match &mut v {
+        Value::Object(o) => {
+            o.remove("cache_control");
+            o.values_mut().for_each(|x| *x = without_breakpoints(x.take()));
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| *x = without_breakpoints(x.take())),
+        _ => {}
+    }
+    v
+}
+
+/// What a request sends the model as its provider's wire body has it: the
+/// system prompt, the tools and the messages.
+type Sent = (Value, Value, Vec<Value>);
+
+fn claude_sent(r: &oak::Request) -> Sent {
+    let b = without_breakpoints(api::claude_body(r));
+    (b["system"].clone(), b["tools"].clone(), b["messages"].as_array().unwrap().clone())
+}
+
+fn codex_sent(r: &oak::Request) -> Sent {
+    let b = without_breakpoints(crate::codex::request_body(r));
+    (b["instructions"].clone(), b["tools"].clone(), b["input"].as_array().unwrap().clone())
+}
+
+fn generic_sent(r: &oak::Request) -> Sent {
+    let b = without_breakpoints(crate::wire_anthropic::body(r, "openrouter", false));
+    (b["system"].clone(), b["tools"].clone(), b["messages"].as_array().unwrap().clone())
+}
+
+/// `next` sends all `prev` sent, unchanged, at its start.
+fn assert_grows(prev: &Sent, next: &Sent, what: &str) {
+    assert_eq!(prev.0, next.0, "{what}: the system prompt changed");
+    assert_eq!(prev.1, next.1, "{what}: the tools changed");
+    assert!(next.2.len() >= prev.2.len(), "{what}: messages went");
+    for (i, (a, b)) in prev.2.iter().zip(&next.2).enumerate() {
+        assert_eq!(a, b, "{what}: message {i} changed");
+    }
+}
+
+/// The prefix invariant end to end (`crate::prefix`), as each provider's
+/// wire body has it: whatever happens between requests (the date, effort,
+/// model, account or cache expiring, notes, a goal, a kit loading,
+/// instruction files changing, old tool output, smart context turned off
+/// and on, a save and reload, a fork), every later request sends what an
+/// earlier one sent, unchanged, at its start. Only a summary changes it.
+fn prefix_only_grows(name: &str, conv: Conversation, other_model: &str, sent: fn(&oak::Request) -> Sent) {
+    let folder = std::env::temp_dir().join(format!("oak-prefix-{name}-{}", api::now_ms()));
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("AGENTS.md"), "Rule one.").unwrap();
+    let (w, s) = idle_worker(name, Conversation { effort: "high".into(), folder: folder.clone(), messages: vec![json!({"role": "user", "content": [oak::text("start")]})].into(), ..conv });
+    let req = |w: &Worker| sent(&w.request_body().0);
+    let reply = |text: &str, next: &str| {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text(text)]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text(next)]}));
+    };
+    let mut prev = req(&w);
+    let flat = |x: &Sent| serde_json::to_string(&(&x.0, &x.2)).unwrap();
+    assert!(flat(&prev).contains("Rule one."));
+    let step = |prev: &mut Sent, w: &Worker, what: &str| {
+        let next = req(w);
+        assert_grows(prev, &next, what);
+        *prev = next;
+        prev.clone()
+    };
+    // The model loads a kit and takes a note.
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [
+        {"type": "tool_call", "id": "l1", "name": "LOAD", "input": {"name": "AGENT"}},
+        {"type": "tool_call", "id": "n1", "name": "NOTE", "input": {"action": "new", "text": "the db is postgres"}}]}));
+    let calls = s.conv.lock().unwrap().messages[1]["content"].as_array().unwrap().clone();
+    w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    step(&mut prev, &w, "a kit loaded, a note taken");
+    // The effort, the date and the model change.
+    s.conv.lock().unwrap().effort = "low".into();
+    reply("ok", "go on");
+    step(&mut prev, &w, "another effort");
+    s.conv.lock().unwrap().prefix.pin.as_mut().unwrap().day = "2000-01-01".into();
+    reply("ok", "and on");
+    assert!(flat(&step(&mut prev, &w, "another day")).contains("Today's date is now "));
+    s.conv.lock().unwrap().model = other_model.into();
+    reply("ok", "still on");
+    assert!(flat(&step(&mut prev, &w, "another model")).contains("Your underlying model is now "));
+    // The cache expires or the account changes; a goal is set; the
+    // instruction files change; old tool output piles up.
+    s.conv.lock().unwrap().cache.cold();
+    reply("ok", "after a pause");
+    step(&mut prev, &w, "a cold cache");
+    {
+        let mut c = s.conv.lock().unwrap();
+        let (block, _) = apply_command(&mut c, Command::Goal("ship v2".into(), false));
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("ok")]}));
+        c.messages.push(json!({"role": "user", "content": [block.unwrap()]}));
+    }
+    step(&mut prev, &w, "a goal");
+    std::fs::write(folder.join("AGENTS.md"), "Rule two.").unwrap();
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [{"type": "tool_call", "id": "e1", "name": "EXECUTE", "input": {"command": "cat big"}}]}));
+        c.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "e1", "content": "x".repeat(300_000)}]}));
+        c.cache.cold();
+    }
+    let after = step(&mut prev, &w, "instruction files changed, old tool output, cold again");
+    assert!(!flat(&after).contains("Rule two.") && flat(&after).contains(&"x".repeat(300_000)));
+    // Smart context off and on.
+    s.conv.lock().unwrap().rolling.off = true;
+    reply("ok", "off");
+    step(&mut prev, &w, "smart context off");
+    s.conv.lock().unwrap().rolling.off = false;
+    reply("ok", "on");
+    step(&mut prev, &w, "smart context on");
+    // Saved and loaded: the same request, and it goes on growing.
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let (w2, s2) = idle_worker(&format!("{name}-reloaded"), serde_json::from_str(&saved).unwrap());
+    assert_eq!(req(&w2), prev, "reloaded");
+    s2.conv.lock().unwrap().cache.cold();
+    s2.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [oak::text("back")]}));
+    s2.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("again")]}));
+    step(&mut prev, &w2, "reloaded, cold");
+    // A fork sends what its source sent.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("done")]}));
+    }
+    let source = req(&w);
+    let forked = crate::side_chat::fork(&s.conv.lock().unwrap(), format!("unit-test-{name}-fork-{}", api::now_ms()), 0);
+    let (w3, _s3) = idle_worker(&format!("{name}-fork"), forked);
+    assert_grows(&source, &req(&w3), "a fork");
+    // A summary: the one moment the prefix changes. The note joins the
+    // session memory, the kit the prefix, the effort and model as they are.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "user", "content": [oak::text("more")]}));
+        let cut = c.messages.len() - 2;
+        c.rolling.apply(crate::rolling::Summary { cut, text: "Loaded AGENT, noted the db, set a goal.".into(), made_at: 1, clear: cut }, 0, Default::default());
+    }
+    let summarized = req(&w);
+    assert_ne!(summarized.0, prev.0, "the system prompt is brought up to date");
+    let system = serde_json::to_string(&summarized.0).unwrap();
+    assert!(system.contains("the db is postgres") && system.contains("ship v2"), "{system}");
+    assert!(flat(&summarized).contains("Rule two.") && !flat(&summarized).contains(&"x".repeat(300_000)));
+    prev = summarized;
+    // After it, the same again.
+    s.conv.lock().unwrap().effort = "high".into();
+    s.conv.lock().unwrap().cache.cold();
+    reply("ok", "after the summary");
+    step(&mut prev, &w, "after the summary: effort, cold");
+    s.conv.lock().unwrap().rolling.off = true;
+    reply("ok", "off again");
+    step(&mut prev, &w, "after the summary: smart context off keeps it");
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let (w4, _s4) = idle_worker(&format!("{name}-reloaded-again"), serde_json::from_str(&saved).unwrap());
+    assert_eq!(req(&w4), prev, "reloaded after the summary");
+    drop((w2, s2));
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn the_prefix_only_grows_on_claude() {
+    prefix_only_grows("prefix-claude", Conversation { model: "claude-opus-5-5".into(), ..Default::default() }, "claude-sonnet-5-5", claude_sent);
+}
+
+#[test]
+fn the_prefix_only_grows_on_codex() {
+    let conv = Conversation { provider: Some(crate::providers::Kind::Codex), model: "gpt-5.6-sol".into(), ..Default::default() };
+    prefix_only_grows("prefix-codex", conv, "gpt-5.6-terra", codex_sent);
+}
+
+#[test]
+fn the_prefix_only_grows_where_system_messages_cant_go() {
+    let conv = Conversation { provider: Some(crate::providers::Kind::OpenRouter), model: "openai/gpt-5".into(), ..Default::default() };
+    prefix_only_grows("prefix-generic", conv, "deepseek/deepseek-v4-flash", generic_sent);
 }

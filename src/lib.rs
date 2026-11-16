@@ -377,7 +377,6 @@ impl App {
         api::set_threads(settings.threads);
         api::set_keep_alive(settings.keep_alive);
         api::set_diagnostics(settings.cache_diagnostics);
-        api::set_stable_prefix(settings.stable_prefix);
         api::set_rotation(settings.rotation);
         agent::set_notes_alert(settings.notes_alert);
         openrouter::set_title_model(&settings.title_model);

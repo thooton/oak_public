@@ -161,7 +161,7 @@ fn probe_prefix(codex: Option<String>) -> i32 {
         println!(
             "{name}: reply {:?} calls {:?}; read {} write {} input {}; miss {} {}; still on: prefix {} codex items {}",
             got.text.head(40),
-            calls, u.cache_read, u.write, u.input, r["miss"], r["missed"], crate::api::stable_prefix(), crate::prefix::codex_native()
+            calls, u.cache_read, u.write, u.input, r["miss"], r["missed"], crate::prefix::claude_native(), crate::prefix::codex_native()
         );
         if name == "+ tool redefined" && mode == Mode::Claude {
             // The keep-alive ping of that request: reads it all, writes nothing.

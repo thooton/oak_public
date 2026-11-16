@@ -1,40 +1,51 @@
-//! Stable prefix: what goes before a conversation (the system prompt and
-//! the tools) stays byte for byte as its cache was written, and what changes
-//! meanwhile reaches the model at the end of the messages instead, where it
-//! adds to the cache rather than rewriting all of it:
+//! The prefix invariant: what a conversation has sent the model (the
+//! system prompt, the tools and the messages before the latest) is never
+//! changed. Requests only add to it. The one exception is Smart context
+//! acting: a summary that replaces the start of the conversation (or a
+//! revert the user makes) is the only moment the prefix is rebuilt.
 //!
-//! - the date in the system prompt: "Today's date is now …";
+//! Anything that changes meanwhile reaches the model at the end of the
+//! messages instead:
+//!
+//! - the date: "Today's date is now …";
+//! - the model: "Your underlying model is now …";
 //! - a tool whose definition changed (AGENT's model list follows the
 //!   providers connected), and the tools of a kit loaded meanwhile (LOAD:
 //!   AGENT, BROWSER, WINDOW);
 //! - Claude's effort (per-message `output_config`).
 //!
-//! All are held as they were (`Pin`) while the cache lives, and brought up
-//! to date at a moment it is cold anyway (expired, a summary, another
-//! account or model), where rewriting the prefix costs nothing. Then the
-//! text of each NOTE call is folded too (`fold`: the session memory has the
-//! notes).
+//! A pin (`Pin`) holds the exact system prompt sent (as rendered, so a
+//! newer Oak with other prompt text, another model, role or scratchpad
+//! leaves it as it was), the tools, the date and the effort. The cache
+//! expiring, another account or model, the settings, a restart: none of
+//! them renews it. Only a summary does (`State::cut`): then everything is
+//! brought up to date at once, and the text of each NOTE call is folded too
+//! (`fold`: the session memory has the notes).
 //!
-//! A loaded kit stays where its LOAD put it, cold moments or not, so the
-//! history the model sees never shows it loading what it had from the
-//! start: its instructions are LOAD's result, and its tools join after that
-//! result (`Join`: a renewal puts their message back there). Only once a
-//! summary covers the LOAD (`loads`, `Setup::base`) do the kit's prompt
-//! block and tools join the prefix, at the renewal that summary brings.
+//! A loaded kit stays where its LOAD put it, so the history the model sees
+//! never shows it loading what it had from the start: its instructions are
+//! LOAD's result, and its tools join after that result (`Join`: a renewal
+//! puts their message back there). Only once a summary covers the LOAD
+//! (`loads`, `Setup::base`) do the kit's prompt block and tools join the
+//! prefix, at the renewal that summary brings.
 //!
 //! How the changes go depends on the provider (`Mode`):
 //! - Claude: a mid-conversation system message (`role: "system"`), with
 //!   `tool_addition` blocks for tools (the inline-tools beta) and
 //!   `output_config` for effort (its own beta);
 //! - Codex: a developer message, and an `additional_tools` item for tools;
-//! - any other (OpenRouter, NodeClub, the user's own server): a text block
-//!   at the end of the user turn they follow. Tools can't be added there, so
-//!   a loaded kit's tools are reached through LOAD (`input`) until a summary
-//!   covers the LOAD.
+//! - any other (OpenRouter, NodeClub, the user's own server, or Claude where
+//!   the API refuses system messages): a text block at the end of the user
+//!   turn they follow. Tools can't be added there, so a loaded kit's tools
+//!   are reached through LOAD (`input`) until a summary covers the LOAD.
 //!
 //! The messages are kept with the conversation (`SysMsg`, at the transcript
 //! index they come before), so every later request sends them where they
 //! first were (`inject`); a summary that covers one leaves it out.
+//!
+//! Freebuff is the one provider the invariant can't reach in full: the
+//! service checks that its system prompt and tools are its own CLI's, dated
+//! today, so those are what it sends; the messages still only grow.
 
 use crate::api::Provider;
 use serde::{Deserialize, Serialize};
@@ -62,16 +73,12 @@ impl Mode {
     }
 }
 
-/// The mode for a conversation on `model`, or None to send everything as it
-/// is now (the setting off, or Freebuff, which sends its own prompt and
-/// tools).
+/// The mode for a conversation on `model`, or None for Freebuff, which
+/// sends its own prompt and tools. No setting turns the invariant off.
 pub fn mode(provider: Provider, model: &str) -> Option<Mode> {
-    if !crate::api::stable_prefix() {
-        return None;
-    }
     Some(match provider {
         Provider::Freebuff => return None,
-        Provider::Claude if supports(model) => Mode::Claude,
+        Provider::Claude if supports(model) && claude_native() => Mode::Claude,
         Provider::Codex if codex_native() => Mode::Codex,
         _ => Mode::Generic,
     })
@@ -80,6 +87,11 @@ pub fn mode(provider: Provider, model: &str) -> Option<Mode> {
 // Codex's developer messages and `additional_tools` items: turned off for
 // the session if the backend refuses them (`codex::open`).
 switch!(CODEX_NATIVE, codex_native, set_codex_native, true);
+
+// Claude's mid-conversation system messages: turned off for the session if
+// the API refuses them (`api::open_extras`), which then go as text, as
+// `plain_body` sends them.
+switch!(CLAUDE_NATIVE, claude_native, set_claude_native, true);
 
 /// `model` is one of `ids`, or a dated version of one.
 fn one_of(model: &str, ids: &[&str]) -> bool {
@@ -113,11 +125,16 @@ pub struct State {
     /// The transcript's length when the pin was last renewed: what came
     /// before is folded (`fold`).
     pub folded: usize,
+    /// The summary cut the pin was renewed on: a request on another cut (a
+    /// summary acted) renews it, and nothing else does. None in a state
+    /// from an older Oak: the cut it is on now is taken as it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cut: Option<usize>,
 }
 
-/// What a request goes with besides its messages: the date and kits its
-/// system prompt is built with, its effort and its tools. As built for it
-/// (`Setup::now`) or as held for the cache (`Pin`).
+/// What a request goes with besides its messages: the date, kits and model
+/// its system prompt is built with, its effort and its tools. As built for
+/// it (`Setup::now`) or as held since the last summary (`Pin`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pin {
@@ -129,6 +146,14 @@ pub struct Pin {
     /// model of the new one, so no message is needed (empty in a pin from
     /// an older Oak: the folder then is the folder now, as it never changed).
     pub folder: String,
+    /// The model the system prompt names (its id).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// The system prompt as it was sent (without the session memory, which
+    /// changes only with a summary as well). Empty until the request that
+    /// renewed the pin rendered it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub system: String,
 }
 
 /// A change the model is told of, before transcript message `at`.
@@ -136,7 +161,7 @@ pub struct Pin {
 #[serde(default)]
 pub struct SysMsg {
     pub at: usize,
-    /// "date", "effort" or "tool:NAME".
+    /// "date", "model", "effort" or "tool:NAME".
     pub kind: String,
     /// What it brings, to tell whether a newer one is needed: the date, the
     /// effort, a hash of the tool's definition.
@@ -168,9 +193,8 @@ pub const NOTE_FOLDED: &str = "(Saved. Your session memory has the notes as they
 /// What a request is built with, and how.
 pub struct Setup {
     pub mode: Mode,
-    /// Nothing cached is left: the pin is renewed.
-    pub cold: bool,
-    /// The transcript's length, and the summary cut the request is built on.
+    /// The transcript's length, and the summary cut the request is built on
+    /// (another one than the pin's renews it).
     pub n: usize,
     pub cut: usize,
     /// The transcript ends with a user turn (where a message may go).
@@ -244,12 +268,25 @@ pub fn loads(messages: &[Value]) -> Vec<Load> {
 }
 
 impl State {
-    /// Holds what requests go with from now on (at a cold moment, or the
-    /// first request), which says all the system messages said: they go.
-    pub fn renew(&mut self, n: usize, now: &Pin) {
-        self.pin = Some(now.clone());
+    /// Holds what requests go with from now on (at the first request, or a
+    /// summary on cut `cut`), which says all the system messages said: they
+    /// go. The system prompt is rendered for it by the request (`system`).
+    pub fn renew(&mut self, n: usize, cut: usize, now: &Pin) {
+        self.pin = Some(Pin { system: String::new(), ..now.clone() });
         self.sys.clear();
         self.folded = n;
+        self.cut = Some(cut);
+    }
+
+    /// The system prompt the pin holds, rendered by `render` from what it
+    /// holds the first time (after a renewal, or for a pin an older Oak
+    /// kept, rendered as that Oak did), then kept as it is.
+    pub fn system(&mut self, render: impl FnOnce(&Pin) -> String) -> String {
+        let Some(p) = self.pin.as_mut() else { return render(&Pin::default()) };
+        if p.system.is_empty() {
+            p.system = render(p);
+        }
+        p.system.clone()
     }
 
     /// After a renewal: the tools of the kits loaded in view, back after
@@ -275,18 +312,16 @@ impl State {
     }
 
     /// The transcript was cut back to `messages` (a revert): kits whose
-    /// LOAD went are unloaded, and what was told after the cut goes. A pin
-    /// holding a kit that went is renewed.
+    /// LOAD went are unloaded, and what was told after the cut goes; what
+    /// stays is sent as it was. (A pin holds a kit whose LOAD went only if
+    /// the revert went back past the summary that covered the LOAD: that
+    /// summary goes, and its cut with it, which renews the pin.)
     pub fn reverted(&mut self, messages: &[Value]) {
         let n = messages.len();
         let loads = loads(messages);
-        let gone: Vec<String> = self.kits.iter().filter(|k| !loads.iter().any(|l| &l.kit == *k)).cloned().collect();
-        self.kits.retain(|k| !gone.contains(k));
+        self.kits.retain(|k| loads.iter().any(|l| &l.kit == k));
         self.sys.retain(|m| m.at <= n);
         self.folded = self.folded.min(n);
-        if self.pin.as_ref().is_some_and(|p| p.kits.iter().any(|k| gone.contains(k))) {
-            self.pin = None;
-        }
     }
 
     /// What the model was last told of `kind` in the view after `cut`.
@@ -294,21 +329,34 @@ impl State {
         self.sys.iter().rev().find(|s| s.kind == kind && in_view(s.at, cut)).map(|s| s.key.as_str())
     }
 
-    /// For a request: what it goes with (the pin, renewed first when cold),
-    /// with system messages added for what changed since (before transcript
-    /// message `n`, after the user turn that ends it).
+    /// For a request: what it goes with (the pin, renewed first when a
+    /// summary acted since: nothing else renews it), with system messages
+    /// added for what changed since (before transcript message `n`, after
+    /// the user turn that ends it).
     pub fn prepare(&mut self, s: Setup) -> Pin {
-        // (A pin without tools is from an older Oak, which held less.)
-        let old = self.pin.as_ref().is_some_and(|p| p.tools.is_empty() && !s.now.tools.is_empty());
-        // A summary covered a kit's LOAD: it joins the prefix now, even
-        // where the cache isn't known to be cold.
-        let covered = self.pin.as_ref().is_some_and(|p| s.base.kits.iter().any(|k| !p.kits.contains(k)));
-        if s.cold || self.pin.is_none() || old || covered {
-            self.renew(s.n, &s.base);
+        // A state from an older Oak: the cut it is on is its own.
+        if self.pin.is_some() && self.cut.is_none() {
+            self.cut = Some(s.cut);
+        }
+        // A summary acted (its cut moved, or covers a kit's LOAD).
+        let summary = self.cut != Some(s.cut) || self.pin.as_ref().is_some_and(|p| s.base.kits.iter().any(|k| !p.kits.contains(k)));
+        if self.pin.is_none() || summary {
+            self.renew(s.n, s.cut, &s.base);
             self.rejoin(&s);
         }
-        if let Some(p) = self.pin.as_mut().filter(|p| p.folder.is_empty()) {
-            p.folder = s.now.folder.clone();
+        // What a pin from an older Oak didn't hold: what it held without
+        // knowing (the folder, the tools and model as they are now, as an
+        // older Oak sent them).
+        if let Some(p) = self.pin.as_mut() {
+            if p.folder.is_empty() {
+                p.folder = s.now.folder.clone();
+            }
+            if p.tools.is_empty() {
+                p.tools = s.base.tools.clone();
+            }
+            if p.model.is_empty() {
+                p.model = s.now.model.clone();
+            }
         }
         let pin = self.pin.clone().unwrap_or_default();
         let (now, cut) = (&s.now, s.cut);
@@ -316,6 +364,9 @@ impl State {
         let msg = |kind: String, key: String| SysMsg { at: s.n, kind, key, ..Default::default() };
         if self.said("date", cut).unwrap_or(&pin.day) != now.day {
             new.push(SysMsg { text: format!("Today's date is now {}.", now.day), ..msg("date".into(), now.day.clone()) });
+        }
+        if !now.model.is_empty() && self.said("model", cut).unwrap_or(&pin.model) != now.model {
+            new.push(SysMsg { text: format!("Your underlying model is now {}.", crate::api::model_name(&now.model)), ..msg("model".into(), now.model.clone()) });
         }
         for t in &now.tools {
             let name = t["name"].as_str().unwrap_or("");
@@ -333,7 +384,9 @@ impl State {
                 (true, None) => new.push(SysMsg { tools: vec![t.clone()], ..msg(kind, key) }),
                 (true, Some(_)) => new.push(SysMsg { tools: vec![t.clone()], text: changed, ..msg(kind, key) }),
                 (false, Some(_)) => new.push(SysMsg { text: format!("{changed} It is now:\n{t}"), ..msg(kind, key) }),
-                // Reached through LOAD until the pin is renewed.
+                // A kit's tool is reached through LOAD (its result says so);
+                // another (a model's own server serving fewer tools first)
+                // joins the list with the next summary.
                 (false, None) => {}
             }
         }
@@ -373,15 +426,12 @@ impl State {
             let text: Vec<&str> = group.iter().map(|s| s.text.as_str()).filter(|t| !t.is_empty()).collect();
             let mut i = pos(k).min(out.len());
             if mode == Mode::Generic {
-                // A text block at the end of the user turn before.
-                if text.is_empty() {
-                    continue;
-                }
-                let block = json!({"type": "text", "text": format!("<system-reminder>\n{}\n</system-reminder>", text.join("\n"))});
-                match out.get_mut(i.wrapping_sub(1)).filter(|m| m["role"] == "user") {
-                    Some(m) => m["content"].as_array_mut().into_iter().for_each(|c| c.push(block.clone())),
-                    None => out.insert(i, json!({"role": "user", "content": [block]})),
-                }
+                // A text block at the end of the user turn before; the tools
+                // a message told where they could be added, in text.
+                let listed = |name: &str| self.pin.as_ref().is_some_and(|p| p.tools.iter().any(|t| t["name"] == name));
+                let mut lines: Vec<String> = group.iter().flat_map(|s| &s.tools).map(|t| tool_text(t, listed(t["name"].as_str().unwrap_or("")))).collect();
+                lines.extend(text.iter().map(|t| t.to_string()));
+                remind(&mut out, i, &lines);
                 continue;
             }
             let mut content: Vec<Value> = group.iter().flat_map(|s| &s.tools).map(|t| json!({"type": "tool_definition", "definition": t})).collect();
@@ -453,13 +503,66 @@ pub fn betas(body: &Value) -> Vec<&'static str> {
     out
 }
 
-/// `body` (Claude's) without its system messages, for an API that refuses
-/// them.
+/// A tool definition a system message brought, told in text where system
+/// messages can't go: `listed` if a tool of its name is in the tool list.
+fn tool_text(def: &Value, listed: bool) -> String {
+    let name = def["name"].as_str().unwrap_or("");
+    if listed {
+        format!("The {name} tool's definition is now:\n{def}")
+    } else if crate::tools::kits_for(false).contains(&name) {
+        format!("The {name} tool isn't in your tool list here: {THROUGH_LOAD}, with name={name} and the tool's input in `input`. It is:\n{def}")
+    } else {
+        format!("The {name} tool isn't in your tool list here, so it can't be called until earlier context is summarized. It is:\n{def}")
+    }
+}
+
+/// `lines` as a system reminder: a text block at the end of the user turn
+/// before message `i` of `out`, or a user turn of its own there.
+fn remind(out: &mut Vec<Value>, i: usize, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    let block = json!({"type": "text", "text": format!("<system-reminder>\n{}\n</system-reminder>", lines.join("\n"))});
+    match out.get_mut(i.wrapping_sub(1)).filter(|m| m["role"] == "user") {
+        Some(m) => m["content"].as_array_mut().into_iter().for_each(|c| c.push(block.clone())),
+        None => out.insert(i, json!({"role": "user", "content": [block]})),
+    }
+}
+
+/// `body` (Claude's) for an API that refuses its system messages: each
+/// one's text and tools go as `inject` sends them in `Mode::Generic` (which
+/// the session's later requests use), so what the model is told is still
+/// there, where it was, and nothing sent changes after.
 pub fn plain_body(mut body: Value) -> Value {
-    if let Some(m) = body["messages"].as_array_mut() {
-        m.retain(|m| m["role"] != "system");
+    let tools = body["tools"].as_array().cloned().unwrap_or_default();
+    if let Some(messages) = body["messages"].as_array_mut() {
+        *messages = plain_messages(std::mem::take(messages), &tools);
     }
     body
+}
+
+/// `messages` with their system messages (Oak's, as `inject` makes them in
+/// `Mode::Claude` or `Mode::Codex`, or Claude's wire form) as `Mode::Generic`
+/// sends them: for a provider that refuses them (`plain_body`, Codex).
+pub fn plain_messages(messages: Vec<Value>, tools: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    for m in messages {
+        if m["role"] != "system" {
+            out.push(m);
+            continue;
+        }
+        let blocks = m["content"].as_array().cloned().unwrap_or_default();
+        let def = |b: &Value| match b["type"].as_str() {
+            Some("tool_definition") => Some(b["definition"].clone()),
+            Some("tool_addition") => Some(b["tool"]["definition"].clone()),
+            _ => None,
+        };
+        let mut lines: Vec<String> = blocks.iter().filter_map(def).map(|d| tool_text(&d, tools.iter().any(|t| t["name"] == d["name"]))).collect();
+        lines.extend(blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).filter(|t| !t.is_empty()).map(str::to_string));
+        let i = out.len();
+        remind(&mut out, i, &lines);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -471,11 +574,11 @@ mod tests {
     }
 
     fn now(day: &str, effort: &str, tools: Vec<Value>) -> Pin {
-        Pin { day: day.into(), kits: vec![], effort: Some(effort.into()), tools, folder: "F".into() }
+        Pin { day: day.into(), kits: vec![], effort: Some(effort.into()), tools, folder: "F".into(), model: "M".into(), system: String::new() }
     }
 
     fn setup(mode: Mode, n: usize, now: Pin) -> Setup {
-        Setup { mode, cold: false, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![] }
+        Setup { mode, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![] }
     }
 
     #[test]
@@ -521,20 +624,52 @@ mod tests {
         // Back to the first list and effort: told again.
         s.prepare(setup(Mode::Claude, 11, now("2026-11-07", "high", tools(&["a"]))));
         assert_eq!(s.sys.len(), 6);
-        // Renewed at a cold moment: everything as built, the messages gone.
-        let p = s.prepare(Setup { cold: true, ..setup(Mode::Claude, 13, now("2026-11-08", "high", t.clone())) });
-        assert_eq!((p.day.as_str(), p.tools.clone(), s.sys.len(), s.folded), ("2026-11-08", t, 0, 13));
+        // Another model: told once, the prompt naming the first.
+        let other = Pin { model: "N".into(), ..now("2026-11-07", "high", tools(&["a"])) };
+        let p = s.prepare(setup(Mode::Claude, 13, other.clone()));
+        assert_eq!((p.model.as_str(), s.sys.len()), ("M", 7));
+        assert_eq!(s.sys[6].text, "Your underlying model is now N.");
+        s.prepare(setup(Mode::Claude, 15, other));
+        assert_eq!(s.sys.len(), 7);
+        // Renewed only by a summary: everything as built, the messages gone.
+        let p = s.prepare(Setup { cut: 10, ..setup(Mode::Claude, 17, now("2026-11-08", "high", t.clone())) });
+        assert_eq!((p.day.as_str(), p.tools.clone(), s.sys.len(), s.folded, s.cut), ("2026-11-08", t, 0, 17, Some(10)));
     }
 
-    /// A conversation from an older Oak (a pin without tools, messages of
-    /// another shape) is renewed, and empty messages never go.
+    /// The system prompt is rendered once per renewal, and kept as it was
+    /// whatever the prompt would say now.
     #[test]
-    fn older_state_is_renewed() {
-        let mut s: State = serde_json::from_value(json!({"pin": {"day": "2026-11-05", "agent": {"name": "AGENT"}}, "sys": [{"at": 1, "kind": "date", "key": "x", "content": []}]})).unwrap();
+    fn the_system_prompt_is_kept_as_sent() {
+        let mut s = State::default();
+        s.prepare(setup(Mode::Claude, 1, now("2026-11-06", "high", tools(&["a"]))));
+        assert_eq!(s.system(|p| format!("prompt on {} for {}", p.day, p.model)), "prompt on 2026-11-06 for M");
+        s.prepare(setup(Mode::Claude, 3, Pin { model: "N".into(), ..now("2026-11-09", "low", tools(&["b"])) }));
+        assert_eq!(s.system(|_| "another prompt".into()), "prompt on 2026-11-06 for M");
+        // A summary renews it.
+        s.prepare(Setup { cut: 2, ..setup(Mode::Claude, 5, now("2026-11-09", "low", tools(&["b"]))) });
+        assert_eq!(s.system(|_| "another prompt".into()), "another prompt");
+        // Saved and loaded: the same.
+        let mut back: State = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.system(|_| "newer Oak".into()), "another prompt");
+    }
+
+    /// A conversation from an older Oak (a pin without tools, model, cut or
+    /// system prompt; messages of another shape) keeps its pin: what it
+    /// lacks is taken as it is now, which is what that Oak sent. Empty
+    /// messages never go.
+    #[test]
+    fn older_state_keeps_its_pin() {
+        let mut s: State = serde_json::from_value(json!({"pin": {"day": "2026-11-05", "agent": {"name": "AGENT"}}, "sys": [{"at": 1, "kind": "date", "key": "x", "content": []}], "folded": 1})).unwrap();
         let out = s.inject(Mode::Claude, vec![m("user", "q0"), m("assistant", "a1")], 0, 2);
         assert_eq!(out.len(), 2);
-        let p = s.prepare(setup(Mode::Claude, 3, now("2026-11-06", "high", tools(&["a"]))));
-        assert_eq!((p.tools, s.sys.len(), s.folded), (tools(&["a"]), 0, 3));
+        let p = s.prepare(Setup { cut: 0, ..setup(Mode::Claude, 3, now("2026-11-05", "high", tools(&["a"]))) });
+        // (What it told is kept; the date it told comes again.)
+        assert_eq!((p.tools, p.model.as_str(), s.sys[0].key.as_str(), s.folded, s.cut), (tools(&["a"]), "M", "x", 1, Some(0)));
+        // A state saved on a summary's cut by an older Oak: that cut is its own.
+        let mut s: State = serde_json::from_value(json!({"pin": {"day": "2026-11-05", "tools": [{"name": "READ"}]}, "folded": 9})).unwrap();
+        s.prepare(Setup { cut: 6, ..setup(Mode::Claude, 12, now("2026-11-05", "high", tools(&["a"]))) });
+        assert_eq!((s.folded, s.cut), (9, Some(6)));
     }
 
     /// Without a user turn to follow, nothing is added (it waits).
@@ -672,34 +807,33 @@ mod tests {
         let base = Pin { kits: vec!["AGENT".into()], tools: vec![t("READ"), t("AGENT")], ..now.clone() };
         let joins = vec![Join { tool: "BROWSER".into(), kit: "BROWSER".into(), at: 4, through: false }];
         let mut s = State::default();
-        let pin = s.prepare(Setup { cold: true, base: base.clone(), joins: joins.clone(), ..setup(Mode::Claude, 9, now.clone()) });
+        let pin = s.prepare(Setup { base: base.clone(), joins: joins.clone(), ..setup(Mode::Claude, 9, now.clone()) });
         assert_eq!(pin, base);
         assert_eq!(s.sys.iter().map(|m| (m.at, m.kind.as_str())).collect::<Vec<_>>(), [(4, "tool:BROWSER")]);
         assert_eq!(s.sys[0].tools, [t("BROWSER")]);
         // Warm, nothing changed: nothing more.
         s.prepare(Setup { base: base.clone(), joins: joins.clone(), ..setup(Mode::Claude, 11, now.clone()) });
         assert_eq!(s.sys.len(), 1);
-        // Cold again: the same.
-        s.prepare(Setup { cold: true, base: base.clone(), joins: joins.clone(), ..setup(Mode::Claude, 13, now.clone()) });
+        // A summary that doesn't cover the LOAD: the same.
+        s.prepare(Setup { cut: 2, base: base.clone(), joins: joins.clone(), ..setup(Mode::Claude, 13, now.clone()) });
         assert_eq!((s.sys.len(), s.sys[0].at), (1, 4));
-        // A summary now covers BROWSER's LOAD too: renewed even though the
-        // cache isn't known to be cold, with both kits held.
-        let s2 = s.prepare(Setup { base: now.clone(), ..setup(Mode::Claude, 15, now.clone()) });
+        // A summary now covers BROWSER's LOAD too: both kits held.
+        let s2 = s.prepare(Setup { cut: 6, base: now.clone(), ..setup(Mode::Claude, 15, now.clone()) });
         assert_eq!(s2, now);
         assert!(s.sys.is_empty());
         // Where tools can't be added, a LOAD that said the tool was in the
         // list gets a text telling to call it through LOAD.
         let mut g = State::default();
-        g.prepare(Setup { cold: true, base: base.clone(), joins: joins.clone(), ..setup(Mode::Generic, 9, now.clone()) });
+        g.prepare(Setup { base: base.clone(), joins: joins.clone(), ..setup(Mode::Generic, 9, now.clone()) });
         assert!(g.sys[0].text.starts_with("The BROWSER tool isn't in your tool list here: call it through LOAD, with name=BROWSER"));
         let mut g = State::default();
         let through = vec![Join { through: true, ..joins[0].clone() }];
-        g.prepare(Setup { cold: true, base, joins: through, ..setup(Mode::Generic, 9, now) });
+        g.prepare(Setup { base, joins: through, ..setup(Mode::Generic, 9, now) });
         assert!(g.sys.is_empty());
     }
 
-    /// A revert unloads the kits whose LOADs it took, drops what was told
-    /// after its point and renews a pin that held such a kit.
+    /// A revert unloads the kits whose LOADs it took and drops what was
+    /// told after its point; the pin stays (only a summary renews it).
     #[test]
     fn a_revert_unloads_kits_and_drops_later_messages() {
         let call = json!({"role": "assistant", "content": [{"type": "tool_call", "id": "a", "name": "LOAD", "input": {"name": "AGENT"}}]});
@@ -709,12 +843,13 @@ mod tests {
             sys: vec![SysMsg { at: 3, ..Default::default() }, SysMsg { at: 7, ..Default::default() }],
             folded: 7,
             pin: Some(Pin { kits: vec!["BROWSER".into()], ..Default::default() }),
+            cut: Some(0),
         };
         s.reverted(&[m("user", "go"), call, result]);
         assert_eq!(s.kits, ["AGENT"]);
         assert_eq!(s.sys.len(), 1);
         assert_eq!(s.folded, 3);
-        assert!(s.pin.is_none());
+        assert!(s.pin.is_some());
     }
 
     #[test]
@@ -727,5 +862,25 @@ mod tests {
         let plain = plain_body(body);
         assert!(betas(&plain).is_empty());
         assert_eq!(plain["messages"].as_array().unwrap().len(), 1);
+    }
+
+    /// Where the API refuses system messages, what they said goes as the
+    /// text `Mode::Generic` sends, byte for byte, so the session's later
+    /// requests (in that mode) send the same.
+    #[test]
+    fn a_plain_body_says_what_its_system_messages_said() {
+        let browser = json!({"name": "BROWSER", "input_schema": {}});
+        let state = State {
+            pin: Some(Pin { tools: vec![json!({"name": "READ"})], ..Default::default() }),
+            sys: vec![sys(1, "Today's date is now d."), SysMsg { at: 3, kind: "tool:BROWSER".into(), key: "k".into(), tools: vec![browser.clone()], ..Default::default() }],
+            ..Default::default()
+        };
+        let view = vec![m("user", "q0"), m("assistant", "a1"), m("user", "q2"), m("assistant", "a3")];
+        let generic = state.inject(Mode::Generic, view.clone(), 0, 4);
+        let claude = state.inject(Mode::Claude, view, 0, 4);
+        let wire = |v: &[Value]| json!({"tools": [{"name": "READ"}], "messages": crate::wire_anthropic::messages(v, "anthropic", true)});
+        assert_eq!(plain_body(wire(&claude)), wire(&generic));
+        let told = generic[2]["content"][1]["text"].as_str().unwrap();
+        assert!(told.starts_with("<system-reminder>\nThe BROWSER tool isn't in your tool list here: call it through LOAD"), "{told}");
     }
 }

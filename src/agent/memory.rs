@@ -204,41 +204,33 @@ pub(crate) fn render_memory(c: &Conversation) -> String {
             s += &format!("[{}] {}, every {}: `{}`\n", m.id, m.label, every(m.every_min), m.command);
         }
     }
-    s += "\nThis block is updated from time to time: goals, notes, heartbeats and progress meters changed in the conversation since then are the current ones.";
+    s += "\nThis block is brought up to date only when earlier context is summarized: goals, notes, heartbeats and progress meters changed in the conversation since then are the current ones.";
     s
 }
 
-/// The session memory for the next request. Changing the system prompt
-/// rewrites the whole cached context, so the block is only brought up to
-/// date when the cache is being rebuilt anyway (`cold`: a summary was
-/// applied, the cache expired, another model or account). In between,
-/// changes are visible to the model as the tool calls and goal notes that
-/// made them: a new note isn't added twice. (Once the block has it, the
-/// call's text is folded: `prefix::State::fold`.) The instruction files and memory index (the context block) are
-/// read only when the session starts and after each summary. The transcript
+/// The session memory for the next request. It is part of the prefix, so
+/// like the rest of it (`crate::prefix`) it is brought up to date only when
+/// the session starts and after each summary: never because the cache
+/// expired, another model or account, or a restart. In between, changes
+/// are visible to the model as the tool calls and goal notes that made
+/// them: a new note isn't added twice. (Once the block has it, the call's
+/// text is folded: `prefix::State::fold`.) The instruction files and memory
+/// index (the context block) are read at those moments too. The transcript
 /// gets a line when the files loaded change.
-pub(crate) fn memory_for_request(c: &mut Conversation, now: i64, cold: bool) -> String {
+pub(crate) fn memory_for_request(c: &mut Conversation, now: i64) -> String {
     let base = c.rolling.base();
-    let reload = c.memory.as_ref().is_none_or(|m| m.base != base);
-    // Kept warm by keep-alive requests (`Worker::keep_warm`), the cache
-    // lives on past its lifetime from the last request: they move `used_at`.
-    if reload || cold || c.cache.cold || c.memory.as_ref().is_some_and(|m| now - m.used_at > c.cache.ttl_ms() + 5_000) {
-        let (context, paths) = match c.memory.take() {
-            Some(m) if !reload => (m.context, m.files),
-            old => {
-                let mut skipped = vec![];
-                // A chat has no folder: no instruction files or memory.
-                let files = if c.chat { vec![] } else { instructions::load(&c.folder, &instructions::home(), &mut skipped) };
-                let context = if c.chat { String::new() } else { instructions::render(&files, &instructions::memory_index(&c.folder)) };
-                let paths: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
-                let before = old.map(|m| m.files).unwrap_or_default();
-                if paths != before && (!paths.is_empty() || !before.is_empty()) {
-                    let line = loaded_line(&paths, &skipped, &c.folder);
-                    add_mark(c, MarkKind::Instructions, line, context.clone(), now);
-                }
-                (context, paths)
-            }
-        };
+    if c.memory.as_ref().is_none_or(|m| m.base != base) {
+        let old = c.memory.take();
+        let mut skipped = vec![];
+        // A chat has no folder: no instruction files or memory.
+        let files = if c.chat { vec![] } else { instructions::load(&c.folder, &instructions::home(), &mut skipped) };
+        let context = if c.chat { String::new() } else { instructions::render(&files, &instructions::memory_index(&c.folder)) };
+        let paths: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
+        let before = old.map(|m| m.files).unwrap_or_default();
+        if paths != before && (!paths.is_empty() || !before.is_empty()) {
+            let line = loaded_line(&paths, &skipped, &c.folder);
+            add_mark(c, MarkKind::Instructions, line, context.clone(), now);
+        }
         c.memory = Some(Memory { text: render_memory(c), context, files: paths, base, used_at: now });
     }
     let m = c.memory.as_mut().unwrap();

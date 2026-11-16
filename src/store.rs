@@ -1107,11 +1107,6 @@ pub struct Settings {
     /// Cache diagnostics: the API says why a request missed the cache, in
     /// the usage log.
     pub cache_diagnostics: bool,
-    /// Stable prefix (Claude): the date and the AGENT tool's model list
-    /// change in mid-conversation system messages, and the goal's tools come
-    /// and go as inline tool changes, instead of rewriting the system prompt
-    /// and tools (and so the whole cache).
-    pub stable_prefix: bool,
     /// Account rotation: a used-up account's requests go to another.
     pub rotation: bool,
     /// The whole interface's zoom (egui's zoom factor, 1 = 100%), changed
@@ -1176,7 +1171,6 @@ impl Default for Settings {
             threads: false,
             keep_alive: true,
             cache_diagnostics: true,
-            stable_prefix: true,
             rotation: true,
             zoom: 1.0,
             click_zoom: false,

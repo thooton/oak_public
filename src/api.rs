@@ -1606,9 +1606,6 @@ fn stream(req: crate::oak::Request, cont: Option<(String, usize)>, thread: bool,
 // Turned off for the session if the API refuses the field.
 switch!(DIAGNOSTICS, diagnostics, set_diagnostics, true);
 
-// The stable prefix (`crate::prefix`; a setting, on by default): turned
-// off for the session if the API refuses its system messages.
-switch!(STABLE_PREFIX, stable_prefix, set_stable_prefix, true);
 
 /// With cache diagnostics: replies list what the API did with earlier
 /// thinking blocks that no longer match what came before them (Oak's
@@ -1776,16 +1773,19 @@ pub(crate) fn miss_reason(d: &Value) -> (String, u64) {
 }
 
 /// `open`, and when the API refuses with a 400 a body with something
-/// experimental (`diagnostics`, the stable-prefix betas: `crate::prefix::betas`),
-/// once more without it, that turned off for the session: a new field or
-/// beta the account's gateway won't take mustn't stop the conversation.
+/// experimental (`diagnostics`, the system messages' betas:
+/// `crate::prefix::betas`), once more without it, that turned off for the
+/// session: a new field or beta the account's gateway won't take mustn't
+/// stop the conversation. What the system messages said still goes, as
+/// text (`crate::prefix::plain_body`), where the session's later requests
+/// send it too.
 fn open_extras(body: &Value, betas: &[&str], continuing: bool, seat: &Seat, tx: &Sender<Sse>) -> Result<(reqwest::blocking::Response, u64), Fail> {
     let extras = body.get("diagnostics").is_some() || betas.iter().any(|b| experimental(b));
     match open(body, betas, continuing, seat, tx) {
         Err(Fail::Report(Sse::Err(e))) if extras && e.starts_with("HTTP 400") => {
-            eprintln!("Retrying without cache diagnostics and the stable-prefix betas after: {e}");
+            eprintln!("Retrying without cache diagnostics and system messages after: {e}");
             set_diagnostics(false);
-            set_stable_prefix(false);
+            crate::prefix::set_claude_native(false);
             let mut plain = body.clone();
             if let Some(o) = plain.as_object_mut() {
                 o.remove("diagnostics");

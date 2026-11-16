@@ -264,16 +264,10 @@ impl Worker {
         let now = api::now_ms();
         let start = c.memory.is_none();
         let marks_before = c.marks.len();
-        // Nothing cached is left (expired, another model or account, a
-        // summary): what would otherwise cost a full cache write is free now.
         let provider = c.provider();
-        let cold = provider != api::Provider::Freebuff && c.cache.is_cold(now, c.rolling.base());
-        if cold && !c.rolling.off {
-            let messages = std::mem::take(&mut c.messages);
-            c.rolling.clear_cold(&messages);
-            c.messages = messages;
-        }
-        let memory = memory_for_request(&mut c, now, cold);
+        // What was sent stays as it was (`crate::prefix`): the session memory
+        // is read again only with a summary, like the rest.
+        let memory = memory_for_request(&mut c, now);
         // A chat has no folder, so no scratchpad either.
         let scratch = if c.chat { PathBuf::new() } else { scratchpad(&mut c) };
         let context = memory_context(&c).to_string();
@@ -305,26 +299,47 @@ impl Worker {
                 joins.push(crate::prefix::Join { tool, kit: l.kit.clone(), at: l.join, through: l.through });
             }
         }
-        let built = crate::prefix::Pin { day: crate::time::today_utc(), kits: kits.clone(), effort, tools: defs(&kits), folder: c.folder.display().to_string() };
+        let model = c.model.clone();
+        let built = crate::prefix::Pin {
+            day: crate::time::today_utc(),
+            kits: kits.clone(),
+            effort,
+            tools: defs(&kits),
+            folder: c.folder.display().to_string(),
+            model,
+            system: String::new(),
+        };
         let base = crate::prefix::Pin { kits: held, tools: held_tools, ..built.clone() };
-        // The stable prefix: the date, kits, tools and effort the cache was
-        // written with, and messages for what changed since (`crate::prefix`).
+        // The prefix as first sent since the last summary: its system prompt,
+        // tools and effort, and messages for what changed since
+        // (`crate::prefix`).
         let mode = crate::prefix::mode(provider, &c.model);
-        let pin = match mode {
+        let (chat, role, model_now) = (c.chat, c.role.clone(), c.model.clone());
+        let render = |pin: &crate::prefix::Pin| {
+            // (The folder and model the prompt was first sent with: a CD's
+            // result and a message say the new ones.)
+            let model = if pin.model.is_empty() { &model_now } else { &pin.model };
+            if chat {
+                super::prompt::chat_prompt(&pin.day, model)
+            } else {
+                system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role)
+            }
+        };
+        let (pin, system) = match mode {
             Some(mode) => {
                 let add = last_is(&c, "user");
                 let effort_per_message = mode == crate::prefix::Mode::Claude && crate::prefix::supports_effort(&c.model);
-                c.prefix.prepare(crate::prefix::Setup { mode, cold, n, cut, add, effort_per_message, now: built, base, joins })
+                let pin = c.prefix.prepare(crate::prefix::Setup { mode, n, cut, add, effort_per_message, now: built, base, joins });
+                let system = c.prefix.system(render);
+                (pin, system)
             }
-            // Everything as it is now, but the system prompt as the history
-            // has it (the tools must be in the list to be called).
-            None => crate::prefix::Pin { kits: base.kits, ..built },
-        };
-        // (The folder the cache was written with: a CD's result says the new one.)
-        let system = if c.chat {
-            super::prompt::chat_prompt(&pin.day, &c.model)
-        } else {
-            system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, &c.model, agent.as_deref(), &pin.kits, &c.role)
+            // Freebuff sends its own prompt and tools: these go to the
+            // sidecar only for what it adds of its own.
+            None => {
+                let pin = crate::prefix::Pin { kits: base.kits, ..built };
+                let system = render(&pin);
+                (pin, system)
+            }
         };
         let tools = Value::Array(pin.tools);
         // Again after a switch to a model whose provider sends other things
