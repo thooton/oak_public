@@ -4,7 +4,7 @@
 //!
 //! Settings shows them as a grid of thumbnails (`thumbnail`: each file's
 //! first frame, decoded on a thread of its own once). Home and the grid
-//! draw them with `home::paint_fill`.
+//! draw them with `home::paint_cover`.
 //!
 //! A `Player` decodes its file's frames on a thread of its own, two ahead
 //! of the screen, and Home shows each when its time comes, reusing one
