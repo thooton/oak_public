@@ -126,6 +126,40 @@ impl Worker {
         Ok(format!("{label} carries on."))
     }
 
+    /// AGENT_PAUSE or AGENT_RESUME with a `model`: pauses (or resumes) every
+    /// one of this session's agents running on it now, as one by one would,
+    /// and names those left alone, so the others are seen to carry on. A
+    /// word naming no agent's model touches nothing.
+    pub(crate) fn agent_group(&self, pause: bool, word: &str) -> Result<String, String> {
+        let word = word.trim();
+        if word.is_empty() {
+            return Err("The model is empty.".into());
+        }
+        let (_, contacts) = self.contacts();
+        let (mut picked, mut left) = (vec![], vec![]);
+        for (id, label, conv) in contacts {
+            let Some(s) = find_session(&conv) else { continue };
+            let (model, provider) = {
+                let c = s.conv.lock().unwrap();
+                (c.model.clone(), c.provider())
+            };
+            if on_model(word, &model, provider) { picked.push((id, label, model)) } else { left.push(format!("{label} ({model})")) }
+        }
+        if picked.is_empty() {
+            let others = if left.is_empty() { "you have no running agents".to_string() } else { format!("yours are {}", left.join(", ")) };
+            return Err(format!("No agent of yours is on {word}: {others}. Nothing was done."));
+        }
+        let mut out = String::new();
+        for (id, label, model) in picked {
+            let r = if pause { self.agent_pause(id) } else { self.agent_resume(id) };
+            out += &format!("- {label} ({model}): {}\n", r.unwrap_or_else(|e| e));
+        }
+        if !left.is_empty() {
+            out += &format!("Left alone: {}.", left.join(", "));
+        }
+        Ok(out.trim_end().to_string())
+    }
+
     /// Who this session is in messages, and the sessions it can write to:
     /// (number, label, conversation id), the main session being 0.
     fn contacts(&self) -> (String, Vec<(u64, String, String)>) {
@@ -309,6 +343,17 @@ impl Worker {
 /// AGENT new's and set's `model` and `effort`, checked: a model this Oak
 /// can use (not the local server's, which serves one request at a time)
 /// and an effort level.
+/// Whether `word` names `model` (served by `provider`): its id, a word of
+/// it with a letter in it ("opus" for claude-opus-4-7, "sol" for
+/// gpt-6.1-sol), or its provider ("codex", "Claude").
+pub(crate) fn on_model(word: &str, model: &str, provider: crate::providers::Kind) -> bool {
+    let (w, m) = (word.trim().to_lowercase(), model.to_lowercase());
+    w == m
+        || w == provider.id()
+        || w == provider.name().to_lowercase()
+        || m.split(['-', '/', ':', ' ']).any(|t| t == w && t.chars().any(|c| c.is_ascii_alphabetic()))
+}
+
 fn model_and_effort(input: &Value) -> Result<(Option<String>, Option<String>), String> {
     let model = input["model"].as_str().map(str::trim).filter(|m| !m.is_empty());
     if let Some(m) = model {

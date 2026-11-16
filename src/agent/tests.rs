@@ -1522,3 +1522,32 @@ fn a_new_notes_limit_keeps_the_prefix() {
     assert!(!flat(&summarized).contains("The limit on your notes is now"));
     crate::agent::memory::set_test_notes_limit(None);
 }
+
+/// AGENT_PAUSE and AGENT_RESUME by model pick the agents on it by id,
+/// family word or provider, and nothing that merely shares a version.
+#[test]
+fn group_pause_picks_by_model() {
+    use crate::providers::Kind;
+    use super::subagents::on_model;
+    for (word, model, kind) in [
+        ("opus", "claude-opus-4-7", Kind::Claude),
+        ("Opus", "anthropic/claude-opus-4", Kind::OpenRouter),
+        ("claude-opus-4-7", "claude-opus-4-7", Kind::Claude),
+        ("sol", "gpt-6.1-sol", Kind::Codex),
+        ("gpt", "gpt-6.1-sol", Kind::Codex),
+        ("codex", "gpt-6.1-sol", Kind::Codex),
+        ("claude", "claude-sonnet-5", Kind::Claude),
+    ] {
+        assert!(on_model(word, model, kind), "{word} {model}");
+    }
+    for (word, model, kind) in [
+        ("opus", "gpt-6.1-sol", Kind::Codex),
+        ("sonnet", "claude-opus-4-7", Kind::Claude),
+        ("4", "claude-opus-4-7", Kind::Claude),
+        ("6.1", "gpt-6.1-sol", Kind::Codex),
+        ("codex", "claude-opus-4-7", Kind::Claude),
+        ("op", "claude-opus-4-7", Kind::Claude),
+    ] {
+        assert!(!on_model(word, model, kind), "{word} {model}");
+    }
+}

@@ -516,6 +516,13 @@ impl Worker {
             "AGENT_SEND" => self.agent_send(id, input["message"].as_str().unwrap_or("")),
             "AGENT_LIST" => Ok(self.agent_list()),
             "AGENT_SET" => self.agent_set(id, input),
+            "AGENT_PAUSE" | "AGENT_RESUME" if input.get("model").is_some_and(|m| !m.is_null()) => {
+                if input.get("id").is_some_and(|i| !i.is_null()) {
+                    Err("Give `id` or `model`, not both.".into())
+                } else {
+                    self.agent_group(name == "AGENT_PAUSE", input["model"].as_str().unwrap_or(""))
+                }
+            }
             "AGENT_PAUSE" => self.agent_pause(id),
             "AGENT_RESUME" => self.agent_resume(id),
             "ACCOUNTS" => Ok(self.accounts_tool()),

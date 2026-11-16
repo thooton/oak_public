@@ -317,7 +317,9 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
   Notes reminder nudges the model at 85% of it), heartbeats, progress meters (a
   shell command whose output's last line is `x/y`, `N%` or a number; `src/progress.rs`) and
   subagents (`src/agent/subagents.rs`; sessions message each other, and a subagent's final reply
-  reaches the main session by itself).
+  reaches the main session by itself). AGENT pause and resume take an agent's `id` or a `model`
+  (id, family word such as opus or sol, or provider), acting on every agent on it and naming the
+  ones left alone.
 - Files changed on disk by someone else are reported to the model before its next request
   (`src/changes.rs`). Instruction files (CLAUDE.md, AGENTS.md) and project memory are off for now
   (`src/instructions.rs`).
