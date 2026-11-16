@@ -2,3 +2,6 @@
 linux/* text eol=lf
 *.sh text eol=lf
 command/deploy/* text eol=lf
+# The plugin interface records are compared byte for byte by the SDK tests.
+sdk/abi/*.txt text eol=lf
+sdk/include/oak_plugin.h text eol=lf
