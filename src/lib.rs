@@ -379,6 +379,7 @@ impl App {
         api::set_diagnostics(settings.cache_diagnostics);
         api::set_rotation(settings.rotation);
         agent::set_notes_alert(settings.notes_alert);
+        agent::set_notes_limit(settings.notes_limit);
         openrouter::set_title_model(&settings.title_model);
         openrouter::set_routing(&settings.or_routing);
         unslop::set_all(&settings);

@@ -300,14 +300,18 @@ impl Worker {
             }
         }
         let model = c.model.clone();
+        let tools = defs(&kits);
+        // (A session with no NOTE tool, a local model's, has no notes limit to tell.)
+        let notes_limit = if tools.iter().any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("NOTE"))) { super::notes_limit() } else { 0 };
         let built = crate::prefix::Pin {
             day: crate::time::today_utc(),
             kits: kits.clone(),
             effort,
-            tools: defs(&kits),
+            tools,
             folder: c.folder.display().to_string(),
             model,
             system: String::new(),
+            notes_limit,
         };
         let base = crate::prefix::Pin { kits: held, tools: held_tools, ..built.clone() };
         // The prefix as first sent since the last summary: its system prompt,
@@ -320,16 +324,17 @@ impl Worker {
             // result and a message say the new ones.)
             let model = if pin.model.is_empty() { &model_now } else { &pin.model };
             if chat {
-                super::prompt::chat_prompt(&pin.day, model)
+                super::prompt::chat_prompt(&pin.day, model, pin.notes_limit)
             } else {
-                system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role)
+                system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role, pin.notes_limit)
             }
         };
         let (pin, system) = match mode {
             Some(mode) => {
                 let add = last_is(&c, "user");
+                let notes = super::notes_tokens(&c.notes);
                 let effort_per_message = mode == crate::prefix::Mode::Claude && crate::prefix::supports_effort(&c.model);
-                let pin = c.prefix.prepare(crate::prefix::Setup { mode, n, cut, add, effort_per_message, now: built, base, joins });
+                let pin = c.prefix.prepare(crate::prefix::Setup { mode, n, cut, add, effort_per_message, now: built, base, joins, notes });
                 let system = c.prefix.system(render);
                 (pin, system)
             }

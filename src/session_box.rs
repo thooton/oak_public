@@ -839,22 +839,25 @@ fn note_size(tokens: u64) -> String {
 }
 
 /// The model's notes (NOTE action=new), in a drop-down box. Its size turns red
-/// once the model is told to tidy them up. With Rewrite notes, the notes
-/// of the user's `own` session show rewritten (the size stays the
-/// model's notes').
+/// once the model is told to tidy them up, or they are over their limit
+/// (it was lowered). With Rewrite notes, the notes of the user's `own`
+/// session show rewritten (the size stays the model's notes').
 pub(crate) fn notes_box(ui: &mut Ui, t: &Theme, w: f32, notes: &[store::Note], own: bool, max_h: f32) {
-    let tokens = agent::notes_tokens(notes);
-    let over = tokens > agent::NOTES_ALERT_TOKENS && agent::notes_alert_on();
+    let (tokens, limit) = (agent::notes_tokens(notes), agent::notes_limit());
+    let over_limit = tokens > limit;
+    let over = over_limit || (tokens > agent::notes_alert_tokens() && agent::notes_alert_on());
     panel_box(ui, t, w, 6, 3.0, |ui| {
         let count = if notes.is_empty() { "none".to_string() } else { notes.len().to_string() };
         let size = if notes.is_empty() { String::new() } else { note_size(tokens) };
         let (open, resp) = side_head(ui, t, "notes", "Notes", &count, (&size, if over { t.error } else { t.ink3 }), !notes.is_empty());
         let tip = if notes.is_empty() {
             "No session notes".to_string()
+        } else if over_limit {
+            format!("About {} of notes, over the limit of {}: the model must shorten or delete notes before adding any", note_size(tokens), note_size(limit))
         } else if over {
-            format!("About {} of notes; cleanup threshold {}", note_size(tokens), note_size(agent::NOTES_ALERT_TOKENS))
+            format!("About {} of notes; limit {}", note_size(tokens), note_size(limit))
         } else {
-            "Session notes, included in every request".to_string()
+            format!("Session notes, included in every request; limit {}", note_size(limit))
         };
         resp.on_hover_text(tip);
         if !open {

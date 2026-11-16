@@ -73,8 +73,14 @@ const TOOLS: &str = include_str!("../../prompts/tools.md");
 const CHAT: &str = include_str!("../../prompts/chat.md");
 
 /// A chat's system prompt (`CHAT`), dated `day`, for `model`.
-pub(crate) fn chat_prompt(day: &str, model: &str) -> String {
-    fill_prompt(CHAT, Path::new(""), Path::new(""), day, &crate::api::model_name(model), None)
+pub(crate) fn chat_prompt(day: &str, model: &str, notes_limit: u64) -> String {
+    with_notes_limit(fill_prompt(CHAT, Path::new(""), Path::new(""), day, &crate::api::model_name(model), None), notes_limit)
+}
+
+/// {{notes_limit}} filled in: the notes' limit the prompt is rendered with
+/// (`prefix::Pin::notes_limit`; a change later is a message).
+fn with_notes_limit(text: String, notes_limit: u64) -> String {
+    text.replace("{{notes_limit}}", &crate::agent::with_commas(notes_limit))
 }
 
 /// The system prompt: the role's prompt (`role`, an id in `ROLES`) with the
@@ -89,19 +95,29 @@ pub(crate) fn system_prompt(folder: &Path, scratch: &Path, model: &str, agent: O
     if goal {
         kits.push("GOAL".into());
     }
-    system_prompt_on(&crate::time::today_utc(), folder, scratch, model, agent, &kits, role)
+    system_prompt_on(&crate::time::today_utc(), folder, scratch, model, agent, &kits, role, crate::agent::notes_limit())
 }
 
 /// `system_prompt` dated `day`, with `kits` loaded (LOAD; a local model's
 /// GOAL with a goal): a kit's block (`{{#window}}`, `{{#agents}}`,
 /// `{{#goal}}`) only once it is. A conversation keeps the date and kits its
-/// cache was written with (`prefix::Pin`).
-pub(crate) fn system_prompt_on(day: &str, folder: &Path, scratch: &Path, model: &str, agent: Option<&str>, kits: &[String], role: &str) -> String {
+/// cache was written with (`prefix::Pin`), and the notes' limit it names.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn system_prompt_on(
+    day: &str,
+    folder: &Path,
+    scratch: &Path,
+    model: &str,
+    agent: Option<&str>,
+    kits: &[String],
+    role: &str,
+    notes_limit: u64,
+) -> String {
     let has = |k: &str| kits.iter().any(|x| x == k);
     let local = crate::local::serves(model);
     let text = with_tools(self::role(role).text, TOOLS);
     let text = keep_blocks(&text, &[("full", !local), ("local", local), ("goal", !local || has("GOAL")), ("window", has("WINDOW")), ("agents", has("AGENT"))]);
-    fill_prompt(&text, folder, scratch, day, &crate::api::model_name(model), agent)
+    with_notes_limit(fill_prompt(&text, folder, scratch, day, &crate::api::model_name(model), agent), notes_limit)
 }
 
 /// A kit's block of the prompt (`{{#window}}` for WINDOW, `{{#agents}}`
@@ -306,7 +322,7 @@ mod tests {
     /// it until then.
     #[test]
     fn kits_add_their_blocks() {
-        let p = |kits: &[&str]| system_prompt_on("2026-11-06", Path::new("F"), Path::new("S"), "claude-opus-5-5", None, &kits.iter().map(|k| k.to_string()).collect::<Vec<_>>(), "normal");
+        let p = |kits: &[&str]| system_prompt_on("2026-11-06", Path::new("F"), Path::new("S"), "claude-opus-5-5", None, &kits.iter().map(|k| k.to_string()).collect::<Vec<_>>(), "normal", 2_000);
         let (none, all) = (p(&[]), p(&["WINDOW", "AGENT"]));
         assert!(!none.contains("GUI app") && !none.contains("Subagents (AGENT) suit") && none.contains("Goals: the user"));
         assert!(all.contains("GUI app") && all.contains("Subagents (AGENT) suit"));

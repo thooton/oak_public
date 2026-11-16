@@ -597,7 +597,7 @@ fn cd_switches_the_working_folder() {
     // The pin keeps the folder the cache was written with.
     let mut p = crate::prefix::State::default();
     let pin = |folder: &Path| crate::prefix::Pin { day: "d".into(), folder: folder.display().to_string(), tools: vec![json!({"name": "READ"})], ..Default::default() };
-    let setup = |n, now: crate::prefix::Pin| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![] };
+    let setup = |n, now: crate::prefix::Pin| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![], notes: 0 };
     assert_eq!(p.prepare(setup(1, pin(&root))).folder, root.display().to_string());
     assert_eq!(p.prepare(setup(3, pin(&sub))).folder, root.display().to_string());
     assert!(p.sys.is_empty());
@@ -1351,4 +1351,170 @@ fn the_prefix_only_grows_on_codex() {
 fn the_prefix_only_grows_where_system_messages_cant_go() {
     let conv = Conversation { provider: Some(crate::providers::Kind::OpenRouter), model: "openai/gpt-5".into(), ..Default::default() };
     prefix_only_grows("prefix-generic", conv, "deepseek/deepseek-v4-flash", generic_sent);
+}
+
+/// NOTE with the notes' limit at `limit` tokens on this thread (100 tokens:
+/// up to 353 bytes of notes, `rolling::estimate`).
+fn limited_notes(limit: u64) -> impl Fn(&mut Conversation, &str, Value) -> Result<String, String> {
+    crate::agent::memory::set_test_notes_limit(Some(limit));
+    |c: &mut Conversation, name: &str, input: Value| memory_tool(c, name, &input, 0)
+}
+
+fn note_lens(c: &Conversation) -> Vec<usize> {
+    c.notes.iter().map(|n| n.text.len()).collect()
+}
+
+/// Notes up to the limit are saved; one byte past it is refused, and
+/// nothing changes.
+#[test]
+fn notes_fill_up_to_their_limit() {
+    let tool = limited_notes(100);
+    let mut c = Conversation::default();
+    tool(&mut c, "NOTE_NEW", json!({"text": "a".repeat(300)})).unwrap();
+    let full = tool(&mut c, "NOTE_NEW", json!({"text": "b".repeat(53)})).unwrap();
+    assert!(!full.contains("over their limit"), "{full}");
+    assert_eq!(notes_tokens(&c.notes), 100);
+    let err = tool(&mut c, "NOTE_NEW", json!({"text": "c"})).unwrap_err();
+    assert!(err.starts_with("Not saved: it would take your notes to about 101 tokens, past their limit of 100"), "{err}");
+    assert_eq!((note_lens(&c), c.next_note_id), (vec![300, 53], 2));
+    // An update that would make a note longer past the limit: refused too.
+    let err = tool(&mut c, "NOTE_UPDATE", json!({"id": 2, "text": "b".repeat(54)})).unwrap_err();
+    assert!(err.starts_with("Not updated: it would make note 2 longer"), "{err}");
+    assert_eq!(note_lens(&c), [300, 53]);
+    // Room made, the same fit.
+    tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "a".repeat(299)})).unwrap();
+    tool(&mut c, "NOTE_NEW", json!({"text": "c"})).unwrap();
+    assert_eq!(note_lens(&c), [299, 53, 1]);
+    // Growing under the limit, and up to it, is fine.
+    tool(&mut c, "NOTE_DELETE", json!({"id": 3})).unwrap();
+    tool(&mut c, "NOTE_UPDATE", json!({"id": 2, "text": "b".repeat(54)})).unwrap();
+    assert_eq!(notes_tokens(&c.notes), 100);
+    crate::agent::memory::set_test_notes_limit(None);
+}
+
+/// The limit lowered under notes already taken: they are all kept, the
+/// model told; only shortening or deleting goes through until they are
+/// under it again.
+#[test]
+fn notes_over_a_lowered_limit_must_shrink_first() {
+    let tool = limited_notes(1_000);
+    let mut c = Conversation::default();
+    for _ in 0..3 {
+        tool(&mut c, "NOTE_NEW", json!({"text": "n".repeat(200)})).unwrap();
+    }
+    let tool = limited_notes(100);
+    assert_eq!((note_lens(&c), notes_tokens(&c.notes)), (vec![200, 200, 200], 171));
+    assert!(render_memory(&c).contains("over their limit of 100"));
+    // No new note, however small; no update that makes a note longer.
+    let err = tool(&mut c, "NOTE_NEW", json!({"text": "x"})).unwrap_err();
+    assert!(err.starts_with("Not saved: your notes take about 171 tokens, over their limit of 100."), "{err}");
+    assert!(tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "n".repeat(201)})).is_err());
+    assert_eq!((note_lens(&c), c.next_note_id), (vec![200, 200, 200], 3));
+    // Rewording at the same length, shrinking and deleting all go through,
+    // each saying what is left to do while still over.
+    let same = tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "m".repeat(200)})).unwrap();
+    assert!(same.contains("over their limit of 100"), "{same}");
+    let shrunk = tool(&mut c, "NOTE_UPDATE", json!({"id": 2, "text": "n".repeat(100)})).unwrap();
+    assert!(shrunk.contains("about 142 tokens, over their limit"), "{shrunk}");
+    let deleted = tool(&mut c, "NOTE_DELETE", json!({"id": 3})).unwrap();
+    assert_eq!(deleted, "Deleted note 3.");
+    assert_eq!((note_lens(&c), notes_tokens(&c.notes)), (vec![200, 100], 85));
+    // Under it: adding works again, up to the limit.
+    assert!(tool(&mut c, "NOTE_NEW", json!({"text": "x".repeat(54)})).is_err());
+    tool(&mut c, "NOTE_NEW", json!({"text": "x".repeat(53)})).unwrap();
+    crate::agent::memory::set_test_notes_limit(None);
+}
+
+/// An update crossing the limit: down across it goes through (and the
+/// model is no longer told it is over), up across it is refused.
+#[test]
+fn note_updates_crossing_the_limit() {
+    let tool = limited_notes(1_000);
+    let mut c = Conversation::default();
+    tool(&mut c, "NOTE_NEW", json!({"text": "a".repeat(500)})).unwrap();
+    let tool = limited_notes(100);
+    let down = tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "a".repeat(300)})).unwrap();
+    assert!(!down.contains("over their limit"), "{down}");
+    assert!(tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "a".repeat(400)})).is_err());
+    tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "a".repeat(353)})).unwrap();
+    assert_eq!(note_lens(&c), [353]);
+    crate::agent::memory::set_test_notes_limit(None);
+}
+
+/// The "Notes limit" setting: 2,000 tokens by default (an older
+/// settings.json without it too), kept across a save, brought into range.
+#[test]
+fn the_notes_limit_setting_persists() {
+    assert_eq!(crate::store::Settings::default().notes_limit, 2_000);
+    let older: crate::store::Settings = serde_json::from_str("{}").unwrap();
+    assert_eq!(older.notes_limit, 2_000);
+    let mut set = crate::store::Settings::default();
+    set.notes_limit = 8_000;
+    let back: crate::store::Settings = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+    assert_eq!(back.notes_limit, 8_000);
+    assert_eq!(crate::agent::memory::sane_notes_limit(0), 2_000);
+    assert_eq!(crate::agent::memory::sane_notes_limit(5), 100);
+    assert_eq!(crate::agent::memory::sane_notes_limit(4_000), 4_000);
+    assert!(NOTES_LIMITS.iter().any(|&(n, _)| n == DEFAULT_NOTES_LIMIT));
+}
+
+/// The system prompt names the limit it was sent with. Changing the
+/// setting mid-session leaves it (and everything sent) as it was and adds
+/// a message, kept across a save and reload; a summary brings the system
+/// prompt up to date. NOTE goes by the limit now throughout.
+#[test]
+fn a_new_notes_limit_keeps_the_prefix() {
+    let limit = |n| crate::agent::memory::set_test_notes_limit(Some(n));
+    limit(2_000);
+    let conv = Conversation { model: "claude-opus-5-5".into(), messages: vec![json!({"role": "user", "content": [oak::text("start")]})].into(), ..Default::default() };
+    let (w, s) = idle_worker("notes-limit", conv);
+    let req = |w: &Worker| claude_sent(&w.request_body().0);
+    let flat = |x: &Sent| serde_json::to_string(&(&x.0, &x.2)).unwrap();
+    let mut prev = req(&w);
+    let system = serde_json::to_string(&prev.0).unwrap();
+    assert!(system.contains("Your notes may take at most about 2,000 tokens in all"), "{system}");
+    let reply = |text: &str| {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("ok")]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text(text)]}));
+    };
+    memory_tool(&mut s.conv.lock().unwrap(), "NOTE_NEW", &json!({"text": "n".repeat(3_500)}), 0).unwrap();
+    reply("noted");
+    let next = req(&w);
+    assert_grows(&prev, &next, "a note");
+    prev = next;
+    // Lowered under the notes: a message, the prefix as it was.
+    limit(500);
+    reply("go on");
+    let next = req(&w);
+    assert_grows(&prev, &next, "a lower limit");
+    let told = "The limit on your notes is now about 500 tokens in all (it was 2,000). They take about 1000 now, over it";
+    assert!(flat(&next).contains(told), "{}", flat(&next));
+    assert!(serde_json::to_string(&next.0).unwrap().contains("about 2,000 tokens in all"));
+    prev = next;
+    assert!(memory_tool(&mut s.conv.lock().unwrap(), "NOTE_NEW", &json!({"text": "more"}), 0).is_err());
+    memory_tool(&mut s.conv.lock().unwrap(), "NOTE_UPDATE", &json!({"id": 1, "text": "n".repeat(1_000)}), 0).unwrap();
+    // Told once.
+    reply("and on");
+    let next = req(&w);
+    assert_grows(&prev, &next, "the same limit");
+    assert_eq!(flat(&next).matches("The limit on your notes is now").count(), 1);
+    prev = next;
+    // Saved and loaded: the same request.
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let (w2, _s2) = idle_worker("notes-limit-reloaded", serde_json::from_str(&saved).unwrap());
+    assert_eq!(req(&w2), prev, "reloaded");
+    // A summary: the system prompt names the limit now, and no message does.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("ok")]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text("more")]}));
+        let cut = c.messages.len() - 1;
+        install_summary(&mut c, crate::rolling::Summary { cut, text: "Noted things.".into(), made_at: 1, clear: cut }, 0, Default::default());
+    }
+    let summarized = req(&w);
+    let system = serde_json::to_string(&summarized.0).unwrap();
+    assert!(system.contains("Your notes may take at most about 500 tokens in all"), "{system}");
+    assert!(!flat(&summarized).contains("The limit on your notes is now"));
+    crate::agent::memory::set_test_notes_limit(None);
 }

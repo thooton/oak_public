@@ -1689,7 +1689,7 @@ pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize
     let label = if streaming {
         "Thinking…".to_string()
     } else if let Some(n) = b["_oak_tokens"].as_u64().filter(|&n| n > 0) {
-        format!("Thought for {} token{}", with_commas(n), crate::plural(n))
+        format!("Thought for {} token{}", crate::agent::with_commas(n), crate::plural(n))
     } else if let Some(ms) = b["_oak_ms"].as_u64() {
         format!("Thought for {}s", ms.div_ceil(1000).max(1))
     } else {
@@ -1720,18 +1720,6 @@ pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize
     }
 }
 
-/// A count with thousands separators: 12345 → "12,345".
-fn with_commas(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
 
 /// Tool calls from outside a conversation (a plugin's chat,
 /// `oak_sdk::ui::work_block`), drawn as a conversation's are: one block,

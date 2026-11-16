@@ -9,6 +9,8 @@
 //!
 //! - the date: "Today's date is now …";
 //! - the model: "Your underlying model is now …";
+//! - the notes' limit (the "Notes limit" setting): "The limit on your
+//!   notes is now …";
 //! - a tool whose definition changed (AGENT's model list follows the
 //!   providers connected), and the tools of a kit loaded meanwhile (LOAD:
 //!   AGENT, BROWSER, WINDOW);
@@ -155,6 +157,14 @@ pub struct Pin {
     /// renewed the pin rendered it.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub system: String,
+    /// The notes' limit the system prompt names, in tokens (0: it names
+    /// none: a session without notes, or a pin from an older Oak).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub notes_limit: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A change the model is told of, before transcript message `at`.
@@ -162,10 +172,10 @@ pub struct Pin {
 #[serde(default)]
 pub struct SysMsg {
     pub at: usize,
-    /// "date", "model", "effort" or "tool:NAME".
+    /// "date", "model", "effort", "notes_limit" or "tool:NAME".
     pub kind: String,
     /// What it brings, to tell whether a newer one is needed: the date, the
-    /// effort, a hash of the tool's definition.
+    /// effort, the notes' limit, a hash of the tool's definition.
     pub key: String,
     /// What it says (may be empty).
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -210,6 +220,9 @@ pub struct Setup {
     pub base: Pin,
     /// Where the tools of the kits loaded in view join (`loads`).
     pub joins: Vec<Join>,
+    /// About how many tokens the notes take now (`agent::notes_tokens`), for
+    /// what a new limit says.
+    pub notes: u64,
 }
 
 /// A kit's tool that joins the conversation after the kit's LOAD.
@@ -358,6 +371,12 @@ impl State {
             if p.model.is_empty() {
                 p.model = s.now.model.clone();
             }
+            // (A system prompt not rendered yet names the limit it is
+            // rendered with; one an older Oak rendered names none, so the
+            // model is told it below.)
+            if p.notes_limit == 0 && p.system.is_empty() {
+                p.notes_limit = s.now.notes_limit;
+            }
         }
         let pin = self.pin.clone().unwrap_or_default();
         let (now, cut) = (&s.now, s.cut);
@@ -368,6 +387,27 @@ impl State {
         }
         if !now.model.is_empty() && self.said("model", cut).unwrap_or(&pin.model) != now.model {
             new.push(SysMsg { text: format!("Your underlying model is now {}.", crate::api::model_name(&now.model)), ..msg("model".into(), now.model.clone()) });
+        }
+        // The "Notes limit" setting changed (none for a session without notes).
+        let limit = now.notes_limit.to_string();
+        let told = self.said("notes_limit", cut).map(str::to_string).unwrap_or_else(|| pin.notes_limit.to_string());
+        if now.notes_limit != 0 && told != limit {
+            let n = crate::agent::with_commas(now.notes_limit);
+            let mut text = match told.parse::<u64>().unwrap_or(0) {
+                0 => format!(
+                    "Your notes are now limited to about {n} tokens in all: Oak refuses a new note, or an update that makes a note longer, \
+                     that would take them past it."
+                ),
+                was => format!("The limit on your notes is now about {n} tokens in all (it was {}).", crate::agent::with_commas(was)),
+            };
+            if s.notes > now.notes_limit {
+                text += &format!(
+                    " They take about {} now, over it: shorten or delete notes (NOTE action=update with less text, or action=delete) \
+                     before adding one or making one longer.",
+                    s.notes
+                );
+            }
+            new.push(SysMsg { text, ..msg("notes_limit".into(), limit) });
         }
         for t in &now.tools {
             let name = t["name"].as_str().unwrap_or("");
@@ -575,11 +615,11 @@ mod tests {
     }
 
     fn now(day: &str, effort: &str, tools: Vec<Value>) -> Pin {
-        Pin { day: day.into(), kits: vec![], effort: Some(effort.into()), tools, folder: "F".into(), model: "M".into(), system: String::new() }
+        Pin { day: day.into(), kits: vec![], effort: Some(effort.into()), tools, folder: "F".into(), model: "M".into(), system: String::new(), notes_limit: 0 }
     }
 
     fn setup(mode: Mode, n: usize, now: Pin) -> Setup {
-        Setup { mode, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![] }
+        Setup { mode, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![], notes: 0 }
     }
 
     #[test]
@@ -674,6 +714,60 @@ mod tests {
     }
 
     /// Without a user turn to follow, nothing is added (it waits).
+    /// The "Notes limit" setting changing: a message (with what the notes
+    /// take when they are over it), once per change; the system prompt
+    /// stays as it was until a summary.
+    #[test]
+    fn a_new_notes_limit_is_a_message() {
+        let limit = |n| Pin { notes_limit: n, ..now("2026-11-06", "high", vec![]) };
+        let mut s = State::default();
+        let p = s.prepare(setup(Mode::Claude, 1, limit(2_000)));
+        assert_eq!(p.notes_limit, 2_000);
+        assert_eq!(s.system(|p| format!("notes up to {}", p.notes_limit)), "notes up to 2000");
+        s.prepare(setup(Mode::Claude, 3, limit(2_000)));
+        assert!(s.sys.is_empty());
+        let p = s.prepare(Setup { notes: 1_500, ..setup(Mode::Claude, 5, limit(1_000)) });
+        assert_eq!(p.notes_limit, 2_000, "the pin keeps what the system prompt says");
+        assert_eq!(s.system(|_| "another prompt".into()), "notes up to 2000");
+        assert_eq!((s.sys.len(), s.sys[0].at, s.sys[0].kind.as_str(), s.sys[0].key.as_str()), (1, 5, "notes_limit", "1000"));
+        assert_eq!(
+            s.sys[0].text,
+            "The limit on your notes is now about 1,000 tokens in all (it was 2,000). They take about 1500 now, over it: shorten or \
+             delete notes (NOTE action=update with less text, or action=delete) before adding one or making one longer."
+        );
+        // Told once; told again only of another change, back included.
+        s.prepare(Setup { notes: 1_500, ..setup(Mode::Claude, 7, limit(1_000)) });
+        assert_eq!(s.sys.len(), 1);
+        s.prepare(Setup { notes: 900, ..setup(Mode::Claude, 9, limit(2_000)) });
+        assert_eq!(s.sys[1].text, "The limit on your notes is now about 2,000 tokens in all (it was 1,000).");
+        // Saved and loaded: the same.
+        let mut s: State = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        s.prepare(setup(Mode::Claude, 11, limit(2_000)));
+        assert_eq!(s.sys.len(), 2);
+        // A session moved to a model without notes is told nothing.
+        s.prepare(setup(Mode::Claude, 13, limit(0)));
+        assert_eq!(s.sys.len(), 2);
+        // A summary renders the system prompt with the limit now.
+        let p = s.prepare(Setup { cut: 12, ..setup(Mode::Claude, 15, limit(4_000)) });
+        assert_eq!((p.notes_limit, s.sys.len()), (4_000, 0));
+        assert_eq!(s.system(|p| format!("notes up to {}", p.notes_limit)), "notes up to 4000");
+    }
+
+    /// A system prompt an older Oak sent named no limit: the model is told
+    /// it in a message. One not rendered yet names it.
+    #[test]
+    fn an_older_pin_is_told_the_notes_limit() {
+        let older = |system: &str| State { pin: Some(Pin { system: system.into(), ..now("2026-11-06", "high", vec![]) }), ..Default::default() };
+        let mut s = older("an older prompt");
+        let p = s.prepare(setup(Mode::Claude, 3, Pin { notes_limit: 2_000, ..now("2026-11-06", "high", vec![]) }));
+        assert_eq!(p.notes_limit, 0);
+        assert_eq!(s.sys.len(), 1);
+        assert!(s.sys[0].text.starts_with("Your notes are now limited to about 2,000 tokens in all"), "{}", s.sys[0].text);
+        let mut s = older("");
+        let p = s.prepare(setup(Mode::Claude, 3, Pin { notes_limit: 2_000, ..now("2026-11-06", "high", vec![]) }));
+        assert_eq!((p.notes_limit, s.sys.len()), (2_000, 0));
+    }
+
     #[test]
     fn messages_wait_for_a_user_turn() {
         let mut s = State::default();

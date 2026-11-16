@@ -94,7 +94,13 @@ impl App {
         ui.end_row();
 
         self.on_off_row(ui, t, "Account rotation", |s| &mut s.rotation, api::set_rotation, "Switches to the account with the most remaining usage at a limit. Off: waits for the selected account to reset.");
-        self.on_off_row(ui, t, "Notes reminder", |s| &mut s.notes_alert, crate::agent::set_notes_alert, "Model reminder to prune notes over about 1,700 tokens.");
+        let tip = "Hard limit on a session's notes, all together. At it, the model must shorten or delete notes before adding or lengthening one; \
+                   notes already over it are kept. Running sessions are told of a change in a message.";
+        if option_row(ui, t, "Notes limit", &mut self.settings.notes_limit, crate::agent::NOTES_LIMITS, Some(tip)) {
+            crate::agent::set_notes_limit(self.settings.notes_limit);
+            store::save_settings(&self.settings);
+        }
+        self.on_off_row(ui, t, "Notes reminder", |s| &mut s.notes_alert, crate::agent::set_notes_alert, "Model reminder to prune notes past 85% of the notes limit.");
 
         caption(ui, "Scratchpads", t.ink3);
         ui.horizontal(|ui| self.scratch_row(ui, t));

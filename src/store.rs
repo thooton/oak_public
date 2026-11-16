@@ -1148,8 +1148,10 @@ pub struct Settings {
     /// With Unslop, the notes box shows the notes rewritten.
     pub unslop_notes: bool,
     /// The model is told to tidy up its notes once they pass
-    /// `agent::NOTES_ALERT_TOKENS`.
+    /// `agent::notes_alert_tokens`.
     pub notes_alert: bool,
+    /// The hard limit on a session's notes, in tokens (`agent::notes_limit`).
+    pub notes_limit: u64,
     /// The OpenRouter model that names sessions (an id in
     /// `crate::openrouter::TITLE_CHOICES`).
     pub title_model: String,
@@ -1198,6 +1200,7 @@ impl Default for Settings {
             unslop_thinking: false,
             unslop_notes: false,
             notes_alert: true,
+            notes_limit: crate::agent::DEFAULT_NOTES_LIMIT,
             title_model: crate::openrouter::TITLE_CHOICES[0].0.into(),
             or_routing: "balanced".into(),
             paused_on_close: vec![],

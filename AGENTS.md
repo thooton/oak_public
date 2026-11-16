@@ -234,10 +234,10 @@ can't read.
   system prompt as rendered, the session memory and context block, the tools, every message) is
   never changed; requests only add to it. Smart context acting (a summary replacing the older part)
   is the only moment it is rebuilt. The cache expiring, another account or model, an effort, date,
-  goal, note or instruction-file change, smart context turned off or on, a save and restart, a
-  newer Oak's prompt text: none of them changes it. What changes reaches the model after the latest
-  user turn ("Today's date is now", "Your underlying model is now", a tool definition, Claude's
-  effort): Claude and Codex as their own mid-conversation messages, which turn themselves off if
+  goal, note, notes-limit or instruction-file change, smart context turned off or on, a save and
+  restart, a newer Oak's prompt text: none of them changes it. What changes reaches the model after
+  the latest user turn ("Today's date is now", "Your underlying model is now", "The limit on your
+  notes is now", a tool definition, Claude's effort): Claude and Codex as their own mid-conversation messages, which turn themselves off if
   refused (then, like other providers, as a text note where they were). A loaded kit stays where
   its LOAD put it: its instructions LOAD's result, its tool right after it (where tools can't be
   added, called through LOAD). Only once a summary covers the LOAD do the kit's prompt block and tool
@@ -310,7 +310,11 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
   An endless goal (the Endless box when editing it) refuses GOAL justify and finish, so it lasts
   until the user pauses or clears it; the model is told in the goal's message and its memory block,
   and changing only the mode sends the goal again.
-- Notes (sent with every request, so they outlive summaries), heartbeats, progress meters (a
+- Notes (sent with every request, so they outlive summaries; Settings → Notes limit caps them all
+  together, 2,000 tokens by default: NOTE itself refuses a new note, or an update making a note
+  longer, that would pass it, and notes already past a lowered limit are kept but must be shortened
+  or deleted first; the system prompt names the limit, a change mid-session comes as a message, and
+  Notes reminder nudges the model at 85% of it), heartbeats, progress meters (a
   shell command whose output's last line is `x/y`, `N%` or a number; `src/progress.rs`) and
   subagents (`src/agent/subagents.rs`; sessions message each other, and a subagent's final reply
   reaches the main session by itself).

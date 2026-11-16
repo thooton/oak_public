@@ -48,7 +48,7 @@ pub(crate) mod title;
 mod tool_calls;
 use prompt::scratchpad;
 pub(crate) use prompt::SCRATCH_ROOT;
-pub use memory::{notes_alert_on, notes_tokens, set_notes_alert, NOTES_ALERT_TOKENS};
+pub use memory::{notes_alert_on, notes_alert_tokens, notes_limit, notes_tokens, set_notes_alert, set_notes_limit, with_commas, DEFAULT_NOTES_LIMIT, NOTES_LIMITS};
 use memory::memory_tool;
 use title::title_for;
 use tool_calls::{Batch, end_ask_request};
