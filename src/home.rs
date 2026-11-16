@@ -90,7 +90,7 @@ impl App {
             // one is in, the list stays the latest first.
             let scan = crate::scratch::scan(Duration::from_secs(15), ui.ctx());
             if scan.at.is_some() {
-                let sizes: HashMap<&str, u64> = scan.pads.iter().filter_map(|p| Some((p.owner.as_deref()?, p.bytes))).collect();
+                let sizes: HashMap<&str, u64> = scan.pads.iter().flat_map(|p| p.owners.iter().map(|o| (o.as_str(), p.bytes))).collect();
                 sort_by_scratch(&mut rows, |id| sizes.get(id).copied());
             }
         }

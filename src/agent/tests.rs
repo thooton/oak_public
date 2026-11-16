@@ -589,7 +589,7 @@ fn cd_switches_the_working_folder() {
     // The scratchpad stays, and is still found by the scan.
     assert_eq!(scratchpad(&mut s.conv.lock().unwrap()), pad);
     let owners = [crate::scratch::Owner { id: "x".into(), folder: sub.clone(), scratch: s.conv.lock().unwrap().scratch.clone(), last_ms: 0, in_use: false }];
-    assert!(crate::scratch::pads(&owners).iter().any(|p| p.dir == pad && p.owner.as_deref() == Some("x")));
+    assert!(crate::scratch::pads(&owners).iter().any(|p| p.dir == pad && p.owners == ["x"]));
     // Back up, with `..`; the old folder has no instructions.
     let out = cd("../proj/..").unwrap();
     assert!(out.contains(&format!("now {}", root.display())) && !out.contains("instructions"), "{out}");

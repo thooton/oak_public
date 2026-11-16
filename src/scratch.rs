@@ -33,15 +33,16 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
-/// A `tempN` folder: where it is, the conversation it belongs to, what it
-/// holds, and when it last changed (ms since 1970).
+/// A `tempN` folder: where it is, the conversations it belongs to (a side
+/// chat shares its source's, `side_chat::fork`), what it holds, and when it
+/// last changed (ms since 1970).
 #[derive(Clone, Debug)]
 pub struct Pad {
     pub dir: PathBuf,
-    pub owner: Option<String>,
+    pub owners: Vec<String>,
     pub bytes: u64,
     pub last_ms: i64,
-    /// Its session is at work, or has a background task running: never
+    /// One of its sessions is at work, or has a background task running: never
     /// cleared on its own.
     pub in_use: bool,
 }
@@ -60,7 +61,7 @@ impl Scan {
 
     /// Bytes in conversation `id`'s scratchpad, as last scanned.
     pub fn of(&self, id: &str) -> Option<u64> {
-        self.pads.iter().find(|p| p.owner.as_deref() == Some(id)).map(|p| p.bytes)
+        self.pads.iter().find(|p| p.owners.iter().any(|o| o == id)).map(|p| p.bytes)
     }
 }
 
@@ -107,7 +108,7 @@ pub fn rescan(ctx: Option<eframe::egui::Context>) {
 /// Every `tempN` folder in the working folders of `owners`, with what it
 /// holds.
 pub fn pads(owners: &[Owner]) -> Vec<Pad> {
-    let mut by_dir: HashMap<PathBuf, &Owner> = HashMap::new();
+    let mut by_dir: HashMap<PathBuf, Vec<&Owner>> = HashMap::new();
     let mut roots: Vec<PathBuf> = vec![];
     for o in owners {
         let root = o.folder.join(crate::agent::SCRATCH_ROOT);
@@ -117,7 +118,7 @@ pub fn pads(owners: &[Owner]) -> Vec<Pad> {
             if let Some(parent) = dir.parent().filter(|p| *p != root && !roots.iter().any(|r| r == p)) {
                 roots.push(parent.to_path_buf());
             }
-            by_dir.insert(dir, o);
+            by_dir.entry(dir).or_default().push(o);
         }
         if !roots.contains(&root) {
             roots.push(root);
@@ -135,12 +136,12 @@ pub fn pads(owners: &[Owner]) -> Vec<Pad> {
             }
             let dir = e.path();
             let (bytes, newest) = walk(&dir);
-            let owner = by_dir.get(&dir);
+            let owners = by_dir.get(&dir).map_or(&[][..], |o| o.as_slice());
             out.push(Pad {
                 bytes,
-                last_ms: newest.max(owner.map_or(0, |o| o.last_ms)),
-                owner: owner.map(|o| o.id.clone()),
-                in_use: owner.is_some_and(|o| o.in_use),
+                last_ms: owners.iter().map(|o| o.last_ms).fold(newest, i64::max),
+                owners: owners.iter().map(|o| o.id.clone()).collect(),
+                in_use: owners.iter().any(|o| o.in_use),
                 dir,
             });
         }
@@ -256,9 +257,12 @@ mod tests {
         let now = crate::api::now_ms();
         let later = now + 3 * 3_600_000;
         let owner = |id: &str, scratch: &str, last_ms, in_use| Owner { id: id.into(), folder: folder.clone(), scratch: scratch.into(), last_ms, in_use };
-        let owners = [owner("young", "temp0", later, false), owner("busy", "temp1", 0, true)];
+        // ("side" is busy's side chat, sharing its scratchpad.)
+        let owners = [owner("young", "temp0", later, false), owner("side", "temp1", 0, false), owner("busy", "temp1", 0, true)];
         let all = pads(&owners);
         assert_eq!(all.len(), 3, "{all:?}");
+        let shared = all.iter().find(|p| p.dir == root.join("temp1")).unwrap();
+        assert_eq!(shared.owners, ["side", "busy"]);
         assert_eq!(all.iter().map(|p| p.bytes).sum::<u64>(), 15);
         // Two hours on: temp0's session wrote later, temp1's is at work,
         // temp2 (no conversation) is idle.
