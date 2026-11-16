@@ -43,9 +43,10 @@
 //! index they come before), so every later request sends them where they
 //! first were (`inject`); a summary that covers one leaves it out.
 //!
-//! Freebuff is the one provider the invariant can't reach in full: the
-//! service checks that its system prompt and tools are its own CLI's, dated
-//! today, so those are what it sends; the messages still only grow.
+//! Freebuff is the one exception, by design: the service checks that its
+//! system prompt and tools are its own CLI's with the current date, so its
+//! prompt is always dated today (a new day renews its cache); the messages
+//! still only grow. No other provider gets this.
 
 use crate::api::Provider;
 use serde::{Deserialize, Serialize};

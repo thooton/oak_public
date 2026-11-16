@@ -245,9 +245,12 @@ can't read.
   edit) to before a summary's cut puts back what requests went with before that summary (the
   summary before it, the prefix, the session memory: `Conversation::earlier`, saved with it, the
   last 8 summaries back) and sends exactly what was sent then, so a prompt cache still alive is
-  read again; only an older Oak's summary is rebuilt. A side chat sends what its source sent. Regression tests (`agent::tests::the_prefix_only_grows_*`) check each
-  provider's wire body. Freebuff is the exception the service imposes: its system prompt and tools
-  are its CLI's, dated today; its messages still only grow.
+  read again; only an older Oak's summary is rebuilt. A side chat sends what its source sent.
+  Regression tests (`agent::tests::the_prefix_only_grows_*`) check each provider's wire body.
+  Freebuff is the one exception, by design: the service requires its CLI's own system prompt and
+  tools with the current date, so its prompt's date is always today's (`freebuff::system_prompt`,
+  tested by `the_prompt_has_todays_date_and_the_row_name`) and a new day renews its cache; its
+  messages still only grow. No other provider or event gets this.
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
   the prompt, and is never offered to subagents (it serves one request at a time).
 
