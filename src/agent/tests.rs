@@ -1112,3 +1112,33 @@ fn execute_returns_when_its_command_exits() {
     });
     w.tasks.kill_all();
 }
+
+/// A loaded kit's tool called through LOAD runs as that tool would called
+/// directly: its input repaired as that tool's as it arrives (here sent as
+/// JSON text, with the agent's id as a string), its result under the
+/// LOAD call's id, the call named as the tool it ran.
+#[test]
+fn calls_through_load_run_as_their_tool() {
+    let (w, s) = idle_worker("through-load", Conversation { model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
+    s.conv.lock().unwrap().prefix.kits.push("AGENT".into());
+    let input = tools::repair("LOAD", json!({"name": "AGENT", "input": "{\"action\": \"send\", \"id\": \"7\", \"message\": \"hi\", \"timeout\": null}"}));
+    assert_eq!(input, json!({"name": "AGENT", "input": {"action": "send", "id": 7, "message": "hi"}}));
+    let calls = vec![
+        json!({"type": "tool_call", "id": "s1", "name": "LOAD", "input": input}),
+        json!({"type": "tool_call", "id": "l1", "name": "LOAD", "input": {"name": "AGENT", "input": {"action": "list"}}}),
+        json!({"type": "tool_call", "id": "k1", "name": "LOAD", "input": {"name": "AGENT"}}),
+    ];
+    let shown: Vec<String> = calls.iter().map(crate::transcript::shown).collect();
+    assert_eq!(shown, ["AGENT send", "AGENT list", "LOAD"]);
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls.clone()}));
+    w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    let c = s.conv.lock().unwrap();
+    let results = c.messages[2]["content"].as_array().unwrap();
+    let ids: Vec<&str> = results.iter().map(|r| r["call_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["s1", "l1", "k1"]);
+    let text = |i: usize| results[i]["content"].to_string();
+    assert!(text(0).contains("No agent 7.") && !text(0).contains("Invalid input"), "{}", text(0));
+    assert!(text(1).contains("No agents yet") && results[1]["is_error"] != true, "{}", text(1));
+    assert!(text(2).contains("AGENT is loaded already"), "{}", text(2));
+}

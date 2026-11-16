@@ -325,8 +325,10 @@ const ALIASES: &[(&str, &str, &[&str])] = &[
 /// it is shown, ordered by `waves` and checked by `validate`): field names
 /// from other agents' file tools (`file_path`, `old_str`, `oldText`, …),
 /// and values of the wrong shape that are unambiguous: an array sent as
-/// JSON text or as its lone item, "true"/"false" for a boolean, digits in
-/// a string for an integer, a number for a string. Fields given as null
+/// JSON text or as its lone item, an object sent as JSON text,
+/// "true"/"false" for a boolean, digits in a string for an integer, a
+/// number for a string. A kit's tool called through LOAD gets the same for
+/// its `input`, as that tool. Fields given as null
 /// are taken out, at any depth: no tool tells null from leaving a field
 /// out, and models write it for those they skip (some providers' schemas
 /// ask for every field: `openrouter::sail_schema`).
@@ -365,6 +367,7 @@ pub fn repair(name: &str, mut input: Value) -> Value {
                     "false" => Some(json!(false)),
                     _ => None,
                 },
+                (Some("object"), Value::String(s)) => serde_json::from_str::<Value>(s).ok().filter(Value::is_object),
                 (Some("integer"), Value::String(s)) => s.trim().parse::<i64>().ok().map(|n| json!(n)),
                 (Some("string"), Value::Number(n)) => Some(json!(n.to_string())),
                 _ => None,
@@ -373,6 +376,12 @@ pub fn repair(name: &str, mut input: Value) -> Value {
                 *v = f;
             }
         }
+    }
+    // A kit's tool called through LOAD: its input repaired as that tool's,
+    // as it would be called directly.
+    if let Some((kit, _)) = through_load(name, &input) {
+        let inner = input["input"].take();
+        input["input"] = repair(kit, inner);
     }
     input
 }
@@ -886,6 +895,24 @@ mod tests {
         assert_eq!(canonical_name("LOAD", &json!({"name": "BROWSER"})), "LOAD");
         assert_eq!(canonical_name("LOAD", &json!({"name": "TASK", "input": {"action": "wait"}})), "LOAD");
         assert_eq!(canonical_name("LOAD", &json!({"name": "WINDOW", "input": {}})), "LOAD");
+    }
+
+    /// A kit's tool called through LOAD is repaired as that tool would be
+    /// called directly, its input sent as JSON text included; a LOAD that
+    /// loads a kit, or names no kit, stays as it came.
+    #[test]
+    fn calls_through_load_are_repaired_as_their_tool() {
+        let send = repair("LOAD", json!({"name": "AGENT", "input": {"action": "send", "id": "3", "message": "hi"}}));
+        assert_eq!(send, json!({"name": "AGENT", "input": {"action": "send", "id": 3, "message": "hi"}}));
+        let (name, input) = canonical_cow("LOAD", &send);
+        assert_eq!(name, "AGENT_SEND");
+        assert!(validate(&name, &input).is_ok());
+        let text = repair("LOAD", json!({"name": "AGENT", "input": "{\"action\": \"send\", \"id\": 3, \"message\": \"hi\"}"}));
+        assert_eq!(text, send);
+        let upload = repair("LOAD", json!({"name": "browser", "input": {"action": "upload", "ref": "2", "paths": "a.png"}}));
+        assert_eq!(upload["input"], json!({"action": "upload", "ref": 2, "paths": ["a.png"]}));
+        assert_eq!(repair("LOAD", json!({"name": "AGENT"})), json!({"name": "AGENT"}));
+        assert_eq!(repair("LOAD", json!({"name": "TASK", "input": {"action": "wait", "id": "1"}}))["input"]["id"], "1");
     }
 
     /// A kit's tools are there once it is loaded; LOAD offers the others.

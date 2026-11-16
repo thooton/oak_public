@@ -136,10 +136,16 @@ impl Streaming {
             Event::Input { index, json: d } => {
                 // The input so far, for the UI to show a WRITE or EDIT as
                 // it comes in (taken out when it's done).
+                let last = index + 1 == l.blocks.len();
                 if let Some(b) = l.blocks.get_mut(index) {
                     match b.get_mut("_oak_partial") {
                         Some(Value::String(s)) => s.push_str(&d),
                         _ => b["_oak_partial"] = json!(d),
+                    }
+                    // A kit's tool through LOAD is named as it once its
+                    // input says which.
+                    if last && b["name"] == "LOAD" {
+                        l.status = format!("Writing {}", crate::transcript::shown(b));
                     }
                 }
             }
