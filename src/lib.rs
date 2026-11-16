@@ -98,6 +98,7 @@ mod theme;
 mod transcript;
 mod usage_view;
 mod vlist;
+mod wallpaper;
 mod widgets;
 mod window;
 
@@ -327,6 +328,15 @@ struct App {
     home_list: String,
     /// What Home's conversation search narrows the list to (not kept).
     chat_filter: String,
+    /// Home's menu (the box with the conversations and the accounts) is
+    /// open; at start it isn't, and Home is the wallpaper alone.
+    home_menu: bool,
+    /// Where the menu and the corner buttons were last drawn (for plugins,
+    /// `App::activity`).
+    home_menu_rect: Option<egui::Rect>,
+    home_buttons_rect: Option<egui::Rect>,
+    /// The wallpaper playing on Home (`wallpaper.rs`).
+    wallpaper: Option<wallpaper::Player>,
     /// The New screen starts a cloud session.
     new_cloud: bool,
     /// What the New screen starts on this machine, when it starts neither

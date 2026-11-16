@@ -344,6 +344,10 @@ pub trait Hooks: Send + Sync {
     fn frame(&self, _ctx: &egui::Context, _app: &mut dyn App) {}
     /// Draws at the top of Home's Providers column (a connection's state).
     fn providers_top(&self, _ui: &mut Ui, _app: &mut dyn App) {}
+    /// Draws over Home's wallpaper and under its menu, every frame Home
+    /// shows; `ui` is the whole page. Ask for the next frame
+    /// (`Context::request_repaint_after`) to move.
+    fn home_scene(&self, _ui: &mut Ui, _app: &mut dyn App) {}
     /// Oak is closing.
     fn exiting(&self) {}
 }
@@ -624,6 +628,10 @@ unsafe extern "C" fn hooks_providers_top(user: *mut c_void, ui: *mut OakUi) {
     outer(|| (), || unsafe { part::<Life>(user) }.providers_top(&mut Ui::raw(ui), &mut Window::default()))
 }
 
+unsafe extern "C" fn hooks_home_scene(user: *mut c_void, ui: *mut OakUi) {
+    outer(|| (), || unsafe { part::<Life>(user) }.home_scene(&mut Ui::raw(ui), &mut Window::default()))
+}
+
 unsafe extern "C" fn hooks_exiting(user: *mut c_void) {
     outer(|| (), || unsafe { part::<Life>(user) }.exiting())
 }
@@ -769,7 +777,7 @@ impl Registrar {
 
     /// Calls at startup, every frame, at exit.
     pub fn hooks(&mut self, hooks: impl Hooks + 'static) {
-        let d = OakHooks { size: size_of::<OakHooks>(), flags: 0, user: keep::<Life>(Box::new(hooks)), started: Some(hooks_started), frame: Some(hooks_frame), providers_top: Some(hooks_providers_top), exiting: Some(hooks_exiting) };
+        let d = OakHooks { size: size_of::<OakHooks>(), flags: 0, user: keep::<Life>(Box::new(hooks)), started: Some(hooks_started), frame: Some(hooks_frame), providers_top: Some(hooks_providers_top), exiting: Some(hooks_exiting), home_scene: Some(hooks_home_scene) };
         unsafe { (api().add_hooks)(&d) };
     }
 }

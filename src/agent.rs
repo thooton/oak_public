@@ -383,6 +383,38 @@ impl<'a> Running<'a> {
     }
 }
 
+impl Live {
+    /// What the session is doing, in a word, for plugins
+    /// (`oak_sdk::host::Doing::phase`), and the tool it is on ("" when none).
+    pub fn phase(&self) -> (&'static str, String) {
+        let last_tool = || self.blocks.iter().rev().find(|b| b["type"] == "tool_use").and_then(|b| b["name"].as_str()).unwrap_or("").to_string();
+        if !self.busy {
+            return ("idle", String::new());
+        }
+        if self.status.starts_with("Waiting for the usage limit") {
+            return ("limit", String::new());
+        }
+        if self.status.starts_with("Retry") {
+            return ("retrying", String::new());
+        }
+        if self.tools > 0 {
+            return ("tool", self.status.strip_prefix("Running ").unwrap_or(&last_tool()).to_string());
+        }
+        if self.waiting > 0 || self.ask.is_some() {
+            return ("waiting", self.status.strip_prefix("Running ").unwrap_or("").to_string());
+        }
+        if self.compacting && !self.requesting {
+            return ("compacting", String::new());
+        }
+        match self.blocks.last().and_then(|b| b["type"].as_str()) {
+            Some("thinking" | "redacted_thinking") => ("thinking", String::new()),
+            Some("text") => ("writing", String::new()),
+            Some("tool_use" | "server_tool_use") => ("tool", last_tool()),
+            _ => ("requesting", String::new()),
+        }
+    }
+}
+
 impl Drop for Running<'_> {
     fn drop(&mut self) {
         let mut l = self.live.lock().unwrap();

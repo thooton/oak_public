@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 3;
+pub const OAK_API_VERSION: u32 = 4;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -689,6 +689,10 @@ c_structs! {
         pub providers_top: Option<OakBody>,
         /// Oak is closing.
         pub exiting: Option<OakDo>,
+        /// Draws over Home's wallpaper, under its menu, every frame Home
+        /// shows (`ui` is the whole page). Asks for frames of its own
+        /// (`repaint_after`) to move.
+        pub home_scene: Option<OakBody>,
     }
 }
 
@@ -1332,6 +1336,21 @@ c_api! {
     /// `{"icon", "title", "caption", "working", "state", "stop" (Stop's tip;
     /// empty: none), "model"}`. OAK_CLICKED when Stop was pressed.
     fn oak_super_agent_box(area: *const OakRect, json: OakStr) -> u32;
+
+    // Version 4.
+
+    /// What Oak is doing now, as JSON: `{"page": "home"|"chats"|"settings"|
+    /// "usage", "menu" (Home's menu is open), "menu_rect" ([x0, y0, x1,
+    /// y1] or null), "buttons_rect" (Home's corner buttons), "maximized",
+    /// "fullscreen", "focused", "tasks" (background tasks running),
+    /// "conversations": [{"id", "title", "busy", "phase": "idle"|
+    /// "requesting"|"thinking"|"writing"|"tool"|"waiting"|"limit"|
+    /// "retrying"|"compacting", "status" (the line Oak shows), "tool" (the
+    /// tool running or being called, or ""), "asking" (ASK is
+    /// waiting on the user), "failed" (its last turn ended in an error),
+    /// "paused", "shown" (its tab is the one shown), "at" (its latest
+    /// message, ms)}]}`. Conversations are this machine's, subagents too.
+    fn app_activity(out: OakSink, out_user: *mut c_void);
 }
 
 /// The C header: everything declared above, in C.

@@ -214,6 +214,53 @@ pub struct Conversation {
     pub busy: bool,
 }
 
+/// What Oak is doing now (`App::activity`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Activity {
+    /// "home", "chats", "settings" or "usage".
+    pub page: String,
+    /// Home's menu is open.
+    pub menu: bool,
+    /// Where Home's menu is, when it is open: x0, y0, x1, y1.
+    pub menu_rect: Option<[f32; 4]>,
+    /// Home's buttons in the bottom right corner.
+    pub buttons_rect: Option<[f32; 4]>,
+    pub maximized: bool,
+    pub fullscreen: bool,
+    pub focused: bool,
+    /// Background tasks running.
+    pub tasks: usize,
+    pub conversations: Vec<Doing>,
+}
+
+/// A conversation's state, in `Activity`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Doing {
+    pub id: String,
+    pub title: String,
+    pub busy: bool,
+    /// "idle", "requesting" (sent, nothing back yet), "thinking", "writing",
+    /// "tool" (a tool running, or its call streaming in), "waiting" (on a
+    /// wait: ASK, a task, an agent), "limit" (for a usage limit to reset),
+    /// "retrying" (after an error) or "compacting".
+    pub phase: String,
+    /// The line Oak shows about what it is doing ("" when idle).
+    pub status: String,
+    /// The tool running or being called ("" when none).
+    pub tool: String,
+    /// ASK is waiting for the user's answers.
+    pub asking: bool,
+    /// Its last turn ended in an error.
+    pub failed: bool,
+    pub paused: bool,
+    /// Its tab is the one shown.
+    pub shown: bool,
+    /// When its latest message was (ms since 1970).
+    pub at: i64,
+}
+
 /// A conversation to start on this machine (`App::start_conversation`):
 /// in the folder and with the model and effort the New screen's rows show
 /// (`App::local_form`).
@@ -444,6 +491,8 @@ pub trait App {
     fn attachments(&mut self) -> &mut Vec<Value>;
     /// This machine's conversations (not side chats, not subagents).
     fn conversations(&self) -> Vec<Conversation>;
+    /// What Oak and its conversations are doing now (interface version 4).
+    fn activity(&self) -> Activity;
     /// Starts a conversation on this machine and opens its tab. Err: why
     /// it couldn't (the folder is missing, say), also shown as the hint.
     fn start_conversation(&mut self, new: NewConversation) -> Result<String, String>;
@@ -560,6 +609,10 @@ impl App for Window {
 
     fn conversations(&self) -> Vec<Conversation> {
         serde_json::from_str(&text_from(|out, user| unsafe { (api().app_conversations)(out, user) }).1).unwrap_or_default()
+    }
+
+    fn activity(&self) -> Activity {
+        serde_json::from_str(&text_from(|out, user| unsafe { (api().app_activity)(out, user) }).1).unwrap_or_default()
     }
 
     fn start_conversation(&mut self, new: NewConversation) -> Result<String, String> {

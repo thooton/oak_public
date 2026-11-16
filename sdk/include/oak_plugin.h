@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 3
+#define OAK_API_VERSION 4
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -594,6 +594,11 @@ struct OakHooks {
     OakBody providers_top;
     /* Oak is closing. */
     OakDo exiting;
+    /* Draws over Home's wallpaper, under its menu, every frame Home
+     * shows (`ui` is the whole page). Asks for frames of its own
+     * (`repaint_after`) to move.
+     */
+    OakBody home_scene;
 };
 
 /* A response's flags. */
@@ -1353,6 +1358,20 @@ struct OakApi {
      * empty: none), "model"}`. OAK_CLICKED when Stop was pressed.
      */
     uint32_t (*oak_super_agent_box)(const OakRect *area, OakStr json);
+
+    /* What Oak is doing now, as JSON: `{"page": "home"|"chats"|"settings"|
+     * "usage", "menu" (Home's menu is open), "menu_rect" ([x0, y0, x1,
+     * y1] or null), "buttons_rect" (Home's corner buttons), "maximized",
+     * "fullscreen", "focused", "tasks" (background tasks running),
+     * "conversations": [{"id", "title", "busy", "phase": "idle"|
+     * "requesting"|"thinking"|"writing"|"tool"|"waiting"|"limit"|
+     * "retrying"|"compacting", "status" (the line Oak shows), "tool" (the
+     * tool running or being called, or ""), "asking" (ASK is
+     * waiting on the user), "failed" (its last turn ended in an error),
+     * "paused", "shown" (its tab is the one shown), "at" (its latest
+     * message, ms)}]}`. Conversations are this machine's, subagents too.
+     */
+    void (*app_activity)(OakSink out, void *out_user);
 };
 
 /* Text from a C string, and from a literal. */

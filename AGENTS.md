@@ -126,7 +126,7 @@ conversation is on), `tasks/` and `task-output/` (background tasks; `tasks/tray.
 the taskbar widget shows, `tray/` holds its copy of oak.exe), `browser/` (the browsers'
 profiles), `plugins/` (plugins to load, and what they keep is beside it under names of their
 own), `bin/` (programs for the agent's commands: the bundled ripgrep, `src/toolbin.rs`),
-`usage.jsonl`, `crash.log` and `startup.log` (how long the last start took, step by step, until
+`wallpapers/` (Home's wallpapers to pick from), `usage.jsonl`, `crash.log` and `startup.log` (how long the last start took, step by step, until
 its first frame was on screen, and the processor time spent by each step: `src/startup.rs`; the
 place to look first when Oak starts slowly). Files are written to a temporary file and renamed over
 the old one, so a crash never leaves half a file; an unreadable `settings.json` is kept as
@@ -150,8 +150,13 @@ Use commas, parentheses, or spacing instead; actual Markdown lists are unaffecte
 ## The app
 
 **Layout.** A title bar Oak draws itself, a strip of tabs and the page. The first tab is Home
-(Alt+H): its left side has the tabs Conversations and Cloud, then those plugins add, then
-Plugins (and at the row's right end the links plugins add), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F) narrows the list to
+(Alt+H): a wallpaper (`src/wallpaper.rs`; Settings → Wallpaper picks Oak's forest or a PNG, JPEG,
+GIF or WebP from `wallpapers/` in Oak's folder, animated ones playing from a decoding thread), what
+plugins draw on it (`Hooks::home_scene`), and in the bottom right corner the Settings gear and the
+menu button. The menu is shut at start; the button, Alt+H on Home or a click on the Home tab opens
+it, and Esc, the button (an X then) or a click on the wallpaper shuts it. It is one box: its left
+side has the tabs Conversations and Cloud, then those plugins add, then
+Plugins (and at the row's right end the links plugins add), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F, which opens the menu too) narrows the list to
 conversations whose title or folder has every word typed, in any case; Enter opens the first, Esc
 clears it, and the query isn't kept across restarts. The picker beside it sorts the list by the
 latest message or by scratchpad size, biggest first (each row then shows its size; kept in settings).
@@ -166,7 +171,7 @@ transcript with a minimap, the session box (title, folder, provider, model, effo
 agents, progress meters) and the message box with the smart context, Unslop and account boxes.
 A click on the session box's folder opens it in the system's file manager; its right-click menu
 has Open folder and Copy path (a folder that no longer exists can only be copied).
-Settings is the gear in the bottom left corner; its Theme and Font rows show once a plugin adds a
+Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme and Font rows show once a plugin adds a
 choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row

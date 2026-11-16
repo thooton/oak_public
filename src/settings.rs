@@ -1,4 +1,4 @@
-//! The Settings page: theme, font (and a plugin font's download), the
+//! The Settings page: theme, font (and a plugin font's download), Home's wallpaper, the
 //! interface's zoom (kept in settings.json, see `sync_zoom`), image zoom, touchpad scroll, prompt cache, account rotation, server threads,
 //! the connections, and what plugins add (Home has the plugins themselves); and the boxes that add a Codex
 //! account, the OpenRouter or NodeClub key, or a local server.
@@ -11,7 +11,7 @@ use crate::composer::{GEAR_ICON, side_box};
 
 impl App {
     /// Settings, opened from the gear in a conversation's bottom left
-    /// corner: one box in the conversation's own colors, under a heading
+    /// corner or in Home's bottom right one: one box in the conversation's own colors, under a heading
     /// with an X (or Escape) that goes back to where it was opened.
     pub(crate) fn settings_page(&mut self, ui: &mut Ui, t: &Theme) {
         let (card, head, closed) = page_card(ui, t, 780.0, None, "settings-close");
@@ -35,6 +35,7 @@ impl App {
     fn settings_rows(&mut self, ui: &mut Ui, t: &Theme) {
         self.theme_row(ui, t);
         self.font_row(ui, t);
+        self.wallpaper_row(ui, t);
 
         caption(ui, "Zoom", t.ink3);
         zoom_row(ui, self.settings.zoom);
@@ -142,6 +143,38 @@ impl App {
                     apply_theme(ui.ctx(), &crate::theme::theme(id));
                     store::save_settings(&self.settings);
                 }
+            }
+        });
+        ui.end_row();
+    }
+
+    /// The Wallpaper row: Home's background, Oak's forest or a picture from
+    /// the wallpapers folder (which a button opens, made when missing).
+    fn wallpaper_row(&mut self, ui: &mut Ui, t: &Theme) {
+        let list = crate::wallpaper::list();
+        let shown = if self.settings.wallpaper.is_empty() { "Forest".to_string() } else { crate::wallpaper::display_name(&self.settings.wallpaper) };
+        caption(ui, "Wallpaper", t.ink3);
+        ui.horizontal(|ui| {
+            let mut pick = None;
+            egui::ComboBox::from_id_salt("wallpaper").selected_text(shown).width(260.0).height(420.0).show_ui(ui, |ui| {
+                if ui.selectable_label(self.settings.wallpaper.is_empty(), "Forest").clicked() {
+                    pick = Some(String::new());
+                }
+                for (file, name) in &list {
+                    if ui.selectable_label(self.settings.wallpaper == *file, name).clicked() {
+                        pick = Some(file.clone());
+                    }
+                }
+            });
+            if let Some(file) = pick.filter(|f| *f != self.settings.wallpaper) {
+                self.settings.wallpaper = file;
+                store::save_settings(&self.settings);
+            }
+            let folder = crate::wallpaper::folder();
+            let tip = format!("PNG, JPEG, GIF or WebP files put in\n{}\nshow in the list. Animated GIF and WebP play.", folder.display());
+            if ui.button("Open folder").on_hover_text(tip).clicked() {
+                let _ = std::fs::create_dir_all(&folder);
+                let _ = open::that_detached(&folder);
             }
         });
         ui.end_row();

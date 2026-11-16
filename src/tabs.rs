@@ -278,11 +278,21 @@ impl App {
         }
     }
 
+    /// Shows Home; on Home already, opens or closes its menu.
+    fn go_home_or_toggle_menu(&mut self) {
+        if self.page == Page::Home {
+            self.home_menu = !self.home_menu;
+        } else {
+            self.page = Page::Home;
+        }
+    }
+
     /// Alt+H, the browsers' tab shortcuts and Ctrl+T; and the tabs whose
     /// conversation, session, bot or agent has gone are dropped.
     fn tab_bar_keys(&mut self, ui: &mut Ui) {
+        // (On Home already, it opens or closes Home's menu.)
         if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::H)) {
-            self.page = Page::Home;
+            self.go_home_or_toggle_menu();
         }
         let tabs = std::mem::take(&mut self.settings.tabs);
         self.settings.tabs = tabs.into_iter().filter(|id| self.tab_exists(id)).collect();
@@ -308,7 +318,7 @@ impl App {
         }
         p.vline(forest.right(), forest.y_range(), Stroke::new(1.0, t.line));
         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Home (Alt+H)").clicked() {
-            self.page = Page::Home;
+            self.go_home_or_toggle_menu();
         }
         forest
     }
