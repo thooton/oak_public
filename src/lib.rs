@@ -61,6 +61,8 @@ mod usage;
 mod web;
 mod wire_anthropic;
 #[cfg(windows)]
+mod tray;
+#[cfg(windows)]
 mod winctl;
 
 // The window's parts, drawn from the state above.
@@ -418,6 +420,9 @@ impl App {
         // Their tasks left running when OAK closed are theirs again.
         if !cfg!(test) {
             tasks::release_holder();
+            // Oak watches them again: the taskbar widget goes.
+            #[cfg(windows)]
+            tray::close_running();
         }
         startup::step("tasks taken back");
         let mut app = App {
@@ -731,6 +736,11 @@ pub fn main() -> eframe::Result {
         // tasks left running; now nothing (rather than a whole Oak).
         return Ok(());
     }
+    #[cfg(windows)]
+    if args.len() > 1 && args[1] == "--tasks-tray" {
+        log_panics(store::dir().join("crash.log"));
+        std::process::exit(tray::main());
+    }
     if args.len() > 1 && args[1] == "--window" {
         #[cfg(windows)]
         std::process::exit(winctl::main(&args[2..]));
@@ -792,7 +802,7 @@ pub fn main() -> eframe::Result {
     // running goes.
     plugins::exiting();
     geometry::save_now();
-    tasks::close_all();
+    let kept = tasks::close_all();
     tasks::kill_all();
     // The last saves, on disk before Oak goes.
     store::flush();
@@ -803,6 +813,14 @@ pub fn main() -> eframe::Result {
     // "Restart to update": the new version, now that this one is done.
     update::relaunch_if_asked();
     gpu::relaunch();
+    // The tasks left running, counted on the taskbar until Oak is back
+    // (not when it is starting again right away).
+    #[cfg(windows)]
+    if !kept.is_empty() && !update::restarting() && !gpu::restarting() {
+        tray::start(kept);
+    }
+    #[cfg(not(windows))]
+    drop(kept);
     result
 }
 

@@ -119,7 +119,7 @@ pub(crate) fn is_release() -> bool {
 
 /// Oak's executable, as it was when Oak started (on Windows the running
 /// file is renamed away by an update; this path then holds the new one).
-fn exe() -> Option<&'static PathBuf> {
+pub(crate) fn exe() -> Option<&'static PathBuf> {
     static EXE: OnceLock<Option<PathBuf>> = OnceLock::new();
     EXE.get_or_init(|| std::env::current_exe().ok().and_then(|p| p.canonicalize().ok().or(Some(p)))).as_ref()
 }
@@ -506,6 +506,12 @@ pub(crate) fn restart(ctx: &egui::Context) {
 
 pub(crate) fn cancel_restart() {
     RESTART.store(false, Ordering::SeqCst);
+}
+
+/// Oak is closing to start the new version.
+#[cfg(windows)]
+pub(crate) fn restarting() -> bool {
+    RESTART.load(Ordering::SeqCst)
 }
 
 /// After Oak has closed and saved everything: starts the executable again

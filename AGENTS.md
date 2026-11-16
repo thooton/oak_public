@@ -122,7 +122,8 @@ login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
 size, place and maximized state), `seats.json` (which account each
-conversation is on), `tasks/` and `task-output/` (background tasks), `browser/` (the browsers'
+conversation is on), `tasks/` and `task-output/` (background tasks; `tasks/tray.json` is what
+the taskbar widget shows, `tray/` holds its copy of oak.exe), `browser/` (the browsers'
 profiles), `plugins/` (plugins to load, and what they keep is beside it under names of their
 own), `bin/` (programs for the agent's commands: the bundled ripgrep, `src/toolbin.rs`),
 `usage.jsonl`, `crash.log` and `startup.log` (how long the last start took, step by step, until
@@ -273,7 +274,13 @@ BROWSER, WINDOW): a tool and its instructions, left out of the prompt until need
 - EXECUTE takes a timeout (0 to 550 seconds, 0 for the background) and a one-line summary shown in
   place of the command. Longer commands become background tasks (`src/tasks.rs`), kept across
   restarts; on closing, Oak can leave them running (on Windows each one's bash is handed a handle
-  to its own job, so no Oak process stays behind to lock oak.exe; the next Oak takes it back). Every
+  to its own job, so no Oak process stays behind to lock oak.exe; the next Oak takes it back). On
+  Windows, tasks left running are counted on the taskbar until Oak starts again (`src/tray.rs`):
+  a notification-area icon showing the number as tall digits, moved out of Windows 11's overflow
+  the first time; clicking it lists the tasks (name, conversation, run time or how it ended, last
+  output line; a task opens its output file), its menu opens Oak or hides it. When they have all
+  ended it says so in a notification and goes. It runs from a copy of oak.exe (`tray/Oak
+  tasks.exe` in Oak's folder), not oak.exe itself, and not when Oak is restarting. Every
   command's PATH starts with Oak's `bin/` folder, which holds the ripgrep bundled at build time
   (`src/toolbin.rs`; written there on a run's first command when missing or different), and the
   prompt tells the model to search with `rg` instead of grep. Output over 50,000 characters is saved to the

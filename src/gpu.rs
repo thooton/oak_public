@@ -150,6 +150,12 @@ pub(crate) fn recover(started: Instant) {
     RESTART.store(again, Ordering::SeqCst);
 }
 
+/// Oak is closing to start again (`recover`).
+#[cfg(windows)]
+pub(crate) fn restarting() -> bool {
+    RESTART.load(Ordering::SeqCst)
+}
+
 /// Starts Oak again, if `recover` said so (once this one has closed).
 pub(crate) fn relaunch() {
     if !RESTART.load(Ordering::SeqCst) {

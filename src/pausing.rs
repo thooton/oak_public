@@ -198,6 +198,22 @@ impl App {
             .cloned()
             .collect();
         store::save_settings(&self.settings);
+        // For the taskbar widget, should tasks be left running: their
+        // conversations' titles, and the theme's colors.
+        #[cfg(windows)]
+        crate::tray::note(
+            self.sessions
+                .iter()
+                .filter(|(_, s)| s.tasks.running() > 0)
+                .map(|(id, s)| {
+                    let c = s.conv.lock().unwrap();
+                    let title = if c.title.is_empty() { "Untitled".to_string() } else { c.title.clone() };
+                    (id.clone(), if c.parent.is_some() { format!("{title} (subagent)") } else { title })
+                })
+                .collect(),
+            &crate::theme::theme(&self.settings.theme),
+            &self.settings.font,
+        );
         self.closing = Some(Closing::Done);
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         true
@@ -340,7 +356,11 @@ fn close_box(ctx: &egui::Context, t: &Theme, active: String, tasks: usize, pausi
         if tasks > 0 {
             ui.add_space(8.0);
             let what = if tasks == 1 { "Keep the background task running".to_string() } else { format!("Keep the {tasks} background tasks running") };
-            let tip = "They go on after Oak closes, their output to a file. When Oak starts again, their conversations see them in Tasks and are told when they end. Otherwise they are stopped.";
+            let tip = if cfg!(windows) {
+                "They go on after Oak closes, their output to a file, counted on the taskbar. When Oak starts again, their conversations see them in Tasks and are told when they end. Otherwise they are stopped."
+            } else {
+                "They go on after Oak closes, their output to a file. When Oak starts again, their conversations see them in Tasks and are told when they end. Otherwise they are stopped."
+            };
             if ui.add_enabled(!pausing, egui::Checkbox::new(&mut keep, RichText::new(what).color(t.ink2))).on_hover_text(tip).changed() {
                 crate::tasks::keep_on_close(keep);
             }

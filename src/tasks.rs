@@ -990,24 +990,72 @@ pub fn keeping_on_close() -> bool {
     KEEP_ON_CLOSE.load(Ordering::SeqCst)
 }
 
+/// A task left running as Oak closed, as the taskbar widget (`tray.rs`)
+/// watches it: its bash by PID and start, its output and exit-code files.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Kept {
+    /// Its conversation's id.
+    pub conv: String,
+    pub id: u64,
+    pub command: String,
+    pub summary: String,
+    pub pid: u32,
+    pub started_ms: i64,
+    pub log: PathBuf,
+    pub exit: PathBuf,
+}
+
+impl Kept {
+    /// Its bash, while it still runs (the same process, by its start): a
+    /// handle to wait on.
+    #[cfg(windows)]
+    pub fn open(&self) -> Option<usize> {
+        find_running(&Record { pid: self.pid, started_ms: self.started_ms, ..Default::default() })
+    }
+
+    /// The exit code its bash wrote on the way out, and when (ms since
+    /// 1970); none when it was killed.
+    #[cfg(windows)]
+    pub fn exit_code(&self) -> Option<(i32, i64)> {
+        exit_file(&self.exit)
+    }
+}
+
 /// Oak is closing: every conversation's task records are saved, its
 /// running tasks first left running if so chosen (else they are stopped
-/// on the way out, and the next Oak says so).
-pub fn close_all() {
+/// on the way out, and the next Oak says so). Returns the tasks left
+/// running.
+pub fn close_all() -> Vec<Kept> {
     let keep = keeping_on_close();
     let all: Vec<Arc<Tasks>> = ALL.lock().unwrap().iter().filter_map(|t| t.upgrade()).collect();
+    let mut kept = vec![];
     for t in all {
         if keep {
-            for p in t.map.lock().unwrap().values() {
+            let summaries = t.summaries.lock().unwrap().clone();
+            for (id, p) in t.map.lock().unwrap().iter() {
                 p.detach();
                 #[cfg(windows)]
                 if p.detached.load(Ordering::SeqCst) && p.job != 0 {
                     p.held.store(give_job(p.pid, p.job), Ordering::SeqCst);
                 }
+                if p.detached.load(Ordering::SeqCst) && p.exit().is_none() {
+                    kept.push(Kept {
+                        conv: t.conv.clone(),
+                        id: *id,
+                        command: p.command.clone(),
+                        summary: summaries.get(id).cloned().unwrap_or_default(),
+                        pid: p.pid,
+                        started_ms: p.started_ms,
+                        log: p.files.log.clone(),
+                        exit: p.files.exit.clone(),
+                    });
+                }
             }
         }
         t.save();
     }
+    kept
 }
 
 /// A job's name stays only while a handle to it is open, so as Oak closes
@@ -1117,6 +1165,8 @@ pub struct Tasks {
     /// Tasks left running when Oak closed: the session tells the model when
     /// they end (or that they did meanwhile).
     revived: Mutex<Vec<u64>>,
+    /// The conversation's id.
+    conv: String,
 }
 
 impl Tasks {
@@ -1126,7 +1176,9 @@ impl Tasks {
         let name: String = conv.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let file = (!cfg!(test) && !name.is_empty()).then(|| crate::store::dir().join("tasks").join(format!("{name}.json")));
         sweep_output();
-        let t = Arc::new(Tasks::load(file));
+        let mut t = Tasks::load(file);
+        t.conv = conv.to_string();
+        let t = Arc::new(t);
         ALL.lock().unwrap().push(Arc::downgrade(&t));
         t
     }
