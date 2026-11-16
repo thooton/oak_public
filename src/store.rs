@@ -464,6 +464,11 @@ pub struct Conversation {
     /// The goal, notes and heartbeats as last put in the system prompt.
     #[serde(default)]
     pub memory: Option<Memory>,
+    /// What requests went with before each summary in force acted, the
+    /// latest last (`agent::install_summary`): a revert to before a
+    /// summary's cut puts back what was sent before it, exactly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<Earlier>,
     /// Stopped by a usage limit: when it resets (ms since 1970).
     #[serde(default)]
     pub limit_wait: Option<i64>,
@@ -777,7 +782,19 @@ impl Mark {
 /// The session memory block in the system prompt. It changes only when the
 /// prompt cache is being rebuilt anyway (a summary was applied, or the cache
 /// went cold), so notes don't cost a rewrite of the whole context.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// What a conversation's requests went with up to a summary: the summary
+/// before it, the prefix and the session memory as sent.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Earlier {
+    pub summary: Option<crate::rolling::Summary>,
+    pub cold: crate::rolling::Clearing,
+    pub measured: Vec<crate::rolling::Measure>,
+    pub prefix: crate::prefix::State,
+    pub memory: Option<Memory>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
     pub text: String,
     /// The instruction files (CLAUDE.md or AGENTS.md) and the project

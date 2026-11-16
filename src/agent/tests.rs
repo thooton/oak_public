@@ -1163,6 +1163,24 @@ fn generic_sent(r: &oak::Request) -> Sent {
     (b["system"].clone(), b["tools"].clone(), b["messages"].as_array().unwrap().clone())
 }
 
+/// `b` sends all `a` sent, unchanged, at its start (where they differ,
+/// briefly).
+fn assert_starts_with(a: &Sent, b: &Sent, what: &str) {
+    let short = |v: &Value| v.to_string().chars().take(300).collect::<String>();
+    let diff = |x: &Value, y: &Value| {
+        let (x, y) = (x.to_string(), y.to_string());
+        let i = x.chars().zip(y.chars()).take_while(|(a, b)| a == b).count();
+        let around = |s: &str| s.chars().skip(i.saturating_sub(80)).take(240).collect::<String>();
+        format!("from char {i}:\n  {}\n  {}", around(&x), around(&y))
+    };
+    assert!(a.0 == b.0, "{what}: the system prompt differs {}", diff(&a.0, &b.0));
+    assert!(a.1 == b.1, "{what}: the tools differ {}", diff(&a.1, &b.1));
+    assert!(a.2.len() <= b.2.len(), "{what}: {} messages, not {} (last: {})", b.2.len(), a.2.len(), b.2.last().map(short).unwrap_or_default());
+    for (i, (x, y)) in a.2.iter().zip(&b.2).enumerate() {
+        assert!(x == y, "{what}: message {i} differs {}", diff(x, y));
+    }
+}
+
 /// `next` sends all `prev` sent, unchanged, at its start.
 fn assert_grows(prev: &Sent, next: &Sent, what: &str) {
     assert_eq!(prev.0, next.0, "{what}: the system prompt changed");
@@ -1241,6 +1259,8 @@ fn prefix_only_grows(name: &str, conv: Conversation, other_model: &str, sent: fn
     s.conv.lock().unwrap().rolling.off = true;
     reply("ok", "off");
     step(&mut prev, &w, "smart context off");
+    // (What a revert to here, past the summary below, sends again.)
+    let (back_to, sent_then) = (s.conv.lock().unwrap().messages.len(), prev.clone());
     s.conv.lock().unwrap().rolling.off = false;
     reply("ok", "on");
     step(&mut prev, &w, "smart context on");
@@ -1267,7 +1287,7 @@ fn prefix_only_grows(name: &str, conv: Conversation, other_model: &str, sent: fn
         let mut c = s.conv.lock().unwrap();
         c.messages.push(json!({"role": "user", "content": [oak::text("more")]}));
         let cut = c.messages.len() - 2;
-        c.rolling.apply(crate::rolling::Summary { cut, text: "Loaded AGENT, noted the db, set a goal.".into(), made_at: 1, clear: cut }, 0, Default::default());
+        install_summary(&mut c, crate::rolling::Summary { cut, text: "Loaded AGENT, noted the db, set a goal.".into(), made_at: 1, clear: cut }, 0, Default::default());
     }
     let summarized = req(&w);
     assert_ne!(summarized.0, prev.0, "the system prompt is brought up to date");
@@ -1284,8 +1304,34 @@ fn prefix_only_grows(name: &str, conv: Conversation, other_model: &str, sent: fn
     reply("ok", "off again");
     step(&mut prev, &w, "after the summary: smart context off keeps it");
     let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
-    let (w4, _s4) = idle_worker(&format!("{name}-reloaded-again"), serde_json::from_str(&saved).unwrap());
+    let (w4, s4) = idle_worker(&format!("{name}-reloaded-again"), serde_json::from_str(&saved).unwrap());
     assert_eq!(req(&w4), prev, "reloaded after the summary");
+    // A second summary, and the session memory changes since.
+    {
+        let mut c = s4.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("ok")]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text("later")]}));
+        memory_tool(&mut c, "NOTE_NEW", &json!({"text": "the cache is redis"}), 0).unwrap();
+        let cut = c.messages.len() - 1;
+        install_summary(&mut c, crate::rolling::Summary { cut, text: "Later.".into(), made_at: 2, clear: cut }, 0, Default::default());
+    }
+    assert!(serde_json::to_string(&req(&w4).0).unwrap().contains("the cache is redis"));
+    // The user reverts (or edits a message) to before both summaries' cuts:
+    // what was sent then is sent again, exactly, from the state saved.
+    assert!(s4.conv.lock().unwrap().rolling.summary.as_ref().is_some_and(|s| s.cut > back_to));
+    assert!(revert_to_end(&mut s4.conv.lock().unwrap(), back_to));
+    let saved = serde_json::to_string(&*s4.conv.lock().unwrap()).unwrap();
+    let (w5, s5) = idle_worker(&format!("{name}-reverted"), serde_json::from_str(&saved).unwrap());
+    // (Then, as after any pause, what changed since is added: here the
+    // effort.)
+    let back = req(&w5);
+    assert_starts_with(&sent_then, &back, "reverted to before the summaries, reloaded");
+    assert_eq!(back.2.len(), sent_then.2.len() + usize::from(name == "prefix-claude"), "only the effort is added");
+    assert_starts_with(&sent_then, &req(&w4), "reverted to before the summaries");
+    let mut back = back;
+    s5.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [oak::text("again")]}));
+    s5.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("onwards")]}));
+    step(&mut back, &w5, "after the revert");
     drop((w2, s2));
     let _ = std::fs::remove_dir_all(&folder);
 }

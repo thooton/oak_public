@@ -1818,17 +1818,53 @@ fn revert_to_end(c: &mut Conversation, n: usize) -> bool {
     true
 }
 
+/// How many summaries back a revert can restore what was sent
+/// (`Conversation::earlier`).
+const EARLIER_KEPT: usize = 8;
+
+/// Puts a summary in force, keeping what requests went with until then for
+/// a revert to before its cut (`cut_messages`).
+pub(crate) fn install_summary(c: &mut Conversation, summary: Summary, saved: u64, cost: rolling::Cost) {
+    let earlier = store::Earlier {
+        summary: c.rolling.summary.clone(),
+        cold: c.rolling.cold,
+        measured: c.rolling.measured.clone(),
+        prefix: c.prefix.clone(),
+        memory: c.memory.clone(),
+    };
+    c.earlier.push(earlier);
+    if c.earlier.len() > EARLIER_KEPT {
+        c.earlier.remove(0);
+    }
+    c.rolling.apply(summary, saved, cost);
+}
+
 /// Keeps the first `n` messages, `changed` being the first one that is no
 /// longer as it was: the transcript lines after it go, and so does a
-/// summary that covered it.
+/// summary that covered it. What requests went with before that summary
+/// comes back as it was sent (the summary before it, the system prompt,
+/// tools, session memory and system messages), so they send what they did
+/// then, and its prompt cache, if it still lives, is read again. Only where
+/// that wasn't kept (an older Oak's summary, or more than `EARLIER_KEPT`
+/// back) is it rebuilt.
 fn cut_messages(c: &mut Conversation, n: usize, changed: usize) {
     c.messages.truncate(n);
-    c.prefix.reverted(&c.messages);
     c.marks.retain(|m| m.at <= changed);
     if c.rolling.summary.as_ref().is_some_and(|s| s.cut > changed) {
         c.rolling.summary = None;
         c.rolling.measured.clear();
+        while let Some(e) = c.earlier.pop() {
+            if e.summary.as_ref().is_none_or(|s| s.cut <= changed) {
+                c.rolling.summary = e.summary;
+                c.rolling.cold = e.cold;
+                c.rolling.measured = e.measured;
+                c.prefix = e.prefix;
+                c.memory = e.memory;
+                break;
+            }
+        }
     }
+    c.prefix.reverted(&c.messages);
     c.rolling.measured.retain(|m| m.n <= changed);
     c.limit_wait = None;
 }
@@ -2290,7 +2326,7 @@ fn finish_summary(conv: &store::Shared, live: &Mutex<Live>, base: usize, plan: P
                 // The transcript only grows: the line goes where it stands
                 // now, and points back at the cut.
                 add_mark(&mut c, MarkKind::Summarized, text.clone(), String::new(), made_at).done = plan.cut as i64;
-                c.rolling.apply(Summary { cut: plan.cut, text, made_at, clear: plan.clear }, saved, cost);
+                install_summary(&mut c, Summary { cut: plan.cut, text, made_at, clear: plan.clear }, saved, cost);
                 c.save();
             }
             live.lock().unwrap().rolling_failed = None;

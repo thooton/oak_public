@@ -241,8 +241,11 @@ can't read.
   refused (then, like other providers, as a text note where they were). A loaded kit stays where
   its LOAD put it: its instructions LOAD's result, its tool right after it (where tools can't be
   added, called through LOAD). Only once a summary covers the LOAD do the kit's prompt block and tool
-  join the system prompt and tool list. A revert to before a LOAD unloads the kit. A side chat sends
-  what its source sent. Regression tests (`agent::tests::the_prefix_only_grows_*`) check each
+  join the system prompt and tool list. A revert to before a LOAD unloads the kit. A revert (or an
+  edit) to before a summary's cut puts back what requests went with before that summary (the
+  summary before it, the prefix, the session memory: `Conversation::earlier`, saved with it, the
+  last 8 summaries back) and sends exactly what was sent then, so a prompt cache still alive is
+  read again; only an older Oak's summary is rebuilt. A side chat sends what its source sent. Regression tests (`agent::tests::the_prefix_only_grows_*`) check each
   provider's wire body. Freebuff is the exception the service imposes: its system prompt and tools
   are its CLI's, dated today; its messages still only grow.
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of

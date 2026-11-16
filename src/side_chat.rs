@@ -37,6 +37,7 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation 
         rolling: source.rolling.clone(),
         prefix: source.prefix.clone(),
         memory: source.memory.clone(),
+        earlier: source.earlier.clone(),
         scratch: source.scratch.clone(),
         notes: source.notes.clone(),
         next_note_id: source.next_note_id,
