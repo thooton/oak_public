@@ -1,5 +1,6 @@
-//! Home, the first tab: the forest, and over it the box with the
-//! conversations (or another of its tabs: Cloud, those plugins add,
+//! Home, the first tab: the wallpaper (`wallpaper.rs`), what plugins draw
+//! on it, and the menu, opened from the bottom right corner: the box with
+//! the conversations (or another of its tabs: Cloud, those plugins add,
 //! Plugins; plugins' links at the row's end) on the left and the accounts on the right.
 
 use super::*;
@@ -10,29 +11,108 @@ use crate::widgets::{add_field, clip_width, sign_in_heading, state_dot};
 use crate::composer::{BOX_W, nodeclub_panel, openrouter_panel, refuseless_panel, side_box, usage_panel};
 
 impl App {
-    /// Home: the forest, and over it one solid box: the chats on the left
-    /// and the signed-in accounts on the right, each under a small heading.
-    /// Sign out is a small button under the box (Settings opens from the
-    /// gear in a conversation's bottom left corner).
+    /// Home: the wallpaper (Settings picks it), what plugins draw on it,
+    /// and in the bottom right corner the buttons for Settings and the
+    /// menu. The menu is one solid box: the chats on the left and the
+    /// signed-in accounts on the right, each under a small heading; it is
+    /// shut at start, and a click on the wallpaper or Esc shuts it again.
     pub(crate) fn home(&mut self, ui: &mut Ui, t: &Theme) {
         let rect = ui.max_rect();
-        let tex = picture(ui.ctx(), &mut self.pictures, "forest-home");
+        self.paint_wallpaper(ui, rect);
+        // First, so what is drawn over it (a plugin's, the menu) takes the
+        // clicks meant for it.
+        let backdrop = ui.interact(rect, Id::unique("home-wallpaper"), Sense::click());
+        for h in &crate::plugins::parts().hooks {
+            h.home_scene(ui, self);
+        }
+        if self.home_menu {
+            let opacity = ui.ctx().animate_bool_with_time(Id::unique("home-menu"), true, 0.12);
+            let g = home_grid(rect);
+            self.home_menu_rect = Some(g.card);
+            ui.scope(|ui| {
+                ui.set_opacity(opacity);
+                self.home_menu(ui, t, &g);
+            });
+        } else {
+            ui.ctx().animate_bool_with_time(Id::unique("home-menu"), false, 0.0);
+            self.home_menu_rect = None;
+            // Ctrl+F searches the conversations: the menu opens for it.
+            if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+                self.home_menu = true;
+                self.home_list = LOCAL_TAB.into();
+                ui.memory_mut(|m| m.request_focus(Id::unique("home-chat-search")));
+            }
+        }
+        self.home_corner(ui, t, rect);
+        self.delete_chat_dialog(ui.ctx(), t);
+        self.reset_dialog(ui.ctx(), t);
+        let calm = self.deleting_chat.is_none() && self.reset_dialog.is_none() && self.renaming.is_none();
+        if self.home_menu && calm {
+            let free = ui.memory(|m| m.focused().is_none());
+            if backdrop.clicked() || (free && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))) {
+                self.home_menu = false;
+            }
+        }
+    }
+
+    /// The wallpaper Settings picks, over all of `rect`; the forest while
+    /// a file's first frame is decoded, and when it can't be read.
+    fn paint_wallpaper(&mut self, ui: &Ui, rect: Rect) {
+        let file = &self.settings.wallpaper;
+        if file.is_empty() {
+            self.wallpaper = None;
+        } else if self.wallpaper.as_ref().is_none_or(|w| &w.file != file) {
+            self.wallpaper = Some(wallpaper::Player::new(file));
+        }
+        let tex = match self.wallpaper.as_mut().and_then(|w| w.frame(ui.ctx())) {
+            Some(tex) => tex.clone(),
+            None => picture(ui.ctx(), &mut self.pictures, "forest-home"),
+        };
         paint_cover(ui.painter(), rect, &tex, Color32::WHITE);
-        let g = home_grid(rect);
-        paint_grid(ui.painter(), t, &g, true);
+    }
+
+    /// The menu's box, laid out by `g`.
+    fn home_menu(&mut self, ui: &mut Ui, t: &Theme, g: &HomeGrid) {
+        // The box takes the clicks on it, so they don't reach the wallpaper.
+        let _ = ui.interact(g.card, Id::unique("home-menu-box"), Sense::click());
+        paint_grid(ui.painter(), t, g, true);
         self.chats_head(ui, t, g.chats_head);
         cell_heading(ui.painter(), t, g.accounts_head, "Providers");
         version_label(ui, t, g.accounts_head);
         self.chats_cell(ui, t, g.chats);
         ui.scope_builder(UiBuilder::new().max_rect(g.accounts), |ui| self.account_column(ui, t));
-        self.delete_chat_dialog(ui.ctx(), t);
-        self.reset_dialog(ui.ctx(), t);
         // Under the accounts: what 1% of the 5-hour limit buys; a click
         // opens the Usage page.
         if let Some(r) = g.preview
             && usage_view::preview(ui, t, r, &mut self.usage)
         {
             self.page = Page::Usage;
+        }
+    }
+
+    /// The buttons in the bottom right corner of `rect`: Settings, and the
+    /// menu's (an X while it is open).
+    fn home_corner(&mut self, ui: &mut Ui, t: &Theme, rect: Rect) {
+        let size = vec2(CORNER_BTN, CORNER_BTN);
+        let menu = Rect::from_min_size(rect.max - size - vec2(CORNER_MARGIN, CORNER_MARGIN), size);
+        let gear = menu.translate(vec2(-(CORNER_BTN + 6.0), 0.0));
+        self.home_buttons_rect = Some(gear.union(menu));
+        let open = self.home_menu;
+        let tip = if open { "Close the menu (Esc)" } else { "Menu: conversations and accounts (Alt+H)" };
+        if corner_button(ui, t, menu, "home-menu-button", tip, |p, r, c| {
+            if open {
+                crate::widgets::draw_x(p, r.shrink(4.0), c);
+            } else {
+                p.text(r.center(), Align2::CENTER_CENTER, MENU_ICON, markdown::icon_font(15.0), c);
+            }
+        }) {
+            self.home_menu = !open;
+        }
+        if corner_button(ui, t, gear, "home-settings-button", "Settings", |p, r, c| {
+            p.text(r.center(), Align2::CENTER_CENTER, crate::composer::GEAR_ICON, markdown::icon_font(15.0), c);
+        }) {
+            self.settings_from = Some(Page::Home);
+            self.page = Page::Settings;
         }
     }
 
@@ -477,6 +557,22 @@ pub(crate) const HOME_GAP: f32 = 12.0;
 const FOOT_H: f32 = 28.0;
 /// The usage preview under Home's accounts.
 const PREVIEW_H: f32 = 124.0;
+/// Home's corner buttons: their size, and their room from the window's edges.
+const CORNER_BTN: f32 = 34.0;
+const CORNER_MARGIN: f32 = 14.0;
+/// The menu button's icon (three lines).
+const MENU_ICON: &str = "\u{f0c9}";
+
+/// A square button over the wallpaper: a solid tile, with `icon` drawn in
+/// it; whether it was clicked.
+fn corner_button(ui: &mut Ui, t: &Theme, rect: Rect, id: &str, tip: &str, icon: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
+    let resp = ui.interact(rect, Id::unique(id), Sense::click());
+    let p = ui.painter();
+    p.rect_filled(rect, 4.0, if resp.hovered() { t.tool_hover } else { t.panel });
+    p.rect_stroke(rect, 4.0, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+    icon(p, rect.shrink(6.0), if resp.hovered() { t.ink } else { t.ink2 });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked()
+}
 
 /// Home's box: the box, its two cells (chats left, accounts right, as wide
 /// as an account box), their headings, the inner areas the lists go in, and

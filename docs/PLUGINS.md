@@ -24,7 +24,7 @@ A plugin can add:
 | A vault | `Vault` | `OakVault` | Somewhere else logins and keys are kept and renewed, for several machines. One at most. |
 | Rows on Settings | `SettingsSection` | `OakSettings` | |
 | A screen before everything | `Gate` | `OakGate` | Shown instead of the app while it says it is shut (a sign-in). |
-| Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, at exit. |
+| Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, on Home's wallpaper (`home_scene`, under the menu; interface version 4), at exit. |
 
 Two examples to copy: `plugins/hello` (Rust: a Home tab, a theme, a Settings row, a system
 prompt) and `plugins/hello-c/hello.c` (C, one file: a Home tab with a button and a text field).
@@ -140,7 +140,9 @@ What a plugin works with:
   `LayoutJob`, no meshes or custom shaders. What is missing is added to the table's end.
 - **`&mut dyn App`** is the window, on the UI thread: the theme in use, opening and closing tabs,
   going Home or to the New screen, the message box's text and attachments, the hint over it, this
-  machine's conversations, starting one, drawing a transcript or a cloud list as Oak draws its own.
+  machine's conversations, starting one, drawing a transcript or a cloud list as Oak draws its own,
+  and what Oak is doing now (`activity`, version 4: the page, Home's menu and corner buttons, the
+  window maximized or focused, each conversation's phase such as thinking, writing or a tool).
 - **`oak_sdk::host()`** is Oak's services, from any thread: HTTP with Oak's client
   (`oak_sdk::Request`), Oak's folder, private files, repaints, the usage log, the cloud engine's
   names and accounts, a JSON blackboard plugins tell each other things through (`shared`,

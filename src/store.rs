@@ -1175,6 +1175,9 @@ pub struct Settings {
     /// (`crate::home::ChatSort`). A string so an unknown value doesn't
     /// make the whole file unreadable.
     pub chat_sort: String,
+    /// Home's wallpaper: "" for Oak's forest, else a file's name in the
+    /// `wallpapers` folder (`crate::wallpaper`).
+    pub wallpaper: String,
 }
 
 impl Default for Settings {
@@ -1212,6 +1215,7 @@ impl Default for Settings {
             paused_on_close: vec![],
             scratch_clear: 0,
             chat_sort: String::new(),
+            wallpaper: String::new(),
         }
     }
 }

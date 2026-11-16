@@ -590,12 +590,13 @@ pub(crate) struct Hooks {
     frame: Option<OakDo>,
     providers_top: Option<OakBody>,
     exiting: Option<OakDo>,
+    home_scene: Option<OakBody>,
     user: User,
 }
 
 impl Hooks {
     pub(crate) fn new(d: &OakHooks) -> Hooks {
-        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, user: User(d.user) }
+        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, home_scene: d.home_scene, user: User(d.user) }
     }
 
     pub(crate) fn started(&self, _ctx: &egui::Context) {
@@ -614,6 +615,10 @@ impl Hooks {
 
     pub(crate) fn providers_top(&self, ui: &mut Ui, app: &mut App) {
         api::draw(self.providers_top, self.user, ui, app);
+    }
+
+    pub(crate) fn home_scene(&self, ui: &mut Ui, app: &mut App) {
+        api::draw(self.home_scene, self.user, ui, app);
     }
 
     pub(crate) fn exiting(&self) {

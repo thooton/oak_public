@@ -27,6 +27,7 @@ impl App {
 
     pub(crate) fn plugin_go_home(&mut self, tab: &str) {
         self.page = Page::Home;
+        self.home_menu = true;
         self.home_list = tab.to_string();
     }
 
@@ -75,6 +76,65 @@ impl App {
             .collect();
         list.sort_by_key(|c| std::cmp::Reverse(c.at));
         list
+    }
+
+    /// What Oak and its conversations are doing (`oak_sdk::App::activity`).
+    pub(crate) fn plugin_activity(&self, ctx: &egui::Context) -> oak_sdk::host::Activity {
+        let shown = match &self.screen {
+            Screen::Chat(id) if self.page == Page::Chats => Some(id.as_str()),
+            _ => None,
+        };
+        let mut tasks = 0;
+        let mut conversations: Vec<oak_sdk::host::Doing> = self
+            .sessions
+            .iter()
+            .filter_map(|(id, s)| {
+                let c = s.conv.lock().unwrap();
+                if c.side_chat_of.is_some() {
+                    return None;
+                }
+                tasks += s.tasks.running();
+                let l = s.live.lock().unwrap();
+                let (phase, tool) = l.phase();
+                Some(oak_sdk::host::Doing {
+                    id: id.clone(),
+                    title: c.title.clone(),
+                    busy: l.busy,
+                    phase: phase.into(),
+                    status: if l.busy { l.status.clone() } else { String::new() },
+                    tool,
+                    asking: l.ask.is_some(),
+                    failed: !l.busy && l.error.is_some(),
+                    paused: c.paused,
+                    shown: shown == Some(id.as_str()),
+                    at: c.last_message_at,
+                })
+            })
+            .collect();
+        conversations.sort_by_key(|c| std::cmp::Reverse(c.at));
+        let rect = |r: Option<egui::Rect>| r.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]);
+        let (maximized, fullscreen, focused) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.maximized.unwrap_or(false), v.fullscreen.unwrap_or(false), v.focused.unwrap_or(true))
+        });
+        let home = self.page == Page::Home;
+        oak_sdk::host::Activity {
+            page: match self.page {
+                Page::Home => "home",
+                Page::Chats => "chats",
+                Page::Settings => "settings",
+                Page::Usage => "usage",
+            }
+            .into(),
+            menu: home && self.home_menu,
+            menu_rect: if home && self.home_menu { rect(self.home_menu_rect) } else { None },
+            buttons_rect: if home { rect(self.home_buttons_rect) } else { None },
+            maximized,
+            fullscreen,
+            focused,
+            tasks,
+            conversations,
+        }
     }
 
     pub(crate) fn plugin_start_conversation(&mut self, new: NewConversation) -> Result<String, String> {

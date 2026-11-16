@@ -1591,6 +1591,15 @@ impl HostApi for Oak {
         let b: crate::super_view::AgentBox = serde_json::from_str(str_of(json)).unwrap_or_default();
         if crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) { OAK_CLICKED } else { 0 }
     }
+
+    // ---- version 4
+
+    unsafe extern "C" fn app_activity(out: OakSink, out_user: *mut c_void) {
+        let Some(ctx) = super::context() else { return };
+        if let Some(a) = app(|a| a.plugin_activity(&ctx)) {
+            give_text(out, out_user, &serde_json::to_string(&a).unwrap_or_default());
+        }
+    }
 }
 
 fn stroke_kind_of(kind: u32) -> StrokeKind {
