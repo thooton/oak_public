@@ -1012,7 +1012,8 @@ impl HostApi for Oak {
                     OAK_CURSOR_WAIT => egui::CursorIcon::Wait,
                     _ => egui::CursorIcon::Default,
                 };
-                drop(r.on_hover_cursor(icon));
+                // (Kept while it is dragged too, as a grab turns to a grabbing hand.)
+                drop(r.on_hover_and_drag_cursor(icon));
             }
             (OAK_RESPONSE_REQUEST_FOCUS, _) => r.request_focus(),
             (OAK_RESPONSE_SURRENDER_FOCUS, _) => r.surrender_focus(),

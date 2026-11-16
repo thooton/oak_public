@@ -704,6 +704,7 @@ impl Response {
         self
     }
 
+    /// The pointer's look over it, and while it is dragged.
     pub fn on_hover_cursor(self, cursor: CursorIcon) -> Response {
         let code = match cursor {
             CursorIcon::Default => OAK_CURSOR_DEFAULT,

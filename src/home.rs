@@ -68,7 +68,7 @@ impl App {
             Some(tex) => tex.clone(),
             None => picture(ui.ctx(), &mut self.pictures, "forest-home"),
         };
-        paint_cover(ui.painter(), rect, &tex, Color32::WHITE);
+        paint_fill(ui.painter(), rect, &tex, Color32::WHITE);
     }
 
     /// The menu's box, laid out by `g`.
@@ -867,6 +867,28 @@ pub(crate) fn paint_cover(p: &egui::Painter, rect: Rect, tex: &egui::TextureHand
         Rect::from_min_max(egui::pos2(0.0, (1.0 - v) / 2.0), egui::pos2(1.0, (1.0 + v) / 2.0))
     } else {
         let u = ra / ia;
+        Rect::from_min_max(egui::pos2((1.0 - u) / 2.0, 0.0), egui::pos2((1.0 + u) / 2.0, 1.0))
+    };
+    p.image(tex.id(), rect, uv, tint);
+}
+
+/// How far a wallpaper may be stretched out of shape to fill its place
+/// rather than lose its edges.
+const MAX_STRETCH: f32 = 0.12;
+
+/// Paints `tex` over all of `rect`, as a wallpaper: stretched to `rect`'s
+/// shape when that is within `MAX_STRETCH` of its own (pixel art is often
+/// 16:10, and its videos show it stretched to 16:9), else stretched that
+/// far and the rest cropped, about the middle.
+pub(crate) fn paint_fill(p: &egui::Painter, rect: Rect, tex: &egui::TextureHandle, tint: Color32) {
+    let [w, h] = tex.size().map(|v| v as f32);
+    let (ra, ia) = (rect.width() / rect.height(), w / h);
+    let shown = ra.clamp(ia / (1.0 + MAX_STRETCH), ia * (1.0 + MAX_STRETCH));
+    let uv = if ra > shown {
+        let v = shown / ra;
+        Rect::from_min_max(egui::pos2(0.0, (1.0 - v) / 2.0), egui::pos2(1.0, (1.0 + v) / 2.0))
+    } else {
+        let u = ra / shown;
         Rect::from_min_max(egui::pos2((1.0 - u) / 2.0, 0.0), egui::pos2((1.0 + u) / 2.0, 1.0))
     };
     p.image(tex.id(), rect, uv, tint);

@@ -152,7 +152,8 @@ Use commas, parentheses, or spacing instead; actual Markdown lists are unaffecte
 **Layout.** A title bar Oak draws itself, a strip of tabs and the page. The first tab is Home
 (Alt+H): a wallpaper (`src/wallpaper.rs`; Settings → Wallpaper opens a grid of them, three to a row, the one under
 the pointer playing, to pick Oak's forest or a PNG, JPEG, GIF or WebP from `wallpapers/` in Oak's
-folder; animated ones play from a decoding thread, and small ones, pixel art, are drawn sharp), what
+folder; animated ones play from a decoding thread, small ones, pixel art, are drawn sharp, and one
+whose shape differs from the window's is stretched up to 12% before the rest is cropped: `home::paint_fill`), what
 plugins draw on it (`Hooks::home_scene`), and in the bottom right corner the Settings gear and the
 menu button. The menu is shut at start; the button, Alt+H on Home or a click on the Home tab opens
 it, and Esc, the button (an X then) or a click on the wallpaper shuts it. It is one box: its left

@@ -3,7 +3,8 @@
 //! plays, looping), picked on Settings.
 //!
 //! Settings shows them as a grid of thumbnails (`thumbnail`: each file's
-//! first frame, cropped to 16:9, decoded on a thread of its own once).
+//! first frame, decoded on a thread of its own once). Home and the grid
+//! draw them with `home::paint_fill`.
 //!
 //! A `Player` decodes its file's frames on a thread of its own, two ahead
 //! of the screen, and Home shows each when its time comes, reusing one
@@ -77,7 +78,7 @@ enum Thumb {
     Failed,
 }
 
-/// `w`'s thumbnail: its first frame cropped to 16:9, at most 480 wide.
+/// `w`'s thumbnail: its first frame, at most 480 wide.
 /// None while it is decoded (on a thread of its own; a repaint follows)
 /// and when the file can't be read.
 pub(crate) fn thumbnail(ctx: &egui::Context, w: &Wallpaper) -> Option<egui::TextureHandle> {
@@ -106,16 +107,15 @@ pub(crate) fn thumbnail(ctx: &egui::Context, w: &Wallpaper) -> Option<egui::Text
     None
 }
 
-/// `path`'s first frame, cropped to 16:9 about its middle and shrunk to
-/// 480 wide when wider (pixel art stays as it is, to be drawn sharp).
+/// `path`'s first frame, shrunk to 480 wide when wider (pixel art stays as
+/// it is, to be drawn sharp).
 fn first_frame(path: &Path) -> Option<(egui::ColorImage, egui::TextureOptions)> {
     let img = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?.to_rgba8();
     let (w, h) = img.dimensions();
-    let (cw, ch) = if w * 9 > h * 16 { (h * 16 / 9, h) } else { (w, w * 9 / 16) };
-    let mut img = image::imageops::crop_imm(&img, (w - cw) / 2, (h - ch) / 2, cw.max(1), ch.max(1)).to_image();
     let pixel_art = w as usize <= PIXEL_ART_W;
-    if img.width() > 480 {
-        img = image::imageops::resize(&img, 480, 270, image::imageops::FilterType::Triangle);
+    let mut img = img;
+    if w > 480 {
+        img = image::imageops::resize(&img, 480, (h * 480 / w).max(1), image::imageops::FilterType::Triangle);
     }
     let size = [img.width() as usize, img.height() as usize];
     let options = if pixel_art { egui::TextureOptions::NEAREST } else { egui::TextureOptions::LINEAR };
