@@ -1683,9 +1683,11 @@ c_api! {
     /// A super agent's chat, as Oak draws its own super agents': people's
     /// messages in deep blue bubbles on the right, the super agent's (as
     /// markdown) by its avatar on the left, in stretches with the day and
-    /// time after a pause, then three dots while it works. `chat` is JSON:
-    /// `{"salt", "icon": "tree"|"delta", "me", "intro", "loaded", "trouble",
-    /// "working", "activity", "messages": [{"kind": "user"|"oak"|"error",
+    /// time after a pause, then what it is doing while it works: a spinner,
+    /// or three dots in a bubble while it writes a message ("typing": true).
+    /// `chat` is JSON: `{"salt", "icon": "tree"|"delta", "me", "intro",
+    /// "loaded", "trouble", "working", "activity", "typing", "messages":
+    /// [{"kind": "user"|"oak"|"error",
     /// "from", "time" (ms; 0: sending, below 0: not known), "text", "key",
     /// "images": [{"name", "block" (an image block), "failed"}]}]}`; an image
     /// with neither block nor failed shows as loading.

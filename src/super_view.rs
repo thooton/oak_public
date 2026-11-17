@@ -58,6 +58,10 @@ pub(crate) struct Chat {
     /// The super agent is at work, doing `activity`.
     pub(crate) working: bool,
     pub(crate) activity: String,
+    /// It is writing a message to the chat now (a reply streaming in):
+    /// three dots in a bubble by its avatar. At work otherwise (thinking,
+    /// running tools), a spinner by what it is doing, no bubble.
+    pub(crate) typing: bool,
     pub(crate) messages: Vec<Msg>,
 }
 
@@ -233,8 +237,8 @@ fn bubble(ui: &mut Ui, t: &Theme, icon: Icon, m: &Msg, name: Option<&str>, first
     });
 }
 
-/// The super agent at work: three dots pulsing in a bubble of its own, by
-/// its avatar, and what it is doing beside it.
+/// The super agent writing a message: three dots pulsing in a bubble of
+/// its own, by its avatar, and what it is doing beside it.
 fn typing(ui: &mut Ui, t: &Theme, icon: Icon, what: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
@@ -250,6 +254,18 @@ fn typing(ui: &mut Ui, t: &Theme, icon: Icon, what: &str) {
         }
         paint_avatar(p, t, icon, egui::pos2(slot.center().x, r.bottom() - AVATAR / 2.0));
         ui.ctx().request_repaint();
+        ui.label(RichText::new(what).small().color(t.ink3));
+    });
+}
+
+/// The super agent at work on something other than a message (thinking,
+/// running tools): a spinner and what it is doing, in the column its
+/// messages start at, with no bubble, since no message is coming yet.
+fn busy(ui: &mut Ui, t: &Theme, what: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(AVATAR + 14.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.add(egui::Spinner::new().size(13.0).color(t.ink3));
         ui.label(RichText::new(what).small().color(t.ink3));
     });
 }
@@ -302,7 +318,8 @@ pub(crate) fn chat(ui: &mut Ui, t: &Theme, c: &Chat, tail: impl FnOnce(&mut Ui))
         }
         if c.working {
             ui.add_space(12.0);
-            typing(ui, t, c.icon, if c.activity.is_empty() { "Working…" } else { &c.activity });
+            let what = if c.activity.is_empty() { "Working…" } else { &c.activity };
+            if c.typing { typing(ui, t, c.icon, what) } else { busy(ui, t, what) }
         }
         if let Some(e) = &c.trouble {
             ui.add_space(8.0);
@@ -614,6 +631,32 @@ pub(crate) fn agent_box(ctx: &egui::Context, t: &Theme, area: Rect, b: &AgentBox
 mod tests {
     use super::*;
 
+    /// At work on something other than a message, the chat shows a spinner
+    /// and what it is doing, not the typing bubble (its dots and avatar);
+    /// writing a message, it shows the bubble.
+    #[test]
+    fn typing_dots_only_while_writing_a_message() {
+        use crate::app_hover_test::{run_frame, test_ctx};
+        let (ctx, t) = test_ctx(true, true);
+        let frame = |typing: bool| {
+            let c = Chat { loaded: true, working: true, typing, activity: if typing { "Writing" } else { "Thinking" }.into(), ..Default::default() };
+            let mut time = 0.0;
+            let mut out = None;
+            for _ in 0..3 {
+                out = Some(run_frame(&ctx, egui::vec2(900.0, 600.0), &mut time, 0.1, vec![], |ui| chat(ui, &t, &c, |_| {})));
+            }
+            let out = out.unwrap();
+            let circles = out.shapes.iter().filter(|s| matches!(s.shape, egui::Shape::Circle(_))).count();
+            (crate::app_hover_test::painted(&out).into_iter().map(|(s, _)| s).collect::<Vec<_>>(), circles)
+        };
+        let (shown, circles) = frame(false);
+        assert!(shown.iter().any(|s| s == "Thinking"), "{shown:?}");
+        assert_eq!(circles, 0, "no typing bubble while thinking");
+        let (shown, circles) = frame(true);
+        assert!(shown.iter().any(|s| s == "Writing"), "{shown:?}");
+        assert!(circles >= 4, "the avatar and three dots: {circles}");
+    }
+
     #[test]
     fn paused_super_agents_are_not_labelled_idle() {
         use crate::app_hover_test::{painted, run_frame, test_ctx};
@@ -630,3 +673,4 @@ mod tests {
         assert!(!shown.iter().any(|(s, _)| s == "Idle"), "{shown:?}");
     }
 }
+
