@@ -237,13 +237,14 @@ pub fn rotation_on() -> bool {
     ROTATION.load(Ordering::SeqCst)
 }
 
-/// Brings the Codex logins and the OpenRouter, NodeClub, Refuseless and Freebuff keys
+/// Brings the Codex logins and the OpenRouter, NodeClub, Refuseless, Muse Code and Freebuff keys
 /// in step with the vault's (they are kept there too).
 fn sync_other_logins() {
     crate::codex::sync();
     crate::openrouter::KEYS.sync();
     crate::nodeclub::KEYS.sync();
     crate::refuseless::KEYS.sync();
+    crate::musecode::KEYS.sync();
     crate::freebuff::sync();
 }
 
@@ -294,6 +295,7 @@ pub fn load_auth() -> bool {
     let openrouter = crate::openrouter::KEYS.load();
     let nodeclub = crate::nodeclub::KEYS.load();
     let refuseless = crate::refuseless::KEYS.load();
+    let musecode = crate::musecode::KEYS.load();
     let codex = crate::codex::load();
     // Freebuff's token, and its balances in the background: it is a separate
     // service, so it does not count as being signed in to Oak.
@@ -305,7 +307,7 @@ pub fn load_auth() -> bool {
     if local {
         std::thread::spawn(crate::local::refresh);
     }
-    let ok = !a.list.is_empty() || openrouter || nodeclub || refuseless || codex || local;
+    let ok = !a.list.is_empty() || openrouter || nodeclub || refuseless || musecode || codex || local;
     *ACCOUNTS.lock().unwrap() = a;
     ok
 }
@@ -376,7 +378,7 @@ pub fn signed_in() -> bool {
 }
 
 fn any_login() -> bool {
-    !ACCOUNTS.lock().unwrap().list.is_empty() || vault_on() || crate::openrouter::on() || crate::nodeclub::on() || crate::refuseless::on() || crate::codex::on()
+    !ACCOUNTS.lock().unwrap().list.is_empty() || vault_on() || crate::openrouter::on() || crate::nodeclub::on() || crate::refuseless::on() || crate::musecode::on() || crate::codex::on()
 }
 
 /// Why there is no account to send a request through.
@@ -879,7 +881,7 @@ pub fn preamble(model: &str, system: &str, tools: &Value) -> Preamble {
     let oak_tools = || tools.as_array().cloned().unwrap_or_default();
     match Provider::of(model) {
         // OpenRouter is asked first: it also serves the session-title models.
-        Provider::OpenRouter | Provider::Local => plain(system.into(), oak_tools()),
+        Provider::OpenRouter | Provider::Local | Provider::MuseCode => plain(system.into(), oak_tools()),
         Provider::Codex => plain(crate::codex::instructions(system), crate::codex::wire_tools(&oak_tools())),
         Provider::Freebuff => {
             let (system, tools) = crate::freebuff::preamble(model);
@@ -1295,6 +1297,7 @@ pub fn refresh_accounts() {
     crate::openrouter::refresh();
     crate::nodeclub::refresh();
     crate::refuseless::refresh();
+    crate::musecode::refresh();
     crate::codex::refresh();
     let ids: Vec<u64> = ACCOUNTS.lock().unwrap().list.iter().map(|s| s.id).collect();
     for id in ids {
@@ -1507,6 +1510,7 @@ fn stream(req: crate::oak::Request, cont: Option<(String, usize)>, thread: bool,
         Provider::Freebuff => return crate::freebuff::stream(req, tx),
         Provider::NodeClub => return crate::nodeclub::stream(req, tx),
         Provider::Refuseless => return crate::refuseless::stream(req, tx),
+        Provider::MuseCode => return crate::musecode::stream(req, tx),
         Provider::Local => return crate::local::stream(req, tx),
         Provider::Claude => {}
     }

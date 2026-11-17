@@ -521,6 +521,7 @@ fn model_list(models: &[crate::api::Model]) -> String {
                 Provider::Local => "The user's own server",
                 Provider::NodeClub => "NodeClub, an OpenAI-compatible API",
                 Provider::Refuseless => "Refuseless, abliterated (refusal-removed) open models, paid per token",
+                Provider::MuseCode => "Meta's Muse models (Muse Code's), paid per token",
                 Provider::Claude => "Claude",
             };
             format!("{head}: {}.", items.join(", "))
@@ -535,6 +536,13 @@ fn model_note(m: &crate::api::Model) -> &'static str {
     let id = m.id.to_lowercase();
     if matches!(m.provider, crate::api::Provider::OpenRouter | crate::api::Provider::Freebuff | crate::api::Provider::Local | crate::api::Provider::NodeClub | crate::api::Provider::Refuseless) {
         ""
+    } else if m.provider == crate::api::Provider::MuseCode {
+        match id.split('-').nth(1) {
+            Some("wonder") => "most capable",
+            Some("ember") => "cheapest",
+            _ if id.ends_with("-contributor") => "cheaper, Meta trains on what it is sent",
+            _ => "for most work",
+        }
     } else if id.contains("astra") || id.contains("opus") {
         "most capable"
     } else if id.contains("sol") || id.contains("sonnet") {

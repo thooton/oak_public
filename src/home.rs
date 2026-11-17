@@ -8,7 +8,7 @@ pub(crate) use crate::look::{BAR_ROOM, HOME_HEAD, list_rows, row_title_color};
 use crate::api::Provider;
 use crate::widgets::{add_field, clip_width, sign_in_heading, state_dot};
 
-use crate::composer::{BOX_W, nodeclub_panel, openrouter_panel, refuseless_panel, side_box, usage_panel};
+use crate::composer::{BOX_W, musecode_panel, nodeclub_panel, openrouter_panel, refuseless_panel, side_box, usage_panel};
 
 impl App {
     /// Home: the wallpaper (Settings picks it), what plugins draw on it,
@@ -328,7 +328,7 @@ impl App {
                     crate::widgets::error_note(ui, t, e);
                 }
                 // Logins kept on this machine though meant for the vault.
-                for note in [codex::note(), openrouter::KEYS.note(), crate::nodeclub::KEYS.note(), crate::refuseless::KEYS.note(), freebuff::note()].into_iter().flatten() {
+                for note in [codex::note(), openrouter::KEYS.note(), crate::nodeclub::KEYS.note(), crate::refuseless::KEYS.note(), crate::musecode::KEYS.note(), freebuff::note()].into_iter().flatten() {
                     caption(ui, &note, t.ink3);
                 }
                 if busy {
@@ -389,11 +389,12 @@ impl App {
             || self.adding_openrouter.open
             || self.adding_nodeclub.open
             || self.adding_refuseless.open
+            || self.adding_musecode.open
             || self.adding.is_some()
     }
 
     /// "+ Add account", which asks what to add: a Claude account, a Codex
-    /// account, an API key (OpenRouter, NodeClub, Refuseless), a Freebuff account or a
+    /// account, an API key (OpenRouter, Muse Code, NodeClub, Refuseless), a Freebuff account or a
     /// local server. While one is being added, its box.
     fn add_account_box(&mut self, ui: &mut Ui, t: &Theme) {
         let w = ui.available_width();
@@ -429,6 +430,8 @@ impl App {
             Some(self.nodeclub_add_box(ui, t, w))
         } else if self.adding_refuseless.open {
             Some(self.refuseless_add_box(ui, t, w))
+        } else if self.adding_musecode.open {
+            Some(self.musecode_add_box(ui, t, w))
         } else {
             None
         };
@@ -470,6 +473,7 @@ impl App {
             Add::OpenRouter => self.adding_openrouter.open = true,
             Add::NodeClub => self.adding_nodeclub.open = true,
             Add::Refuseless => self.adding_refuseless.open = true,
+            Add::MuseCode => self.adding_musecode.open = true,
             Add::Local => self.adding_local = true,
             Add::Freebuff => match freebuff::login_start() {
                 Ok(url) => {
@@ -502,6 +506,7 @@ enum Add {
     NodeClub,
     Freebuff,
     Refuseless,
+    MuseCode,
     Local,
 }
 
@@ -521,6 +526,7 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
     for (provider, label, tip, add) in [
         (Provider::Codex, "Codex account", "ChatGPT plan, Codex models.", Add::Codex),
         (Provider::OpenRouter, "OpenRouter API key", "OpenRouter, pay per token.", Add::OpenRouter),
+        (Provider::MuseCode, "Muse Code API key", "Meta's Muse models (Wonder, Spark, Ember), as Muse Code runs them: a Meta Model API key, pay per token.", Add::MuseCode),
         (Provider::NodeClub, "NodeClub API key", "NodeClub, OpenAI-compatible API (Qwen).", Add::NodeClub),
         (Provider::Freebuff, "Freebuff account", "Freebuff, sign in in the browser; its models run a separate system.", Add::Freebuff),
         (Provider::Refuseless, "Refuseless API key", "Refuseless, abliterated models, pay per token.", Add::Refuseless),
@@ -549,7 +555,7 @@ pub(crate) struct AccountState {
     /// Whether there were an OpenRouter key and a Codex login when the
     /// models were last listed: a sync with the vault that
     /// brings or takes one lists them again.
-    pub(crate) services: Option<(bool, bool, bool, bool, bool, bool)>,
+    pub(crate) services: Option<(bool, bool, bool, bool, bool, bool, bool)>,
     /// Whether a Claude account was there last time: the model list is
     /// asked for again when one arrives.
     pub(crate) claude: Option<bool>,
@@ -668,6 +674,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
         AccountAct::Remove(Provider::OpenRouter, id) => openrouter::KEYS.remove(&id),
         AccountAct::Remove(Provider::NodeClub, id) => crate::nodeclub::KEYS.remove(&id),
         AccountAct::Remove(Provider::Refuseless, id) => crate::refuseless::KEYS.remove(&id),
+        AccountAct::Remove(Provider::MuseCode, id) => crate::musecode::KEYS.remove(&id),
         AccountAct::Remove(Provider::Freebuff, id) => freebuff::sign_out(&id),
         AccountAct::Remove(Provider::Local, _) => {
             local::remove();
@@ -679,6 +686,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
             Provider::OpenRouter => openrouter::KEYS.move_to_vault(id),
             Provider::NodeClub => crate::nodeclub::KEYS.move_to_vault(id),
             Provider::Refuseless => crate::refuseless::KEYS.move_to_vault(id),
+            Provider::MuseCode => crate::musecode::KEYS.move_to_vault(id),
             Provider::Freebuff => freebuff::move_to_vault(id),
             Provider::Local => Ok(()),
         }),
@@ -824,6 +832,14 @@ fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &
                 let status = status(&a.id, movable);
                 let remove = format!("Remove Refuseless key {}{}", a.label, if a.remote { " (all clients)" } else { "" });
                 account_card(ui, t, w, (p, &a.id), movable, &remove, busy, act, |ui, t, w| refuseless_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w));
+            }
+        }
+        Provider::MuseCode => {
+            for a in crate::musecode::accounts() {
+                let movable = crate::musecode::KEYS.movable(&a.id);
+                let status = status(&a.id, movable);
+                let remove = format!("Remove Muse Code key {}{}", a.label, if a.remote { " (all clients)" } else { "" });
+                account_card(ui, t, w, (p, &a.id), movable, &remove, busy, act, |ui, t, w| musecode_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w));
             }
         }
         Provider::Freebuff => {

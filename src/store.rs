@@ -74,12 +74,13 @@ pub fn write_private_json(path: &std::path::Path, v: &impl Serialize) -> std::io
 
 /// The files in `dir()` that hold logins, tokens or keys.
 #[cfg(unix)]
-pub const PRIVATE_FILES: [&str; 9] = [
+pub const PRIVATE_FILES: [&str; 10] = [
     "accounts.json",
     "codex.json",
     "openrouter.json",
     "nodeclub.json",
     "refuseless.json",
+    "musecode.json",
     "freebuff.json",
     "freebuff-device.json",
     "freebuff-device-key.json",

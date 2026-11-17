@@ -19,6 +19,7 @@ pub(crate) fn logo(ctx: &egui::Context, p: Kind) -> egui::TextureHandle {
         Kind::NodeClub => include_bytes!("../assets/logo-nodeclub.png"),
         Kind::Freebuff => include_bytes!("../assets/logo-freebuff.png"),
         Kind::Refuseless => include_bytes!("../assets/logo-refuseless.png"),
+        Kind::MuseCode => include_bytes!("../assets/logo-musecode.png"),
         Kind::Local => include_bytes!("../assets/logo-local.png"),
     };
     let img = image::load_from_memory(bytes).expect("built-in logo decodes").to_rgba8();
@@ -120,6 +121,9 @@ pub(crate) enum Shown {
     /// Dollars left (when known), spent through Oak, all told, and why
     /// what is left couldn't be checked.
     Credits(Option<f64>, f64, Option<String>),
+    /// Billed afterwards: spent through Oak, all told, and why the keys
+    /// couldn't be checked.
+    Spent(f64, Option<String>),
     Free,
     /// Not known yet.
     Loading,
@@ -172,6 +176,13 @@ pub(crate) fn provider_box(ui: &mut Ui, t: &Theme, p: Kind, accounts: usize, sho
                 .on_hover_text("Credits left on the keys' accounts, less what Oak spent since they were checked");
                 kv(ui, t, "Credits spent", &openrouter::dollars(*spent), t.ink).on_hover_text("Spent through Oak, all time");
             }
+            Shown::Spent(spent, error) => {
+                match error {
+                    Some(e) => kv(ui, t, "Billing", "key problem", t.error).on_hover_text(e.as_str()),
+                    None => kv(ui, t, "Billing", "pay as you go", t.ink3),
+                };
+                kv(ui, t, "Spent through Oak", &openrouter::dollars(*spent), t.ink).on_hover_text("At the provider's listed rates, all time");
+            }
             Shown::Free => {
                 ui.label(small("free", t.ink3));
             }
@@ -199,6 +210,10 @@ pub(crate) fn shown(p: Kind) -> Shown {
     let now = api::now_ms();
     match p.metered() {
         Metered::Free => Shown::Free,
+        Metered::Spent => match crate::musecode::account() {
+            Some(a) => Shown::Spent(a.spent, a.error),
+            None => Shown::Loading,
+        },
         Metered::Credits if p == Kind::Refuseless => match crate::refuseless::account() {
             Some(a) => Shown::Credits(a.left, a.spent, a.error),
             None => Shown::Loading,
@@ -236,6 +251,7 @@ pub(crate) fn account_count(p: Kind) -> usize {
         Kind::NodeClub => crate::nodeclub::accounts().len(),
         Kind::Freebuff => crate::freebuff::accounts().len(),
         Kind::Refuseless => crate::refuseless::accounts().len(),
+        Kind::MuseCode => crate::musecode::accounts().len(),
         Kind::Local => local::on() as usize,
     }
 }

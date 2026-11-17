@@ -86,10 +86,15 @@ impl App {
 
         // Each connection's state; they are added and removed on Home.
         caption(ui, "Connections", t.ink3);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 18.0;
-            for (name, state, tip) in connections() {
-                status_dot(ui, t, name, state).on_hover_text(tip);
+        // Two lines: the providers outgrow one line of the dialog.
+        ui.vertical(|ui| {
+            for line in connections().chunks(4) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 18.0;
+                    for (name, state, tip) in line {
+                        status_dot(ui, t, name, *state).on_hover_text(tip);
+                    }
+                });
             }
         });
         ui.end_row();
@@ -432,6 +437,25 @@ impl App {
         )
     }
 
+    /// Adding a Muse Code key (a Meta Model API key) from Home, as the
+    /// NodeClub one: checked with the API (its model list), then kept on
+    /// the vault when connected to one (for every OAK), else on this
+    /// machine. True once added.
+    pub(crate) fn musecode_add_box(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
+        key_add_box(
+            ui,
+            t,
+            w,
+            ("Add Muse Code key", "add-musecode-key", "LLM_…"),
+            || {
+                let to = if api::signing_in_remotely() { format!("kept on {}", api::vault_name()) } else { "kept on this machine".to_string() };
+                format!("A Meta Model API key from dev.meta.ai, {to}")
+            },
+            &mut self.adding_musecode,
+            crate::musecode::set_key,
+        )
+    }
+
     /// Adding a Refuseless key from Home, as the NodeClub one: checked with
     /// Refuseless (its credits), then kept on the vault when connected to
     /// one (for every OAK), else on this machine. True once added.
@@ -460,7 +484,7 @@ pub(crate) struct KeyForm {
     error: Option<String>,
 }
 
-/// The OpenRouter, NodeClub and Refuseless key boxes from Home: a caption, the key in a
+/// The OpenRouter, NodeClub, Refuseless and Muse Code key boxes from Home: a caption, the key in a
 /// password field, a line (its error, or `note`), and Add and Cancel.
 /// The key goes to `set_key`; on success, the form closes. True once added.
 fn key_add_box(ui: &mut Ui, t: &Theme, w: f32, (title, id, hint): (&str, &str, &str), note: impl Fn() -> String, form: &mut KeyForm, set_key: fn(&str) -> Result<(), String>) -> bool {
@@ -532,10 +556,10 @@ enum Conn {
     Off,
 }
 
-/// The connections Settings lists: Claude, Codex, OpenRouter, NodeClub,
+/// The connections Settings lists: Claude, Codex, OpenRouter, Muse Code, NodeClub,
 /// Freebuff, Refuseless and the local llama.cpp server, how each is, and what its dot's
 /// hover says.
-fn connections() -> [(&'static str, Conn, String); 7] {
+fn connections() -> [(&'static str, Conn, String); 8] {
     let kept = |remote: bool| if remote { " (shared)" } else if api::vault_on() { " (on this machine)" } else { "" };
     let accounts = api::accounts();
     let claude = if accounts.is_empty() {
@@ -577,6 +601,13 @@ fn connections() -> [(&'static str, Conn, String); 7] {
             None => (Conn::Ok, format!("{}{}", if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) }, kept(a.remote))),
         },
     };
+    let muse = match crate::musecode::account() {
+        None => (Conn::Off, "No Muse Code key: add one on Home.".to_string()),
+        Some(a) => match a.error {
+            Some(e) => (Conn::Failing, e),
+            None => (Conn::Ok, format!("{}{}", if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) }, kept(a.remote))),
+        },
+    };
     let freebuff = match freebuff::account() {
         None => (Conn::Off, "No Freebuff account: add one on Home.".to_string()),
         Some((email, _)) => match freebuff::error() {
@@ -591,7 +622,7 @@ fn connections() -> [(&'static str, Conn, String); 7] {
         Some(s) => (Conn::Ok, format!("{}, {}", if s.alias.is_empty() { "llama.cpp" } else { &s.alias }, s.url)),
     };
     [("Claude", claude.0, claude.1), ("Codex", codex.0, codex.1), ("OpenRouter", router.0, router.1),
-        ("NodeClub", nodeclub.0, nodeclub.1),
+        ("Muse Code", muse.0, muse.1), ("NodeClub", nodeclub.0, nodeclub.1),
         ("Freebuff", freebuff.0, freebuff.1), ("Refuseless", refuseless.0, refuseless.1), ("Local", llama.0, llama.1)]
 }
 

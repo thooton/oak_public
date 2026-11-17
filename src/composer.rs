@@ -756,6 +756,9 @@ fn account_box(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &Set
         // Refuseless: its credits, and what this session spent.
         api::Provider::Refuseless => refuseless_panel(ui, t, crate::refuseless::account_of_conv(&conv_id).as_ref(), ("This session", spent), None, w)
             .on_hover_text("Refuseless, abliterated models, paid per token from its credits"),
+        // Muse Code: its key, and what this session spent.
+        api::Provider::MuseCode => musecode_panel(ui, t, crate::musecode::account_of_conv(&conv_id).as_ref(), ("This session", spent), None, w)
+            .on_hover_text("Meta's Muse models through the Meta Model API, paid per token"),
         api::Provider::Claude => {
             let accounts = api::accounts();
             let account = seat(api::Provider::Claude).and_then(|id| accounts.iter().find(|a| a.id.to_string() == id)).or_else(|| accounts.iter().find(|a| a.current));
@@ -905,6 +908,30 @@ pub(crate) fn refuseless_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::refusel
             loading(ui, t, "loading credits…");
         }
         kv(ui, t, spent.0, &openrouter::dollars(spent.1), t.ink);
+    })
+    .response
+}
+/// A Muse Code key (or all of them): the key, and `spent` (what this
+/// session or the key spent). The API bills afterwards: there are no
+/// credits to show.
+pub(crate) fn musecode_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::musecode::Account>, spent: (&str, f64), note: Option<&str>, w: f32) -> egui::Response {
+    side_box(ui, t, w, |ui| {
+        head_row(ui, t, "Muse Code", note.filter(|v| !v.is_empty()));
+        let Some(a) = a else {
+            caption(ui, "No API key", t.ink3);
+            return;
+        };
+        let key = if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) };
+        key_line(ui, &key, t.ink3);
+        let r = match &a.error {
+            Some(e) => {
+                let what = if a.rejected { "Key rejected: remove it" } else { "Key not checked" };
+                ui.label(RichText::new(what).small().color(t.error)).on_hover_text(e)
+            }
+            None => caption(ui, "Meta Model API, pay as you go", t.ink3),
+        };
+        drop(r);
+        kv(ui, t, spent.0, &openrouter::dollars(spent.1), t.ink).on_hover_text("At Meta's listed rates, from each reply's tokens");
     })
     .response
 }

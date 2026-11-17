@@ -107,6 +107,7 @@ fn forget_vault() {
     crate::openrouter::KEYS.forget_remote();
     crate::nodeclub::KEYS.forget_remote();
     crate::refuseless::KEYS.forget_remote();
+    crate::musecode::KEYS.forget_remote();
     crate::freebuff::forget_remote();
 }
 

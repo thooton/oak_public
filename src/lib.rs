@@ -44,6 +44,7 @@ mod provider;
 mod providers;
 mod providers_view;
 mod refuseless;
+mod musecode;
 mod rolling;
 mod rotation;
 mod scratch;
@@ -267,10 +268,11 @@ struct App {
     account_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// The providers whose accounts show under their box on Home.
     providers_open: Vec<api::Provider>,
-    /// The OpenRouter, NodeClub and Refuseless keys being added from Home.
+    /// The OpenRouter, NodeClub, Refuseless and Muse Code keys being added from Home.
     adding_openrouter: settings::KeyForm,
     adding_nodeclub: settings::KeyForm,
     adding_refuseless: settings::KeyForm,
+    adding_musecode: settings::KeyForm,
     adding_local: bool,
     local_url: String,
     /// A Codex sign-in under way from Home; the address pasted for it; why
@@ -503,7 +505,7 @@ impl App {
     /// Fetches every account's usage now and then: every two minutes,
     /// after a rotation, or sooner when `fetched` is cleared.
     fn refresh_account(&self, ctx: &egui::Context) {
-        let services = (openrouter::on(), codex::on(), freebuff::on(), local::on(), nodeclub::on(), refuseless::on());
+        let services = (openrouter::on(), codex::on(), freebuff::on(), local::on(), nodeclub::on(), refuseless::on(), musecode::on());
         let mut a = self.account.lock().unwrap();
         // The first fetch can come before the vault's accounts
         // have: an account arriving (or added) fetches the list again.
@@ -538,6 +540,7 @@ impl App {
             freebuff::model(id).map(|m| m.name),
             nodeclub::model(id).map(|m| m.name),
             refuseless::model(id).map(|m| m.name),
+            musecode::model(id).map(|m| m.name),
         ];
         if local::serves(id) {
             return local::model_name(id);

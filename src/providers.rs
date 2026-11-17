@@ -29,6 +29,10 @@ pub enum Kind {
     /// key, paid from its credits.
     #[serde(alias = "Refuseless")]
     Refuseless,
+    /// Meta's Muse models (Muse Code's), through a Meta Model API key,
+    /// paid per token.
+    #[serde(alias = "MuseCode")]
+    MuseCode,
 }
 
 /// What a provider's box measures.
@@ -38,13 +42,15 @@ pub enum Metered {
     Limits,
     /// Credits bought: what is left and what was spent.
     Credits,
+    /// Billed afterwards: what was spent through Oak.
+    Spent,
     /// Nothing to measure.
     Free,
 }
 
 impl Kind {
     /// Every provider, in the order pickers and Home list them.
-    pub const ALL: [Kind; 7] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Local];
+    pub const ALL: [Kind; 8] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::MuseCode, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Local];
 
     /// Signed in to it: a login or key (for Claude, an account here or a
     /// vault, which has them).
@@ -57,6 +63,7 @@ impl Kind {
             Kind::Local => crate::local::on(),
             Kind::NodeClub => crate::nodeclub::on(),
             Kind::Refuseless => crate::refuseless::on(),
+            Kind::MuseCode => crate::musecode::on(),
         }
     }
 
@@ -70,6 +77,7 @@ impl Kind {
             Kind::Local => "local",
             Kind::NodeClub => "nodeclub",
             Kind::Refuseless => "refuseless",
+            Kind::MuseCode => "musecode",
         }
     }
 
@@ -88,6 +96,7 @@ impl Kind {
             Kind::Local => "Local",
             Kind::NodeClub => "NodeClub",
             Kind::Refuseless => "Refuseless",
+            Kind::MuseCode => "Muse Code",
         }
     }
 
@@ -95,6 +104,7 @@ impl Kind {
         match self {
             Kind::Claude | Kind::Codex => Metered::Limits,
             Kind::OpenRouter | Kind::Refuseless => Metered::Credits,
+            Kind::MuseCode => Metered::Spent,
             Kind::NodeClub | Kind::Freebuff | Kind::Local => Metered::Free,
         }
     }
@@ -116,6 +126,8 @@ impl Kind {
             Kind::NodeClub
         } else if crate::refuseless::serves(model) {
             Kind::Refuseless
+        } else if crate::musecode::serves(model) {
+            Kind::MuseCode
         } else {
             Kind::Claude
         }

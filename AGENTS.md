@@ -3,8 +3,9 @@
 A coding agent for Windows and Linux, written in Rust with [egui](https://github.com/emilk/egui).
 Each conversation works in a folder you choose, with a model from one of Oak's providers: Claude
 (a subscription login or an API key), the GPT models a ChatGPT plan includes for Codex,
-OpenRouter, NodeClub, Freebuff, Refuseless (abliterated GLM 5.3 Flash and DeepSeek V4.1 Flash), or a
-llama.cpp server of your own. Cloud sessions run Claude Code in Anthropic's cloud on your Claude accounts.
+OpenRouter, Muse Code (Meta's Muse models through a Meta Model API key, `src/musecode.rs`), NodeClub,
+Freebuff, Refuseless (abliterated GLM 5.3 Flash and DeepSeek V4.1 Flash), or a llama.cpp server of
+your own. Cloud sessions run Claude Code in Anthropic's cloud on your Claude accounts.
 
 Oak is one executable. It loads plugins when it starts: dynamic libraries that add tabs, cloud
 backends, themes, fonts, system prompts and more, through a stable C interface
@@ -131,7 +132,7 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 a build against a copy of your conversations). Each conversation is a file in `conversations/`
 named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `mcp/` (MCP servers' files), `mcp.json` (the MCP servers switched off), `mcp-cache.json` (what each MCP server offered at its last connection), `mcp-logs/` (each stdio server's stderr, its newest run), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
-`refuseless.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
+`refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
 size, place and maximized state), `seats.json` (which account each
 conversation is on), `tasks/` and `task-output/` (background tasks; `tasks/tray.json` is what
