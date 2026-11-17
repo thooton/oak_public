@@ -51,7 +51,8 @@ kept; `OAK_RIPGREP=<path to rg>` bundles that executable instead. With neither, 
 (`OAK_RELEASE=1`) fails and any other is built without ripgrep, with a warning.
 
 `oak --version` prints the version, `oak --plugins` the plugins found and whether each runs,
-`oak --no-plugins` starts without any.
+`oak --no-plugins` starts without any, `oak --mcp blender` serves Oak's Blender MCP server over
+stdio (for Claude Code, Codex or any MCP client) and exits when stdin closes.
 
 Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`:
 
@@ -123,7 +124,7 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 
 `%APPDATA%\oak` on Windows, `~/.config/oak` (`$XDG_CONFIG_HOME/oak`) on Linux, or `OAK_DIR` (to try
 a build against a copy of your conversations). Each conversation is a file in `conversations/`
-named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `models.json`, the
+named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `mcp/` (MCP servers' files), `mcp.json` (the MCP servers switched off), `mcp-cache.json` (what each MCP server offered at its last connection), `mcp-logs/` (each stdio server's stderr, its newest run), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
@@ -165,7 +166,7 @@ plugins draw on it (`Hooks::home_scene`), and in the bottom right corner the Set
 menu button. The menu is shut at start; the button, Alt+H on Home or a click on the Home tab opens
 it, and Esc, the button (an X then) or a click on the wallpaper shuts it. It is one box: its left
 side has the tabs Conversations and Cloud, then those plugins add, then
-Plugins (and at the row's right end the links plugins add), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F, which opens the menu too) narrows the list to
+MCP and Plugins (and at the row's right end the links plugins add), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F, which opens the menu too) narrows the list to
 conversations whose title or folder has every word typed, in any case; Enter opens the first, Esc
 clears it, and the query isn't kept across restarts. The picker beside it sorts the list by the
 latest message or by scratchpad size, biggest first (each row then shows its size; kept in settings).
@@ -185,6 +186,16 @@ choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home,
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
+Home's MCP tab (`src/mcp_view.rs`) lists the MCP servers conversations can load (see MCP servers
+below): Oak's built-in Blender first, then those of the files in `mcp/`, each with a switch (a click
+on the row flips it; off ends its connection), its state (Connected, Starting, Failed), its tool count
+and a line under its name (its command or URL, why it can't be used, or its last error). Open folder
+and Reload sit above the list; Reload reads the files again and ends the connections whose
+configuration changed. Blender's row says whether Blender is listening and, until the add-on is
+installed (or while the installed copy differs from Oak's), has Install add-on. The right-click menu
+has Connect (start it now and list its tools again), Disconnect, Open file, Copy path, Open log and,
+for Blender, Install add-on again, Save add-on file (for Blender's Install from Disk), Open Blender,
+Copy Claude Code command and Copy Codex config (both run `oak --mcp blender`).
 Switches are saved by plugin id in `plugins.json` and apply at the next start or Reload: a changed
 row says "On after reload" or "Off after reload", and Restart to apply (shown then) restarts Oak as
 an update's restart does. Reload (`plugins::reload`) looks at the folders again without a restart:
@@ -264,7 +275,44 @@ can't read.
 (`src/tools/defs.rs`): READ, WRITE, EDIT, EXECUTE, SEARCH, FETCH, SCREENSHOT, DISPLAY, ASK,
 REQUEST_ASK, ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
 `action` and show as tools of their own (`TASK action=wait` is TASK_WAIT). LOAD loads a kit (AGENT,
-BROWSER, WINDOW): a tool and its instructions, left out of the prompt until needed.
+BROWSER, WINDOW, or an MCP server by its name): a tool and its instructions, left out of the prompt
+until needed.
+
+**MCP servers** (`src/mcp.rs`). Oak is an MCP client, as Claude Code and Codex are. Each server
+switched on is a kit offered by LOAD (not in chats or to a local model), described by its file's
+`description` or its instructions' first sentence. Loading one starts it (or reconnects), lists its
+tools and returns them with its instructions; its tools then join the conversation's tools as
+`mcp__<server>__<tool>` (Claude Code's names, at most 64 characters) and its instructions the system
+prompt, under "# MCP Server Instructions". Where the model can't take new tools mid-conversation
+(`prefix::Mode::Generic`), LOAD's text lists them and they are called through LOAD with `input`
+`{"tool", "arguments"}`. A call returns the server's text and pictures (audio and binary resources are
+named, not passed on); long text goes to the scratchpad as EXECUTE's does, the user's message
+interrupts it, and a server that exited is started again once. Servers come from Oak (built in) and
+from `mcp/` in Oak's folder: a JSON file per server named after it (`{"command", "args", "env",
+"cwd"}` for a program on stdio, `{"type": "http", "url", "headers"}` for streamable HTTP, `${VAR}` in
+headers from the environment), or a file with `mcpServers` as Claude Desktop's and `.mcp.json` are;
+optional `description` and `timeout` (seconds per call, default 600). Names of Oak's kits and a name
+used twice are refused (the row says why). The old HTTP+SSE transport and OAuth sign-in aren't
+supported. One connection per server serves every conversation, made on first use; stdio servers end
+with Oak. What a server offered is cached in `mcp-cache.json`, so a conversation's next request lists
+the tools without starting it; a server saying its tools changed is listed again before its next call.
+Oak answers a server's ping and roots (none) and declines sampling and elicitation.
+
+**Blender** (`src/mcp/blender.rs`, `assets/blender/oak_mcp.py`). The built-in server `blender`
+offers the community Blender MCP server's tools (github.com/ahujasid/mcp-for-blender, as Claude Code
+and Codex users run it): get_scene_info, get_object_info (with its world bounding box),
+get_viewport_screenshot, execute_blender_code (what the code prints; a traceback on error) and the Poly
+Haven tools (categories, search, download_polyhaven_asset for HDRIs as the world's lighting, textures
+as a material and models imported, set_texture). It reaches a running Blender through an add-on's
+socket on 127.0.0.1:9876 (`BLENDER_HOST`, `BLENDER_PORT`): Oak's add-on or the community one, which
+speak the same protocol; every tool is Python run through `execute_code`, and Poly Haven's files are
+downloaded by Oak into the system's temp folder (`oak-polyhaven/`). Oak's add-on runs commands on
+Blender's main thread, starts with Blender (not in background mode) and has an Oak tab in the 3D
+viewport's sidebar to stop or start it. Install add-on finds Blender (`OAK_BLENDER`, the PATH, the
+usual install folders and Steam) and runs it twice in the background, to copy the add-on into its
+user add-ons and then switch it on and save its preferences; with no Blender program found it copies
+the file into each of Blender's settings folders (`BLENDER_USER_RESOURCES` overrides where those are).
+`oak --mcp blender` serves the same tools over stdio to other MCP clients.
 
 - The system prompt is `prompts/<role>.md` (who the model is; every file but `tools.md` and
   `chat.md` is a role offered on the New screen, `super.md` only as its Super agent; plugins can add roles) with `prompts/tools.md` in place of `{{tools}}`. `{{folder}}`,
@@ -413,7 +461,13 @@ see-through preview sits beside the transcript, between the column and the minim
 transcript's corner when there is no room). A click on it, or Ctrl+Shift+B, expands it over the
 window as an image opens, where the user uses the page; the X, a click beside it, Ctrl+Shift+B or
 Esc go back. Its viewport is its own (1920x1080 CSS pixels until the model resizes it), scaled to
-fit either way, and the model's pointer shows on it as Oak's green cursor. It runs on the
+fit either way, and the model's pointer shows on it as Oak's green cursor. While the conversation
+shown has the blender kit loaded and Blender answers on its add-on's port, Blender's live view
+(`src/blender_view.rs`) sits in the same place (under the browser's preview when both are shown):
+the 3D viewport as Blender draws it, see-through until the pointer is on it, taken about once a
+second (720 pixels on its longer side; 1600 while expanded) by one background thread only while
+something is shown. A click expands it over the window (Esc, the X or a click beside it go back);
+it is a view only, the work is done in Blender's window. It runs on the
 conversation's own profile unless the model opens it on a named one (`open` with `profile`;
 `browser-profiles/<name>`, names in lower case), which every conversation can open, one browser at
 a time: a login made once serves them all, and another conversation's open on it is refused. Opening

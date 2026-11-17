@@ -295,6 +295,8 @@ impl Worker {
             return self.load(call, input, stop);
         } else if let Some(e) = self.unloaded(name) {
             (e, true, false)
+        } else if name.starts_with("mcp__") {
+            return self.mcp_call(call, name, input);
         } else if call["name"] == "BROWSER" || name.starts_with("BROWSER_") {
             return self.browser_call(call, canon.as_ref().ok().map(|(n, i)| (n.as_str(), i)));
         } else if let Err(e) = &canon {
@@ -346,6 +348,17 @@ impl Worker {
 
     /// Why a call of tool `name` can't run yet: its kit isn't loaded.
     pub(crate) fn unloaded(&self, name: &str) -> Option<String> {
+        if name.starts_with("mcp__") {
+            let Some((server, _)) = crate::mcp::resolve_tool(name) else {
+                return Some(format!("No MCP server has a tool {name}."));
+            };
+            let c = self.conv.lock().unwrap();
+            if c.chat {
+                return Some(format!("{name} isn't available in a chat."));
+            }
+            let kit = crate::mcp::kit_id(&server.name);
+            return (!c.prefix.kits.contains(&kit)).then(|| format!("{name} needs its server's kit: call LOAD with name={} first.", server.name));
+        }
         let c = self.conv.lock().unwrap();
         let agent = c.parent.is_some();
         let kit = tools::kit_of(name, agent).filter(|k| tools::kits_for(agent).contains(k))?;
@@ -358,6 +371,9 @@ impl Worker {
     /// can't be added mid-conversation, until its tool is in the list).
     fn load(&self, call: &Value, input: &Value, stop: &str) -> (Value, bool) {
         let fail = |e: String| (result_block(call, json!(e), true), false);
+        if let Some(server) = crate::mcp::find(input["name"].as_str().unwrap_or("")).filter(|_| !crate::local::serves(&self.conv.lock().unwrap().model)) {
+            return self.load_server(call, &server, input);
+        }
         let kit = input["name"].as_str().unwrap_or("").trim().to_uppercase();
         let (agent, label, mode, loaded) = {
             let c = self.conv.lock().unwrap();
@@ -367,7 +383,9 @@ impl Worker {
         };
         let kits = tools::kits_for(agent);
         if !kits.contains(&kit.as_str()) {
-            return fail(format!("No kit {kit} here: you can load {}.", kits.join(", ")));
+            let servers: Vec<String> = crate::mcp::kits().into_iter().map(|(n, _)| n).collect();
+            let all: Vec<String> = kits.iter().map(|k| k.to_string()).chain(servers).collect();
+            return fail(format!("No kit {kit} here: you can load {}.", all.join(", ")));
         }
         if let Some(inner) = input.get("input").filter(|v| !v.is_null()) {
             if !loaded {
@@ -396,6 +414,91 @@ impl Worker {
         };
         let text = format!("Loaded {kit}. {tool}\n\n{}", super::prompt::kit_prompt(&kit, label.as_deref()));
         (result_block(call, json!(text.trim()), false), false)
+    }
+
+    /// LOAD for an MCP server: connects to it (starting it), adds its kit
+    /// (its tools join the list as Oak's kits' do) and returns its tools and
+    /// instructions. With `input` ({"tool", "arguments"}), calls one of its
+    /// tools through LOAD, where tools can't join the list mid-conversation.
+    fn load_server(&self, call: &Value, server: &crate::mcp::Config, input: &Value) -> (Value, bool) {
+        let fail = |e: String| (result_block(call, json!(e), true), false);
+        let kit = crate::mcp::kit_id(&server.name);
+        let (mode, loaded, chat) = {
+            let c = self.conv.lock().unwrap();
+            (crate::prefix::mode(c.provider(), &c.model), c.prefix.kits.contains(&kit), c.chat)
+        };
+        if chat {
+            return fail("MCP servers aren't available in a chat.".into());
+        }
+        if let Some(inner) = input.get("input").filter(|v| !v.is_null()) {
+            if !loaded {
+                return fail(format!("Load {} first (LOAD without `input`).", server.name));
+            }
+            let Some(tool) = inner["tool"].as_str().or(inner["name"].as_str()) else {
+                return fail("Give `input` as {\"tool\": \"<tool name>\", \"arguments\": {...}}.".into());
+            };
+            let tool = tool.strip_prefix(&format!("mcp__{}__", server.name)).unwrap_or(tool);
+            let args = inner.get("arguments").cloned().unwrap_or_else(|| {
+                let mut rest = inner.clone();
+                if let Some(o) = rest.as_object_mut() {
+                    o.remove("tool");
+                    o.remove("name");
+                }
+                rest
+            });
+            let name = crate::mcp::tool_name(&server.name, tool);
+            return self.mcp_call(call, &name, &args);
+        }
+        let name = server.name.clone();
+        let (r, interrupted) = self.abandonable(&format!("Starting {name}"), move || crate::mcp::connect(&name));
+        if let Err(e) = r {
+            return (result_block(call, json!(format!("Couldn't load {}: {e}", server.name)), true), interrupted);
+        }
+        if !loaded {
+            let mut c = self.conv.lock().unwrap();
+            c.prefix.kits.push(kit);
+            c.save();
+        }
+        let through_load = mode == Some(crate::prefix::Mode::Generic);
+        let mut text = crate::mcp::load_text(server, through_load);
+        if loaded {
+            text = format!("{} is loaded already (connected again).\n\n{text}", server.name);
+        }
+        (result_block(call, json!(text), false), false)
+    }
+
+    /// A call of an MCP server's tool (`name`: mcp__<server>__<tool>): its
+    /// result as the server gave it (text, pictures), long text saved to
+    /// the scratchpad as EXECUTE's is. The user's message interrupts it.
+    fn mcp_call(&self, call: &Value, name: &str, input: &Value) -> (Value, bool) {
+        let Some((server, tool)) = crate::mcp::resolve_tool(name) else {
+            return (result_block(call, json!(format!("No MCP server has a tool {name}.")), true), false);
+        };
+        if !crate::mcp::enabled(&server.name) {
+            return (result_block(call, json!(format!("The user switched the {} MCP server off.", server.name)), true), false);
+        }
+        let args = input.clone();
+        let (r, interrupted) = self.abandonable(&format!("{} ({})", tool, server.name), move || crate::mcp::call(&server, &tool, args));
+        let (blocks, is_error) = match r {
+            Ok(r) => r,
+            Err(e) => return (result_block(call, json!(e), true), interrupted),
+        };
+        let only_text = blocks.iter().all(|b| b["type"] == "text");
+        let content = if only_text {
+            let text: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+            let text = text.join("\n");
+            let text = if text.is_empty() { "(no output)".to_string() } else { text };
+            let text = if tools::too_large(&text) {
+                let dir = scratchpad(&mut self.conv.lock().unwrap());
+                tools::persist(&text, &dir)
+            } else {
+                text
+            };
+            json!(text)
+        } else {
+            json!(blocks)
+        };
+        (result_block(call, content, is_error), interrupted)
     }
 
     /// A BROWSER call (`canon`: its action's tool and input, if the action

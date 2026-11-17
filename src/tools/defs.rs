@@ -67,17 +67,32 @@ pub fn definitions_with_kits(agent: bool, spawner: bool, local: bool, kits: &[St
     let has = |k: &str| kits.iter().any(|x| x == k);
     let mut all = run_definitions(agent, spawner, local, has("GOAL"));
     let loadable = kits_for(agent);
+    // MCP servers are kits too (`crate::mcp`), not for a local model.
+    let servers = if local { vec![] } else { crate::mcp::kits() };
     all.retain(|d| {
         let name = d["name"].as_str().unwrap_or("");
         match name {
-            "LOAD" => !loadable.is_empty(),
+            "LOAD" => !loadable.is_empty() || !servers.is_empty(),
             _ => kit_of(name, agent).is_none_or(has),
         }
     });
     if let Some(load) = all.iter_mut().find(|d| d["name"] == "LOAD") {
-        *load = load_tool(&loadable);
+        *load = load_tool(&loadable, &servers);
     }
-    families(all, agent && !spawner)
+    let mut out = families(all, agent && !spawner);
+    // A loaded server's tools, after Oak's (also one switched off since:
+    // its calls then say so).
+    if !local {
+        for k in kits {
+            if let Some(server) = crate::mcp::server_of_kit(k) {
+                out.extend(crate::mcp::tool_defs(server).into_iter().map(|mut d| {
+                    d["eager_input_streaming"] = json!(true);
+                    d
+                }));
+            }
+        }
+    }
+    out
 }
 
 /// The tools a chat gets (`CHAT_TOOLS`), the same for every model: no
@@ -110,17 +125,26 @@ pub fn kit_of(tool: &str, agent: bool) -> Option<&'static str> {
     (!agent && tool.starts_with("AGENT_")).then_some("AGENT")
 }
 
-/// LOAD, offering `kits`.
-fn load_tool(kits: &[&str]) -> Value {
+/// LOAD, offering `kits` and MCP `servers` (name, what it is).
+fn load_tool(kits: &[&str], servers: &[(String, String)]) -> Value {
     let list: Vec<String> = KITS.iter().filter(|(k, _)| kits.contains(k)).map(|(k, d)| format!("{k}: {d}")).collect();
+    let mut description = format!(
+        "Loads a kit: tools or instructions you don't have by default. Its instructions come back as the result, and its tool is yours from then on. Load one only when the task needs it. Kits: {}.",
+        list.join("; ")
+    );
+    if list.is_empty() {
+        description = "Loads a kit: tools you don't have by default. Its instructions come back as the result, and its tools are yours from then on. Load one only when the task needs it.".into();
+    }
+    if !servers.is_empty() {
+        let s: Vec<String> = servers.iter().map(|(n, d)| format!("{n}: {d}")).collect();
+        description += &format!(" MCP servers (each a kit; its tools are named mcp__<server>__<tool>): {}.", s.join("; "));
+    }
+    let names: Vec<&str> = kits.iter().copied().chain(servers.iter().map(|(n, _)| n.as_str())).collect();
     json!({
         "name": "LOAD",
-        "description": format!(
-            "Loads a kit: tools or instructions you don't have by default. Its instructions come back as the result, and its tool is yours from then on. Load one only when the task needs it. Kits: {}.",
-            list.join("; ")
-        ),
+        "description": description,
         "input_schema": {"type": "object", "properties": {
-            "name": {"type": "string", "enum": kits},
+            "name": {"type": "string", "enum": names},
             "input": {"type": "object", "description": "Only when Oak says a loaded tool isn't in your tool list yet: that tool's input, to call it through LOAD."},
         }, "required": ["name"]},
         "eager_input_streaming": true,

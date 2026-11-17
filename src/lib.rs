@@ -34,6 +34,7 @@ mod instructions;
 mod local;
 mod look;
 mod measure;
+mod mcp;
 mod nodeclub;
 mod oak;
 mod openrouter;
@@ -79,6 +80,8 @@ mod gpu;
 mod highlight;
 mod home;
 mod markdown;
+mod mcp_view;
+mod blender_view;
 mod new_screen;
 mod select;
 mod pausing;
@@ -661,7 +664,8 @@ impl App {
         let central = egui::CentralPanel::default().frame(plain).show(ui, |ui| self.screen_view(ui, t));
         find::keyboard_target(ui.ctx(), None);
         self.session_box(&ctx, t, central.response.rect);
-        self.browser_preview(&ctx, t, central.response.rect);
+        let browser = self.browser_preview(&ctx, t, central.response.rect);
+        self.blender_preview(&ctx, t, central.response.rect, browser);
         let Screen::Chat(id) = &self.screen else { return };
         let id = id.clone();
         self.chat_scene(ui, &id);
@@ -815,6 +819,17 @@ pub fn main() -> eframe::Result {
     if args.len() > 1 && args[1] == "--measure-thinking" {
         std::process::exit(measure::main(&args[2..]));
     }
+    // An MCP server of Oak's, over stdio, for other MCP clients (Claude
+    // Code, Codex): `oak --mcp blender`.
+    if args.len() > 1 && args[1] == "--mcp" {
+        match args.get(2).map(String::as_str) {
+            Some(mcp::blender::NAME) => std::process::exit(mcp::blender::serve_stdio()),
+            _ => {
+                eprintln!("oak --mcp <server>: Oak serves {} over stdio.", mcp::BUILTIN.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "));
+                std::process::exit(2);
+            }
+        }
+    }
     if args.len() > 1 && args[1] == "--gateway" {
         log_panics(store::dir().join("crash.log"));
         std::process::exit(gateway::main(&args[2..]));
@@ -873,6 +888,8 @@ pub fn main() -> eframe::Result {
     freebuff::release();
     // The conversations' browsers, gently, so they keep their cookies.
     browser::shutdown_all();
+    // The MCP servers Oak started.
+    mcp::shutdown();
     // "Restart to update": the new version, now that this one is done.
     update::relaunch_if_asked();
     gpu::relaunch();

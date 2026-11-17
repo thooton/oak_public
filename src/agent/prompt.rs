@@ -104,7 +104,10 @@ pub(crate) fn system_prompt_on(day: &str, folder: &Path, scratch: &Path, model: 
     let local = crate::local::serves(model);
     let text = with_tools(self::role(role).text, TOOLS);
     let text = keep_blocks(&text, &[("full", !local), ("local", local), ("goal", !local || has("GOAL")), ("window", has("WINDOW")), ("agents", has("AGENT"))]);
-    fill_prompt(&text, folder, scratch, day, &crate::api::model_name(model), agent)
+    let out = fill_prompt(&text, folder, scratch, day, &crate::api::model_name(model), agent);
+    // Loaded MCP servers' instructions, as Claude Code adds them.
+    let mcp = if local { String::new() } else { crate::mcp::prompt_section(kits) };
+    if mcp.is_empty() { out } else { format!("{}\n\n{mcp}", out.trim_end()) }
 }
 
 /// A kit's block of the prompt (`{{#window}}` for WINDOW, `{{#agents}}`

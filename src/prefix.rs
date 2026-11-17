@@ -315,7 +315,10 @@ impl State {
                             b["input"]["text"] = json!(NOTE_FOLDED);
                         }
                         if b["name"] == "LOAD" && b["input"].get("input").is_none() {
-                            loads.push((b["id"].clone(), b["input"]["name"].as_str().unwrap_or("").to_uppercase()));
+                            // Oak's kits are upper case; MCP servers keep their names.
+                            let name = b["input"]["name"].as_str().unwrap_or("");
+                            let kit = crate::mcp::find(name).map(|c| c.name).unwrap_or_else(|| name.to_uppercase());
+                            loads.push((b["id"].clone(), kit));
                         }
                     }
                     Some("tool_result") if b["is_error"] != true => {

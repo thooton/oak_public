@@ -902,11 +902,13 @@ mod tests {
         assert!(names(loaded.clone()).contains(&"AGENT".into()) && names(loaded.clone()).contains(&"BROWSER".into()));
         let browser = loaded.iter().find(|d| d["name"] == "BROWSER").unwrap();
         assert!(browser["input_schema"]["properties"]["url"].is_object(), "the whole family once loaded");
-        // A subagent has AGENT, and only WINDOW to load.
+        // A subagent has AGENT, and only WINDOW to load (and MCP servers).
         let sub = definitions_with_kits(true, false, false, &[]);
         let load = sub.iter().find(|d| d["name"] == "LOAD").unwrap();
         assert!(names(sub.clone()).contains(&"AGENT".into()));
-        assert_eq!(load["input_schema"]["properties"]["name"]["enum"], json!(["WINDOW"]));
+        let offered = load["input_schema"]["properties"]["name"]["enum"].as_array().unwrap().clone();
+        assert_eq!(offered[0], "WINDOW");
+        assert!(!offered.iter().any(|k| k == "AGENT" || k == "BROWSER"));
         // A local model: no LOAD; GOAL with a goal.
         assert!(!names(definitions_with_kits(false, false, true, &[])).iter().any(|n| n == "LOAD" || n == "GOAL"));
         assert!(names(definitions_with_kits(false, false, true, &kits(&["GOAL"]))).contains(&"GOAL".into()));

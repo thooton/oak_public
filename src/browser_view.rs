@@ -26,8 +26,8 @@ const EXPAND: f32 = 0.16;
 const PREVIEW_MAX_W: f32 = 360.0;
 const PREVIEW_MIN_W: f32 = 170.0;
 /// How opaque the preview is at rest beside the transcript, and over it.
-const REST_ALPHA: f32 = 0.6;
-const REST_ALPHA_OVER: f32 = 0.4;
+pub(crate) const REST_ALPHA: f32 = 0.6;
+pub(crate) const REST_ALPHA_OVER: f32 = 0.4;
 /// Seconds the model's cursor stays after its last move (while no call of
 /// its runs), then fades.
 const CURSOR_STAYS: f32 = 20.0;
@@ -207,7 +207,7 @@ fn lightbox_layout(area: Rect, size: (u32, u32)) -> (Rect, Rect, f32) {
 /// whose column is `col` and whose minimap (or scroll bar) starts at
 /// `right`, from `top`: in the room between the column and the minimap,
 /// else over the transcript's corner (true). Its shape is the viewport's.
-fn preview_layout(view: Rect, col: Rangef, right: f32, top: f32, size: (u32, u32)) -> (Rect, bool) {
+pub(crate) fn preview_layout(view: Rect, col: Rangef, right: f32, top: f32, size: (u32, u32)) -> (Rect, bool) {
     let aspect = size.0.max(1) as f32 / size.1.max(1) as f32;
     let max_h = (view.height() * 0.4).clamp(80.0, 300.0);
     let fit = |w: f32| {
@@ -257,18 +257,15 @@ impl App {
     }
 
     /// After the transcript (drawn in `view`): the preview beside it.
-    pub(crate) fn browser_preview(&mut self, ctx: &egui::Context, t: &Theme, view: Rect) {
-        let Some(conv) = self.browser_conv() else { return };
+    /// Returns where it is while shown (Blender's live view goes under it).
+    pub(crate) fn browser_preview(&mut self, ctx: &egui::Context, t: &Theme, view: Rect) -> Option<Rect> {
+        let conv = self.browser_conv()?;
         let (inst, mut s) = tick(ctx, &conv);
         if s.alpha <= 0.0 {
-            return;
+            return None;
         }
-        let frame = chat_view::Frame::new(view);
-        let right = frame.map.map_or(frame.track.left(), |m| m.left());
-        // Under the find bar, when it is open (it is in the same corner).
-        let finding = ctx.data(|d| d.get_temp::<crate::find::Find>(Id::unique(("find", conv.as_str())))).is_some_and(|f| f.open);
-        let top = view.top() + if finding { 52.0 } else { 12.0 };
-        let (rect, over) = preview_layout(view, frame.col, right, top, s.size);
+        let (col, right, top) = preview_slot(ctx, &conv, view);
+        let (rect, over) = preview_layout(view, col, right, top, s.size);
         (s.preview, s.beside) = (Some(rect), Some(view));
         let e = ctx.animate_bool_with_time(expand_id(&conv), s.expanded, EXPAND);
         let shown = s.alpha * (1.0 - e);
@@ -303,7 +300,18 @@ impl App {
             });
         }
         store(ctx, &conv, &s);
+        (shown > 0.0).then_some(rect)
     }
+}
+
+/// Where previews beside a transcript in `view` go: its column, where the
+/// minimap (or scroll bar) starts, and the top (under the find bar, when it
+/// is open, as it is in the same corner).
+pub(crate) fn preview_slot(ctx: &egui::Context, conv: &str, view: Rect) -> (Rangef, f32, f32) {
+    let frame = chat_view::Frame::new(view);
+    let right = frame.map.map_or(frame.track.left(), |m| m.left());
+    let finding = ctx.data(|d| d.get_temp::<crate::find::Find>(Id::unique(("find", conv)))).is_some_and(|f| f.open);
+    (frame.col, right, view.top() + if finding { 52.0 } else { 12.0 })
 }
 
 /// The page's picture filling `rect` (white until there is one).
