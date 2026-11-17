@@ -59,11 +59,17 @@ pub(crate) fn weight(a: &api::Account) -> f32 {
     let plan = a.plan.to_ascii_lowercase();
     match a.provider {
         // "Max 5x" (shown as Max), "Max 20x" (shown as Ultra), or "Max" from
-        // before OAK told them apart.
-        // Not the advertised 5x and 20x: what they actually give over Pro,
-        // from Anthropic's own Sonnet 4 weekly hours (Table 1 of the class
-        // action complaint, Case 3:26-cv-05763, June 2026).
-        Kind::Claude if plan.starts_with("max") => if plan.ends_with("20x") { 6.0 } else { 3.5 },
+        // before OAK told them apart. Their weekly allowances over Pro as
+        // Anthropic states them since October 30, 2026 (claude.com/pricing,
+        // the Help Center's Max and Ultra plan pages): Max 5x Pro every 5
+        // hours and every week, Ultra 10x Pro every week (the "20x" of its
+        // old name was per 5 hours, a window verified Ultra accounts no
+        // longer have). Before, Oak used 3.5x and 6x, Anthropic's 2025
+        // Sonnet 4 weekly hours (Table 1 of the class action complaint, Case
+        // 3:26-cv-05763, June 2026), which no current page gives. Ultra's
+        // 5-hour window on an account not yet verified is of a size
+        // Anthropic doesn't state, and counts at the same weight.
+        Kind::Claude if plan.starts_with("max") => if plan.ends_with("20x") { 10.0 } else { 5.0 },
         // Team seats: Premium 6.25x Pro, Standard 1.25x ("claude_team" from
         // before OAK told them apart counts as Standard).
         Kind::Claude if plan == "team premium" => 6.25,
@@ -80,13 +86,16 @@ pub(crate) fn weight(a: &api::Account) -> f32 {
 }
 
 /// Each limit's label summed over `limits` (one list per account, with its
-/// weight), in the order they first come, at most two.
+/// weight), 5-hour then weekly, at most two. Only the shared
+/// windows count: a model's own quota (Fable's week) isn't summed, so an
+/// account without a 5-hour window (a verified Ultra) doesn't put its next
+/// limit in that one's place.
 pub(crate) fn sum_limits<'a>(limits: impl IntoIterator<Item = (&'a [api::Limit], f32)>, now: i64) -> Vec<Summed> {
     // The weighted percents and the weights, beside `out`.
     let mut out: Vec<Summed> = vec![];
     let mut totals: Vec<(f32, f32)> = vec![];
     for (list, w) in limits {
-        for l in list.iter().take(2) {
+        for l in list.iter().filter(|l| !l.model_scoped()).take(2) {
             // A limit whose reset has passed is unused again.
             let used = if l.resets_at.is_some_and(|r| r <= now) { 0.0 } else { l.percent.clamp(0.0, 100.0) };
             let reset = l.resets_at.filter(|&r| r > now);
@@ -111,6 +120,8 @@ pub(crate) fn sum_limits<'a>(limits: impl IntoIterator<Item = (&'a [api::Limit],
     for (s, (used, w)) in out.iter_mut().zip(totals) {
         s.used = if w > 0.0 { used / w } else { 0.0 };
     }
+    // The shorter window first, whichever account came first.
+    out.sort_by_key(|s| ["5h", "Week"].iter().position(|l| *l == s.label).unwrap_or(2));
     out.truncate(2);
     out
 }
@@ -160,7 +171,7 @@ pub(crate) fn provider_box(ui: &mut Ui, t: &Theme, p: Kind, accounts: usize, sho
                         })
                         .response;
                     let how = match p {
-                        Kind::Claude => ", each plan counting by its size (Pro 1, Team Standard 1.25, Max 5, Team Premium 6.25, Ultra 20)",
+                        Kind::Claude => ", each plan counting by its size (Pro 1, Team Standard 1.25, Max 5, Team Premium 6.25, Ultra 10)",
                         Kind::Codex => ", each plan counting by its size (Plus 1, Pro 5x 5, Pro 20x 20)",
                         _ => "",
                     };
@@ -292,20 +303,33 @@ mod tests {
         assert_eq!((s[0].used, s[0].accounts, s[0].next_reset), (15.0, 2, None));
     }
 
-    /// Accounts count by their plans' multipliers: a used-up Max (3.5x) beside
-    /// an unused Pro is 3.5/4.5 used.
+    /// Accounts count by their plans' multipliers: a used-up Max (5x) beside
+    /// an unused Pro is 5/6 used.
     #[test]
     fn plans_count_by_their_multipliers() {
-        let lists = [(vec![limit("5h", 100.0, None)], 3.5), (vec![limit("5h", 0.0, None)], 1.0)];
+        let lists = [(vec![limit("5h", 100.0, None)], 5.0), (vec![limit("5h", 0.0, None)], 1.0)];
         let s = sum_limits(lists.iter().map(|(l, w)| (l.as_slice(), *w)), 0);
-        assert!((s[0].used - 350.0 / 4.5).abs() < 1e-3);
+        assert!((s[0].used - 500.0 / 6.0).abs() < 1e-3);
         let w = |provider, plan: &str| weight(&api::Account { provider, plan: plan.into(), ..Default::default() });
-        assert_eq!([w(Kind::Claude, "Max 20x"), w(Kind::Claude, "Max 5x"), w(Kind::Claude, "Max"), w(Kind::Claude, "Pro")], [6.0, 3.5, 3.5, 1.0]);
+        assert_eq!([w(Kind::Claude, "Max 20x"), w(Kind::Claude, "Max 5x"), w(Kind::Claude, "Max"), w(Kind::Claude, "Pro")], [10.0, 5.0, 5.0, 1.0]);
         assert_eq!([w(Kind::Claude, "Team Premium"), w(Kind::Claude, "Team Standard"), w(Kind::Claude, "claude_team")], [6.25, 1.25, 1.25]);
         assert_eq!(
             [api::team_seat("team_tier_1", "default_claude_max_5x"), api::team_seat("", "default_raven"), api::team_seat("", "default_claude_max_5x"), api::team_seat("team_standard", "")],
             ["Team Premium", "Team Standard", "Team Premium", "Team Standard"]
         );
         assert_eq!([w(Kind::Codex, "Pro"), w(Kind::Codex, "Prolite"), w(Kind::Codex, "Self_serve_business_prolite"), w(Kind::Codex, "Plus")], [20.0, 5.0, 5.0, 1.0]);
+    }
+
+    /// A verified Ultra account has no 5-hour window: listed first, its
+    /// Fable week doesn't take the 5-hour line's place, the 5-hour line
+    /// (still first) is the other accounts' alone, and its week counts 10x.
+    #[test]
+    fn an_account_without_a_five_hour_window_sums_its_week_only() {
+        let ultra = vec![limit("Week", 50.0, None), limit("Fable wk", 100.0, None)];
+        let pro = vec![limit("5h", 20.0, None), limit("Week", 6.0, None)];
+        let s = sum_limits([(ultra.as_slice(), 10.0), (pro.as_slice(), 1.0)], 0);
+        assert_eq!(s.iter().map(|s| (s.label.as_str(), s.accounts)).collect::<Vec<_>>(), [("5h", 1), ("Week", 2)]);
+        assert_eq!(s[0].used, 20.0);
+        assert!((s[1].used - 506.0 / 11.0).abs() < 1e-3);
     }
 }

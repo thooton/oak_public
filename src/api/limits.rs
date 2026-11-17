@@ -47,6 +47,23 @@ fn scope(label: &str) -> Option<&str> {
     }
 }
 
+impl Limit {
+    /// A quota of one model family's ("Fable wk"), not one of the plan's
+    /// shared windows that hold every model ("5h", "Week").
+    pub fn model_scoped(&self) -> bool {
+        scope(self.label).is_some_and(|s| !s.is_empty())
+    }
+}
+
+/// Whether a plan (as accounts keep it) can go without a 5-hour limit:
+/// Ultra ("Max 20x") accounts Anthropic has verified have only weekly ones
+/// (claude.com/pricing and the Help Center's "What is the Ultra plan?", since
+/// October 30, 2026), and their usage reports and replies carry no 5-hour
+/// window. Every other plan's complete reading has both.
+pub(super) fn may_lack_five_hour(plan: &str) -> bool {
+    plan == "Max 20x"
+}
+
 impl Stored {
     pub(super) fn main_limits(&self) -> impl Iterator<Item = &Limit> {
         self.limits_for("")
@@ -91,7 +108,11 @@ impl Stored {
         let models = ["", "opus", "sonnet", "haiku", "fable"];
         let before = models.map(|m| self.blocked_for(m, now) > 0);
         self.limits = limits;
-        let room = self.main_limits().count() == 2 && self.main_limits().all(|l| l.percent < 100.0);
+        // Room takes a complete reading of the shared windows: the weekly
+        // one, and the 5-hour one unless the plan may have none.
+        let has = |label: &str| self.main_limits().any(|l| l.label == label);
+        let complete = has("Week") && (has("5h") || may_lack_five_hour(&self.plan));
+        let room = complete && self.main_limits().all(|l| l.percent < 100.0);
         let mut cleared = self.limited_until > now && asked_at > self.limited_at && room;
         if cleared {
             self.limited_until = 0;

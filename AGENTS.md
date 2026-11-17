@@ -243,7 +243,8 @@ can't read.
   another has much more. A key the provider rejects is skipped the same way. With every account
   used up, Oak waits for the first reset, or until an account is signed in or comes free early: an
   account refused for its limit is usable again once a usage reading taken after the refusal shows
-  its 5-hour and weekly limits below 100% (a reset used here or anywhere else), and waiting
+  its 5-hour and weekly limits below 100% (a reset used here or anywhere else; a verified Ultra
+  account has no 5-hour limit, and its weekly one is enough), and waiting
   sessions try again then. Shared 5-hour/weekly limits apply to every Claude model; model-scoped
   quotas (including Fable's `limits[].scope.model`, even with a null id) apply only to that family.
   They hold on every plan: Max includes Fable but caps it too, and a used-up allowance is refused
@@ -258,7 +259,10 @@ can't read.
 - A Claude account's plan is read from its profile: Pro, Max, Ultra, Team Standard or Team
   Premium. Max and Ultra are the two sizes of Max (rate-limit tiers `..._max_5x` and `..._max_20x`);
   accounts, the usage log and vaults keep them as "Max 5x" and "Max 20x", the names they had
-  before, and only what Oak shows says Max and Ultra (`api::plan_label`).
+  before, and only what Oak shows says Max and Ultra (`api::plan_label`). Summed on Home, each
+  account's limits count by its plan's usage over Pro (`providers_view::weight`): Max 5x and Ultra
+  10x, as Anthropic states them since October 30, 2026 (Max 5x Pro every 5 hours and every week,
+  Ultra 10x Pro every week and no 5-hour limit once verified; the old "20x" was per 5 hours).
 - Usage-limit resets (`src/api/resets.rs`, `src/resets_view.rs`): the resets Anthropic offers a
   Claude account ("Full reset", "Fable reset", "5-hour reset", "Weekly reset", as Claude Code's
   /limit-reset lists them) come in its usage report (`/api/oauth/usage?cedar_ember=1`, read at

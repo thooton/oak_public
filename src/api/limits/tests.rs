@@ -163,3 +163,48 @@ fn an_account_with_fable_room_is_tried_whatever_its_plan() {
     assert_eq!(c.iter().map(|c| c.usable).collect::<Vec<_>>(), [true, false, false, false]);
     assert_eq!(crate::rotation::pick(Provider::Claude, "conv-fable", &c, NOW, false).as_deref(), Some("0"));
 }
+
+/// A verified Ultra's usage report has no 5-hour window (Claude Code shows
+/// no "Current session" bar for it): its weekly window alone is a complete
+/// reading, so a refusal clears early on it, scoped ones as before. Another
+/// plan's reading without the 5-hour window says nothing.
+#[test]
+fn a_verified_ultra_clears_on_its_weekly_window_alone() {
+    let verified = |week: f32, fable: f32| {
+        api::read_limits(&json!({
+            "five_hour": null,
+            "seven_day": {"utilization":week,"resets_at":"2027-01-20T09:00:00Z"},
+            "limits": [
+                {"kind":"weekly_all","percent":week,"scope":null},
+                {"kind":"weekly_scoped","percent":fable,"resets_at":"2027-01-20T09:00:00Z",
+                 "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}
+            ]
+        }))
+    };
+    assert_eq!(verified(40.0, 10.0).iter().map(|l| l.label).collect::<Vec<_>>(), ["Week", "Fable wk"]);
+    let refused = |plan: &str| {
+        let mut a = account(0, 0.0, 100.0, 100.0);
+        a.limits = verified(100.0, 100.0);
+        a.plan = plan.into();
+        a.refuse("claude-opus-5-5", "seven_day", NOW + HOUR, NOW);
+        a.refuse("claude-fable-5-2", "seven_day_overage_included", NOW + HOUR, NOW);
+        a
+    };
+    let mut ultra = refused("Max 20x");
+    assert!(ultra.blocked_for("claude-opus-5-5", NOW) > NOW);
+    assert_eq!(ultra.take_limits(verified(100.0, 100.0), NOW + 1, NOW), (false, false));
+    // Its week reset (Fable's still used up): other models are free again.
+    assert_eq!(ultra.take_limits(verified(0.0, 100.0), NOW + 1, NOW), (true, true));
+    assert_eq!(ultra.blocked_for("claude-opus-5-5", NOW), 0);
+    assert!(ultra.blocked_for("claude-fable-5-2", NOW) > NOW);
+    assert_eq!(ultra.take_limits(verified(0.0, 0.0), NOW + 1, NOW), (true, true));
+    assert_eq!(ultra.blocked_for("claude-fable-5-2", NOW), 0);
+    // A Max (or Pro) reading lacking its 5-hour window is incomplete.
+    let mut max = refused("Max 5x");
+    assert_eq!(max.take_limits(verified(0.0, 0.0), NOW + 1, NOW), (false, false));
+    assert_eq!(max.blocked_for("claude-opus-5-5", NOW), NOW + HOUR);
+    // An Ultra not yet verified has a 5-hour window, and it still counts.
+    let mut unverified = refused("Max 20x");
+    assert_eq!(unverified.take_limits(report(100.0, 0.0, 0.0), NOW + 1, NOW), (false, false));
+    assert_eq!(unverified.take_limits(report(5.0, 0.0, 0.0), NOW + 1, NOW), (true, true));
+}
