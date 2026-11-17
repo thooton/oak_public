@@ -404,7 +404,7 @@ impl State {
                 ),
                 was => format!("The limit on your notes is now about {n} tokens in all (it was {}).", crate::agent::with_commas(was)),
             };
-            if s.notes > now.notes_limit {
+            if s.notes > now.notes_limit && crate::agent::notes_alert_on() {
                 text += &format!(
                     " They take about {} now, over it: shorten or delete notes (NOTE action=update with less text, or action=delete) \
                      before adding one or making one longer.",

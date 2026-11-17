@@ -106,7 +106,7 @@ impl App {
             crate::agent::set_notes_limit(self.settings.notes_limit);
             store::save_settings(&self.settings);
         }
-        self.on_off_row(ui, t, "Notes reminder", |s| &mut s.notes_alert, crate::agent::set_notes_alert, "Model reminder to prune notes past 85% of the notes limit.");
+        self.on_off_row(ui, t, "Notes reminder", |s| &mut s.notes_alert, crate::agent::set_notes_alert, "Model reminder to prune notes past 85% of the notes limit, or once they are over it. Off: the model is never told to shrink its notes (NOTE still refuses to grow them past the limit).");
 
         caption(ui, "Scratchpads", t.ink3);
         ui.horizontal(|ui| self.scratch_row(ui, t));

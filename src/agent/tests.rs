@@ -1553,6 +1553,27 @@ fn notes_over_a_lowered_limit_must_shrink_first() {
     crate::agent::memory::set_test_notes_limit(None);
 }
 
+/// With the Notes reminder off, notes over the limit still can't grow, but
+/// the model is never nagged to shrink them: not in NOTE results, not in
+/// the memory block.
+#[test]
+fn notes_over_the_limit_with_the_reminder_off_are_not_nagged() {
+    let tool = limited_notes(1_000);
+    let mut c = Conversation::default();
+    for _ in 0..3 {
+        tool(&mut c, "NOTE_NEW", json!({"text": "n".repeat(200)})).unwrap();
+    }
+    let tool = limited_notes(100);
+    crate::agent::memory::set_test_notes_alert(Some(false));
+    assert!(!render_memory(&c).contains("over their limit"), "{}", render_memory(&c));
+    assert_eq!(tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "m".repeat(200)})).unwrap(), "Updated note 1.");
+    assert_eq!(tool(&mut c, "NOTE_DELETE", json!({"id": 3})).unwrap(), "Deleted note 3.");
+    // The hard limit itself still holds.
+    assert!(tool(&mut c, "NOTE_NEW", json!({"text": "x"})).is_err());
+    crate::agent::memory::set_test_notes_alert(None);
+    crate::agent::memory::set_test_notes_limit(None);
+}
+
 /// An update crossing the limit: down across it goes through (and the
 /// model is no longer told it is over), up across it is refused.
 #[test]

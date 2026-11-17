@@ -260,11 +260,36 @@ pub fn with_commas(n: u64) -> String {
 // setting); on by default.
 switch!(NOTES_ALERT, notes_alert_on, set_notes_alert, true);
 
-/// For NOTE results (and the memory block): with the notes past their
-/// limit (it was lowered), what the model must do before adding to them;
-/// past `notes_alert_tokens` with the reminder on, a reminder to tidy them
-/// up; empty otherwise.
+#[cfg(test)]
+thread_local! {
+    /// A test's own reminder switch, for this thread only.
+    static TEST_NOTES_ALERT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The reminder switch for this thread's test (None: the setting's).
+#[cfg(test)]
+pub(crate) fn set_test_notes_alert(on: Option<bool>) {
+    TEST_NOTES_ALERT.with(|a| a.set(on));
+}
+
+/// Whether the model gets told to tidy its notes (the setting, or a test's).
+fn reminder_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_NOTES_ALERT.with(|a| a.get()) {
+        return on;
+    }
+    notes_alert_on()
+}
+
+/// For NOTE results (and the memory block), only with the reminder on:
+/// with the notes past their limit (it was lowered), what the model must
+/// do before adding to them; past `notes_alert_tokens`, a reminder to tidy
+/// them up; empty otherwise. With the reminder off the model is never told
+/// to shrink its notes unprompted (NOTE's own refusals still say why).
 fn notes_alert(c: &Conversation) -> String {
+    if !reminder_on() {
+        return String::new();
+    }
     let (tokens, limit) = (notes_tokens(&c.notes), notes_limit());
     if tokens > limit {
         return format!(
@@ -273,7 +298,7 @@ fn notes_alert(c: &Conversation) -> String {
             with_commas(limit)
         );
     }
-    if tokens <= notes_alert_tokens() || !notes_alert_on() {
+    if tokens <= notes_alert_tokens() {
         return String::new();
     }
     format!(
