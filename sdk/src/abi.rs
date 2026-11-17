@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 4;
+pub const OAK_API_VERSION: u32 = 5;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -215,6 +215,9 @@ c_callbacks! {
     /// A plugin's start: registers its parts through `api`, which stays
     /// valid for good. Returns false when it can't run.
     pub type OakInit = fn(api: *const OakApi) -> bool;
+    /// Draws the cell at `row` and `column` into `ui` (`oak_table`,
+    /// `oak_columns`).
+    pub type OakCell = fn(user: *mut c_void, ui: *mut OakUi, row: usize, column: usize);
 }
 
 /// What `OakCall` answers for a method it doesn't have.
@@ -681,13 +684,15 @@ c_structs! {
         pub size: u32,
         pub flags: u32,
         pub user: *mut c_void,
-        /// The window is up, before its first frame.
+        /// The window is up, before its first frame (or, for a plugin a
+        /// reload starts, at once).
         pub started: Option<OakDo>,
         /// Every frame, before anything is drawn.
         pub frame: Option<OakDo>,
         /// Draws at the top of Home's Providers column.
         pub providers_top: Option<OakBody>,
-        /// Oak is closing.
+        /// Oak is closing, or a reload is stopping the plugin: end what it
+        /// started. Its library stays loaded either way.
         pub exiting: Option<OakDo>,
         /// Draws over Home's wallpaper, under its menu, every frame Home
         /// shows (`ui` is the whole page). Asks for frames of its own
@@ -697,6 +702,239 @@ c_structs! {
         /// shows (`ui` is the transcript's view, clipped to it). What is
         /// there (the text's rows, the boxes over it) is `app_chat_scene`.
         pub chat_scene: Option<OakBody>,
+    }
+
+    /// A page (`oak_page`): a column in the middle of what scrolls, its
+    /// title on top. Empty texts aren't shown.
+    pub struct OakPage {
+        pub size: u32,
+        /// `OAK_PAGE_*`.
+        pub flags: u32,
+        /// Where its scroll position is kept; 0: from the title.
+        pub id: u64,
+        pub title: OakStr,
+        /// A line under the title.
+        pub subtitle: OakStr,
+        /// A link above the title ("Back"); pressing it, or Escape,
+        /// returns `OAK_CANCELLED`.
+        pub back: OakStr,
+        /// The column's widest; 0: 760.
+        pub width: f32,
+        /// Draws at the title's right end, right to left (its buttons).
+        pub actions: Option<OakBody>,
+        pub actions_user: *mut c_void,
+    }
+
+    /// A heading (`oak_heading`).
+    pub struct OakHeading {
+        pub size: u32,
+        /// `OAK_HEADING_RULE`, `OAK_HEADING_BUSY`.
+        pub flags: u32,
+        /// `OAK_HEADING_SECTION`, `OAK_HEADING_TITLE`, `OAK_HEADING_SMALL`.
+        pub level: u32,
+        pub text: OakStr,
+        /// Faint, after the text (a count).
+        pub detail: OakStr,
+        /// A Nerd Font symbol before the text.
+        pub icon: OakStr,
+        /// A link at the right end ("See all"): `OAK_CLICKED` when pressed.
+        pub action: OakStr,
+        /// Draws at the right end, right to left, before `action` (its own
+        /// buttons, a badge, a choice): what it draws takes its own clicks.
+        pub right: Option<OakBody>,
+        pub right_user: *mut c_void,
+    }
+
+    /// A section (`oak_section`): a heading and what is under it.
+    pub struct OakSection {
+        pub size: u32,
+        /// `OAK_SECTION_*`.
+        pub flags: u32,
+        /// Where whether it is open is kept; 0: from the title.
+        pub id: u64,
+        pub title: OakStr,
+        pub detail: OakStr,
+        pub icon: OakStr,
+        pub action: OakStr,
+        /// Draws at the heading's right end, as `OakHeading.right`.
+        pub right: Option<OakBody>,
+        pub right_user: *mut c_void,
+    }
+
+    /// A bordered box (`oak_card`).
+    pub struct OakCard {
+        pub size: u32,
+        /// `OAK_CARD_CLICK`, `OAK_CARD_SELECTED`.
+        pub flags: u32,
+        /// 0: from where it is drawn.
+        pub id: u64,
+        /// 0: the theme's panel color.
+        pub fill: u32,
+        /// Inside its border; 0: 12.
+        pub padding: f32,
+        /// 0: all there is.
+        pub width: f32,
+    }
+
+    /// A button (`oak_action`).
+    pub struct OakAction {
+        pub size: u32,
+        /// `OAK_ACTION_DISABLED`, ...
+        pub flags: u32,
+        /// `OAK_ACTION_DEFAULT`, `OAK_ACTION_PRIMARY`, ...
+        pub kind: u32,
+        pub text: OakStr,
+        /// A Nerd Font symbol before the text (an `OAK_ACTION_ICON` has
+        /// only this).
+        pub icon: OakStr,
+        /// Said when the pointer rests on it.
+        pub tip: OakStr,
+        pub min_width: f32,
+    }
+
+    /// A row of a list (`oak_item`): what leads it, its title over its
+    /// subtitle, and at its right end `trailing` and what `right` draws.
+    pub struct OakItem {
+        pub size: u32,
+        /// `OAK_ITEM_*`.
+        pub flags: u32,
+        /// 0: from where it is drawn.
+        pub id: u64,
+        pub title: OakStr,
+        pub subtitle: OakStr,
+        /// Faint text at the right end.
+        pub trailing: OakStr,
+        /// A Nerd Font symbol before the title.
+        pub icon: OakStr,
+        /// The dot's color (`OAK_ITEM_DOT`): an `OAK_TONE_*`.
+        pub tone: u32,
+        /// A picture before the title (`texture_new`); 0: none.
+        pub texture: u64,
+        /// 0: as its texts need.
+        pub height: f32,
+        /// Draws at the right end, right to left (its buttons, a switch).
+        pub right: Option<OakBody>,
+        pub right_user: *mut c_void,
+        /// Draws at the left end, left to right, in place of the dot,
+        /// picture and symbol (an avatar, a checkbox): what it draws takes
+        /// its own clicks.
+        pub left: Option<OakBody>,
+        pub left_user: *mut c_void,
+    }
+
+    /// A labelled text field (`oak_field`).
+    pub struct OakField {
+        pub size: u32,
+        /// `OAK_FIELD_*`.
+        pub flags: u32,
+        /// 0: from the label (or where it is drawn).
+        pub id: u64,
+        /// Over the field.
+        pub label: OakStr,
+        /// In the empty field.
+        pub hint: OakStr,
+        /// Under the field.
+        pub help: OakStr,
+        /// Under the field in the error color, instead of `help`.
+        pub error: OakStr,
+        /// A button at the field's right: it and Enter return
+        /// `OAK_CONFIRMED`. Off while the field is empty.
+        pub button: OakStr,
+        /// 0: all there is.
+        pub width: f32,
+        /// `OAK_FIELD_MULTILINE`'s rows; 0: 4.
+        pub rows: u32,
+    }
+
+    /// One of several (`oak_choice`).
+    pub struct OakChoice {
+        pub size: u32,
+        pub flags: u32,
+        /// `OAK_CHOICE_SEGMENTED`, ...
+        pub style: u32,
+        /// 0: from where it is drawn.
+        pub id: u64,
+        /// `count` texts.
+        pub options: *const OakStr,
+        pub count: usize,
+        /// `OAK_CHOICE_DROPDOWN`'s; 0: as its texts need.
+        pub width: f32,
+    }
+
+    /// A slider (`oak_slider`).
+    pub struct OakSlider {
+        pub size: u32,
+        /// `OAK_SLIDER_*`.
+        pub flags: u32,
+        pub min: f64,
+        pub max: f64,
+        /// It moves in steps of this; 0: smoothly.
+        pub step: f64,
+        /// 0: 200.
+        pub width: f32,
+        /// The value's digits after the point.
+        pub decimals: u32,
+        /// After the value ("%", " ms").
+        pub suffix: OakStr,
+    }
+
+    /// A table (`oak_table`): `count` columns, `rows` rows.
+    pub struct OakTable {
+        pub size: u32,
+        /// `OAK_TABLE_*`.
+        pub flags: u32,
+        /// 0: from where it is drawn.
+        pub id: u64,
+        /// The columns' headings.
+        pub columns: *const OakStr,
+        /// Each column's width (may be null); 0: a share of what is left.
+        pub widths: *const f32,
+        /// Each column's `OAK_ALIGN_*` (may be null: all at the left).
+        pub aligns: *const u32,
+        pub count: usize,
+        pub rows: usize,
+        /// 0: 28.
+        pub row_height: f32,
+    }
+
+    /// How components look, over Oak's: for the next one drawn
+    /// (`oak_look_next`), or for all drawn in a body (`oak_look_scope`).
+    /// Every field is optional: a color of 0 and a length of 0 keep what
+    /// Oak would draw; a negative length is a true zero (no padding, square
+    /// corners). What each means to each component is in docs/PLUGINS.md.
+    pub struct OakLook {
+        pub size: u32,
+        /// `OAK_LOOK_*`.
+        pub flags: u32,
+        /// Colors, 0xRRGGBBAA. Its background, under the pointer, its
+        /// outline, its text, its fainter text (help, subtitles, captions).
+        pub fill: u32,
+        pub fill_hover: u32,
+        pub stroke: u32,
+        pub ink: u32,
+        pub ink_weak: u32,
+        /// What is chosen, or matters most: primary buttons, switches,
+        /// bars, selection, links.
+        pub accent: u32,
+        /// The tones' colors (`OAK_TONE_GOOD`, `_WARN`, `_BAD`).
+        pub good: u32,
+        pub warn: u32,
+        pub bad: u32,
+        /// Lengths, in points.
+        pub radius: f32,
+        pub stroke_width: f32,
+        /// Inside it: at its sides, and above and below.
+        pub padding_x: f32,
+        pub padding_y: f32,
+        pub height: f32,
+        pub width: f32,
+        /// Its main text's size (the rest follow it).
+        pub text_points: f32,
+        /// Between its parts, or after it (a section, a page's header).
+        pub gap: f32,
+        /// All its texts' sizes times this (in a scope: every component's,
+        /// and egui's).
+        pub text_scale: f32,
     }
 }
 
@@ -1001,6 +1239,107 @@ c_consts! {
     /// does) and `show` isn't called. Oaks before version 2 show it as a
     /// tab.
     pub const OAK_HOME_TAB_LINK = 1 << 1;
+
+    /// What something says by its color: badges, notices, progress,
+    /// stats, toasts, an item's dot (`oak_tone_color`).
+    pub const OAK_TONE_PLAIN = 0;
+    pub const OAK_TONE_ACCENT = 1;
+    pub const OAK_TONE_GOOD = 2;
+    pub const OAK_TONE_WARN = 3;
+    pub const OAK_TONE_BAD = 4;
+
+    /// `OakLook.flags`: its texts in the code font.
+    pub const OAK_LOOK_MONOSPACE = 1 << 0;
+    /// No background or outline (a button, a card, a badge, a notice's box).
+    pub const OAK_LOOK_NO_FRAME = 1 << 1;
+
+    /// `OakPage`: no scroll area (what is in it scrolls itself, or fits).
+    pub const OAK_PAGE_NO_SCROLL = 1 << 0;
+
+    /// `OakHeading.level`: a section's (14 points, strong), a page's
+    /// title (20), a small caption's.
+    pub const OAK_HEADING_SECTION = 0;
+    pub const OAK_HEADING_TITLE = 1;
+    pub const OAK_HEADING_SMALL = 2;
+    /// A line under it; a spinner after it.
+    pub const OAK_HEADING_RULE = 1 << 0;
+    pub const OAK_HEADING_BUSY = 1 << 1;
+
+    /// `OakSection`: in a card; opened and closed by its heading
+    /// (`OAK_SECTION_CLOSED`: closed at first); a spinner after its title.
+    pub const OAK_SECTION_CARD = 1 << 0;
+    pub const OAK_SECTION_FOLDS = 1 << 1;
+    pub const OAK_SECTION_CLOSED = 1 << 2;
+    pub const OAK_SECTION_BUSY = 1 << 3;
+
+    /// `OakCard`: lit under the pointer and clicked as a whole; marked chosen.
+    pub const OAK_CARD_CLICK = 1 << 0;
+    pub const OAK_CARD_SELECTED = 1 << 1;
+
+    /// `OakAction.kind`: a framed button; filled with the accent (the
+    /// page's main action); frameless; red; a link; a rounded chip (lit
+    /// when selected); a square with a symbol.
+    pub const OAK_ACTION_DEFAULT = 0;
+    pub const OAK_ACTION_PRIMARY = 1;
+    pub const OAK_ACTION_QUIET = 2;
+    pub const OAK_ACTION_DANGER = 3;
+    pub const OAK_ACTION_LINK = 4;
+    pub const OAK_ACTION_PILL = 5;
+    pub const OAK_ACTION_ICON = 6;
+    /// `OakAction.flags`. Busy: a spinner, and it can't be pressed. Fill:
+    /// as wide as there is room.
+    pub const OAK_ACTION_DISABLED = 1 << 0;
+    pub const OAK_ACTION_BUSY = 1 << 1;
+    pub const OAK_ACTION_SELECTED = 1 << 2;
+    pub const OAK_ACTION_SMALL = 1 << 3;
+    pub const OAK_ACTION_FILL = 1 << 4;
+
+    /// `OakItem`: chosen (lit, a bar at its left); greyed and not
+    /// clickable; a spinner at its right; a dot before it in `tone`'s
+    /// color; no line under it.
+    pub const OAK_ITEM_SELECTED = 1 << 0;
+    pub const OAK_ITEM_DISABLED = 1 << 1;
+    pub const OAK_ITEM_BUSY = 1 << 2;
+    pub const OAK_ITEM_DOT = 1 << 3;
+    pub const OAK_ITEM_NO_LINE = 1 << 4;
+
+    /// `OakField`: masked, with Show; several lines (Enter makes a new
+    /// one); greyed; a spinner by its button, which is off; takes the
+    /// keyboard; its button works while the field is empty too.
+    pub const OAK_FIELD_SECRET = 1 << 0;
+    pub const OAK_FIELD_MULTILINE = 1 << 1;
+    pub const OAK_FIELD_DISABLED = 1 << 2;
+    pub const OAK_FIELD_BUSY = 1 << 3;
+    pub const OAK_FIELD_FOCUS = 1 << 4;
+    pub const OAK_FIELD_EMPTY_OK = 1 << 5;
+
+    /// `OakChoice.style`: joined boxes; tabs over a line; chips; a
+    /// drop-down; a column of rows with a mark.
+    pub const OAK_CHOICE_SEGMENTED = 0;
+    pub const OAK_CHOICE_TABS = 1;
+    pub const OAK_CHOICE_PILLS = 2;
+    pub const OAK_CHOICE_DROPDOWN = 3;
+    pub const OAK_CHOICE_LIST = 4;
+
+    /// `oak_toggle`: greyed, and it can't be switched.
+    pub const OAK_TOGGLE_DISABLED = 1 << 0;
+
+    /// `oak_notice`: a spinner before it; in a tinted box; with an X that
+    /// returns `OAK_CANCELLED`.
+    pub const OAK_NOTICE_BUSY = 1 << 0;
+    pub const OAK_NOTICE_BOXED = 1 << 1;
+    pub const OAK_NOTICE_DISMISS = 1 << 2;
+
+    /// `oak_progress`: the percentage after the label.
+    pub const OAK_PROGRESS_PERCENT = 1 << 0;
+
+    /// `OakSlider`: its value at its right; greyed.
+    pub const OAK_SLIDER_VALUE = 1 << 0;
+    pub const OAK_SLIDER_DISABLED = 1 << 1;
+
+    /// `OakTable`: rows lit under the pointer and clicked; no heading row.
+    pub const OAK_TABLE_CLICK = 1 << 0;
+    pub const OAK_TABLE_NO_HEAD = 1 << 1;
 }
 
 /// A width that takes all there is (`OakTextEdit.width`).
@@ -1365,6 +1704,85 @@ c_api! {
     /// text on screen, from its first ink to its last, between the tops and
     /// bottoms of its small letters)}`. Empty outside `chat_scene`.
     fn app_chat_scene(out: OakSink, out_user: *mut c_void);
+
+    // Version 5: components in Oak's look, so a plugin's page looks like
+    // Oak's without drawing its parts itself. Each draws at `ui`'s cursor
+    // and returns its response's flags (`out`, which may be null, gets all
+    // of it). Empty texts aren't shown.
+
+    /// A page: what `body` draws, in a column in the middle of a scroll
+    /// area, under the title. `OAK_CANCELLED`: its back link was pressed.
+    fn oak_page(ui: *mut OakUi, page: *const OakPage, body: OakBody, user: *mut c_void) -> u32;
+    /// `OAK_CLICKED`: its action was pressed.
+    fn oak_heading(ui: *mut OakUi, heading: *const OakHeading, out: *mut OakResponse) -> u32;
+    /// A heading and what `body` draws under it (when open: `OAK_OPEN`).
+    /// `OAK_CLICKED`: its action was pressed.
+    fn oak_section(ui: *mut OakUi, section: *const OakSection, body: OakBody, user: *mut c_void, out: *mut OakResponse) -> u32;
+    /// What `body` draws, in a bordered box.
+    fn oak_card(ui: *mut OakUi, card: *const OakCard, body: OakBody, user: *mut c_void, out: *mut OakResponse) -> u32;
+    fn oak_action(ui: *mut OakUi, action: *const OakAction, out: *mut OakResponse) -> u32;
+    /// A small tag in `tone`'s color (`flags`: none yet).
+    fn oak_badge(ui: *mut OakUi, text: OakStr, tone: u32, flags: u32, out: *mut OakResponse) -> u32;
+    /// A row of a list, as wide as there is room: `OAK_CLICKED` when it is
+    /// clicked (not its right end's buttons).
+    fn oak_item(ui: *mut OakUi, item: *const OakItem, out: *mut OakResponse) -> u32;
+    /// A text field with its label and help: `text` is what it holds; when
+    /// it was edited, `changed` gets the new text (`OAK_CHANGED`).
+    /// `OAK_CONFIRMED`: Enter, or its button.
+    fn oak_field(ui: *mut OakUi, field: *const OakField, text: OakStr, changed: OakSink, user: *mut c_void, out: *mut OakResponse) -> u32;
+    /// A row with a label, `help` under it and a switch at its right end:
+    /// a click anywhere on it flips `on` (`OAK_CHANGED`).
+    fn oak_toggle(ui: *mut OakUi, on: *mut bool, label: OakStr, help: OakStr, flags: u32, out: *mut OakResponse) -> u32;
+    /// A setting's row: its label and `help` at the left, what `body`
+    /// draws (its control) at the right; one under the other when narrow.
+    fn oak_setting(ui: *mut OakUi, label: OakStr, help: OakStr, body: Option<OakBody>, user: *mut c_void, out: *mut OakResponse);
+    /// One of `choice`'s options: `selected` is its index (`OAK_CHANGED`
+    /// when it was changed).
+    fn oak_choice(ui: *mut OakUi, choice: *const OakChoice, selected: *mut usize, out: *mut OakResponse) -> u32;
+    /// A bar `fraction` full (below 0: moving, for work of unknown
+    /// length), with `label` over it.
+    fn oak_progress(ui: *mut OakUi, fraction: f32, label: OakStr, tone: u32, flags: u32, out: *mut OakResponse);
+    /// A line saying how things stand, in `tone`'s color: busy (a
+    /// spinner), done, a warning, an error.
+    fn oak_notice(ui: *mut OakUi, tone: u32, text: OakStr, flags: u32, out: *mut OakResponse) -> u32;
+    /// What an empty page or list says: a symbol, a title, a line and a
+    /// button (`OAK_CLICKED`), in the middle.
+    fn oak_empty(ui: *mut OakUi, icon: OakStr, title: OakStr, text: OakStr, action: OakStr, out: *mut OakResponse) -> u32;
+    /// A number in a box: its label over it, `detail` under it.
+    fn oak_stat(ui: *mut OakUi, label: OakStr, value: OakStr, detail: OakStr, tone: u32, out: *mut OakResponse) -> u32;
+    /// `OAK_CHANGED` when `value` was moved.
+    fn oak_slider(ui: *mut OakUi, value: *mut f64, slider: *const OakSlider, out: *mut OakResponse) -> u32;
+    /// A table: its headings, then `cell` draws each cell. A row clicked
+    /// (`OAK_TABLE_CLICK`) returns `OAK_CLICKED` and its index in `clicked`
+    /// (may be null).
+    fn oak_table(ui: *mut OakUi, table: *const OakTable, cell: OakCell, user: *mut c_void, clicked: *mut usize) -> u32;
+    /// `count` columns of equal width, `gap` apart: `cell` draws each
+    /// (`row` is 0).
+    fn oak_columns(ui: *mut OakUi, count: usize, gap: f32, cell: OakCell, user: *mut c_void);
+    /// The color a tone is drawn in, in the theme in use (and the looks
+    /// of the scopes it is in).
+    fn oak_tone_color(tone: u32) -> u32;
+
+    // Version 5: any thread.
+
+    /// A short message in the window's corner that goes by itself.
+    fn toast(tone: u32, text: OakStr);
+    /// Runs `run(user)` on a thread of its own, named `name`. False: it
+    /// couldn't start.
+    fn spawn(name: OakStr, run: OakDo, user: *mut c_void) -> bool;
+    /// The JSON kept under `key` for the plugin `plugin` (its id), from
+    /// one run of Oak to the next. False: nothing is.
+    fn prefs_get(plugin: OakStr, key: OakStr, out: OakSink, out_user: *mut c_void) -> bool;
+    /// Keeps `json` under `key` (empty: forgets it). Written to disk soon after.
+    fn prefs_set(plugin: OakStr, key: OakStr, json: OakStr);
+    // Version 5: looks (UI thread).
+    /// The next component drawn (only it, not what is in it) looks as
+    /// `look` says. Null: none.
+    fn oak_look_next(look: *const OakLook);
+    /// What `body` draws looks as `look` says: its colors, corners,
+    /// outlines, text scale and code font apply to every component in it
+    /// (and egui's widgets take its colors); scopes in scopes add to it.
+    fn oak_look_scope(ui: *mut OakUi, look: *const OakLook, body: OakBody, user: *mut c_void);
 }
 
 /// The C header: everything declared above, in C.

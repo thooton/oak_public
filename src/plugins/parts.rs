@@ -639,8 +639,8 @@ impl Hooks {
     }
 }
 
-/// Everything plugins registered.
-#[derive(Default)]
+/// Everything plugins registered (or one of them did: `plugins::Running`).
+#[derive(Clone, Default)]
 pub(crate) struct Parts {
     pub(crate) home_tabs: Vec<Arc<HomeTab>>,
     pub(crate) tab_kinds: Vec<Arc<TabKind>>,

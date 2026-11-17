@@ -19,7 +19,8 @@
 //! - `Hooks`: at startup, every frame, at exit.
 //!
 //! Parts are `Send + Sync` and take `&self`: a plugin keeps what changes
-//! behind its own locks (or in statics; the library is never unloaded).
+//! behind its own locks (or in statics; the library is never unloaded,
+//! and a reload starts a fresh copy of it, statics and all).
 //! What draws gets the `App`; the rest of Oak is `crate::host()`.
 //!
 //! Underneath, each part is one of `abi`'s descriptors: the `Registrar`
@@ -338,7 +339,8 @@ pub trait Gate: Send + Sync {
 
 /// Calls at the turns of Oak's life.
 pub trait Hooks: Send + Sync {
-    /// The window is up (before its first frame). Start threads here.
+    /// The window is up (before its first frame; for a plugin a reload
+    /// starts, at once). Start threads here.
     fn started(&self, _ctx: &egui::Context) {}
     /// Every frame, before anything is drawn.
     fn frame(&self, _ctx: &egui::Context, _app: &mut dyn App) {}
@@ -353,7 +355,9 @@ pub trait Hooks: Send + Sync {
     /// is `App::chat_scene`. Draw in an `Area` of your own to be above the
     /// boxes over the transcript and to take the pointer there.
     fn chat_scene(&self, _ui: &mut Ui, _app: &mut dyn App) {}
-    /// Oak is closing.
+    /// Oak is closing, or a reload is stopping this plugin (it was
+    /// rebuilt, removed or switched off): end what it started, its threads
+    /// first. Its library stays loaded either way.
     fn exiting(&self) {}
 }
 

@@ -26,8 +26,9 @@ A plugin can add:
 | A screen before everything | `Gate` | `OakGate` | Shown instead of the app while it says it is shut (a sign-in). |
 | Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, on Home's wallpaper (`home_scene`, under the menu; interface version 4), over a local conversation's transcript (`chat_scene`, clipped to it; version 4), at exit. |
 
-Two examples to copy: `plugins/hello` (Rust: a Home tab, a theme, a Settings row, a system
-prompt) and `plugins/hello-c/hello.c` (C, one file: a Home tab with a button and a text field).
+Two examples to copy: `plugins/hello` (Rust: a Home tab built from Oak's components, with state
+kept between runs and work on a thread; a theme, a Settings row, a system prompt) and
+`plugins/hello-c/hello.c` (C, one file: the same kind of Home tab, through `oak_view.h`).
 
 ## Using plugins
 
@@ -41,13 +42,20 @@ Oak looks for libraries in, in this order:
   registered. It exits with 1 when a library doesn't run.
 - Home → Plugins shows the same: each plugin's name, version and description, or why it isn't
   running, with a switch to turn it off or on. Switches are kept in `plugins.json` in Oak's folder
-  and apply at the next start (Restart to apply). A switched-off plugin's library is opened to read
+  and apply at the next start or Reload. A switched-off plugin's library is opened to read
   who it is, but its `init` never runs; switching one on also switches on what it `needs`.
 - `oak --no-plugins`, or `OAK_PLUGINS=off`, starts Oak without any.
 - Two libraries with the same plugin id: the first found runs.
 
-Plugins load once, at startup, and are never unloaded: installing or replacing one takes a
-restart. Updating Oak doesn't touch them, and they don't need rebuilding for it.
+Plugins load at startup, and Home → Plugins → Reload loads them again without a restart: libraries
+added or rebuilt start, those removed or switched off stop, and the rest keep running untouched.
+Oak loads each library from a copy (in `plugin-copies` in Oak's folder), so the file in the plugins
+folder can be rebuilt or replaced while Oak runs: build, then Reload. A plugin that stops at a
+reload gets its `exiting` hook and its parts leave the window, but its library is never unloaded:
+what it left running (threads, servers) goes on unless `exiting` ends it, so a plugin meant to be
+reloaded should stop its threads there. One started again is a fresh instance (its statics start
+over), and the plugins that need it aren't started again with it. Updating Oak doesn't touch
+plugins, and they don't need rebuilding for it.
 
 A plugin is code with all of Oak's rights: it sees the logins Oak has and can do anything Oak
 can. Install only those you would run as a program.
@@ -92,6 +100,7 @@ oak-sdk = { path = "../oak_public/sdk" }    # or a git dependency on this reposi
 ```rust
 use oak_sdk::{App, HomeTab, Info, Plugin, Registrar};
 use oak_sdk::egui::Ui;
+use oak_sdk::view::{Action, Page};
 
 struct Hello;
 
@@ -112,8 +121,11 @@ impl HomeTab for Tab {
     fn id(&self) -> String { "hello".into() }
     fn label(&self) -> String { "Hello".into() }
     fn show(&self, ui: &mut Ui, app: &mut dyn App) {
-        ui.label("Hello");
-        if ui.button("New conversation").clicked() {
+        let mut go = false;
+        Page::new("Hello").subtitle("What this tab is for.").show(ui, |ui| {
+            go = Action::primary("New conversation").show(ui).clicked();
+        });
+        if go {
             app.go_new("local");
         }
     }
@@ -131,6 +143,23 @@ color crates); the library exports one symbol.
 
 What a plugin works with:
 
+- **`oak_sdk::view`** is Oak's components (interface version 5), what most pages are made of,
+  drawn by Oak in its look and the theme in use: `Page` (a centered column under a title, with a
+  back link and buttons at its right), `Heading`, `Section` (in a card, folding), `Card`,
+  `Action` (a button: `new`, `primary`, `quiet`, `danger`, `link`, `pill`, `icon`; busy,
+  disabled, selected), `Badge`, `Item` (a list row: a dot, a picture or a symbol, title,
+  subtitle, faint text and buttons at its right), `Field` (label, hint, help or error, a
+  button; `confirmed()` on Enter), `Toggle` (a row with a switch), `setting` (label and help at
+  the left, a control at the right), `Choice` (joined boxes, tabs, chips, a drop-down, a list),
+  `Slider`, `Progress`, `Notice` (how things stand, in a `Tone`), `Empty`, `Stat`, `Table` (only
+  the rows in view are drawn), `columns`, and `toast` (a message in the window's corner, from
+  any thread). Each is a builder drawn with `show`, and each takes a `Look` (below). `Heading`
+  and `Section` take a `right` body (at the heading's right end), `Item` a `left` and a `right`
+  one (an avatar, a checkbox; buttons, a switch). Beside them, what a plugin keeps: `State<T>`
+  (a static, made with `Default` when first used), `Stored<T>` (serde, kept in
+  `plugin-prefs.json` in Oak's folder under the plugin's id, written soon after a change), and
+  `Job<T>` (work on a thread of its own: `start`, `busy`, `take` its result; a panic in it is an
+  error, and Oak repaints when it ends).
 - **`oak_sdk::egui`** has egui's names and shapes (`Ui`, `RichText`, `Button`, `TextEdit`,
   `Frame`, `ScrollArea`, `Grid`, `ComboBox`, `Window`, `Area`, `Painter`, `Response`, ...), so
   code written for egui mostly compiles as it is. It is not egui: each call goes through the
@@ -166,7 +195,15 @@ OAK_PLUGINS=. oak
 ```
 
 `oak_plugin.h` is all there is to include (C11 or C++), and every function and field is
-documented in it. How it reads (`hello.c` shows each):
+documented in it. `oak_view.h`, beside it, is optional: Oak's components made short to call
+(`ov_page`, `ov_section`, `ov_primary`, `ov_item`, `ov_input`, `ov_toggle`, `ov_choice`,
+`ov_notice`, `ov_table`, `ov_toast`, ...), `ov_fmt` for a label made with printf, a text field
+over a `char` buffer, and prefs (`ov_pref_text`, `ov_set_pref_bool`, ...). It is all `static
+inline`; one file defines `OAK_VIEW_MAIN` before including it, and `init` calls
+`ov_init(api, "<plugin id>")`. `OV_ITEM(...)` and the like make a component's full struct with
+its size set. Looks: `ov_next_look(OV_LOOK(.fill = OV_RGB(0x2b5cd6), .radius = 6))` before a
+component, or `ov_look_scope(ui, OV_LOOK(...), body, user)`; `OV_ZERO` is a length that is a
+true zero. How the interface reads (`hello.c` shows each):
 
 - **Text** is an `OakStr`: `oak_str(s)` for a C string, `OAK_S("literal")` for a literal. Oak
   copies what it keeps; a string only has to live for the call. (Callbacks and their `user`
@@ -190,14 +227,68 @@ documented in it. How it reads (`hello.c` shows each):
   out_user)` for everything else, by name, with JSON arguments ("look", "send", "accounts",
   "token", ...; each descriptor's comment lists its methods). Return `OAK_CALL_UNKNOWN` for a
   method you don't have, and Oak does what it does without it.
+- **Components** (version 5) are the table's functions from `oak_page` to `oak_tone_color`.
+  `oak_page`, `oak_section`, `oak_card` and `oak_setting` take a body; `oak_table` and
+  `oak_columns` take an `OakCell` callback, called for each cell. Their options are structs as
+  above (`OakPage`, `OakItem`, `OakField`, ...). What they say by color is a tone (`OAK_TONE_*`).
+  Their answers add `OAK_CONFIRMED` (a field's Enter or button), `OAK_CANCELLED` (a page's back
+  link, a notice's X) and `OAK_OPEN` (a section drew its body) to the usual flags.
+  `oak_look_next` and `oak_look_scope` take an `OakLook` (below).
 - **Threads**: functions that take an `OakUi`, and those named `ui_`, `paint_`, `input_`,
   `app_`, `oak_`, `window`, `texture_`, work on the UI thread, inside a callback Oak made. The
-  rest (HTTP, files, `repaint`, `share`, usage, cloud) work from any thread.
+  rest (HTTP, files, `repaint`, `share`, usage, cloud, `toast`, `spawn`, `prefs_get`,
+  `prefs_set`) work from any thread.
+
+## Changing how components look
+
+Oak's look is the default, never the limit. An `OakLook` (`view::Look` in Rust, `OV_LOOK` in C)
+changes it, part by part; what it leaves unset stays as Oak draws it:
+
+- **Colors** (0xRRGGBBAA; 0 keeps Oak's): `fill` (its background), `fill_hover` (under the
+  pointer), `stroke` (its outline or line), `ink` (its text), `ink_weak` (its fainter text),
+  `accent` (what is chosen or matters most: primary buttons, switches, bars, selections,
+  links), and the tones' `good`, `warn`, `bad`.
+- **Lengths** (points; 0 keeps Oak's, below 0 is a true zero): `radius`, `stroke_width`,
+  `padding_x`, `padding_y`, `height`, `width`, `text_points` (its main text's size; its other
+  texts follow), `gap` (between its parts, or after it), and `text_scale` (a factor).
+- **Flags**: `OAK_LOOK_MONOSPACE` (the code font), `OAK_LOOK_NO_FRAME` (no background or
+  outline).
+
+Given to one component (`.look(..)` on any builder; `oak_look_next` before the call; it doesn't
+pass to what is drawn in it), all of it applies. Given to a scope (`look_scope(ui, &look, |ui|
+...)`; `oak_look_scope`), its colors, `radius`, `stroke_width`, `text_scale` and the code font
+apply to every component drawn in it, and egui's own widgets there take its colors; scopes in
+scopes add to it (scales multiply), and a component's own look goes over its scopes'.
+`tone_color` (`oak_tone_color`) answers in the scope's colors.
+
+What a look's sizes mean to each:
+
+| Component | `width` | `height` | `padding` | `text_points` | `gap` | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Page | the column | | `_y`: above | the title | under the header | |
+| Heading | | its row | | its text | | `stroke`: its rule |
+| Section | its card | its heading's row | its card's | its heading | after it | frame parts go to its card |
+| Card | its width | | inside | | | |
+| Action | exact | its height | `_x`: its sides | its text | | own colors beat its kind's |
+| Badge | | its height | `_x` | its text | | `stroke`: an outline |
+| Item | | its height | `_x` | its title | | `stroke`: its line; `no_frame`: none |
+| Field | the field | its least | inside the field | its text | | `ink_weak`: label and help |
+| Toggle | | its row | `_y` | its label | | `fill_hover`: the row lit |
+| setting | its left side | | | its label | after it | |
+| Choice | a drop-down's | its height | `_x` | its text | between chips | pills take a button's look |
+| Progress | the bar | the bar's | | its label | | `fill`: the track |
+| Notice | | | its box's | its text | | `stroke`: its bar; `stroke_width`: the bar's |
+| Empty | its text's widest | | `_y`: around it | its title | | |
+| Stat | its box | | its box's | the number | | `ink`: the number |
+| Slider | its track | its row | | its value | | `fill`: the track; `ink`: the knob |
+| Table | | a row's | `_x`: in a cell | the headings | | `fill`: the headings' row; `no_frame`: no lines |
+| columns | | | | | between them | |
 
 ## Rules of the road
 
 - **State is the plugin's own**: statics, or fields behind locks (parts are called from several
-  threads). Keep files in Oak's folder under names of your own (`dir`).
+  threads). Keep files in Oak's folder under names of your own (`dir`), or small settings in
+  its prefs (`prefs_set`, `view::Stored`), which are kept per plugin id.
 - **Never block the UI thread.** `show` runs every frame: do requests on a thread, keep what
   came back, and call `repaint`.
 - **Depend on another plugin with `needs`.** It starts after the ones it names, and doesn't run
@@ -220,6 +311,7 @@ The app's tests run plugins headless, in the whole app, without a display:
 cargo build -p oak-hello
 OAK_PLUGINS=target/debug cargo test --lib the_example_plugins -- --ignored   # both examples, step by step
 OAK_PLUGINS=<folder> cargo test --lib every_plugin_draws -- --ignored        # any plugins
+cargo test --lib reloading_picks_up -- --ignored                             # Reload, with C variants
 ```
 
 The first also compiles `plugins/hello-c/hello.c` (with `OAK_TEST_CC`, else `CC`, else `gcc` on Windows and `cc` elsewhere). `every_plugin_draws`
@@ -240,9 +332,13 @@ A Rust plugin can also be tested in Oak's own test process, without building a l
   generator. `sdk/include/oak_plugin.h`: the header. `sdk/abi/`: each version's record.
 - The rest of `sdk/`: the Rust wrapper. `rt.rs` (the entry, the panic guard), `plugin.rs` (the
   parts' traits, the registrar and the callbacks behind them), `egui.rs` (the egui-shaped
-  drawing), `host.rs` (`Host`, `App`, HTTP), `ui.rs`, `widgets.rs`, `text_menu.rs` (Oak's look),
-  `theme.rs`, `time.rs`, `chat.rs`, `cloud.rs`, `usage.rs`.
-- `src/plugins.rs`: finding and loading libraries. `src/plugins/api.rs`: Oak's side of the
+  drawing), `view.rs` (the components, `State`, `Stored`, `Job`), `host.rs` (`Host`, `App`,
+  HTTP), `ui.rs`, `widgets.rs`, `text_menu.rs` (Oak's look), `theme.rs`, `time.rs`, `chat.rs`,
+  `cloud.rs`, `usage.rs`. `sdk/include/oak_view.h`: the components for C.
+- `src/view.rs`: the components themselves (Oak's own pages can use them too), and the toasts,
+  drawn over everything each frame from `src/lib.rs`. `src/plugin_prefs.rs`: the prefs and
+  `plugin-prefs.json`.
+- `src/plugins.rs`: finding, loading and reloading libraries. `src/plugins/api.rs`: Oak's side of the
   table, every function of it. `src/plugins/parts.rs`: a plugin's parts as Oak calls them.
   `src/plugin_app.rs`: what the window does for plugins.
 - `src/plugins_view.rs`: Home's Plugins tab, the manager.

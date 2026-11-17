@@ -83,6 +83,7 @@ mod new_screen;
 mod select;
 mod pausing;
 mod plugin_app;
+mod plugin_prefs;
 pub mod plugins;
 mod plugins_view;
 mod rename;
@@ -97,6 +98,7 @@ mod text_menu;
 mod theme;
 mod transcript;
 mod usage_view;
+mod view;
 mod vlist;
 mod wallpaper;
 mod widgets;
@@ -559,8 +561,16 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         startup::frame(ui.ctx());
         self.sync_zoom(ui.ctx());
+        // Plugins were reloaded: their themes and fonts may have changed.
+        if plugins::take_reloaded() {
+            apply_theme(ui.ctx(), &theme::theme(&self.settings.theme));
+            self.font_job.lock().unwrap().reinstall = true;
+        }
         let t = theme::theme(&self.settings.theme);
         plugins::begin_frame(ui.ctx(), &t);
+        // Toasts (`view::toast`), over everything at the top right.
+        view::show_toasts(ui.ctx(), &t, TITLE_H + TABS_H + 10.0);
+        view::begin_frame();
         let plain = egui::Frame::new().fill(t.bg);
         // A clicked image, over everything but the title bar.
         let style = images::ViewerStyle { ink: t.ink, ink3: t.ink3, line: t.line, panel: t.panel };
@@ -858,6 +868,7 @@ pub fn main() -> eframe::Result {
     tasks::kill_all();
     // The last saves, on disk before Oak goes.
     store::flush();
+    plugin_prefs::flush();
     // Freebuff bills a whole hour per session: give it back on the way out.
     freebuff::release();
     // The conversations' browsers, gently, so they keep their cookies.

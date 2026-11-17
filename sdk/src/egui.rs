@@ -342,7 +342,7 @@ impl Modifiers {
     }
 }
 
-fn align_code(a: Align) -> u32 {
+pub(crate) fn align_code(a: Align) -> u32 {
     match a {
         Align::Min => OAK_ALIGN_MIN,
         Align::Center => OAK_ALIGN_CENTER,
@@ -627,6 +627,21 @@ impl Response {
 
     pub fn changed(&self) -> bool {
         self.has(OAK_CHANGED)
+    }
+
+    /// A field's Enter or button (`view::Field`), a dialog's first button.
+    pub fn confirmed(&self) -> bool {
+        self.has(OAK_CONFIRMED)
+    }
+
+    /// A page's back link (`view::Page`), a notice's X, a dialog's Cancel.
+    pub fn cancelled(&self) -> bool {
+        self.has(OAK_CANCELLED)
+    }
+
+    /// A container that opens drew its body (`view::Section`).
+    pub fn open(&self) -> bool {
+        self.has(OAK_OPEN)
     }
 
     pub fn mark_changed(&mut self) {

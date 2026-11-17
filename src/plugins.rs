@@ -1,5 +1,5 @@
-//! Plugins: the dynamic libraries Oak loads when it starts, what they
-//! registered, and Oak as they reach it.
+//! Plugins: the dynamic libraries Oak loads, what they registered, and Oak
+//! as they reach it.
 //!
 //! A plugin is a library (`.so`, `.dll`, `.dylib`) in one of `dirs()`: the
 //! `plugins` folder in Oak's folder, the one beside the executable, and
@@ -7,19 +7,31 @@
 //! (`oak_sdk::abi`, `sdk/include/oak_plugin.h`): `load` opens each
 //! library, asks its `oak_plugin` who it is, and calls its `init` with
 //! Oak's table of functions (`api`), through which it hands over its parts
-//! (`parts`). The rest of Oak asks for those here: `parts()`. Libraries
-//! are never unloaded.
+//! (`parts`). The rest of Oak asks for those here: `parts()`.
+//!
+//! Each library is loaded from a copy of it in `plugin-copies` in Oak's
+//! folder (`copy_of`), so the file in the plugins folder is never held
+//! open and can be rebuilt or replaced while Oak runs (Windows refuses to
+//! write a loaded DLL; Linux crashes a process whose mapped library is
+//! rewritten in place). `reload` (Home's Plugins tab) looks again: plugins
+//! added, changed on disk, switched on or stopped start, each from a fresh
+//! copy, and those changed, removed or switched off are retired first:
+//! their `exiting` hooks run and their parts leave `parts()`. Plugins that
+//! didn't change keep running untouched. Libraries are never unloaded: a
+//! retired plugin's threads may still run in it and what it registered may
+//! still be borrowed, so every set of parts is kept for good too (`parts()`
+//! hands out `&'static`).
 //!
 //! The table only grows at its end, so a plugin built for an older Oak
 //! runs in this one; one built for a newer Oak says so and isn't started.
 //!
-//! `OAK_PLUGINS=off` (or `--no-plugins`) loads none.
+//! `OAK_PLUGINS=off` (or `--no-plugins`) loads none, and reloads none.
 //!
 //! Plugins can be switched off (Home's Plugins tab): their ids are kept in
 //! `plugins.json` in Oak's folder. A switched-off plugin's library is
 //! opened to read who it is, but its `init` is never called, so it
-//! registers and runs nothing. A change takes effect at the next start
-//! (`pending`).
+//! registers and runs nothing. A change takes effect at the next start or
+//! reload (`pending`).
 
 mod api;
 mod parts;
@@ -28,30 +40,46 @@ use crate::{api as accounts, store};
 use oak_sdk::abi::{ENTRY_SYMBOL, OAK_ABI, OAK_API_VERSION, OakInit, OakPlugin};
 pub(crate) use parts::{CloudBackend, FontDef, HomeTab, Info, NewKind, Parts, SessionKit, TabKind, Tags, Vault};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
+
+/// A library file as it was on disk: its size and when it was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(path).ok()?;
+    Some(Stamp { len: m.len(), modified: m.modified().ok() })
+}
 
 /// A library Oak looked at.
 #[derive(Clone, Debug)]
 pub(crate) struct Found {
+    /// The file in a plugins folder (not the copy loaded).
     pub(crate) path: PathBuf,
     /// Who it is, once it said (a library that isn't a plugin never does).
     pub(crate) info: Option<Info>,
     /// Why it isn't running: it doesn't fit, it failed to start, or it
     /// panicked since.
     pub(crate) trouble: Option<String>,
-    /// It was switched off when Oak started, so it wasn't started.
+    /// It was switched off at the last start or reload, so it wasn't started.
     pub(crate) disabled: bool,
+    /// The file as it was when it was opened.
+    stamp: Option<Stamp>,
 }
 
-/// Which plugins are switched off, by id: as Oak started, and as saved
-/// since (what the next start does).
+/// Which plugins are switched off, by id: as the last start or reload
+/// applied, and as saved since (what the next one does).
 struct Switches {
-    at_start: Vec<String>,
+    applied: Vec<String>,
     saved: Vec<String>,
 }
 
@@ -72,18 +100,18 @@ fn with_switches<R>(f: impl FnOnce(&mut Switches) -> R) -> R {
     let mut s = SWITCHES.lock().unwrap();
     let s = s.get_or_insert_with(|| {
         let disabled = store::read_json::<SwitchFile>(&switch_file()).unwrap_or_default().disabled;
-        Switches { at_start: disabled.clone(), saved: disabled }
+        Switches { applied: disabled.clone(), saved: disabled }
     });
     f(s)
 }
 
-/// Whether the plugin `id` is on, as saved (for the next start).
+/// Whether the plugin `id` is on, as saved (for the next start or reload).
 pub(crate) fn enabled(id: &str) -> bool {
     with_switches(|s| !s.saved.iter().any(|d| d == id))
 }
 
-/// Switches the plugins `ids` on or off for the next start, and saves it.
-/// Switching one on switches on what it needs too (those found).
+/// Switches the plugins `ids` on or off for the next start or reload, and
+/// saves it. Switching one on switches on what it needs too (those found).
 pub(crate) fn set_enabled(ids: &[String], on: bool) {
     let found = found();
     let mut ids: Vec<String> = ids.to_vec();
@@ -112,25 +140,68 @@ pub(crate) fn set_enabled(ids: &[String], on: bool) {
     }
 }
 
-/// Whether the plugins switched on or off since Oak started differ from
-/// what runs: a restart applies them.
+/// Whether the plugins switched on or off since the last start or reload
+/// differ from what runs: a reload or a restart applies them.
 pub(crate) fn pending() -> bool {
     let found = found();
     with_switches(|s| {
-        found.iter().filter_map(|f| f.info.as_ref()).any(|i| s.at_start.contains(&i.id) != s.saved.contains(&i.id))
+        found.iter().filter_map(|f| f.info.as_ref()).any(|i| s.applied.contains(&i.id) != s.saved.contains(&i.id))
     })
 }
 
-static PARTS: OnceLock<Parts> = OnceLock::new();
+/// A library opened in this process.
+struct Opened {
+    /// The file in a plugins folder (not the copy).
+    path: PathBuf,
+    stamp: Option<Stamp>,
+    /// Who it is and its `init`, or why it can't run.
+    plugin: Result<(Info, OakInit), String>,
+    /// Its `init` was called: starting the plugin again takes a fresh copy
+    /// (the same file again would be the same instance, statics and all).
+    used: bool,
+}
+
+/// A plugin that runs, and what it registered.
+struct Running {
+    id: String,
+    name: String,
+    path: PathBuf,
+    stamp: Option<Stamp>,
+    parts: Parts,
+}
+
+struct State {
+    /// The latest library opened from each file found.
+    opened: Vec<Opened>,
+    /// In the order they started; one started again keeps its place (cloud
+    /// providers are numbered by it).
+    running: Vec<Running>,
+    /// The copies loaded by this process, kept on disk while it runs.
+    copies: Vec<PathBuf>,
+}
+
+static STATE: Mutex<State> = Mutex::new(State { opened: Vec::new(), running: Vec::new(), copies: Vec::new() });
+/// What the running plugins registered: a leaked `Parts`, replaced whole
+/// by a reload (the one before stays valid, for whoever still borrows it).
+static PARTS: AtomicPtr<Parts> = AtomicPtr::new(std::ptr::null_mut());
+static LOADED: AtomicBool = AtomicBool::new(false);
 static FOUND: Mutex<Vec<Found>> = Mutex::new(Vec::new());
-static OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static OFF: AtomicBool = AtomicBool::new(false);
+/// A reload happened since the window last asked (`take_reloaded`).
+static RELOADED: AtomicBool = AtomicBool::new(false);
 /// What the plugin being started has handed over so far.
 static REGISTERING: Mutex<Option<Parts>> = Mutex::new(None);
 
 /// What the plugins registered (nothing, before `load` or with none).
 pub(crate) fn parts() -> &'static Parts {
     static NONE: OnceLock<Parts> = OnceLock::new();
-    PARTS.get().unwrap_or_else(|| NONE.get_or_init(Parts::default))
+    let p = PARTS.load(Ordering::Acquire);
+    if p.is_null() {
+        NONE.get_or_init(Parts::default)
+    } else {
+        // SAFETY: a leaked box, never freed.
+        unsafe { &*p }
+    }
 }
 
 /// Takes a part from the plugin being started (`api`'s `add_` functions;
@@ -148,12 +219,12 @@ pub(crate) fn found() -> Vec<Found> {
 
 /// `--no-plugins`: `load` loads none.
 pub fn disable() {
-    OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+    OFF.store(true, Ordering::Relaxed);
 }
 
 /// Oak started without plugins (`--no-plugins`, `OAK_PLUGINS=off`).
 pub(crate) fn none_loaded() -> bool {
-    OFF.load(std::sync::atomic::Ordering::Relaxed)
+    OFF.load(Ordering::Relaxed)
 }
 
 /// The folders plugins are looked for in.
@@ -181,14 +252,113 @@ fn is_library(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(std::env::consts::DLL_EXTENSION))
 }
 
-/// Opens the library at `path` and asks its plugin who it is. Err: why it
-/// can't run in this Oak.
-fn open(path: &Path) -> Result<(Info, OakInit), String> {
+/// The libraries in the plugins folders, in the order they are looked at.
+fn libraries() -> Vec<PathBuf> {
+    let mut all = vec![];
+    for dir in dirs() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.is_file() && is_library(p)).collect();
+        files.sort();
+        all.extend(files);
+    }
+    all
+}
+
+/// Where the copies plugins are loaded from are kept.
+fn copies_dir() -> PathBuf {
+    store::dir().join("plugin-copies")
+}
+
+/// The copy of the library at `path` to load: one already there from an
+/// earlier start when the file hasn't changed since, else made now. Named
+/// after the file, its place, size and time, so a copy is never written
+/// over, with a number after when this process has that one loaded
+/// already (`taken`: loading it again would give back the same instance).
+/// None: no copy could be made.
+fn copy_of(path: &Path, stamp: Option<Stamp>, taken: &[PathBuf]) -> Option<PathBuf> {
+    let stamp = stamp?;
+    let dir = copies_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let mut key = Sha256::new();
+    key.update(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).as_os_str().as_encoded_bytes());
+    key.update(stamp.len.to_le_bytes());
+    let time = stamp.modified.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).unwrap_or_default();
+    key.update(time.as_nanos().to_le_bytes());
+    let key = accounts::hex(&key.finalize()[..8]);
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    let ext = std::env::consts::DLL_EXTENSION;
+    let whole = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.len() == stamp.len);
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { format!("{stem}-{key}.{ext}") } else { format!("{stem}-{key}-{n}.{ext}") };
+        n += 1;
+        let copy = dir.join(&name);
+        if taken.contains(&copy) {
+            continue;
+        }
+        if whole(&copy) {
+            return Some(copy);
+        }
+        // Written beside it and renamed, so no Oak ever loads half a copy.
+        let part = dir.join(format!("{name}.{}.part", std::process::id()));
+        let made = std::fs::copy(path, &part).is_ok_and(|len| len == stamp.len) && std::fs::rename(&part, &copy).is_ok();
+        let _ = std::fs::remove_file(&part);
+        return (made || whole(&copy)).then_some(copy);
+    }
+}
+
+/// Deletes, on a thread, the copies no Oak has loaded (Windows refuses
+/// for those another Oak has; on Linux deleting one doesn't trouble the
+/// Oak that loaded it), and half-made ones left long ago. `keep`: this
+/// process's.
+fn clear_copies(keep: Vec<PathBuf>) {
+    std::thread::spawn(move || {
+        let Ok(read) = std::fs::read_dir(copies_dir()) else { return };
+        for e in read.flatten() {
+            let p = e.path();
+            if keep.contains(&p) {
+                continue;
+            }
+            // (Another Oak may be writing a fresh one.)
+            let stale = || e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(3600));
+            if is_library(&p) || stale() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    });
+}
+
+/// Loads the library at `path`, for good.
+fn library(path: &Path) -> Result<&'static libloading::Library, String> {
     // SAFETY: loading a library runs its initializers; that is what the
     // user asked for by putting it in a plugins folder.
     let lib = unsafe { libloading::Library::new(path) }.map_err(|e| format!("it couldn't be loaded: {e}"))?;
     // Never unloaded: what it registers and its threads point into it.
-    let lib: &'static libloading::Library = Box::leak(Box::new(lib));
+    Ok(Box::leak(Box::new(lib)))
+}
+
+/// Opens the library at `path` (from a copy, `copy_of`; from the file
+/// itself when there is none, or the copy doesn't load) and asks its
+/// plugin who it is. `copies`: those this process loaded, which gets the
+/// one used.
+fn open(path: &Path, stamp: Option<Stamp>, copies: &mut Vec<PathBuf>) -> Opened {
+    let lib = match copy_of(path, stamp, copies) {
+        Some(copy) => match library(&copy) {
+            Ok(lib) => {
+                copies.push(copy);
+                Ok(lib)
+            }
+            // (The original may find what it needs beside it.)
+            Err(_) => library(path),
+        },
+        None => library(path),
+    };
+    Opened { path: path.to_path_buf(), stamp, plugin: lib.and_then(describe), used: false }
+}
+
+/// Who the plugin in `lib` is, and its `init`. Err: why it can't run in
+/// this Oak.
+fn describe(lib: &'static libloading::Library) -> Result<(Info, OakInit), String> {
     // SAFETY: the symbol's type is the one the interface gives it.
     let entry = unsafe { lib.get::<unsafe extern "C" fn() -> *const OakPlugin>(ENTRY_SYMBOL) }.map_err(|_| "it isn't an Oak plugin (it exports no oak_plugin)".to_string())?;
     // SAFETY: as above.
@@ -229,76 +399,280 @@ fn open(path: &Path) -> Result<(Info, OakInit), String> {
 /// Loads every plugin and takes what they register. Once, at startup,
 /// before the window.
 pub fn load() {
-    if PARTS.get().is_some() {
+    if LOADED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let off = OFF.load(std::sync::atomic::Ordering::Relaxed) || std::env::var("OAK_PLUGINS").is_ok_and(|v| v == "off" || v == "0");
-    OFF.store(off, std::sync::atomic::Ordering::Relaxed);
-    let switched_off = with_switches(|s| s.at_start.clone());
+    let off = OFF.load(Ordering::Relaxed) || std::env::var("OAK_PLUGINS").is_ok_and(|v| v == "off" || v == "0");
+    OFF.store(off, Ordering::Relaxed);
+    apply(true);
+}
+
+/// What a reload did, by the plugins' names.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Changes {
+    pub(crate) started: Vec<String>,
+    pub(crate) restarted: Vec<String>,
+    pub(crate) stopped: Vec<String>,
+    /// Those that were to start and didn't (`Found::trouble` says why).
+    pub(crate) failed: Vec<String>,
+}
+
+/// Home's Plugins tab's Reload, on the UI thread: the plugins folders and
+/// the switches, looked at again (see the top of this file). Nothing
+/// without plugins (`none_loaded`) or before `load`.
+pub(crate) fn reload() -> Changes {
+    if none_loaded() || !LOADED.load(Ordering::SeqCst) {
+        return Changes::default();
+    }
+    apply(false)
+}
+
+/// Whether plugins were reloaded since this was last asked: the window
+/// applies its theme and font again (a plugin's may have changed).
+pub(crate) fn take_reloaded() -> bool {
+    RELOADED.swap(false, Ordering::Relaxed)
+}
+
+/// Looks at the plugins folders and the switches and makes what runs fit
+/// them: at startup (`first`) everything starts; at a reload what didn't
+/// change keeps running, the rest is retired and started again.
+fn apply(first: bool) -> Changes {
+    let switched_off = with_switches(|s| {
+        s.applied = s.saved.clone();
+        s.saved.clone()
+    });
+    let before = found();
+    let mut guard = STATE.lock().unwrap();
+    let st = &mut *guard;
+
+    // What is in the folders: opened when new or changed since.
     let mut found: Vec<Found> = vec![];
-    let mut started: Vec<(usize, Info, OakInit)> = vec![];
-    for dir in if off { vec![] } else { dirs() } {
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
-        let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.is_file() && is_library(p)).collect();
-        files.sort();
-        for path in files {
-            let at = found.len();
-            let opened = open(&path);
-            crate::startup::step(format!("plugin file {} opened", path.file_name().unwrap_or_default().to_string_lossy()));
-            match opened {
-                Ok((info, init)) => {
-                    let disabled = !info.id.is_empty() && switched_off.contains(&info.id);
-                    let trouble = if info.id.is_empty() {
-                        Some("it has no id".to_string())
-                    } else if found.iter().any(|f| f.info.as_ref().is_some_and(|i| i.id == info.id)) {
-                        Some(format!("a plugin with the id {} is loaded already", info.id))
-                    } else {
-                        None
-                    };
-                    found.push(Found { path, info: Some(info.clone()), trouble: trouble.clone(), disabled });
-                    if trouble.is_none() && !disabled {
-                        started.push((at, info, init));
+    let mut wanted: Vec<usize> = vec![];
+    for path in if none_loaded() { vec![] } else { libraries() } {
+        let stamp = stamp(&path);
+        let at = st.opened.iter().position(|o| o.path == path);
+        let i = match at {
+            Some(i) if stamp.is_some() && st.opened[i].stamp == stamp => i,
+            _ => {
+                let o = open(&path, stamp, &mut st.copies);
+                if first {
+                    crate::startup::step(format!("plugin file {} opened", path.file_name().unwrap_or_default().to_string_lossy()));
+                }
+                match at {
+                    Some(i) => {
+                        st.opened[i] = o;
+                        i
+                    }
+                    None => {
+                        st.opened.push(o);
+                        st.opened.len() - 1
                     }
                 }
-                Err(why) => found.push(Found { path, info: None, trouble: Some(why), disabled: false }),
             }
+        };
+        match &st.opened[i].plugin {
+            Ok((info, _)) => {
+                let disabled = !info.id.is_empty() && switched_off.contains(&info.id);
+                let trouble = if info.id.is_empty() {
+                    Some("it has no id".to_string())
+                } else if found.iter().any(|f| f.info.as_ref().is_some_and(|i| i.id == info.id)) {
+                    Some(format!("a plugin with the id {} is loaded already", info.id))
+                } else {
+                    None
+                };
+                if trouble.is_none() && !disabled {
+                    wanted.push(found.len());
+                }
+                found.push(Found { path, info: Some(info.clone()), trouble, disabled, stamp });
+            }
+            Err(why) => found.push(Found { path, info: None, trouble: Some(why.clone()), disabled: false, stamp }),
         }
     }
+    st.opened.retain(|o| found.iter().any(|f| f.path == o.path));
+    let info = |i: usize| found[i].info.clone().unwrap_or_default();
+
+    // Those that can run: wanted, and what they need can run too.
+    let mut runnable = wanted.clone();
+    loop {
+        let ids: Vec<String> = runnable.iter().map(|&i| info(i).id).collect();
+        let n = runnable.len();
+        runnable.retain(|&i| info(i).needs.iter().all(|need| ids.contains(need)));
+        if runnable.len() == n {
+            break;
+        }
+    }
+
+    // What runs and can go on as it is keeps running; the rest is retired,
+    // the last started first.
+    let keeps = |r: &Running| {
+        r.stamp.is_some()
+            && before.iter().any(|f| f.path == r.path && f.trouble.is_none())
+            && runnable.iter().any(|&i| found[i].path == r.path && found[i].stamp == r.stamp && info(i).id == r.id)
+    };
+    let keep: Vec<bool> = st.running.iter().map(keeps).collect();
+    for (r, _) in st.running.iter().zip(&keep).rev().filter(|(_, k)| !**k) {
+        for h in &r.parts.hooks {
+            h.exiting();
+        }
+    }
+    // Each running plugin's place, empty for those retired.
+    let mut slots: Vec<(String, String, Option<Running>)> = st.running.drain(..).zip(keep).map(|(r, k)| (r.id.clone(), r.name.clone(), k.then_some(r))).collect();
+    let wanted_ids: Vec<String> = wanted.iter().map(|&i| info(i).id).collect();
+    let infos: Vec<Info> = (0..found.len()).map(info).collect();
+    let paths: Vec<(PathBuf, Option<Stamp>)> = found.iter().map(|f| (f.path.clone(), f.stamp)).collect();
     *FOUND.lock().unwrap() = found;
-    // Those whose needs are met start, the needed first; the rest say
-    // what they miss.
-    let mut all = Parts::default();
-    let mut done: Vec<String> = vec![];
-    while let Some(i) = started.iter().position(|(_, info, _)| info.needs.iter().all(|n| done.contains(n))) {
-        let (at, info, init) = started.remove(i);
-        *REGISTERING.lock().unwrap() = Some(Parts::default());
-        // SAFETY: the plugin's `init`, with the table it was built for (or
-        // a later one, which starts the same).
-        let ok = unsafe { init(&api::TABLE) };
-        crate::startup::step(format!("plugin {} started", info.id));
+
+    // The rest start, those needed first.
+    let mut changes = Changes::default();
+    let mut done: Vec<String> = slots.iter().filter(|(_, _, r)| r.is_some()).map(|(id, _, _)| id.clone()).collect();
+    let mut todo: Vec<usize> = runnable.into_iter().filter(|&i| !done.contains(&infos[i].id)).collect();
+    let mut new_hooks = vec![];
+    while let Some(k) = todo.iter().position(|&i| infos[i].needs.iter().all(|n| done.contains(n))) {
+        let at = todo.remove(k);
+        let (info, (path, stamp)) = (&infos[at], paths[at].clone());
+        let Some(o) = st.opened.iter().position(|o| o.path == path) else { continue };
+        if st.opened[o].used {
+            st.opened[o] = open(&path, stamp, &mut st.copies);
+        }
+        st.opened[o].used = true;
+        let init = match &st.opened[o].plugin {
+            Ok((again, init)) if again.id == info.id => Ok(*init),
+            Ok(_) => Err("it changed while it was being loaded (reload again)".to_string()),
+            Err(why) => Err(why.clone()),
+        };
+        let ok = init.as_ref().is_ok_and(|init| {
+            *REGISTERING.lock().unwrap() = Some(Parts::default());
+            // SAFETY: the plugin's `init`, with the table it was built for
+            // (or a later one, which starts the same).
+            unsafe { init(&api::TABLE) }
+        });
+        if first {
+            crate::startup::step(format!("plugin {} started", info.id));
+        }
         let parts = REGISTERING.lock().unwrap().take().unwrap_or_default();
         let mut found = FOUND.lock().unwrap();
+        let name = name_of(info);
+        let again = slots.iter().any(|(id, _, _)| *id == info.id);
         if ok && found[at].trouble.is_none() {
-            all.absorb(parts);
+            new_hooks.extend(parts.hooks.iter().cloned());
+            let running = Running { id: info.id.clone(), name: name.clone(), path, stamp, parts };
+            match slots.iter_mut().find(|(id, _, r)| *id == info.id && r.is_none()) {
+                Some(slot) => slot.2 = Some(running),
+                None => slots.push((info.id.clone(), name.clone(), Some(running))),
+            }
             done.push(info.id.clone());
-        } else if found[at].trouble.is_none() {
+            if again { changes.restarted.push(name) } else { changes.started.push(name) }
+        } else {
             // (One that panicked said why already: `failed`.)
-            found[at].trouble = Some("it failed to start".into());
+            if found[at].trouble.is_none() {
+                found[at].trouble = Some(init.err().unwrap_or_else(|| "it failed to start".into()));
+            }
+            changes.failed.push(name);
         }
     }
+    // Those wanted that didn't start for want of others say which.
     let mut found = FOUND.lock().unwrap();
-    for (at, info, _) in started {
+    for (at, f) in found.iter_mut().enumerate().filter(|(_, f)| f.trouble.is_none()) {
+        let info = &infos[at];
+        if !wanted_ids.contains(&info.id) || done.contains(&info.id) {
+            continue;
+        }
         let missing: Vec<&str> = info.needs.iter().filter(|n| !done.contains(n)).map(|s| s.as_str()).collect();
         let off: Vec<&str> = missing.iter().copied().filter(|n| switched_off.iter().any(|d| d == n)).collect();
-        found[at].trouble = Some(if off.len() == missing.len() {
+        f.trouble = Some(if off.len() == missing.len() {
             format!("it needs the plugin{} {}, which {} switched off", oak_sdk::plural(off.len()), off.join(", "), if off.len() == 1 { "is" } else { "are" })
         } else {
             format!("it needs the plugin{} {}, which {} loaded", oak_sdk::plural(missing.len()), missing.join(", "), if missing.len() == 1 { "isn't" } else { "aren't" })
         });
     }
     drop(found);
-    let _ = PARTS.set(all);
+    for (id, name, r) in &slots {
+        if r.is_none() && !done.contains(id) && !changes.failed.contains(name) {
+            changes.stopped.push(name.clone());
+        }
+    }
+
+    // What runs now, in place of what ran.
+    st.running = slots.into_iter().filter_map(|(_, _, r)| r).collect();
+    let mut all = Parts::default();
+    for r in &st.running {
+        all.absorb(r.parts.clone());
+    }
+    let old_vault = parts().vault.clone();
+    PARTS.store(Box::into_raw(Box::new(all)), Ordering::Release);
     crate::agent::prompt::add_roles(&parts().roles);
+    clear_copies(st.copies.clone());
+    drop(guard);
+    *DISK.lock().unwrap() = None;
+    if !first {
+        if let Some(ctx) = CONTEXT.get() {
+            for h in &new_hooks {
+                h.started(ctx);
+            }
+            ctx.request_repaint();
+        }
+        // A vault that went, or came already connected: its accounts follow
+        // (one that connects later says so itself).
+        let changed = match (&old_vault, &parts().vault) {
+            (None, None) => false,
+            (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+            _ => true,
+        };
+        if changed {
+            std::thread::spawn(|| {
+                if vault().is_none_or(|v| v.connected()) {
+                    accounts::vault_changed();
+                }
+            });
+        }
+        RELOADED.store(true, Ordering::Relaxed);
+    }
+    changes
+}
+
+/// What a reload would pick up in the plugins folders: libraries added,
+/// changed or removed since they were last looked at.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct OnDisk {
+    pub(crate) added: Vec<PathBuf>,
+    pub(crate) changed: Vec<PathBuf>,
+    pub(crate) removed: Vec<PathBuf>,
+}
+
+impl OnDisk {
+    pub(crate) fn any(&self) -> bool {
+        !(self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty())
+    }
+}
+
+/// The last `on_disk`, and when it was looked.
+static DISK: Mutex<Option<(Instant, OnDisk)>> = Mutex::new(None);
+
+/// How often `on_disk` looks at the folders again.
+pub(crate) const DISK_EVERY: Duration = Duration::from_secs(2);
+
+/// What changed in the plugins folders (looked at again at most every
+/// `DISK_EVERY`).
+pub(crate) fn on_disk() -> OnDisk {
+    let mut last = DISK.lock().unwrap();
+    if let Some((at, d)) = &*last
+        && at.elapsed() < DISK_EVERY
+    {
+        return d.clone();
+    }
+    let d = if none_loaded() {
+        OnDisk::default()
+    } else {
+        let found = found();
+        let now = libraries();
+        OnDisk {
+            added: now.iter().filter(|p| !found.iter().any(|f| &f.path == *p)).cloned().collect(),
+            changed: found.iter().filter(|f| now.contains(&f.path) && (f.stamp.is_none() || stamp(&f.path) != f.stamp)).map(|f| f.path.clone()).collect(),
+            removed: found.iter().filter(|f| !now.contains(&f.path)).map(|f| f.path.clone()).collect(),
+        }
+    };
+    *last = Some((Instant::now(), d.clone()));
+    d
 }
 
 /// `oak --plugins`: says where plugins are looked for, which were found
@@ -562,6 +936,14 @@ mod tests {
         let out = std::env::temp_dir().join(format!("oak-hello-c-{}", std::process::id()));
         std::fs::create_dir_all(&out).unwrap();
         let lib = out.join(format!("liboak_hello_c.{}", std::env::consts::DLL_EXTENSION));
+        compile_c(&root.join("plugins/hello-c/hello.c"), &lib);
+        out
+    }
+
+    /// Compiles the C file `source` into the library `lib` (as
+    /// `built_c_example` says).
+    fn compile_c(source: &Path, lib: &Path) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let cc = std::env::var("OAK_TEST_CC")
             .or_else(|_| std::env::var("CC"))
             .unwrap_or_else(|_| if cfg!(windows) { "gcc" } else { "cc" }.into());
@@ -573,12 +955,11 @@ mod tests {
             .arg("-I")
             .arg(root.join("sdk/include"))
             .arg("-o")
-            .arg(&lib)
-            .arg(root.join("plugins/hello-c/hello.c"))
+            .arg(lib)
+            .arg(source)
             .output()
             .unwrap_or_else(|e| panic!("the C compiler {cc} didn't run: {e}"));
-        assert!(done.status.success(), "the C example doesn't compile:\n{}", String::from_utf8_lossy(&done.stderr));
-        out
+        assert!(done.status.success(), "{} doesn't compile:\n{}", source.display(), String::from_utf8_lossy(&done.stderr));
     }
 
     /// Points Oak at the scratch folder `Headless::start(name, ..)` will
@@ -632,6 +1013,7 @@ mod tests {
         };
         // Home has its tab; picked, the plugin draws the cell.
         app.page = Page::Home;
+        app.home_menu = true;
         let shown = frames(&mut app, vec![]);
         let tab = rect_of(&shown, "Hello");
         let shown = frames(&mut app, click(tab.center(), Primary));
@@ -693,7 +1075,7 @@ mod tests {
         assert!(!texts(&shown).contains("Restart to apply"));
         let shown = frames(&mut app, click(in_list(&shown, "Hello").center(), Primary));
         assert!(!enabled("hello") && enabled("hello-c") && pending());
-        assert!(texts(&shown).contains("Off after restart") && texts(&shown).contains("Restart to apply"), "{}", texts(&shown));
+        assert!(texts(&shown).contains("Off after reload") && texts(&shown).contains("Restart to apply"), "{}", texts(&shown));
         let saved = std::fs::read_to_string(switch_file()).unwrap();
         assert!(saved.contains("\"hello\""), "{saved}");
         let shown = frames(&mut app, click(in_list(&shown, "Hello").center(), Primary));
@@ -775,5 +1157,103 @@ mod tests {
         // As Oak does when it quits: what the plugins started ends.
         exiting();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Reload, in the whole app, headless, with variants of the C example
+    /// (built here): a library rebuilt in place while it runs (it was
+    /// loaded from a copy) is shown as changed and restarted by the
+    /// Plugins tab's Reload; one added starts, leaving the other running;
+    /// one switched off, or deleted, stops; with nothing changed nothing
+    /// happens. Alone in its process (plugins load once per process):
+    /// `cargo test --lib reloading_picks_up -- --ignored`
+    #[test]
+    #[ignore]
+    fn reloading_picks_up_what_changed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(root.join("plugins/hello-c/hello.c")).unwrap();
+        let work = std::env::temp_dir().join(format!("oak-reload-test-src-{}", std::process::id()));
+        let folder = work.join("plugins");
+        std::fs::create_dir_all(&folder).unwrap();
+        let lib = |name: &str| folder.join(format!("{name}.{}", std::env::consts::DLL_EXTENSION));
+        // The C example with its texts swapped as `swaps` says.
+        let build = |name: &str, swaps: &[(&str, &str)]| {
+            let mut s = source.clone();
+            for (from, to) in swaps {
+                assert!(s.contains(from), "hello.c has no {from}");
+                s = s.replace(from, to);
+            }
+            let c = work.join(format!("{name}.c"));
+            std::fs::write(&c, s).unwrap();
+            compile_c(&c, &lib(name));
+        };
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let tab_ids = || parts().home_tabs.iter().map(|t| t.id()).collect::<Vec<_>>();
+        build("hello_c", &[]);
+        unsafe { std::env::set_var("OAK_PLUGINS", &folder) };
+        scratch_folder("reload");
+        load();
+        assert_eq!(found().iter().map(|f| (f.info.as_ref().map(|i| i.id.clone()), f.trouble.clone())).collect::<Vec<_>>(), vec![(Some("hello-c".into()), None)]);
+        let copies = STATE.lock().unwrap().copies.clone();
+        assert!(copies.len() == 1 && copies[0].starts_with(copies_dir()), "loaded from a copy: {copies:?}");
+
+        let (dir, mut h, mut app) = Headless::start("reload", &[]);
+        let mut frames = |app: &mut crate::App, events: Vec<eframe::egui::Event>| {
+            let mut out = h.events(app, events);
+            for _ in 0..2 {
+                out = h.events(app, vec![]);
+            }
+            painted(&out)
+        };
+        let texts = |shown: &[(String, eframe::egui::Rect)]| shown.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>().join("|");
+        app.page = Page::Home;
+        app.home_menu = true;
+        app.home_list = "hello-c".into();
+        let shown = frames(&mut app, vec![]);
+        assert!(texts(&shown).contains("Hello, world, from C|"), "{}", texts(&shown));
+
+        // Rebuilt in place while it runs (Windows refuses to write a loaded
+        // DLL): the Plugins tab says so, and Reload starts the new build.
+        build("hello_c", &[("from C\"", "from C, rebuilt\"")]);
+        *DISK.lock().unwrap() = None;
+        assert_eq!(on_disk().changed, vec![lib("hello_c")]);
+        app.home_list = crate::plugins_view::TAB.into();
+        let shown = frames(&mut app, vec![]);
+        assert!(texts(&shown).contains("Changed on disk"), "{}", texts(&shown));
+        let shown = frames(&mut app, click(rect_of(&shown, "Reload").center(), Primary));
+        assert!(texts(&shown).contains("Restarted Hello C") && !texts(&shown).contains("Changed on disk"), "{}", texts(&shown));
+        assert_eq!(tab_ids(), names(&["hello-c"]));
+        assert_eq!(STATE.lock().unwrap().copies.len(), 2);
+        app.home_list = "hello-c".into();
+        let shown = frames(&mut app, vec![]);
+        assert!(texts(&shown).contains("Hello, world, from C, rebuilt"), "{}", texts(&shown));
+
+        // Another added: it starts, and the first runs on untouched.
+        let d: &[(&str, &str)] = &[("\"hello-c\", 7", "\"hello-d\", 7"), ("OAK_S(\"hello-c\")", "OAK_S(\"hello-d\")"), ("\"Hello C\", 7", "\"Hello D\", 7"), ("OAK_S(\"Hello C\")", "OAK_S(\"Hello D\")")];
+        build("hello_d", d);
+        assert_eq!(reload(), Changes { started: names(&["Hello D"]), ..Changes::default() });
+        assert_eq!(tab_ids(), names(&["hello-c", "hello-d"]));
+        app.home_list = "hello-d".into();
+        let shown = frames(&mut app, vec![]);
+        assert!(texts(&shown).contains("Hello, world, from C|"), "{}", texts(&shown));
+
+        // Switched off, it stops at the reload; on again, it starts.
+        set_enabled(&["hello-d".into()], false);
+        assert!(pending());
+        assert_eq!(reload(), Changes { stopped: names(&["Hello D"]), ..Changes::default() });
+        assert!(!pending() && tab_ids() == names(&["hello-c"]));
+        assert!(found().iter().any(|f| f.disabled && f.info.as_ref().is_some_and(|i| i.id == "hello-d")));
+        set_enabled(&["hello-d".into()], true);
+        assert_eq!(reload(), Changes { started: names(&["Hello D"]), ..Changes::default() });
+
+        // Deleted (it can be: a copy is what is loaded), it stops and leaves the list.
+        std::fs::remove_file(lib("hello_d")).unwrap();
+        assert_eq!(reload(), Changes { stopped: names(&["Hello D"]), ..Changes::default() });
+        assert_eq!(found().len(), 1);
+        assert_eq!(tab_ids(), names(&["hello-c"]));
+        // Nothing changed: nothing happens.
+        assert_eq!(reload(), Changes::default());
+        exiting();
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(work);
     }
 }

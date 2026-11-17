@@ -40,6 +40,12 @@ pub fn has_api() -> bool {
     !API.load(Ordering::Acquire).is_null()
 }
 
+/// The plugin's id (its `Info`'s), once `export_plugin!` made it; empty
+/// before.
+pub fn plugin_id() -> String {
+    PLUGIN.get().map(|(p, _)| p.info().id).unwrap_or_default()
+}
+
 /// Text, lent to Oak for one call.
 pub fn s(text: &str) -> OakStr {
     OakStr { ptr: text.as_ptr() as *const c_char, len: text.len() }

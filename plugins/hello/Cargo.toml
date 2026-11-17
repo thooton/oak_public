@@ -14,3 +14,5 @@ crate-type = ["cdylib"]
 # All a plugin is written against: Oak's interface (a C header underneath),
 # made comfortable in Rust.
 oak-sdk = { path = "../../sdk" }
+# What it keeps from one run to the next is serde-encoded (`view::Stored`).
+serde = { version = "1", features = ["derive"] }

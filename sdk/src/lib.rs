@@ -47,6 +47,7 @@ pub mod theme;
 pub mod time;
 pub mod ui;
 pub mod usage;
+pub mod view;
 pub mod widgets;
 
 pub use host::{App, Host, Request, Response, has_host, host};

@@ -21,6 +21,11 @@ pub(crate) fn theme(id: &str) -> Theme {
 }
 
 pub(crate) fn apply_theme(ctx: &egui::Context, t: &Theme) {
+    ctx.set_visuals(visuals(t));
+}
+
+/// egui's colors from `t` (also a look's scope's: `view::look_scope`).
+pub(crate) fn visuals(t: &Theme) -> egui::Visuals {
     let mut v = egui::Visuals::dark();
     v.dark_mode = true;
     v.panel_fill = t.bg;
@@ -51,7 +56,7 @@ pub(crate) fn apply_theme(ctx: &egui::Context, t: &Theme) {
         w.expansion = 0.0;
     }
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, t.ink);
-    ctx.set_visuals(v);
+    v
 }
 
 pub(crate) fn setup_style(ctx: &egui::Context) {

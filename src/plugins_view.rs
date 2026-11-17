@@ -1,14 +1,18 @@
 //! Home's Plugins tab, the plugin manager: every library Oak found, with a
 //! switch for each plugin, Enable all and Disable all, the plugins folder,
-//! and Restart to apply once a switch differs from what runs (plugins load
-//! only at startup, `plugins.rs`). A click on a row flips its switch;
-//! switching one on switches on the plugins it needs.
+//! Reload (`plugins::reload`: libraries added or changed in the folders
+//! load, and the switches apply; lit while there is something to apply,
+//! with a row's "Changed on disk"), and Restart to apply once a switch
+//! differs from what runs. A click on a row flips its switch; switching
+//! one on switches on the plugins it needs.
 
 use crate::look::{BAR_ROOM, list_rows, row_title_color};
 use crate::plugins::{self, Found};
 use crate::theme::Theme;
 use crate::widgets::{clip_width, paint_switch};
 use eframe::egui::{self, Align, Align2, Button, FontId, Layout, Rect, RichText, Ui, UiBuilder, vec2};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Home's tab id for the manager (not a plugin id, so no plugin's tab
 /// takes its place).
@@ -34,8 +38,36 @@ fn folder() -> std::path::PathBuf {
     crate::store::dir().join("plugins")
 }
 
+/// What the last Reload did, and when, shown in place of the count for a
+/// while.
+static LAST: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+const SHOW_OUTCOME: Duration = Duration::from_secs(6);
+
+/// A reload's outcome in a line: "Restarted Hello; started Hello C".
+fn outcome(c: &plugins::Changes) -> String {
+    let mut said = vec![];
+    for (verb, names) in [("restarted", &c.restarted), ("started", &c.started), ("stopped", &c.stopped)] {
+        if !names.is_empty() {
+            said.push(format!("{verb} {}", names.join(", ")));
+        }
+    }
+    if !c.failed.is_empty() {
+        said.push(format!("{} didn't start", c.failed.join(", ")));
+    }
+    let said = said.join("; ");
+    let mut chars = said.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => "Nothing to reload".into(),
+    }
+}
+
 /// The manager, in `area` (the left cell of Home).
 pub(crate) fn show(ui: &mut Ui, t: &Theme, area: Rect) {
+    // (Changes on disk show without the pointer moving.)
+    if !plugins::none_loaded() {
+        ui.ctx().request_repaint_after(plugins::DISK_EVERY);
+    }
     let found = plugins::found();
     let head = Rect::from_min_max(egui::pos2(area.left() + 12.0, area.top() + 8.0), egui::pos2(area.right() - BAR_ROOM - 8.0, area.top() + 8.0 + HEAD_H));
     let list = Rect::from_min_max(egui::pos2(area.left(), head.bottom() + 6.0), area.max);
@@ -48,12 +80,14 @@ pub(crate) fn show(ui: &mut Ui, t: &Theme, area: Rect) {
             ui.painter().text(list.center() + vec2(0.0, 20.0), Align2::CENTER_CENTER, sub, FontId::proportional(11.5), t.ink4);
             return;
         }
-        list_rows(ui, t, "home-plugins", found.len(), "", |ui, i, rect, resp| row(ui, t, &found[i], rect, resp));
+        let changed = plugins::on_disk().changed;
+        list_rows(ui, t, "home-plugins", found.len(), "", |ui, i, rect, resp| row(ui, t, &found[i], changed.contains(&found[i].path), rect, resp));
     });
 }
 
-/// The heading: how many run, then (from the right) the folder, Disable
-/// all, Enable all and, when a switch changed, Restart to apply.
+/// The heading: how many run (or for a while what the last Reload did),
+/// then (from the right) the folder, Disable all, Enable all, Reload and,
+/// when a switch changed, Restart to apply.
 fn head_row(ui: &mut Ui, t: &Theme, head: Rect, found: &[Found]) {
     let ids: Vec<String> = found.iter().filter_map(id_of).map(str::to_string).collect();
     let on: Vec<&String> = ids.iter().filter(|id| plugins::enabled(id)).collect();
@@ -75,13 +109,29 @@ fn head_row(ui: &mut Ui, t: &Theme, head: Rect, found: &[Found]) {
         if ui.add_enabled(on.len() < ids.len(), Button::new(small("Enable all"))).clicked() {
             plugins::set_enabled(&ids, true);
         }
-        if plugins::pending() {
-            let b = Button::new(RichText::new("Restart to apply").size(12.0).color(t.bg)).fill(t.accent);
-            if ui.add(b).on_hover_text("Plugins load at startup. Active conversations pause for the restart, then resume.").clicked() {
-                crate::update::restart(ui.ctx());
+        let pending = plugins::pending();
+        let disk = plugins::on_disk();
+        let due = pending || disk.any();
+        let reload = if due { Button::new(RichText::new("Reload").size(12.0).color(t.bg)).fill(t.accent) } else { Button::new(small("Reload")) };
+        let mut tip = vec!["Loads plugins added or changed in the folders and applies the switches; the others keep running. A plugin replaced or switched off is told to stop, but its library stays in memory until Oak restarts.".to_string()];
+        let names = |paths: &[std::path::PathBuf]| paths.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect::<Vec<_>>().join(", ");
+        for (label, paths) in [("New", &disk.added), ("Changed", &disk.changed), ("Removed", &disk.removed)] {
+            if !paths.is_empty() {
+                tip.push(format!("{label}: {}", names(paths)));
             }
         }
-        let summary = if n == 0 && !found.is_empty() {
+        if ui.add_enabled(!plugins::none_loaded(), reload).on_hover_text(tip.join("\n")).clicked() {
+            let changes = plugins::reload();
+            *LAST.lock().unwrap() = Some((std::time::Instant::now(), outcome(&changes)));
+        }
+        if pending && ui.button(small("Restart to apply")).on_hover_text("Starts Oak again with every plugin loaded fresh. Active conversations pause for the restart, then resume.").clicked() {
+            crate::update::restart(ui.ctx());
+        }
+        let last = LAST.lock().unwrap().clone().filter(|(at, _)| at.elapsed() < SHOW_OUTCOME);
+        let summary = if let Some((at, said)) = last {
+            ui.ctx().request_repaint_after(SHOW_OUTCOME.saturating_sub(at.elapsed()));
+            said
+        } else if n == 0 && !found.is_empty() {
             format!("{} librar{}, none a plugin", found.len(), if found.len() == 1 { "y" } else { "ies" })
         } else {
             format!("{n} plugin{}, {run} running", crate::plural(n))
@@ -97,8 +147,9 @@ fn head_row(ui: &mut Ui, t: &Theme, head: Rect, found: &[Found]) {
 }
 
 /// One library's row: its name and version, what it is (or why it isn't
-/// running), and its switch with what a restart will change.
-fn row(ui: &mut Ui, t: &Theme, f: &Found, rect: Rect, resp: egui::Response) {
+/// running), and its switch with what a reload will change (`changed`:
+/// its file changed since it was loaded).
+fn row(ui: &mut Ui, t: &Theme, f: &Found, changed: bool, rect: Rect, resp: egui::Response) {
     let p = ui.painter().clone();
     let y = rect.center().y;
     let (x, right) = (rect.left() + 12.0, rect.right() - 12.0);
@@ -114,8 +165,12 @@ fn row(ui: &mut Ui, t: &Theme, f: &Found, rect: Rect, resp: egui::Response) {
         paint_switch(&p, t, sw, on, resp.hovered());
         text_right = sw.left() - 12.0;
         let was_on = !f.disabled;
-        if on != was_on {
-            let note = if on { "On after restart" } else { "Off after restart" };
+        let note = if on != was_on {
+            Some(if on { "On after reload" } else { "Off after reload" })
+        } else {
+            (changed && on).then_some("Changed on disk")
+        };
+        if let Some(note) = note {
             let font = FontId::proportional(11.5);
             let r = p.text(egui::pos2(text_right, y), Align2::RIGHT_CENTER, note, font, t.accent);
             text_right = r.left() - 12.0;

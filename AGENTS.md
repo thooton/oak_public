@@ -15,7 +15,12 @@ The repository:
 - `src/`: the app. Every file opens with a comment saying what it holds; `lib.rs` has the app's
   state, its screens and the frame loop (`main.rs` only calls it).
 - `sdk/`: the plugin interface (`sdk/src/abi.rs`, and the C header written from it,
-  `sdk/include/oak_plugin.h`) and `oak-sdk`, its Rust wrapper. `plugins/hello` and
+  `sdk/include/oak_plugin.h`) and `oak-sdk`, its Rust wrapper; `sdk/src/view.rs` and
+  `sdk/include/oak_view.h` are its components (pages, sections, buttons, rows, fields, toasts)
+  and plugin state, which Oak draws from `src/view.rs`. Every component reads its look there
+  (`view::style`: the scopes' and its own `Look` over the theme); a new component, or a new
+  part of one, takes its colors and sizes from that `Style` and says which in its doc comment
+  and in docs/PLUGINS.md's table. `plugins/hello` and
   `plugins/hello-c`: example plugins in Rust and in C.
 - `prompts/`: the system prompt, compiled in. `assets/`: fonts, logos and pictures (with the
   scripts that make some of them). `linux/`: the self-contained Linux bundle. `scripts/`: checks.
@@ -66,8 +71,9 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
   conversations (`OAK_UPGRADE_FROM`).
 - Plugins, headless, each alone (plugins load once per process):
   `the_example_plugins_draw_in_the_window` (after `cargo build -p oak-hello`, with
-  `OAK_PLUGINS=target/debug`; it compiles the C example itself) and `every_plugin_draws`
-  (whatever `OAK_PLUGINS` holds); docs/PLUGINS.md has both. The interface's own tests are in
+  `OAK_PLUGINS=target/debug`; it compiles the C example itself), `reloading_picks_up_what_changed`
+  (builds variants of the C example and reloads them) and `every_plugin_draws`
+  (whatever `OAK_PLUGINS` holds); docs/PLUGINS.md has them. The interface's own tests are in
   `sdk/src/abi.rs` (the header and the record of each version are current, and no version
   breaks an earlier one) and `src/plugins/api.rs` (the SDK against Oak's table, in process).
 
@@ -117,7 +123,7 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 
 `%APPDATA%\oak` on Windows, `~/.config/oak` (`$XDG_CONFIG_HOME/oak`) on Linux, or `OAK_DIR` (to try
 a build against a copy of your conversations). Each conversation is a file in `conversations/`
-named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `models.json`, the
+named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
@@ -125,7 +131,8 @@ size, place and maximized state), `seats.json` (which account each
 conversation is on), `tasks/` and `task-output/` (background tasks; `tasks/tray.json` is what
 the taskbar widget shows, `tray/` holds its copy of oak.exe), `browser/` (the browsers'
 profiles), `browser-profiles/` (the named ones), `plugins/` (plugins to load, and what they keep is beside it under names of their
-own), `bin/` (programs for the agent's commands: the bundled ripgrep, `src/toolbin.rs`),
+own), `plugin-copies/` (the copies of those libraries Oak loads, named after each file, its place,
+size and time; reused while the file is unchanged, the rest deleted at each start or reload), `bin/` (programs for the agent's commands: the bundled ripgrep, `src/toolbin.rs`),
 `wallpapers/` (Home's wallpapers to pick from), `usage.jsonl`, `crash.log` and `startup.log` (how long the last start took, step by step, until
 its first frame was on screen, and the processor time spent by each step: `src/startup.rs`; the
 place to look first when Oak starts slowly). Files are written to a temporary file and renamed over
@@ -178,11 +185,20 @@ choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home,
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
-Switches are saved by plugin id in `plugins.json` and apply at the next start, since plugins load
-only then: a changed row says "On after restart" or "Off after restart", and Restart to apply
-restarts Oak as an update's restart does. Switching a plugin on switches on the plugins it needs;
-one whose needs are switched off says so. A switched-off plugin's library is opened to read who it
-is but never started.
+Switches are saved by plugin id in `plugins.json` and apply at the next start or Reload: a changed
+row says "On after reload" or "Off after reload", and Restart to apply (shown then) restarts Oak as
+an update's restart does. Reload (`plugins::reload`) looks at the folders again without a restart:
+libraries added or rebuilt start (a rebuilt or stopped one from a fresh copy), those removed or
+switched off stop, and plugins that didn't change keep running untouched; the heading says for a
+few seconds what it did ("Restarted Hello C; started Hello D"). It is lit while there is something
+to apply (a switch changed, or a library added, changed or removed: the folders are looked at every
+two seconds while the tab is shown), and a running plugin whose file changed says "Changed on
+disk". Oak loads each library from a copy in `plugin-copies/` so the file itself can be rebuilt or
+replaced while Oak runs (Windows refuses to write a loaded DLL). A plugin that stops at a reload
+gets its `exiting` hook and its parts leave the window, but its library is never unloaded (its
+threads may still run in it): a clean slate takes a restart. Switching a plugin on switches on the
+plugins it needs; one whose needs are switched off says so. A switched-off plugin's library is
+opened to read who it is but never started.
 The window opens with the size, place and maximized state it was closed with (`src/geometry.rs`);
 a place no monitor shows any more is left to the system, and a window partly off its monitor is
 moved and shrunk onto it. Wayland keeps only the size and maximized state.

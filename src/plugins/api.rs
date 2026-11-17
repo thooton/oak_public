@@ -16,7 +16,7 @@
 use super::parts::{self, User};
 use super::{Response as Answer, registering};
 use crate::theme::Theme;
-use crate::{App, look, text_menu, widgets};
+use crate::{App, look, text_menu, view, widgets};
 use eframe::egui::{self, Align, Align2, Color32, FontFamily, FontId, Id, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, TextWrapMode, Ui, Vec2, pos2, vec2};
 use oak_sdk::abi::*;
 use oak_sdk::rt::{bytes_of, str_of, text_from};
@@ -1607,6 +1607,362 @@ impl HostApi for Oak {
             give_text(out, out_user, &serde_json::to_string(&s).unwrap_or_default());
         }
     }
+
+    // ---- version 5: components (`crate::view`), and services any thread may use
+
+    unsafe extern "C" fn oak_page(ui: *mut OakUi, page: *const OakPage, body: OakBody, user: *mut c_void) -> u32 {
+        let (ui, p, t) = (ui_of(ui), read(page), theme());
+        let o = view::PageOpts { id: id_opt(p.id), title: str_of(p.title), subtitle: str_of(p.subtitle), back: str_of(p.back), width: p.width, no_scroll: p.flags & OAK_PAGE_NO_SCROLL != 0 };
+        let mut actions = p.actions.map(|a| move |ui: &mut Ui| run(a, p.actions_user, ui));
+        let back = view::page(ui, &t, &o, actions.as_mut().map(|a| a as &mut dyn FnMut(&mut Ui)), &mut |ui| run(body, user, ui));
+        if back { OAK_CANCELLED } else { 0 }
+    }
+
+    unsafe extern "C" fn oak_heading(ui: *mut OakUi, heading: *const OakHeading, out: *mut OakResponse) -> u32 {
+        let h = read(heading);
+        let level = match h.level {
+            OAK_HEADING_TITLE => view::Level::Title,
+            OAK_HEADING_SMALL => view::Level::Small,
+            _ => view::Level::Section,
+        };
+        let o = view::HeadingOpts { level, text: str_of(h.text), detail: str_of(h.detail), icon: str_of(h.icon), action: str_of(h.action), rule: h.flags & OAK_HEADING_RULE != 0, busy: h.flags & OAK_HEADING_BUSY != 0 };
+        let mut right = h.right.map(|b| move |ui: &mut Ui| run(b, h.right_user, ui));
+        let (r, pressed) = view::heading(ui_of(ui), &theme(), &o, right.as_mut().map(|r| r as &mut dyn FnMut(&mut Ui)));
+        give_as(r, out, |f| with(f & !OAK_CLICKED, OAK_CLICKED, pressed))
+    }
+
+    unsafe extern "C" fn oak_section(ui: *mut OakUi, section: *const OakSection, body: OakBody, user: *mut c_void, out: *mut OakResponse) -> u32 {
+        let s = read(section);
+        let on = |flag: u32| s.flags & flag != 0;
+        let o = view::SectionOpts {
+            id: id_opt(s.id),
+            title: str_of(s.title),
+            detail: str_of(s.detail),
+            icon: str_of(s.icon),
+            action: str_of(s.action),
+            card: on(OAK_SECTION_CARD),
+            folds: on(OAK_SECTION_FOLDS),
+            closed: on(OAK_SECTION_CLOSED),
+            busy: on(OAK_SECTION_BUSY),
+        };
+        let mut right = s.right.map(|b| move |ui: &mut Ui| run(b, s.right_user, ui));
+        let (r, open, pressed) = view::section(ui_of(ui), &theme(), &o, right.as_mut().map(|r| r as &mut dyn FnMut(&mut Ui)), &mut |ui| run(body, user, ui));
+        give_as(r, out, |f| with(with(f & !OAK_CLICKED, OAK_CLICKED, pressed), OAK_OPEN, open))
+    }
+
+    unsafe extern "C" fn oak_card(ui: *mut OakUi, card: *const OakCard, body: OakBody, user: *mut c_void, out: *mut OakResponse) -> u32 {
+        let c = read(card);
+        let o = view::CardOpts { id: id_opt(c.id), fill: col_opt(c.fill), padding: c.padding, width: c.width, click: c.flags & OAK_CARD_CLICK != 0, selected: c.flags & OAK_CARD_SELECTED != 0 };
+        give(view::card(ui_of(ui), &theme(), &o, &mut |ui| run(body, user, ui)), out)
+    }
+
+    unsafe extern "C" fn oak_action(ui: *mut OakUi, action: *const OakAction, out: *mut OakResponse) -> u32 {
+        let a = read(action);
+        let kind = match a.kind {
+            OAK_ACTION_PRIMARY => view::Kind::Primary,
+            OAK_ACTION_QUIET => view::Kind::Quiet,
+            OAK_ACTION_DANGER => view::Kind::Danger,
+            OAK_ACTION_LINK => view::Kind::Link,
+            OAK_ACTION_PILL => view::Kind::Pill,
+            OAK_ACTION_ICON => view::Kind::Icon,
+            _ => view::Kind::Default,
+        };
+        let on = |flag: u32| a.flags & flag != 0;
+        let o = view::ActionOpts {
+            kind,
+            text: str_of(a.text),
+            icon: str_of(a.icon),
+            tip: str_of(a.tip),
+            min_width: a.min_width,
+            disabled: on(OAK_ACTION_DISABLED),
+            busy: on(OAK_ACTION_BUSY),
+            selected: on(OAK_ACTION_SELECTED),
+            small: on(OAK_ACTION_SMALL),
+            fill: on(OAK_ACTION_FILL),
+            height: 0.0,
+        };
+        give(view::action(ui_of(ui), &theme(), &o), out)
+    }
+
+    unsafe extern "C" fn oak_badge(ui: *mut OakUi, text: OakStr, tone: u32, _flags: u32, out: *mut OakResponse) -> u32 {
+        give(view::badge(ui_of(ui), &theme(), str_of(text), tone_of(tone)), out)
+    }
+
+    unsafe extern "C" fn oak_item(ui: *mut OakUi, item: *const OakItem, out: *mut OakResponse) -> u32 {
+        let i = read(item);
+        let on = |flag: u32| i.flags & flag != 0;
+        let o = view::ItemOpts {
+            id: id_opt(i.id),
+            title: str_of(i.title),
+            subtitle: str_of(i.subtitle),
+            trailing: str_of(i.trailing),
+            icon: str_of(i.icon),
+            dot: on(OAK_ITEM_DOT).then(|| tone_of(i.tone)),
+            texture: if i.texture == 0 { None } else { texture(i.texture) },
+            height: i.height,
+            selected: on(OAK_ITEM_SELECTED),
+            disabled: on(OAK_ITEM_DISABLED),
+            busy: on(OAK_ITEM_BUSY),
+            no_line: on(OAK_ITEM_NO_LINE),
+        };
+        let mut left = i.left.map(|b| move |ui: &mut Ui| run(b, i.left_user, ui));
+        let mut right = i.right.map(|b| move |ui: &mut Ui| run(b, i.right_user, ui));
+        let r = view::item(ui_of(ui), &theme(), &o, left.as_mut().map(|l| l as &mut dyn FnMut(&mut Ui)), right.as_mut().map(|r| r as &mut dyn FnMut(&mut Ui)));
+        give(r, out)
+    }
+
+    unsafe extern "C" fn oak_field(ui: *mut OakUi, field: *const OakField, text: OakStr, changed: OakSink, user: *mut c_void, out: *mut OakResponse) -> u32 {
+        let (ui, f, before) = (ui_of(ui), read(field), str_of(text));
+        let on = |flag: u32| f.flags & flag != 0;
+        let label = str_of(f.label);
+        let id = match (f.id, label.is_empty()) {
+            (0, false) => Some(ui.scope_id().with(("field", label))),
+            (id, _) => id_opt(id),
+        };
+        let o = view::FieldOpts {
+            id,
+            label,
+            hint: str_of(f.hint),
+            help: str_of(f.help),
+            error: str_of(f.error),
+            button: str_of(f.button),
+            width: f.width,
+            rows: f.rows,
+            secret: on(OAK_FIELD_SECRET),
+            multiline: on(OAK_FIELD_MULTILINE),
+            disabled: on(OAK_FIELD_DISABLED),
+            busy: on(OAK_FIELD_BUSY),
+            focus: on(OAK_FIELD_FOCUS),
+            empty_ok: on(OAK_FIELD_EMPTY_OK),
+        };
+        let mut now = before.to_string();
+        let (r, confirmed) = view::field(ui, &theme(), &o, &mut now);
+        if now != before {
+            give_text(changed, user, &now);
+        }
+        give_as(r, out, |f| with(f, OAK_CONFIRMED, confirmed))
+    }
+
+    unsafe extern "C" fn oak_toggle(ui: *mut OakUi, on: *mut bool, label: OakStr, help: OakStr, flags: u32, out: *mut OakResponse) -> u32 {
+        let mut v = !on.is_null() && *on;
+        let r = view::toggle(ui_of(ui), &theme(), &mut v, str_of(label), str_of(help), flags & OAK_TOGGLE_DISABLED != 0);
+        if !on.is_null() {
+            *on = v;
+        }
+        give(r, out)
+    }
+
+    unsafe extern "C" fn oak_setting(ui: *mut OakUi, label: OakStr, help: OakStr, body: Option<OakBody>, user: *mut c_void, out: *mut OakResponse) {
+        let mut control = body.map(|b| move |ui: &mut Ui| run(b, user, ui));
+        give(view::setting(ui_of(ui), &theme(), str_of(label), str_of(help), control.as_mut().map(|c| c as &mut dyn FnMut(&mut Ui))), out);
+    }
+
+    unsafe extern "C" fn oak_choice(ui: *mut OakUi, choice: *const OakChoice, selected: *mut usize, out: *mut OakResponse) -> u32 {
+        let (ui, c) = (ui_of(ui), read(choice));
+        let options: Vec<&str> = slice(c.options, c.count).iter().map(|s| str_of(*s)).collect();
+        let style = match c.style {
+            OAK_CHOICE_TABS => view::ChoiceStyle::Tabs,
+            OAK_CHOICE_PILLS => view::ChoiceStyle::Pills,
+            OAK_CHOICE_DROPDOWN => view::ChoiceStyle::Dropdown,
+            OAK_CHOICE_LIST => view::ChoiceStyle::List,
+            _ => view::ChoiceStyle::Segmented,
+        };
+        let id = id_opt(c.id).unwrap_or_else(|| ui.scope_id().with(("choice", &options)));
+        let mut at = if selected.is_null() { 0 } else { *selected };
+        let r = view::choice(ui, &theme(), id, style, &options, &mut at, c.width);
+        if !selected.is_null() {
+            *selected = at;
+        }
+        give(r, out)
+    }
+
+    unsafe extern "C" fn oak_progress(ui: *mut OakUi, fraction: f32, label: OakStr, tone: u32, flags: u32, out: *mut OakResponse) {
+        let fraction = (fraction >= 0.0).then_some(fraction);
+        give(view::progress(ui_of(ui), &theme(), fraction, str_of(label), tone_of(tone), flags & OAK_PROGRESS_PERCENT != 0), out);
+    }
+
+    unsafe extern "C" fn oak_notice(ui: *mut OakUi, tone: u32, text: OakStr, flags: u32, out: *mut OakResponse) -> u32 {
+        let o = view::NoticeOpts { busy: flags & OAK_NOTICE_BUSY != 0, boxed: flags & OAK_NOTICE_BOXED != 0, dismiss: flags & OAK_NOTICE_DISMISS != 0 };
+        let (r, dismissed) = view::notice(ui_of(ui), &theme(), tone_of(tone), str_of(text), &o);
+        give_as(r, out, |f| with(f, OAK_CANCELLED, dismissed))
+    }
+
+    unsafe extern "C" fn oak_empty(ui: *mut OakUi, icon: OakStr, title: OakStr, text: OakStr, action: OakStr, out: *mut OakResponse) -> u32 {
+        give(view::empty(ui_of(ui), &theme(), str_of(icon), str_of(title), str_of(text), str_of(action)), out)
+    }
+
+    unsafe extern "C" fn oak_stat(ui: *mut OakUi, label: OakStr, value: OakStr, detail: OakStr, tone: u32, out: *mut OakResponse) -> u32 {
+        give(view::stat(ui_of(ui), &theme(), str_of(label), str_of(value), str_of(detail), tone_of(tone)), out)
+    }
+
+    unsafe extern "C" fn oak_slider(ui: *mut OakUi, value: *mut f64, slider: *const OakSlider, out: *mut OakResponse) -> u32 {
+        let s = read(slider);
+        let o = view::SliderOpts {
+            min: s.min,
+            max: s.max,
+            step: s.step,
+            width: s.width,
+            decimals: s.decimals.min(12) as usize,
+            suffix: str_of(s.suffix),
+            show_value: s.flags & OAK_SLIDER_VALUE != 0,
+            disabled: s.flags & OAK_SLIDER_DISABLED != 0,
+        };
+        let mut v = if value.is_null() { s.min } else { *value };
+        let r = view::slider(ui_of(ui), &theme(), &mut v, &o);
+        if !value.is_null() {
+            *value = v;
+        }
+        give(r, out)
+    }
+
+    unsafe extern "C" fn oak_table(ui: *mut OakUi, table: *const OakTable, cell: OakCell, user: *mut c_void, clicked: *mut usize) -> u32 {
+        let tb = read(table);
+        let columns: Vec<&str> = slice(tb.columns, tb.count).iter().map(|s| str_of(*s)).collect();
+        let widths = slice(tb.widths, tb.count).to_vec();
+        let aligns: Vec<Align> = slice(tb.aligns, tb.count).iter().map(|a| align(*a)).collect();
+        let o = view::TableOpts {
+            id: id_opt(tb.id),
+            columns: &columns,
+            widths: &widths,
+            aligns: &aligns,
+            rows: tb.rows,
+            row_height: tb.row_height,
+            click: tb.flags & OAK_TABLE_CLICK != 0,
+            no_head: tb.flags & OAK_TABLE_NO_HEAD != 0,
+        };
+        let (r, row) = view::table(ui_of(ui), &theme(), &o, &mut |ui, r, c| cell(user, ui_ptr(ui), r, c));
+        if let (Some(row), false) = (row, clicked.is_null()) {
+            *clicked = row;
+        }
+        with(flags_of(&r) & !OAK_CLICKED, OAK_CLICKED, row.is_some())
+    }
+
+    unsafe extern "C" fn oak_columns(ui: *mut OakUi, count: usize, gap: f32, cell: OakCell, user: *mut c_void) {
+        view::columns(ui_of(ui), count, gap, &mut |ui, i| cell(user, ui_ptr(ui), 0, i));
+    }
+
+    unsafe extern "C" fn oak_tone_color(tone: u32) -> u32 {
+        col_out(view::scoped(&theme()).tone(tone_of(tone)))
+    }
+
+    unsafe extern "C" fn oak_look_next(look: *const OakLook) {
+        view::look_next(look_of(look));
+    }
+
+    unsafe extern "C" fn oak_look_scope(ui: *mut OakUi, look: *const OakLook, body: OakBody, user: *mut c_void) {
+        let l = look_of(look).unwrap_or_default();
+        view::look_scope(ui_of(ui), &theme(), &l, |ui| run(body, user, ui));
+    }
+
+    unsafe extern "C" fn toast(tone: u32, text: OakStr) {
+        view::toast(tone_of(tone), str_of(text));
+    }
+
+    unsafe extern "C" fn spawn(name: OakStr, job: OakDo, user: *mut c_void) -> bool {
+        // (The plugin says its pointer may go to another thread.)
+        struct Job(OakDo, *mut c_void);
+        unsafe impl Send for Job {}
+        let job = Job(job, user);
+        let name = str_of(name);
+        std::thread::Builder::new()
+            .name(if name.is_empty() { "plugin".into() } else { name.to_string() })
+            .spawn(move || {
+                let job = job;
+                unsafe { (job.0)(job.1) }
+            })
+            .is_ok()
+    }
+
+    unsafe extern "C" fn prefs_get(plugin: OakStr, key: OakStr, out: OakSink, out_user: *mut c_void) -> bool {
+        match crate::plugin_prefs::get(str_of(plugin), str_of(key)) {
+            Some(json) => {
+                give_text(out, out_user, &json);
+                true
+            }
+            None => false,
+        }
+    }
+
+    unsafe extern "C" fn prefs_set(plugin: OakStr, key: OakStr, json: OakStr) {
+        let (plugin, key) = (str_of(plugin), str_of(key));
+        if plugin.is_empty() {
+            return;
+        }
+        if let Err(e) = crate::plugin_prefs::set(plugin, key, str_of(json)) {
+            crate::log_crash(&format!("plugin {plugin}: prefs_set {key}: {e}"));
+        }
+    }
+}
+
+/// `flags` with `flag` set when `on`.
+fn with(flags: u32, flag: u32, on: bool) -> u32 {
+    if on { flags | flag } else { flags }
+}
+
+/// Hands the plugin a widget's answer with its flags as `flags` makes
+/// them (a component's own: its action pressed, Enter in its field).
+unsafe fn give_as(r: egui::Response, out: *mut OakResponse, flags: impl FnOnce(u32) -> u32) -> u32 {
+    let mut a = answer(r);
+    a.flags = flags(a.flags);
+    if !out.is_null() {
+        *out = a;
+    }
+    a.flags
+}
+
+/// The look at `p` (null: none).
+unsafe fn look_of(p: *const OakLook) -> Option<view::Look> {
+    if p.is_null() {
+        return None;
+    }
+    let l = read(p);
+    // 0 keeps Oak's; below 0 is a true zero.
+    let len = |v: f32| (v != 0.0 && !v.is_nan()).then(|| v.max(0.0));
+    Some(view::Look {
+        fill: col_opt(l.fill),
+        fill_hover: col_opt(l.fill_hover),
+        stroke: col_opt(l.stroke),
+        ink: col_opt(l.ink),
+        ink_weak: col_opt(l.ink_weak),
+        accent: col_opt(l.accent),
+        good: col_opt(l.good),
+        warn: col_opt(l.warn),
+        bad: col_opt(l.bad),
+        radius: len(l.radius),
+        stroke_width: len(l.stroke_width),
+        padding_x: len(l.padding_x),
+        padding_y: len(l.padding_y),
+        height: len(l.height),
+        width: len(l.width),
+        text_points: len(l.text_points).filter(|p| *p > 0.0),
+        gap: len(l.gap),
+        text_scale: (l.text_scale > 0.0).then_some(l.text_scale),
+        monospace: l.flags & OAK_LOOK_MONOSPACE != 0,
+        no_frame: l.flags & OAK_LOOK_NO_FRAME != 0,
+    })
+}
+
+/// An id the plugin gave; 0: none.
+fn id_opt(v: u64) -> Option<Id> {
+    (v != 0).then(|| eid(v))
+}
+
+fn tone_of(code: u32) -> view::Tone {
+    match code {
+        OAK_TONE_ACCENT => view::Tone::Accent,
+        OAK_TONE_GOOD => view::Tone::Good,
+        OAK_TONE_WARN => view::Tone::Warn,
+        OAK_TONE_BAD => view::Tone::Bad,
+        _ => view::Tone::Plain,
+    }
+}
+
+/// `count` things at `p` (null: none).
+///
+/// # Safety
+/// `p` is null or points to `count` of them.
+unsafe fn slice<'a, T>(p: *const T, count: usize) -> &'a [T] {
+    if p.is_null() || count == 0 { &[] } else { std::slice::from_raw_parts(p, count) }
 }
 
 fn stroke_kind_of(kind: u32) -> StrokeKind {
@@ -1634,9 +1990,14 @@ mod tests {
 
     /// Draws a frame of `page` through the SDK's wrappers, which call
     /// Oak's table in this process as a loaded plugin's do; what it painted.
-    fn frame(ctx: &egui::Context, t: &Theme, time: &mut f64, events: Vec<egui::Event>, mut page: impl FnMut(&mut sdk::Ui)) -> Vec<(String, Rect)> {
+    fn frame(ctx: &egui::Context, t: &Theme, time: &mut f64, events: Vec<egui::Event>, page: impl FnMut(&mut sdk::Ui)) -> Vec<(String, Rect)> {
+        frame_sized(ctx, t, vec2(800.0, 600.0), time, events, page)
+    }
+
+    /// `frame`, in a window `size` large.
+    fn frame_sized(ctx: &egui::Context, t: &Theme, size: egui::Vec2, time: &mut f64, events: Vec<egui::Event>, mut page: impl FnMut(&mut sdk::Ui)) -> Vec<(String, Rect)> {
         oak_sdk::rt::attach(&TABLE);
-        let out = run_frame(ctx, vec2(800.0, 600.0), time, 0.05, events, |ui| {
+        let out = run_frame(ctx, size, time, 0.05, events, |ui| {
             crate::plugins::begin_frame(ui.ctx(), t);
             page(&mut unsafe { sdk::Ui::from_raw(ui_ptr(ui)) });
         });
@@ -1737,6 +2098,210 @@ mod tests {
         draw(&mut s, vec![egui::Event::Text("!".into())]);
         assert!(s.name.contains('!') && s.name.len() == 4, "{}", s.name);
         drop(shown);
+    }
+
+    #[derive(Default)]
+    struct Shown {
+        back: bool,
+        saved: u32,
+        opened: Option<usize>,
+        name: String,
+        confirmed: Option<String>,
+        on: bool,
+        kind: usize,
+        level: f64,
+        row: Option<usize>,
+        dismissed: bool,
+        section_open: bool,
+        heading_action: bool,
+    }
+
+    fn parts(ui: &mut sdk::Ui, s: &mut Shown) {
+        use oak_sdk::view::*;
+        let back = Page::new("Components").subtitle("All of them").back("Home").no_scroll().show(ui, |ui| {
+            s.heading_action |= Heading::new("Recent").detail("3").action("See all").show(ui).clicked();
+            let r = Section::new("Accounts").card().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if Action::primary("Save").show(ui).clicked() {
+                        s.saved += 1;
+                    }
+                    Action::new("Busy").busy(true).show(ui);
+                    Badge::new("beta", Tone::Accent).show(ui);
+                });
+                for (i, title) in ["First", "Second"].iter().enumerate() {
+                    if Item::new(title).subtitle("a row").trailing("now").dot(Tone::Good).show(ui).clicked() {
+                        s.opened = Some(i);
+                    }
+                }
+            });
+            s.section_open = r.response.open() && r.inner.is_some();
+            let f = Field::new(&mut s.name).label("Name").hint("Who").button("Add").show(ui);
+            if f.confirmed() {
+                s.confirmed = Some(s.name.clone());
+            }
+            Toggle::new(&mut s.on, "Loud").help("Says it louder").show(ui);
+            Choice::new(&mut s.kind, &["One", "Two", "Three"]).show(ui);
+            Slider::new(&mut s.level, 0.0..=10.0).step(1.0).width(200.0).show_value(0, " pt").show(ui);
+            if let Some(row) = Table::new(&["Name", "Size"], 3).aligns(&[Align::Min, Align::Max]).clickable().show(ui, |ui, r, c| {
+                ui.label(format!("r{r}c{c}"));
+            }) {
+                s.row = Some(row);
+            }
+            if !s.dismissed {
+                s.dismissed = Notice::new(Tone::Warn, "Careful").dismiss().show(ui).cancelled();
+            }
+            columns(ui, 2, 0.0, |ui, i| {
+                Stat::new(["Tokens", "Cost"][i], ["1.2k", "$3"][i]).show(ui);
+            });
+            Progress::new(0.5).label("Halfway").percent().show(ui);
+            Empty::new("Nothing here").text("Add one to start.").show(ui);
+        });
+        s.back |= back;
+    }
+
+    /// Oak's components, drawn through the table from `oak_sdk::view`: they
+    /// show their texts, and what is pressed, typed or picked comes back.
+    #[test]
+    fn components_drawn_through_the_table() {
+        let (ctx, t) = test_ctx(true, true);
+        let (mut time, mut s) = (0.0, Shown::default());
+        let mut draw = |s: &mut Shown, events: Vec<egui::Event>| {
+            let size = vec2(800.0, 1200.0);
+            frame_sized(&ctx, &t, size, &mut time, events, |ui| parts(ui, s));
+            frame_sized(&ctx, &t, size, &mut time, vec![], |ui| parts(ui, s))
+        };
+        let shown = draw(&mut s, vec![]);
+        for want in ["← Home", "Components", "All of them", "Recent", "See all", "Accounts", "Save", "beta", "First", "a row", "now", "Name", "Who", "Loud", "Says it louder", "One", "Two", "0 pt", "Size", "r2c1", "Careful", "Tokens", "1.2k", "Halfway", "50%", "Nothing here"] {
+            assert!(shown.iter().any(|(text, _)| text == want), "{want} isn't drawn: {}", texts(&shown));
+        }
+        assert!(s.section_open);
+        // A row's widgets side by side; the table's cells in their columns.
+        assert!(rect_of(&shown, "beta").left() > rect_of(&shown, "Save").right());
+        assert!(rect_of(&shown, "r0c1").left() > rect_of(&shown, "r0c0").right());
+
+        let shown = draw(&mut s, click(rect_of(&shown, "Save").center(), Primary));
+        assert_eq!(s.saved, 1);
+        let shown = draw(&mut s, click(rect_of(&shown, "Second").center(), Primary));
+        assert_eq!(s.opened, Some(1));
+        let shown = draw(&mut s, click(rect_of(&shown, "See all").center(), Primary));
+        assert!(s.heading_action);
+        let shown = draw(&mut s, click(rect_of(&shown, "Says it louder").center(), Primary));
+        assert!(s.on, "a click anywhere on the row flips it");
+        let shown = draw(&mut s, click(rect_of(&shown, "Three").center(), Primary));
+        assert_eq!(s.kind, 2);
+        let shown = draw(&mut s, click(rect_of(&shown, "r1c0").center(), Primary));
+        assert_eq!(s.row, Some(1), "a click on a cell's text is its row's");
+        // The notice's X is at the column's right end (760 wide, in the
+        // middle of 800).
+        let careful = rect_of(&shown, "Careful");
+        let shown = draw(&mut s, click(egui::pos2(780.0 - 9.0, careful.center().y), Primary));
+        assert!(s.dismissed && !texts(&shown).contains("Careful"), "{}", texts(&shown));
+
+        // Typing in the field, then Enter, confirms it; the button is off
+        // while it is empty.
+        let shown = draw(&mut s, click(rect_of(&shown, "Who").center(), Primary));
+        draw(&mut s, vec![egui::Event::Text("Ann".into())]);
+        assert_eq!(s.name, "Ann");
+        assert_eq!(s.confirmed, None);
+        draw(&mut s, vec![crate::app_hover_test::key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(s.confirmed.as_deref(), Some("Ann"));
+        drop(shown);
+
+        // The back link.
+        let shown = draw(&mut s, vec![]);
+        draw(&mut s, click(rect_of(&shown, "← Home").center(), Primary));
+        assert!(s.back);
+    }
+
+    /// A look changes the one component it is given to, a scope every
+    /// component in it (scopes in scopes add to it, and it ends with its
+    /// body), and the new slots draw where they say.
+    #[test]
+    fn looks_change_components() {
+        use oak_sdk::view::*;
+        let (ctx, t) = test_ctx(true, true);
+        let mut time = 0.0;
+        let pink = Color32::from_rgb(0xe0, 0x6c, 0x9f);
+        let blue = Color32::from_rgb(0x2b, 0x5c, 0xd6);
+        let accents = RefCell::new(Vec::new());
+        let mut draw = || {
+            frame(&ctx, &t, &mut time, vec![], |ui| {
+                ui.horizontal(|ui| {
+                    Action::new("Tall").look(Look::new().height(50.0).width(140.0)).show(ui);
+                    Action::new("Plain").show(ui);
+                });
+                ui.label("After");
+                ui.horizontal(|ui| {
+                    next_look(&Look::new().text_size(30.0));
+                    Badge::new("Big", Tone::Plain).show(ui);
+                    Badge::new("Small", Tone::Plain).show(ui);
+                });
+                let mut a = accents.borrow_mut();
+                a.push(tone_color(Tone::Accent));
+                look_scope(ui, &Look::new().accent(pink).text_scale(2.0), |ui| {
+                    a.push(tone_color(Tone::Accent));
+                    look_scope(ui, &Look::new().accent(blue).bad(blue), |ui| {
+                        a.push(tone_color(Tone::Accent));
+                        a.push(tone_color(Tone::Bad));
+                        Badge::new("Scaled", Tone::Plain).show(ui);
+                    });
+                    a.push(tone_color(Tone::Accent));
+                });
+                a.push(tone_color(Tone::Accent));
+                Section::new("Mail").right(|ui| {
+                    ui.label("Unread");
+                })
+                .show(ui, |ui| {
+                    Item::new("Ann").left(|ui| {
+                        ui.label("AV");
+                    })
+                    .right(|ui| {
+                        ui.label("Reply");
+                    })
+                    .show(ui);
+                });
+            })
+        };
+        let shown = draw();
+        let (tall, plain) = (rect_of(&shown, "Tall"), rect_of(&shown, "Plain"));
+        assert!(rect_of(&shown, "Big").height() > rect_of(&shown, "Small").height() * 2.0, "{}", texts(&shown));
+        assert!(rect_of(&shown, "Scaled").height() > rect_of(&shown, "Small").height() * 1.6);
+        // Its text is in the middle of a button 140 wide (the plain one is
+        // as wide as its text and padding: 28 from its middle to its end).
+        assert!(plain.left() - tall.center().x > 70.0, "{tall:?} {plain:?}");
+        // (50 high: its text is 17 from its top, and what is after it 54.)
+        assert!(rect_of(&shown, "After").top() - tall.top() > 32.0, "{tall:?} {:?}", rect_of(&shown, "After"));
+        let a = accents.borrow();
+        let base = t.accent;
+        assert_eq!(*a, vec![base, pink, blue, blue, pink, base]);
+        drop(a);
+        // The slots: the item's left before its title, the section's right
+        // at its heading's right end.
+        assert!(rect_of(&shown, "AV").right() < rect_of(&shown, "Ann").left());
+        assert!(rect_of(&shown, "Reply").left() > rect_of(&shown, "Ann").right());
+        assert!(rect_of(&shown, "Unread").left() > rect_of(&shown, "Mail").right() + 200.0);
+        assert!((rect_of(&shown, "Unread").center().y - rect_of(&shown, "Mail").center().y).abs() < 4.0);
+        // A next look no component took is gone by the next frame.
+        oak_sdk::view::next_look(&Look::new().text_size(40.0));
+        crate::view::begin_frame();
+        let shown = draw();
+        assert!(rect_of(&shown, "Plain").height() < 20.0);
+    }
+
+    /// Toasts and prefs go through the table from any thread.
+    #[test]
+    fn toasts_and_spawned_work_through_the_table() {
+        oak_sdk::rt::attach(&TABLE);
+        oak_sdk::view::toast(oak_sdk::view::Tone::Good, "Saved the thing");
+        assert!(crate::view::toasts_now().iter().any(|t| t == "Saved the thing"));
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let tx = Box::into_raw(Box::new(tx));
+        unsafe extern "C" fn run(user: *mut c_void) {
+            let tx = unsafe { Box::from_raw(user as *mut std::sync::mpsc::Sender<String>) };
+            tx.send(std::thread::current().name().unwrap_or("").to_string()).unwrap();
+        }
+        assert!(unsafe { (TABLE.spawn)(oak_sdk::rt::s("plugin work"), run, tx as *mut c_void) });
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), "plugin work");
     }
 
     /// A plugin's super agent looks as Oak's own: its chat, its box and

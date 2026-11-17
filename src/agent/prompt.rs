@@ -33,11 +33,13 @@ include!(concat!(env!("OUT_DIR"), "/roles.rs"));
 /// `new_screen::SUPER_KIND`). Not offered as a System prompt.
 pub(crate) const SUPER_ROLE: &str = "super";
 
-/// The roles plugins added (`add_roles`).
-static EXTRA: std::sync::OnceLock<Vec<Role>> = std::sync::OnceLock::new();
+/// The roles plugins added (`add_roles`). Each set is kept for good: a
+/// role handed out stays valid after a reload replaces the set.
+static EXTRA: std::sync::RwLock<&'static [Role]> = std::sync::RwLock::new(&[]);
 
-/// Takes the roles plugins registered, once, when they were loaded. One
-/// with a built-in role's id (or another plugin's) is left out.
+/// Takes the roles the running plugins registered, when they were loaded
+/// or reloaded (in place of those before). One with a built-in role's id
+/// (or another plugin's) is left out.
 pub(crate) fn add_roles(roles: &[oak_sdk::Role]) {
     let keep = |s: &str| -> &'static str { Box::leak(s.to_string().into_boxed_str()) };
     let mut extra: Vec<Role> = vec![];
@@ -47,12 +49,13 @@ pub(crate) fn add_roles(roles: &[oak_sdk::Role]) {
         }
         extra.push(Role { id: keep(&r.id), name: keep(if r.name.is_empty() { &r.id } else { &r.name }), text: keep(&r.text), icon: keep(&r.icon), offered: r.offered });
     }
-    let _ = EXTRA.set(extra);
+    *EXTRA.write().unwrap_or_else(|e| e.into_inner()) = Box::leak(extra.into_boxed_slice());
 }
 
 /// Every role: the built-in ones, then the plugins'.
 fn all() -> impl Iterator<Item = &'static Role> {
-    ROLES.iter().chain(EXTRA.get().into_iter().flatten())
+    let extra: &'static [Role] = *EXTRA.read().unwrap_or_else(|e| e.into_inner());
+    ROLES.iter().chain(extra)
 }
 
 /// The roles the New screen offers.
