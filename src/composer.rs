@@ -40,13 +40,14 @@ impl App {
         // rest, flush with the window's edge. The message box grows with
         // its text, upwards (the panel is pinned to the window's bottom),
         // up to `composer_max_h`; past that it scrolls. The buttons and
-        // boxes stay level with its bottom, which keeps room under them for
-        // the Settings link and a plugin's row above it.
-        let corners_h = links_room() - 24.0;
+        // boxes stay level with its bottom. (The Settings link and a
+        // plugin's row above it fit in the corner within the row's height,
+        // so the row isn't moved down for them: it would leave the message
+        // box above the boxes beside it.)
         let top = y;
         let (resp, box_rect) = self.message_box(ui, t, lay.chat, top, id);
         if resp.has_focus() { self.side_active = false; }
-        let bottom = box_rect.bottom().max(top + COMPOSER_H) + corners_h;
+        let bottom = box_rect.bottom().max(top + COMPOSER_H);
         let row = |x: Rangef| Rect::from_x_y_ranges(x, bottom - COMPOSER_H..=bottom);
         let pick = self.composer_buttons(ui, t, row(Rangef::new(lay.buttons, lay.buttons + BTN)));
         self.corner_links(ui, t, area.left(), lay.unslop.map_or(lay.buttons, |u| u.min) - 8.0, bottom);
@@ -174,8 +175,7 @@ impl App {
             }
         }
         // Above it: what a plugin keeps there (a switch that works on every
-        // message). It draws in a row of its own, and the box grows to
-        // leave it room.
+        // message). It draws in a row of its own, within the row's height.
         crate::plugins::composer_corner(ui, self, &room);
         let Some(alpha) = flash else { return };
         let font = FontId::proportional(12.0);
@@ -404,12 +404,6 @@ fn chat_session<'a>(screen: &Screen, sessions: &'a HashMap<String, Session>) -> 
 
 /// The composer row's height: the message box at four lines.
 pub(crate) const COMPOSER_H: f32 = 96.0;
-/// What the Settings link takes at the row's bottom, and above it the row
-/// `plugins::COMPOSER_CORNER_H` tall a plugin's corner hook draws in.
-pub(crate) fn links_room() -> f32 {
-    let plugin = crate::plugins::parts().hooks.iter().any(|h| h.has_composer_corner());
-    24.0 + if plugin { crate::plugins::COMPOSER_CORNER_H + 6.0 } else { 0.0 }
-}
 /// The tallest the message box grows (it scrolls past that): 300 points,
 /// or less in a short window, so the transcript keeps most of it.
 pub(crate) fn composer_max_h(ctx: &egui::Context) -> f32 {
