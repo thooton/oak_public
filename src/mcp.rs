@@ -316,6 +316,16 @@ pub fn kit_id(name: &str) -> String {
     format!("mcp:{name}")
 }
 
+/// The kit LOAD's `name` means: a configured server's (any case, switched
+/// on or not: `kit_id`), else one of Oak's, in upper case.
+pub fn kit_named(name: &str) -> String {
+    let name = name.trim();
+    match configs().into_iter().find(|c| c.trouble.is_none() && c.name.eq_ignore_ascii_case(name)) {
+        Some(c) => kit_id(&c.name),
+        None => name.to_uppercase(),
+    }
+}
+
 /// The server a kit id is for.
 pub fn server_of_kit(kit: &str) -> Option<&str> {
     kit.strip_prefix("mcp:")
@@ -398,7 +408,8 @@ pub fn load_text(c: &Config, through_load: bool) -> String {
         out += " It lists no tools.";
     } else if through_load {
         out += &format!(
-            " Its tools aren't in your tool list until Oak next renews the list: until then, call them through LOAD, with name={} and `input` {{\"tool\": \"<tool name>\", \"arguments\": {{...}}}}.\n\nIts tools:\n",
+            " Its tools aren't in your tool list until earlier context is summarized: to use one, {}, with name={} and `input` {{\"tool\": \"<tool name>\", \"arguments\": {{...}}}}.\n\nIts tools:\n",
+            crate::prefix::THROUGH_LOAD,
             c.name
         );
         for t in &o.tools {
@@ -1137,7 +1148,7 @@ mod kit_tests {
         let (c, tool) = resolve_tool("mcp__blender__get_scene_info").unwrap();
         assert_eq!((c.name.as_str(), tool.as_str()), ("blender", "get_scene_info"));
         assert!(prompt_section(&[kit_id("blender")]).starts_with("# MCP Server Instructions"));
-        assert!(load_text(&c, true).contains("call them through LOAD"));
+        assert!(load_text(&c, true).contains("call it through LOAD"));
         // A local model gets none of it.
         let local = crate::tools::definitions_with_kits(true, false, true, &[kit_id("blender")]);
         assert!(!local.iter().any(|d| d["name"].as_str().unwrap().starts_with("mcp__")));

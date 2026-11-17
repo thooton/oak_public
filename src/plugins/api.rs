@@ -323,8 +323,16 @@ unsafe fn field<'a>(text: &'a mut String, e: &OakTextEdit) -> egui::TextEdit<'a>
     if let Some(c) = col_opt(e.text_color) {
         t = t.text_color(c);
     }
-    if on(OAK_EDIT_NO_FRAME) {
-        t = t.frame(egui::Frame::NONE);
+    // (A frame given replaces the margin: a frameless field's goes in its frame.)
+    let m = |v: f32| v.round().clamp(-128.0, 127.0) as i8;
+    let margin = on(OAK_EDIT_MARGIN).then(|| egui::Margin { left: m(e.margin_left), right: m(e.margin_right), top: m(e.margin_top), bottom: m(e.margin_bottom) });
+    match (on(OAK_EDIT_NO_FRAME), margin) {
+        (true, margin) => t = t.frame(egui::Frame::NONE.inner_margin(margin.unwrap_or_default())),
+        (false, Some(margin)) => t = t.margin(margin),
+        (false, None) => {}
+    }
+    if e.min_width > 0.0 || e.min_height > 0.0 {
+        t = t.min_size(vec2(e.min_width.max(0.0), e.min_height.max(0.0)));
     }
     if on(OAK_EDIT_ENTER_SENDS) {
         t = t.return_key(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
@@ -410,6 +418,15 @@ unsafe fn give_result(r: Result<String, String>, out: OakSink, user: *mut c_void
         }
     }
 }
+
+/// The same, when what worked has nothing to say.
+unsafe fn give_done(r: Result<(), String>, out: OakSink, user: *mut c_void) -> bool {
+    give_result(r.map(|()| String::new()), out, user)
+}
+
+/// Why a call that needs the window couldn't be made: Oak has none up (a
+/// plugin's thread, before the first frame, or after the last).
+const NO_WINDOW: &str = "Oak's window isn't there.";
 
 fn headers_from(lines: &str) -> Vec<(String, String)> {
     lines.lines().filter_map(|l| l.split_once(':')).map(|(n, v)| (n.trim().to_string(), v.trim().to_string())).collect()
@@ -745,6 +762,49 @@ impl HostApi for Oak {
         app(|a| a.plugin_cloud_list(ui, str_of(backend)));
     }
 
+    unsafe extern "C" fn app_session(key: OakStr, out: OakSink, out_user: *mut c_void) -> bool {
+        let key = str_of(key);
+        match app(|a| a.plugin_session(key)) {
+            Some(Some(s)) => {
+                give_text(out, out_user, &serde_json::to_string(&s).unwrap_or_default());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    unsafe extern "C" fn app_set_model(key: OakStr, provider: OakStr, model: OakStr, error: OakSink, error_user: *mut c_void) -> bool {
+        let (key, provider, model) = (str_of(key), str_of(provider), str_of(model));
+        match app(|a| a.plugin_set_model(key, provider, model)) {
+            Some(r) => give_done(r, error, error_user),
+            None => give_result(Err(NO_WINDOW.into()), error, error_user),
+        }
+    }
+
+    unsafe extern "C" fn app_send(key: OakStr, text: OakStr, error: OakSink, error_user: *mut c_void) -> bool {
+        let (key, text) = (str_of(key), str_of(text));
+        match app(|a| a.plugin_send(key, text)) {
+            Some(r) => give_done(r, error, error_user),
+            None => give_result(Err(NO_WINDOW.into()), error, error_user),
+        }
+    }
+
+    unsafe extern "C" fn app_interrupt(key: OakStr, error: OakSink, error_user: *mut c_void) -> bool {
+        let key = str_of(key);
+        match app(|a| a.plugin_interrupt(key)) {
+            Some(r) => give_done(r, error, error_user),
+            None => give_result(Err(NO_WINDOW.into()), error, error_user),
+        }
+    }
+
+    unsafe extern "C" fn app_resume(key: OakStr, error: OakSink, error_user: *mut c_void) -> bool {
+        let key = str_of(key);
+        match app(|a| a.plugin_resume(key)) {
+            Some(r) => give_done(r, error, error_user),
+            None => give_result(Err(NO_WINDOW.into()), error, error_user),
+        }
+    }
+
     // ---- laying out
 
     unsafe extern "C" fn ui_row(ui: *mut OakUi, kind: u32, body: OakBody, user: *mut c_void, out: *mut OakResponse) {
@@ -1024,6 +1084,15 @@ impl HostApi for Oak {
                 _ => None,
             }),
             (OAK_RESPONSE_HIGHLIGHT, _) => drop(r.highlight()),
+            (OAK_RESPONSE_MENU, Some(body)) => {
+                let mut popup = egui::Popup::menu(&r);
+                if value > 0 {
+                    popup = popup.width(value as f32);
+                }
+                popup.show(|ui| run(body, user, ui));
+                let open = egui::Popup::is_id_open(&r.ctx, egui::Popup::default_response_id(&r));
+                return if open { flags | OAK_OPEN } else { flags & !OAK_OPEN };
+            }
             _ => {}
         }
         flags
@@ -1279,12 +1348,16 @@ impl HostApi for Oak {
     unsafe extern "C" fn input_get(what: u32, out: *mut OakRect) -> bool {
         let Some(ctx) = super::context() else { return false };
         let point = |p: Option<Pos2>| p.map(|p| OakRect { x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+        if what == OAK_INPUT_FOCUSED {
+            return ctx.memory(|m| m.focused().is_some());
+        }
         let (r, on) = ctx.input(|i| match what {
             OAK_INPUT_POINTER => (point(i.pointer.interact_pos()), true),
             OAK_INPUT_PRESS_ORIGIN => (point(i.pointer.press_origin()), true),
             OAK_INPUT_POINTER_DOWN => (Some(OakRect::default()), i.pointer.primary_down()),
             OAK_INPUT_MODIFIERS => (Some(OakRect { x0: modifiers_out(i.modifiers) as f32, ..Default::default() }), true),
             OAK_INPUT_SCROLL => (Some(OakRect { x0: i.smooth_scroll_delta().x, y0: i.smooth_scroll_delta().y, ..Default::default() }), true),
+            OAK_INPUT_FILES_HOVERED => (Some(OakRect::default()), !i.raw.hovered_files.is_empty()),
             _ => (None, false),
         });
         match r {
@@ -1590,10 +1663,61 @@ impl HostApi for Oak {
     unsafe extern "C" fn oak_super_agent_box(area: *const OakRect, json: OakStr) -> u32 {
         let Some(ctx) = super::context() else { return 0 };
         let b: crate::super_view::AgentBox = serde_json::from_str(str_of(json)).unwrap_or_default();
-        if crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) { OAK_CLICKED } else { 0 }
+        if crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) == Some(crate::super_view::AgentAction::Stop) { OAK_CLICKED } else { 0 }
     }
 
-    // ---- version 4
+    unsafe extern "C" fn oak_super_agent_box_act(area: *const OakRect, json: OakStr, out: OakSink, out_user: *mut c_void) {
+        let Some(ctx) = super::context() else { return };
+        let b: crate::super_view::AgentBox = serde_json::from_str(str_of(json)).unwrap_or_default();
+        if let Some(act) = crate::super_view::agent_box(&ctx, &theme(), rect(&*area), &b, |_, _| {}) {
+            give_text(out, out_user, &serde_json::to_string(&act).unwrap_or_default());
+        }
+    }
+
+    // ---- version 5
+
+    unsafe extern "C" fn animate_time(id: u64, on: bool, seconds: f32) -> f32 {
+        super::context().map_or(on as u8 as f32, |ctx| ctx.animate_bool_with_time(eid(id), on, seconds.max(0.0)))
+    }
+
+    unsafe extern "C" fn app_go_settings() {
+        app(|a| a.plugin_go_settings());
+    }
+
+    unsafe extern "C" fn app_go_page(id: OakStr) {
+        app(|a| a.plugin_go_page(str_of(id)));
+    }
+
+    unsafe extern "C" fn take_files(out: OakSink, out_user: *mut c_void) -> bool {
+        let Some(ctx) = super::context() else { return false };
+        let mut files = vec![];
+        let errors = crate::composer::take_drops_all(&ctx, &mut files);
+        if files.is_empty() && errors.is_empty() {
+            return false;
+        }
+        give_text(out, out_user, &json!({"files": files, "errors": errors}).to_string());
+        true
+    }
+
+    unsafe extern "C" fn pick_files(filter: OakStr, extensions: OakStr, out: OakSink, out_user: *mut c_void) -> bool {
+        let exts: Vec<&str> = str_of(extensions).lines().map(str::trim).filter(|e| !e.is_empty()).collect();
+        let mut dialog = rfd::FileDialog::new();
+        if !exts.is_empty() {
+            let name = str_of(filter);
+            dialog = dialog.add_filter(if name.is_empty() { "Files" } else { name }, &exts).add_filter("Any file", &["*"]);
+        }
+        let Some(paths) = dialog.pick_files() else { return false };
+        let (mut files, mut errors) = (vec![], vec![]);
+        for path in paths {
+            let mut hint = None;
+            crate::composer::attach_file(&mut files, &mut hint, &path);
+            errors.extend(hint);
+        }
+        give_text(out, out_user, &json!({"files": files, "errors": errors}).to_string());
+        true
+    }
+
+    // ---- version 7
 
     unsafe extern "C" fn app_activity(out: OakSink, out_user: *mut c_void) {
         let Some(ctx) = super::context() else { return };
@@ -1608,7 +1732,7 @@ impl HostApi for Oak {
         }
     }
 
-    // ---- version 5: components (`crate::view`), and services any thread may use
+    // ---- version 8: components (`crate::view`), and services any thread may use
 
     unsafe extern "C" fn oak_page(ui: *mut OakUi, page: *const OakPage, body: OakBody, user: *mut c_void) -> u32 {
         let (ui, p, t) = (ui_of(ui), read(page), theme());
@@ -2354,6 +2478,25 @@ mod tests {
         let mut stopped = false;
         frame(&ctx, &t, &mut time, click(rect_of(&shown, "Stop").center(), Primary), |ui| stopped |= oak_sdk::ui::super_agent_box(ui.ctx(), &t, area, &b));
         assert!(stopped);
+        // Version 4: pickers, Pause, detail, blocker and a switch waiting.
+        let b = json!({"title": "Fix the build", "caption": "Agent 4, run by Delta", "working": true, "state": "Running EXECUTE", "stop": "Stops it",
+            "models": [{"id": "a", "name": "Model A", "efforts": ["low", "high"]}], "model_id": "a", "effort": "high", "model": "unused",
+            "pending": "Switching to Model B after this step", "pause": "Pauses it", "detail": "Running tools for 3m", "blocker": "Blocked: no computer"});
+        let mut got = vec![];
+        let mut draw = |events: Vec<egui::Event>, got: &mut Vec<Option<Value>>| {
+            frame(&ctx, &t, &mut time, events, |ui| got.push(oak_sdk::ui::super_agent_box_act(ui.ctx(), &t, area, &b)))
+        };
+        draw(vec![], &mut got);
+        let shown = draw(vec![], &mut got);
+        for want in ["Model A", "high", "Pause", "Stop", "Running tools for 3m", "Blocked: no computer", "Switching to Model B after this step"] {
+            assert!(shown.iter().any(|(s, _)| s == want), "{want} isn't drawn: {}", texts(&shown));
+        }
+        assert!(!shown.iter().any(|(s, _)| s == "unused"), "pickers in place of the line");
+        draw(click(rect_of(&shown, "Pause").center(), Primary), &mut got);
+        draw(click(rect_of(&shown, "Stop").center(), Primary), &mut got);
+        let acts: Vec<Value> = got.into_iter().flatten().collect();
+        assert_eq!(acts, vec![json!("pause"), json!("stop")]);
+        assert_eq!(serde_json::to_value(crate::super_view::AgentAction::Model("b".into(), "low".into())).unwrap(), json!({"model": ["b", "low"]}));
     }
 
     /// An answer goes over the table by its handle, either way, and its

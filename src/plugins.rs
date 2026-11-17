@@ -36,7 +36,7 @@
 mod api;
 mod parts;
 
-use crate::{api as accounts, store};
+use crate::{App, api as accounts, store};
 use oak_sdk::abi::{ENTRY_SYMBOL, OAK_ABI, OAK_API_VERSION, OakInit, OakPlugin};
 pub(crate) use parts::{CloudBackend, FontDef, HomeTab, Info, NewKind, Parts, SessionKit, TabKind, Tags, Vault};
 use serde_json::Value;
@@ -764,6 +764,25 @@ pub(crate) fn exiting() {
     }
 }
 
+/// What plugins draw in a message box's bottom left corner, above Oak's
+/// Settings link: each a row `COMPOSER_CORNER_H` tall, `GAP` apart, its
+/// bottom on the link's top. Returns the top of what was drawn, or
+/// `room.top()` when nothing was.
+pub(crate) fn composer_corner(ui: &mut eframe::egui::Ui, app: &mut App, room: &eframe::egui::Rect) -> f32 {
+    let mut top = room.top();
+    for h in parts().hooks.iter().filter(|h| h.has_composer_corner()) {
+        let bottom = top - 6.0;
+        let area = eframe::egui::Rect::from_min_max(eframe::egui::pos2(room.left(), bottom - COMPOSER_CORNER_H), eframe::egui::pos2(room.right(), bottom));
+        ui.scope_builder(eframe::egui::UiBuilder::new().max_rect(area).layout(eframe::egui::Layout::bottom_up(eframe::egui::Align::LEFT)), |ui| h.composer_corner(ui, app));
+        top = area.top();
+    }
+    top
+}
+
+/// The height of a plugin's row above the Settings link: one line, a
+/// switch and its padding.
+pub(crate) const COMPOSER_CORNER_H: f32 = 22.0;
+
 /// The plugin tab kind that owns `key`, if one does.
 pub(crate) fn tab_kind(key: &str) -> Option<&'static Arc<TabKind>> {
     parts().tab_kinds.iter().find(|k| k.owns(key))
@@ -1136,6 +1155,10 @@ mod tests {
                 app.page = Page::Home;
                 app.home_list = tab.id();
                 frames(&mut app, &format!("Home's {} tab in the {theme} theme", tab.id()));
+            }
+            for tab in p.home_tabs.iter().filter(|tab| tab.page()) {
+                app.plugin_go_page(&tab.id());
+                frames(&mut app, &format!("the page {} in the {theme} theme", tab.id()));
             }
         }
         app.page = Page::Settings;

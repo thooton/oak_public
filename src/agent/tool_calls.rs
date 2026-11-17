@@ -407,7 +407,8 @@ impl Worker {
         let tool = match mode {
             _ if kit == "WINDOW" => String::new(),
             Some(crate::prefix::Mode::Generic) => format!(
-                "Its tool isn't in your tool list until Oak next renews the list: until then, call it through LOAD, with name={kit} and the tool's input in `input`, e.g. {{\"name\": \"{kit}\", \"input\": {{\"action\": \"...\"}}}}.\n{}",
+                "Its tool isn't in your tool list: {}, with name={kit} and the tool's input in `input`, e.g. {{\"name\": \"{kit}\", \"input\": {{\"action\": \"...\"}}}}.\n{}",
+                crate::prefix::THROUGH_LOAD,
                 tools::kit_help(&kit, agent)
             ),
             _ => format!("The {kit} tool is in your tool list now."),
@@ -640,6 +641,13 @@ impl Worker {
             "AGENT_SEND" => self.agent_send(id, input["message"].as_str().unwrap_or("")),
             "AGENT_LIST" => Ok(self.agent_list()),
             "AGENT_SET" => self.agent_set(id, input),
+            "AGENT_PAUSE" | "AGENT_RESUME" if input.get("model").is_some_and(|m| !m.is_null()) => {
+                if input.get("id").is_some_and(|i| !i.is_null()) {
+                    Err("Give `id` or `model`, not both.".into())
+                } else {
+                    self.agent_group(name == "AGENT_PAUSE", input["model"].as_str().unwrap_or(""))
+                }
+            }
             "AGENT_PAUSE" => self.agent_pause(id),
             "AGENT_RESUME" => self.agent_resume(id),
             "ACCOUNTS" => Ok(self.accounts_tool()),

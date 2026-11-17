@@ -218,7 +218,7 @@ pub struct Conversation {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Activity {
-    /// "home", "chats", "settings" or "usage".
+    /// "home", "chats", "settings", "usage" or "plugin" (a plugin's page).
     pub page: String,
     /// Home's menu is open.
     pub menu: bool,
@@ -297,6 +297,19 @@ pub struct NewConversation {
     pub text: String,
     /// The message's attachments, as the message box holds them.
     pub files: Vec<Value>,
+    /// Where it runs (empty: the folder picked in Settings). A plugin may
+    /// name one its own choice of folder didn't, to carry a conversation
+    /// on where another was.
+    pub folder: String,
+    /// The model it runs on, and who serves it: an id `App::conversations`
+    /// gives, or empty for the one picked in Settings. Its provider is
+    /// worked out from the model unless `provider` says which.
+    pub model: String,
+    pub provider: String,
+    /// Its effort ("high"; empty: the one picked in Settings).
+    pub effort: String,
+    /// A chat: no folder, no project, only the web's tools.
+    pub chat: bool,
 }
 
 /// Oak's services, for any thread.
@@ -502,6 +515,19 @@ pub trait App {
     /// Shows the New screen with `kind` picked (a `NewKind`'s id, a cloud
     /// backend's id, "local", "chat", "super").
     fn go_new(&mut self, kind: &str);
+    /// Shows Settings; leaving it comes back to what was shown (Oak 5).
+    fn go_settings(&mut self);
+    /// Shows the page of the `HomeTab` `id` (one whose `page` is true; Oak 5).
+    fn go_page(&mut self, id: &str);
+    /// What was pasted (pictures) or dropped on the window this frame,
+    /// as image and file blocks the message box would attach, and why any
+    /// couldn't be. Whoever takes them has them: take them only while
+    /// showing somewhere they go (Oak 5).
+    fn take_files(&mut self) -> Attached;
+    /// Asks for files to attach in the system's dialog, offering those
+    /// with `extensions` (named `filter`; none: any file) and any file.
+    /// `None`: none were picked (Oak 5).
+    fn pick_files(&mut self, filter: &str, extensions: &[&str]) -> Option<Attached>;
     /// Says `text` over the message box, in the error color (None clears it).
     fn hint(&mut self, text: Option<String>);
     /// The message box's text. What is changed in it reaches the box when
@@ -512,10 +538,10 @@ pub trait App {
     fn attachments(&mut self) -> &mut Vec<Value>;
     /// This machine's conversations (not side chats, not subagents).
     fn conversations(&self) -> Vec<Conversation>;
-    /// What Oak and its conversations are doing now (interface version 4).
+    /// What Oak and its conversations are doing now (interface version 7).
     fn activity(&self) -> Activity;
     /// During `Hooks::chat_scene`, what the transcript shows (interface
-    /// version 4); None at other times.
+    /// version 7); None at other times.
     fn chat_scene(&self) -> Option<ChatScene>;
     /// Starts a conversation on this machine and opens its tab. Err: why
     /// it couldn't (the folder is missing, say), also shown as the hint.
@@ -531,6 +557,59 @@ pub trait App {
     /// The list of backend `id`'s cloud sessions, as Home's Cloud tab
     /// shows Oak's own: a click opens the session.
     fn cloud_list(&mut self, ui: &mut Ui, backend: &str);
+    /// A conversation of this machine's (`Session`), under its key. None:
+    /// there is none.
+    fn session(&self, key: &str) -> Option<Session>;
+    /// Switches conversation `key` to model `model` of provider `provider`,
+    /// as its model picker does but without asking. Err: why it couldn't.
+    fn set_model(&mut self, key: &str, provider: &str, model: &str) -> Result<(), String>;
+    /// Sends conversation `key` a message from the user, as the message box
+    /// does. Err: why it couldn't.
+    fn send(&mut self, key: &str, text: &str) -> Result<(), String>;
+    /// Stops what conversation `key` is doing, as its interrupt does. Err:
+    /// why it couldn't.
+    fn interrupt(&mut self, key: &str) -> Result<(), String>;
+    /// Asks conversation `key` to answer its last turn, as resuming a paused
+    /// one does (a transcript that ends in a message from the user that
+    /// nothing woke to answer). Err: why it couldn't.
+    fn resume(&mut self, key: &str) -> Result<(), String>;
+}
+
+/// A conversation of this machine's, as `App::session` shows it: what it
+/// is, what it is doing, and how its last turn went.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Session {
+    pub id: String,
+    pub title: String,
+    pub folder: String,
+    pub model: String,
+    /// Who serves `model`.
+    pub provider: String,
+    pub effort: String,
+    pub role: String,
+    /// A chat: no folder, no project.
+    pub chat: bool,
+    /// A turn is under way.
+    pub busy: bool,
+    /// What it is doing now ("Retry 2/4 in 8s after: a safety classifier
+    /// declined the request (category cyber: …)", say).
+    pub status: String,
+    /// What went wrong in its last turn, when it failed.
+    pub error: Option<String>,
+    /// The text of its last message, when that is the model's.
+    pub reply: Option<String>,
+}
+
+/// Files to attach (`App::take_files`, `App::pick_files`).
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct Attached {
+    /// Image and file blocks, as `App::attachments` holds them.
+    #[serde(default)]
+    pub files: Vec<Value>,
+    /// Why each that couldn't be attached wasn't.
+    #[serde(default)]
+    pub errors: Vec<String>,
 }
 
 /// Oak's window: the `App` a part is given. What the plugin changed in
@@ -611,6 +690,26 @@ impl App for Window {
         unsafe { (api().app_go_new)(s(kind)) };
     }
 
+    fn go_settings(&mut self) {
+        self.settle();
+        unsafe { (api().app_go_settings)() };
+    }
+
+    fn go_page(&mut self, id: &str) {
+        self.settle();
+        unsafe { (api().app_go_page)(s(id)) };
+    }
+
+    fn take_files(&mut self) -> Attached {
+        let (some, json) = text_from(|out, user| unsafe { (api().take_files)(out, user) });
+        if some { serde_json::from_str(&json).unwrap_or_default() } else { Attached::default() }
+    }
+
+    fn pick_files(&mut self, filter: &str, extensions: &[&str]) -> Option<Attached> {
+        let (some, json) = text_from(|out, user| unsafe { (api().pick_files)(s(filter), s(&extensions.join("\n")), out, user) });
+        some.then(|| serde_json::from_str(&json).unwrap_or_default())
+    }
+
     fn hint(&mut self, text: Option<String>) {
         unsafe { (api().app_hint)(s(text.as_deref().unwrap_or(""))) };
     }
@@ -676,6 +775,34 @@ impl App for Window {
     fn cloud_list(&mut self, ui: &mut Ui, backend: &str) {
         self.settle();
         unsafe { (api().app_cloud_list)(ui.as_raw(), s(backend)) };
+    }
+
+    fn session(&self, key: &str) -> Option<Session> {
+        let (there, json) = text_from(|out, user| unsafe { (api().app_session)(s(key), out, user) });
+        if !there {
+            return None;
+        }
+        serde_json::from_str(&json).ok()
+    }
+
+    fn set_model(&mut self, key: &str, provider: &str, model: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_set_model)(s(key), s(provider), s(model), out, user) }).map(drop)
+    }
+
+    fn send(&mut self, key: &str, text: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_send)(s(key), s(text), out, user) }).map(drop)
+    }
+
+    fn interrupt(&mut self, key: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_interrupt)(s(key), out, user) }).map(drop)
+    }
+
+    fn resume(&mut self, key: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_resume)(s(key), out, user) }).map(drop)
     }
 }
 

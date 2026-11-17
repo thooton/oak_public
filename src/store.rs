@@ -396,6 +396,12 @@ pub struct Conversation {
     #[serde(default = "Format::old")]
     pub format: Format,
     pub last_message_at: i64,
+    /// Its last progress (`agent::pulse`): when its model's last reply or
+    /// tool result went in (ms since 1970; 0 none yet), and what it was.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub progress_at: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub progress: String,
     pub next_task_id: u64,
     #[serde(default)]
     pub rolling: crate::rolling::State,
@@ -464,6 +470,11 @@ pub struct Conversation {
     /// The goal, notes and heartbeats as last put in the system prompt.
     #[serde(default)]
     pub memory: Option<Memory>,
+    /// What requests went with before each summary in force acted, the
+    /// latest last (`agent::install_summary`): a revert to before a
+    /// summary's cut puts back what was sent before it, exactly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<Earlier>,
     /// Stopped by a usage limit: when it resets (ms since 1970).
     #[serde(default)]
     pub limit_wait: Option<i64>,
@@ -485,6 +496,11 @@ pub struct Conversation {
     /// Paused by the user: nothing is sent until resumed.
     #[serde(default)]
     pub paused: bool,
+    /// A pause waiting for the request under way to end
+    /// (`Session::request_pause`): if OAK closes first, the conversation
+    /// starts paused, as it would have been.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pause_queued: bool,
     /// For a subagent: the conversation that started it (AGENT_NEW), and
     /// its number there. None for a session the user started.
     #[serde(default)]
@@ -797,7 +813,19 @@ impl Mark {
 /// The session memory block in the system prompt. It changes only when the
 /// prompt cache is being rebuilt anyway (a summary was applied, or the cache
 /// went cold), so notes don't cost a rewrite of the whole context.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// What a conversation's requests went with up to a summary: the summary
+/// before it, the prefix and the session memory as sent.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Earlier {
+    pub summary: Option<crate::rolling::Summary>,
+    pub cold: crate::rolling::Clearing,
+    pub measured: Vec<crate::rolling::Measure>,
+    pub prefix: crate::prefix::State,
+    pub memory: Option<Memory>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
     pub text: String,
     /// The instruction files (CLAUDE.md or AGENTS.md) and the project
@@ -1127,11 +1155,6 @@ pub struct Settings {
     /// Cache diagnostics: the API says why a request missed the cache, in
     /// the usage log.
     pub cache_diagnostics: bool,
-    /// Stable prefix (Claude): the date and the AGENT tool's model list
-    /// change in mid-conversation system messages, and the goal's tools come
-    /// and go as inline tool changes, instead of rewriting the system prompt
-    /// and tools (and so the whole cache).
-    pub stable_prefix: bool,
     /// Account rotation: a used-up account's requests go to another.
     pub rotation: bool,
     /// The whole interface's zoom (egui's zoom factor, 1 = 100%), changed
@@ -1156,8 +1179,10 @@ pub struct Settings {
     /// With Unslop, the notes box shows the notes rewritten.
     pub unslop_notes: bool,
     /// The model is told to tidy up its notes once they pass
-    /// `agent::NOTES_ALERT_TOKENS`.
+    /// `agent::notes_alert_tokens`.
     pub notes_alert: bool,
+    /// The hard limit on a session's notes, in tokens (`agent::notes_limit`).
+    pub notes_limit: u64,
     /// The OpenRouter model that names sessions (an id in
     /// `crate::openrouter::TITLE_CHOICES`).
     pub title_model: String,
@@ -1199,7 +1224,6 @@ impl Default for Settings {
             threads: false,
             keep_alive: true,
             cache_diagnostics: true,
-            stable_prefix: true,
             rotation: true,
             zoom: 1.0,
             click_zoom: false,
@@ -1210,6 +1234,7 @@ impl Default for Settings {
             unslop_thinking: false,
             unslop_notes: false,
             notes_alert: true,
+            notes_limit: crate::agent::DEFAULT_NOTES_LIMIT,
             title_model: crate::openrouter::TITLE_CHOICES[0].0.into(),
             or_routing: "balanced".into(),
             paused_on_close: vec![],

@@ -935,37 +935,10 @@ pub(crate) fn request_body(req: &Request) -> Value {
     body
 }
 
-/// Whether `body` has the stable prefix's items (developer messages, an
-/// `additional_tools` item).
+/// Whether `body` has the prefix's mid-conversation items (developer
+/// messages, an `additional_tools` item: `crate::prefix`).
 fn native_items(body: &Value) -> bool {
     body["input"].as_array().is_some_and(|i| i.iter().any(|x| x["role"] == "developer"))
-}
-
-/// `body` as the backend takes it when it refuses those items: the tools
-/// join the list (once, which rewrites the cache) and the text goes as the
-/// user's.
-fn plain_body(mut body: Value) -> Value {
-    let Some(items) = body["input"].as_array_mut() else { return body };
-    let mut added = vec![];
-    items.retain_mut(|x| {
-        if x["type"] == "additional_tools" {
-            added.extend(x["tools"].as_array().cloned().unwrap_or_default());
-            return false;
-        }
-        if x["role"] == "developer" {
-            x["role"] = json!("user");
-        }
-        true
-    });
-    if let Some(tools) = body["tools"].as_array_mut() {
-        for t in added {
-            match tools.iter_mut().find(|x| x["name"] == t["name"]) {
-                Some(x) => *x = t,
-                None => tools.push(t),
-            }
-        }
-    }
-    body
 }
 
 /// What one Responses event becomes.
@@ -1150,12 +1123,15 @@ pub fn stream(req: Request, tx: Sender<Sse>) {
     let session = body["prompt_cache_key"].as_str().unwrap_or("").to_string();
     let conv = req.seat_conv();
     let resp = match open(&body, &session, &conv, &tx) {
-        // The stable prefix's items refused: again without them, and
-        // without them from now on.
+        // The prefix's items refused: again without them, and without them
+        // from now on. What they said goes as text, as the session's later
+        // requests send it (`crate::prefix::plain_messages`): the tool list
+        // stays as it was.
         Err(Some(Sse::Err(e))) if e.starts_with("Codex HTTP 400") && native_items(&body) => {
             eprintln!("Codex refused developer messages or additional_tools items: {e}");
             crate::prefix::set_codex_native(false);
-            open(&plain_body(body), &session, &conv, &tx)
+            let plain = Request { messages: crate::prefix::plain_messages(req.messages.clone(), &req.tools), ..req.clone() };
+            open(&request_body(&plain), &session, &conv, &tx)
         }
         r => r,
     };

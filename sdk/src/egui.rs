@@ -736,6 +736,14 @@ impl Response {
         self
     }
 
+    /// A menu under it that a click on it opens and closes, `width` wide
+    /// (0: as wide as it is), as `egui::Popup::menu` shows one. Whether it
+    /// is open (Oak 5).
+    pub fn popup_menu(&self, width: f32, f: impl FnOnce(&mut Ui)) -> bool {
+        let (_, flags) = with_body(f, |body, user| unsafe { (api().ui_response)(self.handle, OAK_RESPONSE_MENU, width.max(0.0) as u32, s(""), Some(body), user) });
+        flags & OAK_OPEN != 0
+    }
+
     /// Its right-click menu.
     pub fn context_menu(&self, f: impl FnOnce(&mut Ui)) {
         self.act_body(OAK_RESPONSE_CONTEXT_MENU, f);
@@ -902,6 +910,12 @@ impl InputState {
         unsafe { (api().input_key)(key.code(), modifiers.code() | OAK_KEY_CONSUME) }
     }
 
+    /// Whether files are being dragged over the window (Oak 5).
+    pub fn files_hovered(&self) -> bool {
+        let mut r = OakRect::default();
+        unsafe { (api().input_get)(OAK_INPUT_FILES_HOVERED, &mut r) }
+    }
+
     pub fn smooth_scroll_delta(&self) -> Vec2 {
         let mut r = OakRect::default();
         unsafe { (api().input_get)(OAK_INPUT_SCROLL, &mut r) };
@@ -965,6 +979,17 @@ impl Context {
         unsafe { (api().animate)(id.0, on) }
     }
 
+    /// `animate_bool` taking `seconds` (linear; Oak 5).
+    pub fn animate_bool_with_time(&self, id: Id, on: bool, seconds: f32) -> f32 {
+        unsafe { (api().animate_time)(id.0, on, seconds) }
+    }
+
+    /// `animate_bool_with_time`, eased by `easing` (`emath::easing`; Oak 5).
+    pub fn animate_bool_with_time_and_easing(&self, id: Id, on: bool, seconds: f32, easing: fn(f32) -> f32) -> f32 {
+        let t = self.animate_bool_with_time(id, on, seconds);
+        if on { easing(t) } else { 1.0 - easing(1.0 - t) }
+    }
+
     /// A texture from an image. Dropping the last handle frees it.
     pub fn load_texture(&self, name: impl Into<String>, image: ColorImage, options: TextureOptions) -> TextureHandle {
         let name = name.into();
@@ -1024,6 +1049,12 @@ impl Memory {
 
     pub fn request_focus(&mut self, id: Id) {
         unsafe { (api().focus)(id.0, true) };
+    }
+
+    /// Whether any widget has the keyboard (Oak 5; always false before).
+    pub fn any_focused(&self) -> bool {
+        let mut r = OakRect::default();
+        unsafe { (api().input_get)(OAK_INPUT_FOCUSED, &mut r) }
     }
 }
 
@@ -2237,6 +2268,24 @@ impl<'a> TextEdit<'a> {
 
     pub fn text_color(mut self, color: Color32) -> TextEdit<'a> {
         self.edit.text_color = color_in(color);
+        self
+    }
+
+    /// The room around the text, inside the frame (Oak 5).
+    pub fn margin(self, m: impl Into<Margin>) -> TextEdit<'a> {
+        let m = m.into();
+        self.margin_sides(m.x, m.x, m.y, m.y)
+    }
+
+    /// The room around the text on each side (Oak 5).
+    pub fn margin_sides(mut self, left: f32, right: f32, top: f32, bottom: f32) -> TextEdit<'a> {
+        (self.edit.margin_left, self.edit.margin_right, self.edit.margin_top, self.edit.margin_bottom) = (left, right, top, bottom);
+        self.flag(OAK_EDIT_MARGIN, true)
+    }
+
+    /// The least room it takes, however little text it has (Oak 5).
+    pub fn min_size(mut self, size: Vec2) -> TextEdit<'a> {
+        (self.edit.min_width, self.edit.min_height) = (size.x, size.y);
         self
     }
 

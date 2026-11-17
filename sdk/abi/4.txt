@@ -256,8 +256,6 @@ struct OakHooks grows
   frame: Option<OakDo>
   providers_top: Option<OakBody>
   exiting: Option<OakDo>
-  home_scene: Option<OakBody>
-  chat_scene: Option<OakBody>
 callback OakSink(user: *mutc_void, ptr: *constu8, len: usize)
 callback OakBody(user: *mutc_void, ui: *mutOakUi)
 callback OakAsk(user: *mutc_void) -> bool
@@ -600,5 +598,4 @@ fn oak_work_block(ui: *mutOakUi, thinking: OakStr, key_a: u64, key_b: u64, strea
 fn oak_super_chat(ui: *mutOakUi, chat: OakStr)
 fn oak_super_box(area: *constOakRect, json: OakStr, out: OakSink, out_user: *mutc_void)
 fn oak_super_agent_box(area: *constOakRect, json: OakStr) -> u32
-fn app_activity(out: OakSink, out_user: *mutc_void)
-fn app_chat_scene(out: OakSink, out_user: *mutc_void)
+fn oak_super_agent_box_act(area: *constOakRect, json: OakStr, out: OakSink, out_user: *mutc_void)

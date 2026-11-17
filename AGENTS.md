@@ -77,6 +77,11 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
   (whatever `OAK_PLUGINS` holds); docs/PLUGINS.md has them. The interface's own tests are in
   `sdk/src/abi.rs` (the header and the record of each version are current, and no version
   breaks an earlier one) and `src/plugins/api.rs` (the SDK against Oak's table, in process).
+  `handoff_in_a_whole_app` runs the private repository's classifier-avoidance plugin against
+  `bench/tools/fake_refusal.py` and `fake_deepseek.py` there (both ports are its arguments):
+  a refusal is handed to DeepSeek for a note, and a new conversation on the refused model
+  picks the work up from it. It needs `REFUSELESS_API_KEY`, and `OAK_API_BASE`,
+  `REFUSELESS_BASE_URL` and `OAK_PLUGINS` (the plugins' build folder).
 
 To use the app on a virtual display (Linux), with a scratch config folder:
 
@@ -183,6 +188,9 @@ A click on the session box's folder opens it in the system's file manager; its r
 has Open folder and Copy path (a folder that no longer exists can only be copied).
 Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme and Font rows show once a plugin adds a
 choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings.
+The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
+plugin draws one row there, `plugins::COMPOSER_CORNER_H` tall, and the message box makes room for
+it under the buttons (`composer::links_room`) whenever a plugin registers the hook.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
@@ -265,9 +273,27 @@ can't read.
 - Effort levels are each model's own (Claude's from the Models API). `max_tokens` is the model's
   maximum. The prompt cache lifetime (Settings, `src/cache_ttl.rs`) is chosen per conversation:
   an hour when a long enough pause is likely, else 5 minutes.
-- Stable prefix (Settings, on by default; `src/prefix.rs`): the system prompt and tool list stay
-  byte for byte as cached; what changes meanwhile (the date, a kit loaded, effort) reaches the model
-  after the latest user turn, and the prefix is rebuilt only when the cache is cold anyway.
+- The prefix invariant (`src/prefix.rs`, no setting): what a conversation has sent the model (the
+  system prompt as rendered, the session memory and context block, the tools, every message) is
+  never changed; requests only add to it. Smart context acting (a summary replacing the older part)
+  is the only moment it is rebuilt. The cache expiring, another account or model, an effort, date,
+  goal, note, notes-limit or instruction-file change, smart context turned off or on, a save and
+  restart, a newer Oak's prompt text: none of them changes it. What changes reaches the model after
+  the latest user turn ("Today's date is now", "Your underlying model is now", "The limit on your
+  notes is now", a tool definition, Claude's effort): Claude and Codex as their own mid-conversation messages, which turn themselves off if
+  refused (then, like other providers, as a text note where they were). A loaded kit stays where
+  its LOAD put it: its instructions LOAD's result, its tool right after it (where tools can't be
+  added, called through LOAD). Only once a summary covers the LOAD do the kit's prompt block and tool
+  join the system prompt and tool list. A revert to before a LOAD unloads the kit. A revert (or an
+  edit) to before a summary's cut puts back what requests went with before that summary (the
+  summary before it, the prefix, the session memory: `Conversation::earlier`, saved with it, the
+  last 8 summaries back) and sends exactly what was sent then, so a prompt cache still alive is
+  read again; only an older Oak's summary is rebuilt. A side chat sends what its source sent.
+  Regression tests (`agent::tests::the_prefix_only_grows_*`) check each provider's wire body.
+  Freebuff is the one exception, by design: the service requires its CLI's own system prompt and
+  tools with the current date, so its prompt's date is always today's (`freebuff::system_prompt`,
+  tested by `the_prompt_has_todays_date_and_the_row_name`) and a new day renews its cache; its
+  messages still only grow. No other provider or event gets this.
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
   the prompt, and is never offered to subagents (it serves one request at a time).
 
@@ -282,7 +308,8 @@ until needed.
 switched on is a kit offered by LOAD (not in chats or to a local model), described by its file's
 `description` or its instructions' first sentence. Loading one starts it (or reconnects), lists its
 tools and returns them with its instructions; its tools then join the conversation's tools as
-`mcp__<server>__<tool>` (Claude Code's names, at most 64 characters) and its instructions the system
+`mcp__<server>__<tool>` (Claude Code's names, at most 64 characters) right after that LOAD, as any
+kit's do (`src/prefix.rs`), and once a summary covers the LOAD its instructions join the system
 prompt, under "# MCP Server Instructions". Where the model can't take new tools mid-conversation
 (`prefix::Mode::Generic`), LOAD's text lists them and they are called through LOAD with `input`
 `{"tool", "arguments"}`. A call returns the server's text and pictures (audio and binary resources are
@@ -367,21 +394,30 @@ the file into each of Blender's settings folders (`BLENDER_USER_RESOURCES` overr
 - Smart context (`src/rolling.rs`): past a trigger (120k tokens by default) the older part is
   summarized in the background, reusing the prompt cache, and the newest ~40k stay verbatim. The
   transcript only grows: a banner marks where a summary was made and a line where its part ends.
-  Old tool output is replaced by a placeholder in requests, and a line marks where that stops.
+  Old tool output is replaced by a placeholder in requests, and a line marks where that stops:
+  only when a summary is made, the one moment what was sent may change. Turning smart context
+  off for a conversation stops new summaries; the one in use stays.
 - Goals: the model keeps working until it calls GOAL finish; "pause goal" stops Oak asking it to
   continue without telling it. While a goal is set, ASK needs the user's yes through REQUEST_ASK.
   An endless goal (the Endless box when editing it) refuses GOAL justify and finish, so it lasts
   until the user pauses or clears it; the model is told in the goal's message and its memory block,
   and changing only the mode sends the goal again.
-- Notes (sent with every request, so they outlive summaries), heartbeats, progress meters (a
+- Notes (sent with every request, so they outlive summaries; Settings → Notes limit caps them all
+  together, 2,000 tokens by default: NOTE itself refuses a new note, or an update making a note
+  longer, that would pass it, and notes already past a lowered limit are kept but must be shortened
+  or deleted first; the system prompt names the limit, a change mid-session comes as a message, and
+  Notes reminder nudges the model at 85% of it), heartbeats, progress meters (a
   shell command whose output's last line is `x/y`, `N%` or a number; `src/progress.rs`) and
   subagents (`src/agent/subagents.rs`; sessions message each other, and a subagent's final reply
-  reaches the main session by itself).
+  reaches the main session by itself). AGENT pause and resume take an agent's `id` or a `model`
+  (id, family word such as opus or sol, or provider), acting on every agent on it and naming the
+  ones left alone.
 - Files changed on disk by someone else are reported to the model before its next request
   (`src/changes.rs`). Instruction files (CLAUDE.md, AGENTS.md) and project memory are off for now
   (`src/instructions.rs`).
 - Messages sent while Oak works are queued for its next request. Pause lets the request and
-  commands under way finish; ultrapause stops everything at once. A pause survives a restart. Reverting
+  commands under way finish; ultrapause stops everything at once. A pause survives a restart, even one
+  still waiting for its request when Oak closed. Reverting
   (a message's icon, or right-click inside a reply) takes the conversation back, not the files.
 - A safety classifier's refusal is retried as failed requests are, then every minute and a half;
   there is no fallback to another model. Titles come from OpenRouter's title model when there is
@@ -414,14 +450,29 @@ task), saved as `"role": "super"`, so its subagents work in its folder on this m
 same prompt. Its tab has Oak's tree, its Home row says "folder, super agent", and `oak_sdk`'s
 `go_new` takes `super` to pick it. It looks as the command center's super agents do (the Oak tab's
 and Delta's), drawn by the one implementation of that look, `src/super_view.rs`, which plugins
-use through `oak_sdk::ui::super_chat`, `super_box` and `super_agent_box` (interface version 3):
+use through `oak_sdk::ui::super_chat`, `super_box` and `super_agent_box` (interface version 3),
+and `super_agent_box_act` (version 4: the agent box's model and effort pickers, Pause or Resume,
+a detail line and what blocks it, and a switch waiting shown under the pickers):
 `src/super_local.rs` makes a super agent's tab a text conversation (the user's messages in deep
 blue bubbles on the right, what it says beside its avatar on the left, in stretches with the day
 and time after a pause, three dots and its status while it works; its tool calls, thinking and
 subagents' messages stay out of it, and its questions show under it), its corner box its name and
 folder, what it is doing with Stop, its model and effort, and its subagents, each opening its tab,
 and a subagent's corner box an agent's (its title, "Agent n, run by" the super agent, its state
-with Stop, its model), each with notes and background tasks under it when there are any. A collapsed "Local controls"
+with Stop and Pause or Resume, its model and effort pickers), each with notes and background tasks
+under it when there are any. A subagent's model switches in place, from its pickers or the super
+agent's AGENT action=set: its conversation and work carry on, a request under way finishes on the
+model it started on (the box says it is switching until then, AGENT_LIST and set's reply too), and
+the next request, with that one's tool results, goes to the new model with the "Your underlying
+model is now" line appended; a switch to another provider asks first, as the session box does.
+Each session has a pulse (`src/agent/pulse.rs`), as the command center's workers do: its phase
+from its status line (its model writing, its tools running, waiting on a retry, a usage limit, an
+answer or its agents, summarizing; idle, paused) and since when, its last progress (its model's
+reply or a tool's result going into the transcript, by tool name, never a command; kept with the
+conversation as `progress_at`/`progress`, never sent) and what holds it up, only as known (the wait
+its status line names, or the error its last turn ended on). A subagent's box shows it under its
+state, its row on the super agent's list on hover, and AGENT_LIST in its state and last progress
+columns, so "working" doesn't pass for progress. A collapsed "Local controls"
 section keeps provider/model/effort switching, goals, progress meters, heartbeats, folder actions
 and parent navigation available without crowding the shared layout. It still
 runs here: its subagents are conversations of their own. Oak's own choices win over a plugin's `NewKind` of the same id,
@@ -430,7 +481,8 @@ as built-in roles do over plugin roles (`add_roles`), so a plugin can't replace 
 **Side chats** (`src/side_chat.rs`). The message bubble in the title bar, left of the window's buttons,
 opens this conversation's side chat in a resizable pane on the right within Oak, with only its
 transcript and message box. The usual attachment, pause and ultrapause buttons sit by the message box.
-The first opening snapshots the saved conversation (including smart context and notes) and adds:
+The first opening snapshots the saved conversation (including smart context, notes, the prefix as
+sent and the scratchpad it names) and adds:
 'The session was forked to be placed in a "side chat". This is only a chat for asking questions or requesting small changes, so do not continue work as you were before it was forked. Only make changes to the project if the user explicitly requests so.'
 It waits for a question; the original keeps working independently. A side chat shares the working
 folder, so any explicitly requested file changes are real, but it inherits no running tasks,

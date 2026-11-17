@@ -16,7 +16,8 @@
 //! - `Vault`: somewhere else logins and keys are kept;
 //! - `SettingsSection`: rows on the Settings page;
 //! - `Gate`: a screen that comes before everything (signing in somewhere);
-//! - `Hooks`: at startup, every frame, at exit.
+//! - `Hooks`: at startup, every frame, at the top of Home's Providers, in a
+//!   message box's corner, at exit.
 //!
 //! Parts are `Send + Sync` and take `&self`: a plugin keeps what changes
 //! behind its own locks (or in statics; the library is never unloaded,
@@ -94,8 +95,13 @@ pub trait HomeTab: Send + Sync {
     /// row, and a click opens the tab whose key is `id` (as `App::open`
     /// does) instead of showing a cell. `order` doesn't apply to it.
     fn link(&self) -> bool { false }
+    /// A link to a page of the plugin's own rather than to a tab: a click
+    /// shows `show` in all of the window under the tabs' row, as Settings
+    /// is shown (no tab is lit and there is no message box), until
+    /// another tab or Home is picked. Only with `link`.
+    fn page(&self) -> bool { false }
     /// Draws the cell: `ui.max_rect()` is all of it (a link's only in an
-    /// Oak older than links, which shows it as a tab).
+    /// Oak older than links, which shows it as a tab); a page's, the page.
     fn show(&self, ui: &mut Ui, app: &mut dyn App);
 }
 
@@ -346,6 +352,11 @@ pub trait Hooks: Send + Sync {
     fn frame(&self, _ctx: &egui::Context, _app: &mut dyn App) {}
     /// Draws at the top of Home's Providers column (a connection's state).
     fn providers_top(&self, _ui: &mut Ui, _app: &mut dyn App) {}
+    /// Draws in a message box's bottom left corner, above Oak's Settings
+    /// link: where a plugin puts switches for what it does to every
+    /// message. Keep it one row tall, or two at most: the room above the
+    /// link is small, and the box grows (upwards) to make it.
+    fn composer_corner(&self, _ui: &mut Ui, _app: &mut dyn App) {}
     /// Draws over Home's wallpaper and under its menu, every frame Home
     /// shows; `ui` is the whole page. Ask for the next frame
     /// (`Context::request_repaint_after`) to move.
@@ -637,6 +648,10 @@ unsafe extern "C" fn hooks_providers_top(user: *mut c_void, ui: *mut OakUi) {
     outer(|| (), || unsafe { part::<Life>(user) }.providers_top(&mut Ui::raw(ui), &mut Window::default()))
 }
 
+unsafe extern "C" fn hooks_composer_corner(user: *mut c_void, ui: *mut OakUi) {
+    outer(|| (), || unsafe { part::<Life>(user) }.composer_corner(&mut Ui::raw(ui), &mut Window::default()))
+}
+
 unsafe extern "C" fn hooks_home_scene(user: *mut c_void, ui: *mut OakUi) {
     outer(|| (), || unsafe { part::<Life>(user) }.home_scene(&mut Ui::raw(ui), &mut Window::default()))
 }
@@ -673,7 +688,7 @@ impl Registrar {
         let (id, label, icon, tip) = (tab.id(), tab.label(), tab.icon(), tab.tip());
         let d = OakHomeTab {
             size: size_of::<OakHomeTab>(),
-            flags: icon_flags(tab.icon_is_text()) | if tab.link() { OAK_HOME_TAB_LINK } else { 0 },
+            flags: icon_flags(tab.icon_is_text()) | if tab.link() { OAK_HOME_TAB_LINK } else { 0 } | if tab.link() && tab.page() { OAK_HOME_TAB_PAGE } else { 0 },
             id: s(&id),
             label: s(&label),
             icon: s(&icon),
@@ -790,7 +805,18 @@ impl Registrar {
 
     /// Calls at startup, every frame, at exit.
     pub fn hooks(&mut self, hooks: impl Hooks + 'static) {
-        let d = OakHooks { size: size_of::<OakHooks>(), flags: 0, user: keep::<Life>(Box::new(hooks)), started: Some(hooks_started), frame: Some(hooks_frame), providers_top: Some(hooks_providers_top), exiting: Some(hooks_exiting), home_scene: Some(hooks_home_scene), chat_scene: Some(hooks_chat_scene) };
+        let d = OakHooks {
+            size: size_of::<OakHooks>(),
+            flags: 0,
+            user: keep::<Life>(Box::new(hooks)),
+            started: Some(hooks_started),
+            frame: Some(hooks_frame),
+            providers_top: Some(hooks_providers_top),
+            exiting: Some(hooks_exiting),
+            composer_corner: Some(hooks_composer_corner),
+            home_scene: Some(hooks_home_scene),
+            chat_scene: Some(hooks_chat_scene),
+        };
         unsafe { (api().add_hooks)(&d) };
     }
 }

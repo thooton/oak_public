@@ -6,10 +6,11 @@
 //! here, as any conversation does: its subagents are conversations of
 //! their own, in their own tabs.
 
+use crate::agent::pulse::Pulse;
 use crate::agent::{self, Live};
 use crate::session_box::{AgentState, BoxActions, model_label};
 use crate::store::{Conversation, MarkKind};
-use crate::super_view::{self, AgentBox, AgentRow, BoxAction, Chat, Icon, Model, Msg, Pic, SuperBox};
+use crate::super_view::{self, AgentAction, AgentBox, AgentRow, BoxAction, Chat, Icon, Model, Msg, Pic, SuperBox};
 use crate::transcript::Item;
 use crate::{App, Theme};
 use eframe::egui::{self, Rect, Ui};
@@ -241,13 +242,16 @@ impl App {
             (b, provider, agents)
         };
         let mut b = b;
+        let now = crate::api::now_ms();
         // The subagents at work first, then the rest, the latest first in each.
         let mut rows: Vec<(AgentRow, String)> = agents
             .into_iter()
             .map(|(n, title, conv)| {
                 let state = self.sessions.get(&conv).map_or(AgentState::Idle, AgentState::of);
                 let report = self.sessions.get(&conv).map(|s| last_reply(&s.conv.lock().unwrap())).unwrap_or_default();
-                (AgentRow { n, title, state: state_word(state).into(), live: true, working: state == AgentState::Working, report }, conv)
+                // How long it has been at it, its last progress and what holds it up.
+                let detail = self.sessions.get(&conv).map(Pulse::of).map(|p| [p.detail(now), p.blocked(now)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+                (AgentRow { n, title, state: state_word(state).into(), live: true, working: state == AgentState::Working, report, detail }, conv)
             })
             .collect();
         rows.sort_by_key(|(r, _)| (!r.working, std::cmp::Reverse(r.n)));
@@ -295,26 +299,65 @@ impl App {
     pub(crate) fn local_agent_box(&mut self, ctx: &egui::Context, t: &Theme, area: Rect, key: &str) {
         let Some(s) = self.sessions.get(key) else { return };
         let state = AgentState::of(s);
-        let b = {
+        // What it is at, its last progress and what holds it up.
+        let (pulse, now) = (Pulse::of(s), crate::api::now_ms());
+        // (Before its live state is locked below: `pause_on` locks it.)
+        let paused = s.pause_on();
+        let models = match &*self.models.lock().unwrap() {
+            Some(Ok(list)) => list.clone(),
+            _ => vec![],
+        };
+        let (b, provider) = {
             let conv = s.conv.lock().unwrap();
             let live = s.live.lock().unwrap();
             let (working, activity) = activity(&conv, &live);
             let parent = conv.parent.clone().unwrap_or_default();
             let boss = self.sessions.get(&parent).map(|p| p.conv.lock().unwrap().title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| "its super agent".into());
-            AgentBox {
+            // The pickers show a switch waiting to go out as made (as the
+            // super agent's do), and the line under them says it waits.
+            let (now_model, now_effort) = (conv.model.clone(), agent::effort_for(&conv.model, &conv.effort));
+            let (mut model, mut effort, mut provider) = (conv.model.clone(), conv.effort.clone(), conv.provider());
+            for cmd in &live.commands {
+                match cmd {
+                    agent::Command::Effort(e) => effort = e.clone(),
+                    agent::Command::Model(p, m) => (provider, model) = (*p, m.clone()),
+                    _ => {}
+                }
+            }
+            let effort = agent::effort_for(&model, &effort);
+            let pending = if live.requesting && (model != now_model || effort != now_effort) {
+                format!("Switching to {} at {effort} effort after the request under way; {} at {now_effort} effort until then", self.model_name(&model), self.model_name(&now_model))
+            } else {
+                String::new()
+            };
+            let mut list: Vec<Model> = models.iter().filter(|m| m.provider == provider).map(|m| Model { id: m.id.clone(), name: model_label(m), efforts: agent::efforts(&m.id).into_iter().map(String::from).collect() }).collect();
+            if !list.iter().any(|m| m.id == model) {
+                list.insert(0, Model { id: model.clone(), name: self.model_name(&model), efforts: agent::efforts(&model).into_iter().map(String::from).collect() });
+            }
+            let b = AgentBox {
                 icon: Icon::Tree,
                 title: if conv.title.is_empty() { format!("Agent {}", conv.agent_id) } else { conv.title.clone() },
                 caption: format!("Agent {}, run by {boss}", conv.agent_id),
                 working,
                 state: if working && !activity.is_empty() { activity } else { state_word(state).into() },
                 stop: if live.busy { "Stops its turn".into() } else { String::new() },
-                model: format!("{} at {} effort", self.model_name(&conv.model), agent::effort_for(&conv.model, &conv.effort)),
-            }
+                model: format!("{} at {effort} effort", self.model_name(&model)),
+                models: list,
+                model_id: model,
+                effort,
+                model_tip: "Switches it in place: its conversation and work carry on, a request under way finishes on the model it started on".into(),
+                pending,
+                pause: if paused { "Lets it carry on where it stopped".into() } else { "Pauses it after the request under way; messages for it wait".into() },
+                paused,
+                detail: pulse.detail(now),
+                blocker: pulse.blocked(now),
+            };
+            (b, provider)
         };
-        let models = match &*self.models.lock().unwrap() {
-            Some(Ok(list)) => list.clone(),
-            _ => vec![],
-        };
+        if b.working {
+            // Its "for 2m" and "40s ago" count on.
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
         crate::unslop::start_notes(&s.conv, ctx);
         let mut info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
         for a in &mut info.agents {
@@ -327,9 +370,23 @@ impl App {
         let bottom = area.bottom() - crate::look::GAP;
         let mut controls = BoxActions::default();
         let editing = self.goal_edit.as_mut().filter(|g| g.key == key);
-        let stop = super_view::agent_box(ctx, t, area, &b, |ui, w| local_controls(ui, t, w, bottom, key, &info, &tasks, editing, &mut controls));
-        if stop {
-            s.interrupt();
+        let act = super_view::agent_box(ctx, t, area, &b, |ui, w| local_controls(ui, t, w, bottom, key, &info, &tasks, editing, &mut controls));
+        let Some(s) = self.sessions.get(key) else { return };
+        match act {
+            Some(AgentAction::Stop) => s.interrupt(),
+            Some(AgentAction::Pause) => {
+                s.request_pause();
+            }
+            Some(AgentAction::Resume) => s.set_paused(false),
+            Some(AgentAction::Model(m, e)) => {
+                if e != b.effort {
+                    s.command(agent::Command::Effort(e));
+                }
+                if m != b.model_id {
+                    self.model_switch = Some((key.to_string(), provider, m));
+                }
+            }
+            None => {}
         }
         self.box_actions(ctx, t, key, &info, controls);
     }

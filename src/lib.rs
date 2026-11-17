@@ -184,6 +184,9 @@ enum Page {
     Chats,
     /// Charts of the usage log, opened from Home's preview.
     Usage,
+    /// A plugin's page (`App::plugin_page`): a link at the right end of
+    /// Home's tabs' row opens it (`oak_sdk::HomeTab::page`).
+    Plugin,
 }
 
 /// A quick hasher (FxHash's step) for what is hashed every frame: the
@@ -331,6 +334,8 @@ struct App {
     /// (`home::LOCAL_TAB`, also when empty), the cloud sessions
     /// (`home::CLOUD_TAB`), or a plugin's tab, by its id.
     home_list: String,
+    /// The Home tab whose page `Page::Plugin` shows, by its id.
+    plugin_page: String,
     /// What Home's conversation search narrows the list to (not kept).
     chat_filter: String,
     /// Home's menu (the box with the conversations and the accounts) is
@@ -401,9 +406,9 @@ impl App {
         api::set_threads(settings.threads);
         api::set_keep_alive(settings.keep_alive);
         api::set_diagnostics(settings.cache_diagnostics);
-        api::set_stable_prefix(settings.stable_prefix);
         api::set_rotation(settings.rotation);
         agent::set_notes_alert(settings.notes_alert);
+        agent::set_notes_limit(settings.notes_limit);
         openrouter::set_title_model(&settings.title_model);
         openrouter::set_routing(&settings.or_routing);
         unslop::set_all(&settings);
@@ -642,6 +647,13 @@ impl eframe::App for App {
                 }
             }
             Page::Chats => self.chats_page(ui, &t, plain),
+            Page::Plugin => match plugins::parts().home_tabs.iter().find(|tab| tab.page() && tab.id() == self.plugin_page).cloned() {
+                Some(tab) => {
+                    central(&mut |ui| tab.show(ui, self));
+                }
+                // (Its plugin is gone.)
+                None => self.page = Page::Home,
+            },
         }
     }
 }
@@ -908,5 +920,7 @@ pub fn main() -> eframe::Result {
 mod tests;
 #[cfg(test)]
 mod app_hover_test;
+#[cfg(test)]
+mod handoff_test;
 #[cfg(test)]
 mod frame_bench;

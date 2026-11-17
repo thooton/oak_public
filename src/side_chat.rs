@@ -18,6 +18,9 @@ pub(crate) const CHAT_FORK_MESSAGE: &str = "The conversation was forked to be pl
 /// A snapshot of the durable context, not the source's worker, task ownership,
 /// goal, timers, inbox, usage totals or account/server thread. Complete any
 /// in-flight tool calls in the copy before adding the fork instruction.
+/// What the source sent (`crate::prefix`: its system prompt, which names its
+/// scratchpad, its session memory and context block, its tools and messages)
+/// the fork sends as it was, the fork instruction after it.
 pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation {
     let mut c = Conversation {
         id,
@@ -33,6 +36,9 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation 
         format: source.format,
         rolling: source.rolling.clone(),
         prefix: source.prefix.clone(),
+        memory: source.memory.clone(),
+        earlier: source.earlier.clone(),
+        scratch: source.scratch.clone(),
         notes: source.notes.clone(),
         next_note_id: source.next_note_id,
         marks: source.marks.clone(),
@@ -277,7 +283,8 @@ mod tests {
         assert!(c.parent.is_none() && !c.spawner && c.agents.is_empty());
         assert!(c.goal.is_empty() && c.heartbeats.is_empty() && c.meters.is_empty());
         assert!(c.inbox.is_empty() && c.held.is_empty() && c.limit_wait.is_none());
-        assert!(!c.paused && c.scratch.is_empty() && c.next_task_id == 0);
+        // (The prompt it sends names the source's scratchpad: it shares it.)
+        assert!(!c.paused && c.scratch == source.scratch && c.next_task_id == 0);
         assert_eq!(c.tokens, store::Tokens::default());
         assert_eq!(c.spent, 0.0);
         c.messages.push(json!({"role": "assistant", "content": [oak::text("Independent")]}));

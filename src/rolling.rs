@@ -293,7 +293,9 @@ pub struct Summary {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
-    /// Turned off for this conversation.
+    /// Turned off for this conversation: no new summaries. The summary in
+    /// use stays in use: only a summary changes what was sent
+    /// (`crate::prefix`), so turning it off or on changes nothing sent.
     pub off: bool,
     pub summary: Option<Summary>,
     /// Prompt sizes measured on the current summary (cleared when it changes).
@@ -307,15 +309,16 @@ pub struct State {
     pub last_cost: Option<Cost>,
     /// Why the latest summary failed, if it did (cleared by the next one that works).
     pub last_error: Option<String>,
-    /// Old tool output cleared while the cache was cold anyway, between
-    /// summaries (`Clearing`).
+    /// Old tool output an older Oak cleared while the cache was cold, between
+    /// summaries (`Clearing`): kept as it was sent until the next summary.
     pub cold: Clearing,
 }
 
-/// Tool output cleared at a moment the prompt cache was cold anyway (it
-/// expired, or the conversation moved to another account or model), when
-/// clearing costs nothing: the next request writes the whole context
-/// either way. For the view after the summary ending at `base` only.
+/// Tool output an older Oak cleared at a moment the prompt cache was cold
+/// (it expired, or the conversation moved to another account or model).
+/// Oak no longer does (only a summary changes what was sent), but a state
+/// saved with one sends it as it did. For the view after the summary ending
+/// at `base` only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Clearing {
@@ -329,10 +332,9 @@ pub struct Clearing {
 }
 
 impl State {
-    /// The summary requests use: none while smart context is off (it is
-    /// kept, so turning it back on doesn't pay for it again).
+    /// The summary requests use, smart context on or off.
     pub fn active(&self) -> Option<&Summary> {
-        self.summary.as_ref().filter(|_| !self.off)
+        self.summary.as_ref()
     }
 
     pub fn base(&self) -> usize {
@@ -341,7 +343,7 @@ impl State {
 
     /// The cold-moment clearing in force: the one made on the view in use.
     pub fn cold_clearing(&self) -> Option<&Clearing> {
-        Some(&self.cold).filter(|c| !self.off && c.base == self.base() && (c.to > c.base || c.sup > c.base))
+        Some(&self.cold).filter(|c| c.base == self.base() && (c.to > c.base || c.sup > c.base))
     }
 
     /// Messages before this index have their old tool output cleared (by the
@@ -376,13 +378,14 @@ impl State {
         cleared_set(messages, self.active(), self.cold_clearing())
     }
 
-    /// At a moment the cache is cold anyway: clears old tool output in
-    /// `messages` all but the newest `RECENT` tokens', and READ output a
-    /// later identical READ superseded. Returns whether anything more is
-    /// cleared than was.
+    /// Clears old tool output in `messages` as an older Oak did at a cold
+    /// moment (all but the newest `RECENT` tokens', and READ output a later
+    /// identical READ superseded), for tests of a state saved with that.
+    /// Returns whether anything more is cleared than was.
+    #[cfg(test)]
     pub fn clear_cold(&mut self, messages: &[Value]) -> bool {
         let (base, n) = (self.base(), messages.len());
-        if self.off || n < base + 3 {
+        if n < base + 3 {
             return false;
         }
         let now = cleared_set(messages, self.active(), self.cold_clearing()).len();
@@ -448,11 +451,10 @@ fn summary_message(text: &str) -> Value {
 // read and command output) and the least needed once it is old: the model's
 // reasoning and its calls stay, so it knows what it saw and can look again.
 // So when a summary is made, tool results in the verbatim part are cleared
-// too, all but those in its newest `RECENT` tokens; and so they are when the
-// cache is cold anyway (it expired, or the conversation moved to another
-// account or model: `State::clear_cold`), along with READ output a later
-// identical READ superseded. Only then: clearing at any other time would
-// make the next request write the whole context to the cache again.
+// too, all but those in its newest `RECENT` tokens. Only then: a summary is
+// the one moment what was sent may change (`crate::prefix`). (An older Oak
+// cleared them, with READ output a later identical READ superseded, at
+// cold-cache moments as well: `Clearing`, still sent as it was.)
 //
 // RECENT was checked by replaying OAK's conversations (Nov 2026, 200k/125k,
 // clearing at cold moments): 10k saves 1.7% but leaves 2 points fewer of the
@@ -469,8 +471,10 @@ const LEFT: f64 = 0.35;
 const SMALL: usize = 600;
 pub const CLEARED: &str = "[Old tool output, cleared to save context. Run the tool again if you need it.]";
 /// Tools whose output running them again wouldn't bring back: the user's
-/// answers, other agents' messages, a task's output already read.
-const KEPT_TOOLS: &[&str] = &["ASK", "AGENT_NEW", "AGENT_SEND", "AGENT_WAIT", "TASK_WAIT", "TASK_GET_NEW_OUTPUT"];
+/// answers, other agents' messages, a task's output already read, a kit's
+/// instructions (LOAD's result: the kit joins the system prompt only once a
+/// summary covers its LOAD, `crate::prefix`).
+const KEPT_TOOLS: &[&str] = &["LOAD", "ASK", "AGENT_NEW", "AGENT_SEND", "AGENT_WAIT", "TASK_WAIT", "TASK_GET_NEW_OUTPUT"];
 
 
 /// Which tool each call id in `messages` went to.

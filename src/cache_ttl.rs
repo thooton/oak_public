@@ -173,12 +173,6 @@ impl State {
         self.cold = true;
     }
 
-    /// Whether nothing of the view after summary `base` is cached at
-    /// `now`: the next request writes it all whatever it sends.
-    pub fn is_cold(&self, now: i64, base: usize) -> bool {
-        self.cold || (self.last.is_some() && self.alive(now, base).0 == 0)
-    }
-
     /// When the last request's entry dies, if it lives (ms since 1970).
     pub fn expires_at(&self) -> Option<i64> {
         self.last.map(|e| e.at + self.ttl_ms())
@@ -265,24 +259,29 @@ mod tests {
         assert_eq!(s.alive(MIN, 0), (0, 0));
     }
 
+    /// Whether nothing of the view after summary `base` is cached at `now`.
+    fn is_cold(s: &State, now: i64, base: usize) -> bool {
+        s.cold || (s.last.is_some() && s.alive(now, base).0 == 0)
+    }
+
     /// Cold when nothing cached is left; a keep-alive ping moves the entry's
     /// time but not the user's, so pauses are still measured from requests.
     #[test]
     fn cold_moments_and_keep_alive() {
         let five = Choice { ttl: Ttl::FiveMinutes, anchor: None };
         let mut s = State::default();
-        assert!(!s.is_cold(0, 0), "nothing was ever cached: nothing to lose either");
+        assert!(!is_cold(&s, 0, 0), "nothing was ever cached: nothing to lose either");
         let (t0, ttl) = (1_000_000, Ttl::FiveMinutes.ms());
         s.record(t0, five, 50_000, 3, 0);
         assert_eq!(s.expires_at(), Some(t0 + ttl));
-        assert!(!s.is_cold(t0 + ttl - 1, 0) && s.is_cold(t0 + ttl, 0));
-        assert!(s.is_cold(t0 + 1, 2), "another summary's view");
+        assert!(!is_cold(&s, t0 + ttl - 1, 0) && is_cold(&s, t0 + ttl, 0));
+        assert!(is_cold(&s, t0 + 1, 2), "another summary's view");
         s.warm(t0 + ttl - 30_000, false);
-        assert!(!s.is_cold(t0 + ttl + 60_000, 0));
+        assert!(!is_cold(&s, t0 + ttl + 60_000, 0));
         s.record(t0 + ttl + 60_000, five, 51_000, 5, 0);
         assert_eq!(s.gaps.back().copied(), Some(((ttl + 60_000) / 1000) as u32), "the gap is from the last request");
         s.cold();
-        assert!(s.is_cold(t0 + ttl + 60_001, 0));
+        assert!(is_cold(&s, t0 + ttl + 60_001, 0));
         s.record(t0 + ttl + 70_000, five, 52_000, 7, 0);
         assert!(!s.cold);
     }

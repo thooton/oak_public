@@ -49,7 +49,6 @@ impl App {
         self.on_off_row(ui, t, "Server threads", |s| &mut s.threads, api::set_threads, "Experimental API. Sends only new messages; the server retains the conversation. Falls back to a full request if needed.");
         self.on_off_row(ui, t, "Keep cache warm", |s| &mut s.keep_alive, api::set_keep_alive, "Claude: rereads an idle conversation's 5-minute cache just before it expires (0.05× input each time), up to 30 minutes. With Auto, the cache is then always 5 minutes.");
         self.on_off_row(ui, t, "Cache diagnostics", |s| &mut s.cache_diagnostics, api::set_diagnostics, "Claude: each request names the previous one, and the API says why a request missed the cache (system, tools or messages changed). Logged in usage.jsonl.");
-        self.on_off_row(ui, t, "Stable prefix", |s| &mut s.stable_prefix, api::set_stable_prefix, "A new date, AGENT model list, loaded kit or (Claude) effort reaches the model after the latest message, instead of a changed system prompt, tool list or effort that rewrites the whole cache; all are brought up to date when the cache is cold anyway. Claude and Codex use their own mid-conversation messages, which turn themselves off if refused; other providers get a text note.");
 
         if option_row(ui, t, "Title model", &mut self.settings.title_model, openrouter::TITLE_CHOICES.iter().map(|(id, name)| (id.to_string(), *name)), Some("Requires an OpenRouter key. Nemotron is free; Gemma costs a fraction of a cent per title. Each is the other's fallback.")) {
             openrouter::set_title_model(&self.settings.title_model);
@@ -96,7 +95,13 @@ impl App {
         ui.end_row();
 
         self.on_off_row(ui, t, "Account rotation", |s| &mut s.rotation, api::set_rotation, "Switches to the account with the most remaining usage at a limit. Off: waits for the selected account to reset.");
-        self.on_off_row(ui, t, "Notes reminder", |s| &mut s.notes_alert, crate::agent::set_notes_alert, "Model reminder to prune notes over about 1,700 tokens.");
+        let tip = "Hard limit on a session's notes, all together. At it, the model must shorten or delete notes before adding or lengthening one; \
+                   notes already over it are kept. Running sessions are told of a change in a message.";
+        if option_row(ui, t, "Notes limit", &mut self.settings.notes_limit, crate::agent::NOTES_LIMITS, Some(tip)) {
+            crate::agent::set_notes_limit(self.settings.notes_limit);
+            store::save_settings(&self.settings);
+        }
+        self.on_off_row(ui, t, "Notes reminder", |s| &mut s.notes_alert, crate::agent::set_notes_alert, "Model reminder to prune notes past 85% of the notes limit.");
 
         caption(ui, "Scratchpads", t.ink3);
         ui.horizontal(|ui| self.scratch_row(ui, t));

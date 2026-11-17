@@ -142,9 +142,13 @@ fn pause_waits_for_the_request() {
     w.set(|l| l.requesting = true);
     assert!(s.request_pause());
     assert!(s.pause_queued() && !s.paused.load(Ordering::SeqCst));
+    // Saved, a queued pause holds if OAK closes before it takes hold.
+    let mut saved = s.conv.lock().unwrap().clone();
+    assert!(saved.pause_queued && !saved.paused);
+    assert!(hold_queued_pause(&mut saved) && saved.paused && !saved.pause_queued);
     // The request ends: paused now, and the queue is done with.
     w.end_request();
-    assert!(paused() && !s.pause_queued());
+    assert!(paused() && !s.pause_queued() && !s.conv.lock().unwrap().pause_queued);
     // Resumed, and queued again, the second press pauses at once.
     s.set_paused(false);
     w.set(|l| l.requesting = true);
@@ -229,12 +233,12 @@ fn goal_runs_until_finished() {
     assert!(!sent[0]["content"][0].as_object().unwrap().contains_key("_oak_goal"));
 }
 
-/// Kits and notes on a stable prefix (Claude): LOAD adds AGENT's tool in
-/// a system message while the cache is warm, the prompt and tools as
-/// they were; at the next cold moment the tool and its prompt block join
-/// the prefix and the LOAD result and NOTE text are folded.
+/// Kits and notes (Claude): LOAD adds AGENT's tool in a system message,
+/// the prompt and tools as they were. A cold cache changes nothing; only a
+/// summary that covers the LOAD brings the kit into the prefix (and the
+/// note into the session memory, its call's text folded).
 #[test]
-fn kits_and_notes_wait_for_a_cold_moment() {
+fn kits_and_notes_wait_for_a_summary() {
     let (w, s) = idle_worker("kits", Conversation { model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
     let names = |r: &oak::Request| r.tools.iter().map(|t| t["name"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
     s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
@@ -268,15 +272,162 @@ fn kits_and_notes_wait_for_a_cold_moment() {
     s.conv.lock().unwrap().effort = "low".into();
     let (r3, ..) = w.request_body();
     assert_eq!((r3.effort.as_deref(), r3.messages.last().unwrap()["effort"].as_str()), (Some("high"), Some("low")));
-    // Cold: everything as it is now, the duplicates folded.
-    s.conv.lock().unwrap().cache.cold();
+    // Cold (expired, another account), and old tool output: nothing sent
+    // changes, nothing is cleared or folded, the effort stays per message.
+    {
+        let mut c = s.conv.lock().unwrap();
+        let big = "x".repeat(200_000);
+        c.messages.push(json!({"role": "assistant", "content": [{"type": "tool_call", "id": "e1", "name": "EXECUTE", "input": {"command": "cat big"}}]}));
+        c.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "e1", "content": big}]}));
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("done")]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text("next")]}));
+        c.cache.cold();
+    }
     let (r4, ..) = w.request_body();
-    assert!(names(&r4).contains(&"AGENT".to_string()) && r4.system.contains("Subagents (AGENT) suit") && r4.system.contains("[1] the db is postgres"));
-    assert_eq!(r4.effort.as_deref(), Some("low"));
-    assert!(r4.messages.iter().all(|m| m["role"] != "system"));
+    assert_eq!((&r4.system, &r4.tools, r4.effort.as_deref()), (&r1.system, &r1.tools, Some("high")));
+    assert_eq!(&r4.messages[..r3.messages.len()], &r3.messages[..]);
     let flat = serde_json::to_string(&r4.messages).unwrap();
-    assert!(flat.contains("Loaded AGENT: it is in your tools and system prompt now.") && !flat.contains("Subagents (AGENT) suit"));
-    assert!(flat.contains(crate::prefix::NOTE_FOLDED) && !flat.contains("the db is postgres"));
+    assert!(flat.contains("the db is postgres") && !flat.contains(crate::prefix::NOTE_FOLDED) && flat.contains(&"x".repeat(200_000)));
+    // A summary covers the LOAD: the kit joins the prefix, and no message
+    // adds its tool any more.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.rolling.summary = Some(crate::rolling::Summary { cut: 3, text: "Loaded AGENT, noted the db.".into(), made_at: 1, clear: 3 });
+    }
+    let (r6, ..) = w.request_body();
+    assert!(names(&r6).contains(&"AGENT".to_string()) && r6.system.contains("Subagents (AGENT) suit"));
+    assert!(r6.system.contains("[1] the db is postgres") && r6.effort.as_deref() == Some("low"));
+    assert!(r6.messages.iter().all(|m| m["role"] != "system"));
+    let flat = serde_json::to_string(&r6.messages).unwrap();
+    assert!(!flat.contains("\"LOAD\"") && !flat.contains("Subagents (AGENT) suit"), "{flat}");
+}
+
+/// A transcript in which the model loaded AGENT (message 1) and BROWSER
+/// (message 3), each result followed by more work.
+fn two_loads() -> Conversation {
+    let load = |id: &str, kit: &str| json!({"role": "assistant", "content": [{"type": "tool_call", "id": id, "name": "LOAD", "input": {"name": kit}}]});
+    let result = |id: &str, kit: &str| json!({"role": "user", "content": [{"type": "tool_result", "call_id": id, "content": format!("Loaded {kit}. The {kit} tool is in your tool list now.\n\n{kit} instructions")}]});
+    Conversation {
+        model: "claude-opus-5-5".into(),
+        effort: "high".into(),
+        messages: vec![
+            json!({"role": "user", "content": [oak::text("go")]}),
+            load("a", "agent"),
+            result("a", "AGENT"),
+            load("b", "BROWSER"),
+            result("b", "BROWSER"),
+            json!({"role": "assistant", "content": [oak::text("both loaded")]}),
+            json!({"role": "user", "content": [oak::text("next")]}),
+        ]
+        .into(),
+        prefix: crate::prefix::State { kits: vec!["AGENT".into(), "BROWSER".into()], ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// Each kit is in the prefix exactly when a summary covers its LOAD;
+/// otherwise its tool is told right after its LOAD's result, at every
+/// renewal, and through a save and reload.
+#[test]
+fn a_kit_joins_the_prefix_only_once_a_summary_covers_its_load() {
+    let (w, s) = idle_worker("two-loads", two_loads());
+    let names = |r: &oak::Request| r.tools.iter().map(|t| t["name"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    let added = |r: &oak::Request| -> Vec<(usize, String)> {
+        let at = |i: usize, m: &Value| m["content"].as_array().unwrap().iter().filter(|b| b["type"] == "tool_definition").map(|b| (i, b["definition"]["name"].as_str().unwrap().to_string())).collect::<Vec<_>>();
+        r.messages.iter().enumerate().filter(|(_, m)| m["role"] == "system").flat_map(|(i, m)| at(i, m)).collect()
+    };
+    // The first request (nothing cached): neither kit in the prefix.
+    let (r1, ..) = w.request_body();
+    assert!(!names(&r1).contains(&"AGENT".to_string()) && !names(&r1).contains(&"BROWSER".to_string()));
+    assert!(!r1.system.contains("Subagents (AGENT) suit") && !r1.system.contains("BROWSER kit"));
+    // Each tool after its LOAD's result, before the reply that follows.
+    assert_eq!(added(&r1), [(3, "AGENT".to_string()), (6, "BROWSER".to_string())]);
+    assert_eq!((r1.messages[2]["role"].as_str(), r1.messages[5]["content"][0]["call_id"].as_str()), (Some("user"), Some("b")));
+    // As sent to Claude: each `tool_addition` right after its LOAD's
+    // result, the tool list and system prompt without either kit.
+    let body = api::claude_body(&r1);
+    let sent: Vec<(String, String)> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["role"].as_str().unwrap().to_string(), m["content"][0]["type"].as_str().unwrap_or("").to_string()))
+        .collect();
+    let at = |role: &str, kind: &str| (role.to_string(), kind.to_string());
+    assert_eq!(&sent[1..7], [at("assistant", "tool_use"), at("user", "tool_result"), at("system", "tool_addition"), at("assistant", "tool_use"), at("user", "tool_result"), at("system", "tool_addition")]);
+    assert_eq!(body["messages"][3]["content"][0]["tool"]["definition"]["name"], "AGENT");
+    assert!(!body["tools"].as_array().unwrap().iter().any(|t| t["name"] == "AGENT" || t["name"] == "BROWSER"));
+    // Cold again (expired, another account): the same request.
+    s.conv.lock().unwrap().cache.cold();
+    let (r2, ..) = w.request_body();
+    assert_eq!((&r2.system, &r2.tools, &r2.messages), (&r1.system, &r1.tools, &r1.messages));
+    // Saved and loaded again: the same request.
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let back: Conversation = serde_json::from_str(&saved).unwrap();
+    let (w2, _s2) = idle_worker("two-loads-reloaded", back);
+    let (r3, ..) = w2.request_body();
+    assert_eq!((&r3.system, &r3.tools, &r3.messages), (&r1.system, &r1.tools, &r1.messages));
+    // A summary covers AGENT's LOAD, not BROWSER's: AGENT joins the
+    // prefix, BROWSER's tool stays after its LOAD.
+    s.conv.lock().unwrap().rolling.summary = Some(crate::rolling::Summary { cut: 3, text: "Loaded AGENT.".into(), made_at: 1, clear: 3 });
+    let (r4, ..) = w.request_body();
+    assert!(names(&r4).contains(&"AGENT".to_string()) && !names(&r4).contains(&"BROWSER".to_string()));
+    assert!(r4.system.contains("Subagents (AGENT) suit"));
+    // The view: the summary, then messages 3.. (BROWSER's LOAD first).
+    assert_eq!(r4.messages[1]["content"][0]["input"]["name"], "BROWSER");
+    assert_eq!(added(&r4), [(3, "BROWSER".to_string())]);
+    // Saved and loaded again, warm: the same request.
+    {
+        let mut c = s.conv.lock().unwrap();
+        let choice = crate::cache_ttl::Choice { ttl: oak::Ttl::FiveMinutes, anchor: None };
+        let base = c.rolling.base();
+        c.cache.record(api::now_ms(), choice, 20_000, r4.messages.len(), base);
+    }
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let back: Conversation = serde_json::from_str(&saved).unwrap();
+    let (w3, _s3) = idle_worker("two-loads-reloaded-again", back);
+    let (r5, ..) = w3.request_body();
+    assert_eq!((&r5.system, &r5.tools, &r5.messages), (&r4.system, &r4.tools, &r4.messages));
+    // A summary that covers both: both in the prefix, no tool messages.
+    s.conv.lock().unwrap().rolling.summary = Some(crate::rolling::Summary { cut: 5, text: "Loaded both.".into(), made_at: 2, clear: 5 });
+    let (r6, ..) = w.request_body();
+    assert!(names(&r6).contains(&"AGENT".to_string()) && names(&r6).contains(&"BROWSER".to_string()));
+    assert!(added(&r6).is_empty() && r6.messages.iter().all(|m| m["role"] != "system"));
+}
+
+/// Where tools can't be added (OpenRouter), a kit loaded in view is
+/// reached through LOAD; one loaded with a Claude model, whose LOAD said
+/// it was in the tool list, is told so in text after its result.
+#[test]
+fn a_kit_loaded_in_view_is_called_through_load_where_tools_cant_be_added() {
+    let (w, s) = idle_worker("two-loads-generic", Conversation { provider: Some(crate::providers::Kind::OpenRouter), model: "openai/gpt-5".into(), ..two_loads() });
+    assert_eq!(crate::prefix::mode(s.conv.lock().unwrap().provider(), "openai/gpt-5"), Some(crate::prefix::Mode::Generic));
+    let (r, ..) = w.request_body();
+    let names: Vec<&str> = r.tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(!names.contains(&"AGENT") && !names.contains(&"BROWSER") && names.contains(&"LOAD"));
+    let flat = serde_json::to_string(&r.messages).unwrap();
+    assert!(flat.contains("The AGENT tool isn't in your tool list here: call it through LOAD, with name=AGENT"), "{flat}");
+    assert!(flat.contains("The BROWSER tool isn't in your tool list here: call it through LOAD, with name=BROWSER"));
+    // A LOAD whose result said so already isn't told again.
+    let mut c = s.conv.lock().unwrap().clone();
+    c.messages[2]["content"][0]["content"] = json!("Loaded AGENT. Its tool isn't in your tool list: call it through LOAD, with name=AGENT …");
+    c.prefix = crate::prefix::State { kits: c.prefix.kits.clone(), ..Default::default() };
+    let (w, _s) = idle_worker("two-loads-generic-said", c);
+    let (r, ..) = w.request_body();
+    let flat = serde_json::to_string(&r.messages).unwrap();
+    assert!(!flat.contains("The AGENT tool isn't in your tool list here") && flat.contains("The BROWSER tool isn't in your tool list here"));
+}
+
+/// A revert to before a LOAD unloads its kit, and what was told after
+/// the revert's point goes with it.
+#[test]
+fn a_revert_before_a_load_unloads_its_kit() {
+    let mut c = two_loads();
+    c.prefix.sys.push(crate::prefix::SysMsg { at: 5, kind: "tool:BROWSER".into(), ..Default::default() });
+    c.prefix.sys.push(crate::prefix::SysMsg { at: 3, kind: "tool:AGENT".into(), ..Default::default() });
+    let was = c.messages[3]["content"][0].clone();
+    assert!(revert_to(&mut c, 3, 0, &was));
+    assert_eq!(c.prefix.kits, ["AGENT"]);
+    assert_eq!(c.prefix.sys.iter().map(|m| m.at).collect::<Vec<_>>(), [3]);
 }
 
 /// While a goal is active, ASK needs a REQUEST_ASK the user accepted,
@@ -554,7 +705,7 @@ fn cd_switches_the_working_folder() {
     // The scratchpad stays, and is still found by the scan.
     assert_eq!(scratchpad(&mut s.conv.lock().unwrap()), pad);
     let owners = [crate::scratch::Owner { id: "x".into(), folder: sub.clone(), scratch: s.conv.lock().unwrap().scratch.clone(), last_ms: 0, in_use: false }];
-    assert!(crate::scratch::pads(&owners).iter().any(|p| p.dir == pad && p.owner.as_deref() == Some("x")));
+    assert!(crate::scratch::pads(&owners).iter().any(|p| p.dir == pad && p.owners == ["x"]));
     // Back up, with `..`; the old folder has no instructions.
     let out = cd("../proj/..").unwrap();
     assert!(out.contains(&format!("now {}", root.display())) && !out.contains("instructions"), "{out}");
@@ -562,7 +713,7 @@ fn cd_switches_the_working_folder() {
     // The pin keeps the folder the cache was written with.
     let mut p = crate::prefix::State::default();
     let pin = |folder: &Path| crate::prefix::Pin { day: "d".into(), folder: folder.display().to_string(), tools: vec![json!({"name": "READ"})], ..Default::default() };
-    let setup = |n, now| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, cold: false, n, cut: 0, add: true, effort_per_message: true, now };
+    let setup = |n, now: crate::prefix::Pin| crate::prefix::Setup { mode: crate::prefix::Mode::Claude, n, cut: 0, add: true, effort_per_message: true, base: now.clone(), now, joins: vec![], notes: 0 };
     assert_eq!(p.prepare(setup(1, pin(&root))).folder, root.display().to_string());
     assert_eq!(p.prepare(setup(3, pin(&sub))).folder, root.display().to_string());
     assert!(p.sys.is_empty());
@@ -665,30 +816,30 @@ fn start_marks_show_what_the_model_is_given() {
     assert!(!preamble_changed(&c, &reworded));
 }
 
-/// The memory block (goal, notes) changes only when the prompt cache is
-/// being rebuilt anyway: after a summary, or a cold cache.
+/// The memory block (goal, notes) is part of the prefix: it changes only
+/// with a summary, never because the cache expired or went cold.
 #[test]
-fn memory_changes_only_with_the_cache() {
+fn memory_changes_only_with_a_summary() {
     let mut c = Conversation::default();
-    assert_eq!(memory_for_request(&mut c, 0, false), "");
+    assert_eq!(memory_for_request(&mut c, 0), "");
     let (block, mark) = apply_command(&mut c, Command::Goal("ship v2".into(), false));
     let block = block.unwrap();
     assert!(block["text"].as_str().unwrap().starts_with(GOAL_TAG) && is_hidden_block(&block));
     assert_eq!(mark, (MarkKind::Goal, "ship v2".into()));
     memory_tool(&mut c, "NOTE_NEW", &json!({"text": "the db is postgres"}), 0).unwrap();
-    // Requests keep the cache warm: the block stays as it was.
     let ttl = c.cache.ttl_ms();
-    assert_eq!(memory_for_request(&mut c, ttl / 2, false), "", "a pause shorter than the cache's lifetime");
-    assert_eq!(memory_for_request(&mut c, ttl + ttl / 2 - 1_000, false), "");
-    // After a quiet cache lifetime the cache is gone anyway: bring it up to date.
+    assert_eq!(memory_for_request(&mut c, ttl / 2), "", "a pause shorter than the cache's lifetime");
+    // The cache expired, or went cold (another account): the same.
     let later = 2 * ttl + ttl / 2 + 10_000;
-    let m = memory_for_request(&mut c, later, false);
-    assert!(m.contains("# Session memory") && m.contains("ship v2") && m.contains("[1] the db is postgres"), "{m}");
-    // A summary moves the cut, which rewrites the cache too.
-    memory_tool(&mut c, "NOTE_NEW", &json!({"text": "second note"}), 0).unwrap();
-    assert!(!memory_for_request(&mut c, later + 1_000, false).contains("second note"));
+    assert_eq!(memory_for_request(&mut c, later), "");
+    c.cache.cold();
+    assert_eq!(memory_for_request(&mut c, later + 500), "");
+    // A summary moves the cut: brought up to date.
     c.rolling.apply(Summary { cut: 2, text: "s".into(), made_at: 0, ..Default::default() }, 0, Default::default());
-    assert!(memory_for_request(&mut c, later + 2_000, false).contains("[2] second note"));
+    let m = memory_for_request(&mut c, later + 1_000);
+    assert!(m.contains("# Session memory") && m.contains("ship v2") && m.contains("[1] the db is postgres"), "{m}");
+    memory_tool(&mut c, "NOTE_NEW", &json!({"text": "second note"}), 0).unwrap();
+    assert!(!memory_for_request(&mut c, later + 10 * ttl).contains("second note"));
 }
 
 /// Reverting goes back to before a message the user sent: it and all
@@ -1068,11 +1219,499 @@ fn execute_returns_when_its_command_exits() {
 #[test]
 fn phase_reads_oaks_own_block_types() {
     let mut l = Live { busy: true, ..Live::default() };
-    assert_eq!(l.phase().0, "requesting");
+    assert_eq!(l.plugin_phase().0, "requesting");
     l.blocks = vec![json!({"type": "reasoning", "text": "hm", "by": "claude"})];
-    assert_eq!(l.phase(), ("thinking", String::new()));
+    assert_eq!(l.plugin_phase(), ("thinking", String::new()));
     l.blocks.push(json!({"type": "text", "text": "So"}));
-    assert_eq!(l.phase().0, "writing");
+    assert_eq!(l.plugin_phase().0, "writing");
     l.blocks.push(json!({"type": "tool_call", "id": "t", "name": "READ", "input": {}}));
-    assert_eq!(l.phase(), ("tool", "READ".to_string()));
+    assert_eq!(l.plugin_phase(), ("tool", "READ".to_string()));
+}
+
+/// A loaded kit's tool called through LOAD runs as that tool would called
+/// directly: its input repaired as that tool's as it arrives (here sent as
+/// JSON text, with the agent's id as a string), its result under the
+/// LOAD call's id, the call named as the tool it ran.
+#[test]
+fn calls_through_load_run_as_their_tool() {
+    let (w, s) = idle_worker("through-load", Conversation { model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
+    s.conv.lock().unwrap().prefix.kits.push("AGENT".into());
+    let input = tools::repair("LOAD", json!({"name": "AGENT", "input": "{\"action\": \"send\", \"id\": \"7\", \"message\": \"hi\", \"timeout\": null}"}));
+    assert_eq!(input, json!({"name": "AGENT", "input": {"action": "send", "id": 7, "message": "hi"}}));
+    let calls = vec![
+        json!({"type": "tool_call", "id": "s1", "name": "LOAD", "input": input}),
+        json!({"type": "tool_call", "id": "l1", "name": "LOAD", "input": {"name": "AGENT", "input": {"action": "list"}}}),
+        json!({"type": "tool_call", "id": "k1", "name": "LOAD", "input": {"name": "AGENT"}}),
+    ];
+    let shown: Vec<String> = calls.iter().map(crate::transcript::shown).collect();
+    assert_eq!(shown, ["AGENT send", "AGENT list", "LOAD"]);
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls.clone()}));
+    w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    let c = s.conv.lock().unwrap();
+    let results = c.messages[2]["content"].as_array().unwrap();
+    let ids: Vec<&str> = results.iter().map(|r| r["call_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["s1", "l1", "k1"]);
+    let text = |i: usize| results[i]["content"].to_string();
+    assert!(text(0).contains("No agent 7.") && !text(0).contains("Invalid input"), "{}", text(0));
+    assert!(text(1).contains("No agents yet") && results[1]["is_error"] != true, "{}", text(1));
+    assert!(text(2).contains("AGENT is loaded already"), "{}", text(2));
+}
+
+/// `v` without its cache breakpoints, which move with every request and
+/// are no part of what the model reads.
+fn without_breakpoints(mut v: Value) -> Value {
+    match &mut v {
+        Value::Object(o) => {
+            o.remove("cache_control");
+            o.values_mut().for_each(|x| *x = without_breakpoints(x.take()));
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| *x = without_breakpoints(x.take())),
+        _ => {}
+    }
+    v
+}
+
+/// What a request sends the model as its provider's wire body has it: the
+/// system prompt, the tools and the messages.
+type Sent = (Value, Value, Vec<Value>);
+
+fn claude_sent(r: &oak::Request) -> Sent {
+    let b = without_breakpoints(api::claude_body(r));
+    (b["system"].clone(), b["tools"].clone(), b["messages"].as_array().unwrap().clone())
+}
+
+fn codex_sent(r: &oak::Request) -> Sent {
+    let b = without_breakpoints(crate::codex::request_body(r));
+    (b["instructions"].clone(), b["tools"].clone(), b["input"].as_array().unwrap().clone())
+}
+
+fn generic_sent(r: &oak::Request) -> Sent {
+    let b = without_breakpoints(crate::wire_anthropic::body(r, "openrouter", false));
+    (b["system"].clone(), b["tools"].clone(), b["messages"].as_array().unwrap().clone())
+}
+
+/// `b` sends all `a` sent, unchanged, at its start (where they differ,
+/// briefly).
+fn assert_starts_with(a: &Sent, b: &Sent, what: &str) {
+    let short = |v: &Value| v.to_string().chars().take(300).collect::<String>();
+    let diff = |x: &Value, y: &Value| {
+        let (x, y) = (x.to_string(), y.to_string());
+        let i = x.chars().zip(y.chars()).take_while(|(a, b)| a == b).count();
+        let around = |s: &str| s.chars().skip(i.saturating_sub(80)).take(240).collect::<String>();
+        format!("from char {i}:\n  {}\n  {}", around(&x), around(&y))
+    };
+    assert!(a.0 == b.0, "{what}: the system prompt differs {}", diff(&a.0, &b.0));
+    assert!(a.1 == b.1, "{what}: the tools differ {}", diff(&a.1, &b.1));
+    assert!(a.2.len() <= b.2.len(), "{what}: {} messages, not {} (last: {})", b.2.len(), a.2.len(), b.2.last().map(short).unwrap_or_default());
+    for (i, (x, y)) in a.2.iter().zip(&b.2).enumerate() {
+        assert!(x == y, "{what}: message {i} differs {}", diff(x, y));
+    }
+}
+
+/// `next` sends all `prev` sent, unchanged, at its start.
+fn assert_grows(prev: &Sent, next: &Sent, what: &str) {
+    assert_eq!(prev.0, next.0, "{what}: the system prompt changed");
+    assert_eq!(prev.1, next.1, "{what}: the tools changed");
+    assert!(next.2.len() >= prev.2.len(), "{what}: messages went");
+    for (i, (a, b)) in prev.2.iter().zip(&next.2).enumerate() {
+        assert_eq!(a, b, "{what}: message {i} changed");
+    }
+}
+
+/// The prefix invariant end to end (`crate::prefix`), as each provider's
+/// wire body has it: whatever happens between requests (the date, effort,
+/// model, account or cache expiring, notes, a goal, a kit loading,
+/// instruction files changing, old tool output, smart context turned off
+/// and on, a save and reload, a fork), every later request sends what an
+/// earlier one sent, unchanged, at its start. Only a summary changes it.
+fn prefix_only_grows(name: &str, conv: Conversation, other_model: &str, sent: fn(&oak::Request) -> Sent) {
+    let folder = std::env::temp_dir().join(format!("oak-prefix-{name}-{}", api::now_ms()));
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("AGENTS.md"), "Rule one.").unwrap();
+    let (w, s) = idle_worker(name, Conversation { effort: "high".into(), folder: folder.clone(), messages: vec![json!({"role": "user", "content": [oak::text("start")]})].into(), ..conv });
+    let req = |w: &Worker| sent(&w.request_body().0);
+    let reply = |text: &str, next: &str| {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text(text)]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text(next)]}));
+    };
+    let mut prev = req(&w);
+    let flat = |x: &Sent| serde_json::to_string(&(&x.0, &x.2)).unwrap();
+    assert!(flat(&prev).contains("Rule one."));
+    let step = |prev: &mut Sent, w: &Worker, what: &str| {
+        let next = req(w);
+        assert_grows(prev, &next, what);
+        *prev = next;
+        prev.clone()
+    };
+    // The model loads a kit and takes a note.
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [
+        {"type": "tool_call", "id": "l1", "name": "LOAD", "input": {"name": "AGENT"}},
+        {"type": "tool_call", "id": "n1", "name": "NOTE", "input": {"action": "new", "text": "the db is postgres"}}]}));
+    let calls = s.conv.lock().unwrap().messages[1]["content"].as_array().unwrap().clone();
+    w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    step(&mut prev, &w, "a kit loaded, a note taken");
+    // The effort, the date and the model change.
+    s.conv.lock().unwrap().effort = "low".into();
+    reply("ok", "go on");
+    step(&mut prev, &w, "another effort");
+    s.conv.lock().unwrap().prefix.pin.as_mut().unwrap().day = "2000-01-01".into();
+    reply("ok", "and on");
+    assert!(flat(&step(&mut prev, &w, "another day")).contains("Today's date is now "));
+    s.conv.lock().unwrap().model = other_model.into();
+    reply("ok", "still on");
+    assert!(flat(&step(&mut prev, &w, "another model")).contains("Your underlying model is now "));
+    // The cache expires or the account changes; a goal is set; the
+    // instruction files change; old tool output piles up.
+    s.conv.lock().unwrap().cache.cold();
+    reply("ok", "after a pause");
+    step(&mut prev, &w, "a cold cache");
+    {
+        let mut c = s.conv.lock().unwrap();
+        let (block, _) = apply_command(&mut c, Command::Goal("ship v2".into(), false));
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("ok")]}));
+        c.messages.push(json!({"role": "user", "content": [block.unwrap()]}));
+    }
+    step(&mut prev, &w, "a goal");
+    std::fs::write(folder.join("AGENTS.md"), "Rule two.").unwrap();
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [{"type": "tool_call", "id": "e1", "name": "EXECUTE", "input": {"command": "cat big"}}]}));
+        c.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "e1", "content": "x".repeat(300_000)}]}));
+        c.cache.cold();
+    }
+    let after = step(&mut prev, &w, "instruction files changed, old tool output, cold again");
+    assert!(!flat(&after).contains("Rule two.") && flat(&after).contains(&"x".repeat(300_000)));
+    // Smart context off and on.
+    s.conv.lock().unwrap().rolling.off = true;
+    reply("ok", "off");
+    step(&mut prev, &w, "smart context off");
+    // (What a revert to here, past the summary below, sends again.)
+    let (back_to, sent_then) = (s.conv.lock().unwrap().messages.len(), prev.clone());
+    s.conv.lock().unwrap().rolling.off = false;
+    reply("ok", "on");
+    step(&mut prev, &w, "smart context on");
+    // Saved and loaded: the same request, and it goes on growing.
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let (w2, s2) = idle_worker(&format!("{name}-reloaded"), serde_json::from_str(&saved).unwrap());
+    assert_eq!(req(&w2), prev, "reloaded");
+    s2.conv.lock().unwrap().cache.cold();
+    s2.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [oak::text("back")]}));
+    s2.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("again")]}));
+    step(&mut prev, &w2, "reloaded, cold");
+    // A fork sends what its source sent.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("done")]}));
+    }
+    let source = req(&w);
+    let forked = crate::side_chat::fork(&s.conv.lock().unwrap(), format!("unit-test-{name}-fork-{}", api::now_ms()), 0);
+    let (w3, _s3) = idle_worker(&format!("{name}-fork"), forked);
+    assert_grows(&source, &req(&w3), "a fork");
+    // A summary: the one moment the prefix changes. The note joins the
+    // session memory, the kit the prefix, the effort and model as they are.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "user", "content": [oak::text("more")]}));
+        let cut = c.messages.len() - 2;
+        install_summary(&mut c, crate::rolling::Summary { cut, text: "Loaded AGENT, noted the db, set a goal.".into(), made_at: 1, clear: cut }, 0, Default::default());
+    }
+    let summarized = req(&w);
+    assert_ne!(summarized.0, prev.0, "the system prompt is brought up to date");
+    let system = serde_json::to_string(&summarized.0).unwrap();
+    assert!(system.contains("the db is postgres") && system.contains("ship v2"), "{system}");
+    assert!(flat(&summarized).contains("Rule two.") && !flat(&summarized).contains(&"x".repeat(300_000)));
+    prev = summarized;
+    // After it, the same again.
+    s.conv.lock().unwrap().effort = "high".into();
+    s.conv.lock().unwrap().cache.cold();
+    reply("ok", "after the summary");
+    step(&mut prev, &w, "after the summary: effort, cold");
+    s.conv.lock().unwrap().rolling.off = true;
+    reply("ok", "off again");
+    step(&mut prev, &w, "after the summary: smart context off keeps it");
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let (w4, s4) = idle_worker(&format!("{name}-reloaded-again"), serde_json::from_str(&saved).unwrap());
+    assert_eq!(req(&w4), prev, "reloaded after the summary");
+    // A second summary, and the session memory changes since.
+    {
+        let mut c = s4.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("ok")]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text("later")]}));
+        memory_tool(&mut c, "NOTE_NEW", &json!({"text": "the cache is redis"}), 0).unwrap();
+        let cut = c.messages.len() - 1;
+        install_summary(&mut c, crate::rolling::Summary { cut, text: "Later.".into(), made_at: 2, clear: cut }, 0, Default::default());
+    }
+    assert!(serde_json::to_string(&req(&w4).0).unwrap().contains("the cache is redis"));
+    // The user reverts (or edits a message) to before both summaries' cuts:
+    // what was sent then is sent again, exactly, from the state saved.
+    assert!(s4.conv.lock().unwrap().rolling.summary.as_ref().is_some_and(|s| s.cut > back_to));
+    assert!(revert_to_end(&mut s4.conv.lock().unwrap(), back_to));
+    let saved = serde_json::to_string(&*s4.conv.lock().unwrap()).unwrap();
+    let (w5, s5) = idle_worker(&format!("{name}-reverted"), serde_json::from_str(&saved).unwrap());
+    // (Then, as after any pause, what changed since is added: here the
+    // effort.)
+    let back = req(&w5);
+    assert_starts_with(&sent_then, &back, "reverted to before the summaries, reloaded");
+    assert_eq!(back.2.len(), sent_then.2.len() + usize::from(name == "prefix-claude"), "only the effort is added");
+    assert_starts_with(&sent_then, &req(&w4), "reverted to before the summaries");
+    let mut back = back;
+    s5.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [oak::text("again")]}));
+    s5.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("onwards")]}));
+    step(&mut back, &w5, "after the revert");
+    drop((w2, s2));
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn the_prefix_only_grows_on_claude() {
+    prefix_only_grows("prefix-claude", Conversation { model: "claude-opus-5-5".into(), ..Default::default() }, "claude-sonnet-5-5", claude_sent);
+}
+
+#[test]
+fn the_prefix_only_grows_on_codex() {
+    let conv = Conversation { provider: Some(crate::providers::Kind::Codex), model: "gpt-5.6-sol".into(), ..Default::default() };
+    prefix_only_grows("prefix-codex", conv, "gpt-5.6-terra", codex_sent);
+}
+
+#[test]
+fn the_prefix_only_grows_where_system_messages_cant_go() {
+    let conv = Conversation { provider: Some(crate::providers::Kind::OpenRouter), model: "openai/gpt-5".into(), ..Default::default() };
+    prefix_only_grows("prefix-generic", conv, "deepseek/deepseek-v4-flash", generic_sent);
+}
+
+/// NOTE with the notes' limit at `limit` tokens on this thread (100 tokens:
+/// up to 353 bytes of notes, `rolling::estimate`).
+fn limited_notes(limit: u64) -> impl Fn(&mut Conversation, &str, Value) -> Result<String, String> {
+    crate::agent::memory::set_test_notes_limit(Some(limit));
+    |c: &mut Conversation, name: &str, input: Value| memory_tool(c, name, &input, 0)
+}
+
+fn note_lens(c: &Conversation) -> Vec<usize> {
+    c.notes.iter().map(|n| n.text.len()).collect()
+}
+
+/// Notes up to the limit are saved; one byte past it is refused, and
+/// nothing changes.
+#[test]
+fn notes_fill_up_to_their_limit() {
+    let tool = limited_notes(100);
+    let mut c = Conversation::default();
+    tool(&mut c, "NOTE_NEW", json!({"text": "a".repeat(300)})).unwrap();
+    let full = tool(&mut c, "NOTE_NEW", json!({"text": "b".repeat(53)})).unwrap();
+    assert!(!full.contains("over their limit"), "{full}");
+    assert_eq!(notes_tokens(&c.notes), 100);
+    let err = tool(&mut c, "NOTE_NEW", json!({"text": "c"})).unwrap_err();
+    assert!(err.starts_with("Not saved: it would take your notes to about 101 tokens, past their limit of 100"), "{err}");
+    assert_eq!((note_lens(&c), c.next_note_id), (vec![300, 53], 2));
+    // An update that would make a note longer past the limit: refused too.
+    let err = tool(&mut c, "NOTE_UPDATE", json!({"id": 2, "text": "b".repeat(54)})).unwrap_err();
+    assert!(err.starts_with("Not updated: it would make note 2 longer"), "{err}");
+    assert_eq!(note_lens(&c), [300, 53]);
+    // Room made, the same fit.
+    tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "a".repeat(299)})).unwrap();
+    tool(&mut c, "NOTE_NEW", json!({"text": "c"})).unwrap();
+    assert_eq!(note_lens(&c), [299, 53, 1]);
+    // Growing under the limit, and up to it, is fine.
+    tool(&mut c, "NOTE_DELETE", json!({"id": 3})).unwrap();
+    tool(&mut c, "NOTE_UPDATE", json!({"id": 2, "text": "b".repeat(54)})).unwrap();
+    assert_eq!(notes_tokens(&c.notes), 100);
+    crate::agent::memory::set_test_notes_limit(None);
+}
+
+/// The limit lowered under notes already taken: they are all kept, the
+/// model told; only shortening or deleting goes through until they are
+/// under it again.
+#[test]
+fn notes_over_a_lowered_limit_must_shrink_first() {
+    let tool = limited_notes(1_000);
+    let mut c = Conversation::default();
+    for _ in 0..3 {
+        tool(&mut c, "NOTE_NEW", json!({"text": "n".repeat(200)})).unwrap();
+    }
+    let tool = limited_notes(100);
+    assert_eq!((note_lens(&c), notes_tokens(&c.notes)), (vec![200, 200, 200], 171));
+    assert!(render_memory(&c).contains("over their limit of 100"));
+    // No new note, however small; no update that makes a note longer.
+    let err = tool(&mut c, "NOTE_NEW", json!({"text": "x"})).unwrap_err();
+    assert!(err.starts_with("Not saved: your notes take about 171 tokens, over their limit of 100."), "{err}");
+    assert!(tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "n".repeat(201)})).is_err());
+    assert_eq!((note_lens(&c), c.next_note_id), (vec![200, 200, 200], 3));
+    // Rewording at the same length, shrinking and deleting all go through,
+    // each saying what is left to do while still over.
+    let same = tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "m".repeat(200)})).unwrap();
+    assert!(same.contains("over their limit of 100"), "{same}");
+    let shrunk = tool(&mut c, "NOTE_UPDATE", json!({"id": 2, "text": "n".repeat(100)})).unwrap();
+    assert!(shrunk.contains("about 142 tokens, over their limit"), "{shrunk}");
+    let deleted = tool(&mut c, "NOTE_DELETE", json!({"id": 3})).unwrap();
+    assert_eq!(deleted, "Deleted note 3.");
+    assert_eq!((note_lens(&c), notes_tokens(&c.notes)), (vec![200, 100], 85));
+    // Under it: adding works again, up to the limit.
+    assert!(tool(&mut c, "NOTE_NEW", json!({"text": "x".repeat(54)})).is_err());
+    tool(&mut c, "NOTE_NEW", json!({"text": "x".repeat(53)})).unwrap();
+    crate::agent::memory::set_test_notes_limit(None);
+}
+
+/// An update crossing the limit: down across it goes through (and the
+/// model is no longer told it is over), up across it is refused.
+#[test]
+fn note_updates_crossing_the_limit() {
+    let tool = limited_notes(1_000);
+    let mut c = Conversation::default();
+    tool(&mut c, "NOTE_NEW", json!({"text": "a".repeat(500)})).unwrap();
+    let tool = limited_notes(100);
+    let down = tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "a".repeat(300)})).unwrap();
+    assert!(!down.contains("over their limit"), "{down}");
+    assert!(tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "a".repeat(400)})).is_err());
+    tool(&mut c, "NOTE_UPDATE", json!({"id": 1, "text": "a".repeat(353)})).unwrap();
+    assert_eq!(note_lens(&c), [353]);
+    crate::agent::memory::set_test_notes_limit(None);
+}
+
+/// The "Notes limit" setting: 2,000 tokens by default (an older
+/// settings.json without it too), kept across a save, brought into range.
+#[test]
+fn the_notes_limit_setting_persists() {
+    assert_eq!(crate::store::Settings::default().notes_limit, 2_000);
+    let older: crate::store::Settings = serde_json::from_str("{}").unwrap();
+    assert_eq!(older.notes_limit, 2_000);
+    let mut set = crate::store::Settings::default();
+    set.notes_limit = 8_000;
+    let back: crate::store::Settings = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+    assert_eq!(back.notes_limit, 8_000);
+    assert_eq!(crate::agent::memory::sane_notes_limit(0), 2_000);
+    assert_eq!(crate::agent::memory::sane_notes_limit(5), 100);
+    assert_eq!(crate::agent::memory::sane_notes_limit(4_000), 4_000);
+    assert!(NOTES_LIMITS.iter().any(|&(n, _)| n == DEFAULT_NOTES_LIMIT));
+}
+
+/// The system prompt names the limit it was sent with. Changing the
+/// setting mid-session leaves it (and everything sent) as it was and adds
+/// a message, kept across a save and reload; a summary brings the system
+/// prompt up to date. NOTE goes by the limit now throughout.
+#[test]
+fn a_new_notes_limit_keeps_the_prefix() {
+    let limit = |n| crate::agent::memory::set_test_notes_limit(Some(n));
+    limit(2_000);
+    let conv = Conversation { model: "claude-opus-5-5".into(), messages: vec![json!({"role": "user", "content": [oak::text("start")]})].into(), ..Default::default() };
+    let (w, s) = idle_worker("notes-limit", conv);
+    let req = |w: &Worker| claude_sent(&w.request_body().0);
+    let flat = |x: &Sent| serde_json::to_string(&(&x.0, &x.2)).unwrap();
+    let mut prev = req(&w);
+    let system = serde_json::to_string(&prev.0).unwrap();
+    assert!(system.contains("Your notes may take at most about 2,000 tokens in all"), "{system}");
+    let reply = |text: &str| {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("ok")]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text(text)]}));
+    };
+    memory_tool(&mut s.conv.lock().unwrap(), "NOTE_NEW", &json!({"text": "n".repeat(3_500)}), 0).unwrap();
+    reply("noted");
+    let next = req(&w);
+    assert_grows(&prev, &next, "a note");
+    prev = next;
+    // Lowered under the notes: a message, the prefix as it was.
+    limit(500);
+    reply("go on");
+    let next = req(&w);
+    assert_grows(&prev, &next, "a lower limit");
+    let told = "The limit on your notes is now about 500 tokens in all (it was 2,000). They take about 1000 now, over it";
+    assert!(flat(&next).contains(told), "{}", flat(&next));
+    assert!(serde_json::to_string(&next.0).unwrap().contains("about 2,000 tokens in all"));
+    prev = next;
+    assert!(memory_tool(&mut s.conv.lock().unwrap(), "NOTE_NEW", &json!({"text": "more"}), 0).is_err());
+    memory_tool(&mut s.conv.lock().unwrap(), "NOTE_UPDATE", &json!({"id": 1, "text": "n".repeat(1_000)}), 0).unwrap();
+    // Told once.
+    reply("and on");
+    let next = req(&w);
+    assert_grows(&prev, &next, "the same limit");
+    assert_eq!(flat(&next).matches("The limit on your notes is now").count(), 1);
+    prev = next;
+    // Saved and loaded: the same request.
+    let saved = serde_json::to_string(&*s.conv.lock().unwrap()).unwrap();
+    let (w2, _s2) = idle_worker("notes-limit-reloaded", serde_json::from_str(&saved).unwrap());
+    assert_eq!(req(&w2), prev, "reloaded");
+    // A summary: the system prompt names the limit now, and no message does.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("ok")]}));
+        c.messages.push(json!({"role": "user", "content": [oak::text("more")]}));
+        let cut = c.messages.len() - 1;
+        install_summary(&mut c, crate::rolling::Summary { cut, text: "Noted things.".into(), made_at: 1, clear: cut }, 0, Default::default());
+    }
+    let summarized = req(&w);
+    let system = serde_json::to_string(&summarized.0).unwrap();
+    assert!(system.contains("Your notes may take at most about 500 tokens in all"), "{system}");
+    assert!(!flat(&summarized).contains("The limit on your notes is now"));
+    crate::agent::memory::set_test_notes_limit(None);
+}
+
+/// AGENT_PAUSE and AGENT_RESUME by model pick the agents on it by id,
+/// family word or provider, and nothing that merely shares a version.
+#[test]
+fn group_pause_picks_by_model() {
+    use crate::providers::Kind;
+    use super::subagents::on_model;
+    for (word, model, kind) in [
+        ("opus", "claude-opus-4-7", Kind::Claude),
+        ("Opus", "anthropic/claude-opus-4", Kind::OpenRouter),
+        ("claude-opus-4-7", "claude-opus-4-7", Kind::Claude),
+        ("sol", "gpt-6.1-sol", Kind::Codex),
+        ("gpt", "gpt-6.1-sol", Kind::Codex),
+        ("codex", "gpt-6.1-sol", Kind::Codex),
+        ("claude", "claude-sonnet-5", Kind::Claude),
+    ] {
+        assert!(on_model(word, model, kind), "{word} {model}");
+    }
+    for (word, model, kind) in [
+        ("opus", "gpt-6.1-sol", Kind::Codex),
+        ("sonnet", "claude-opus-4-7", Kind::Claude),
+        ("4", "claude-opus-4-7", Kind::Claude),
+        ("6.1", "gpt-6.1-sol", Kind::Codex),
+        ("codex", "claude-opus-4-7", Kind::Claude),
+        ("op", "claude-opus-4-7", Kind::Claude),
+    ] {
+        assert!(!on_model(word, model, kind), "{word} {model}");
+    }
+}
+
+/// A session's pulse: its last progress (a reply, a tool's result by its
+/// tool's name), kept with the conversation; a wait its status line names
+/// is what blocks it, and so is the error its last turn ended on.
+#[test]
+fn the_pulse_says_progress_and_blockers() {
+    let (w, s) = idle_worker("pulse", Conversation::default());
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!((p.phase, p.progress_at, p.blocker.as_str()), (super::pulse::IDLE, 0, ""));
+    w.set(|l| {
+        l.busy = true;
+        l.status = "Waiting for the model".into();
+    });
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!(p.phase, super::pulse::MODEL);
+    assert!(p.since > 0 && p.detail(api::now_ms()).ends_with("no progress yet"), "{p:?}");
+
+    w.push("assistant", vec![json!({"type": "tool_call", "id": "e1", "name": "EXECUTE", "input": {"command": "echo hush", "summary": "Say"}})]);
+    assert_eq!(s.conv.lock().unwrap().progress, "Its model replied with 1 tool call");
+    w.set(|l| l.status = "Running Say".into());
+    w.push("user", vec![oak::tool_result(&json!("e1"), json!("hush"), false)]);
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!((p.phase, p.progress.as_str()), (super::pulse::TOOLS, "EXECUTE returned"));
+    assert!(!format!("{p:?}").contains("echo hush"));
+
+    w.set(|l| l.status = "Retry 1/5 in 3s after: HTTP 529".into());
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!((p.phase, p.blocker.as_str()), (super::pulse::WAITING, "Retry 1/5 in 3s after: HTTP 529"));
+
+    w.set(|l| {
+        l.busy = false;
+        l.status.clear();
+        l.error = Some("Anthropic answered HTTP 500:\n overloaded".into());
+    });
+    let p = super::pulse::Pulse::of(&s);
+    assert_eq!((p.phase, p.blocker.as_str()), (super::pulse::BLOCKED, "Its last turn ended on an error: Anthropic answered HTTP 500: overloaded"));
+    // The last progress is saved with the conversation.
+    let saved = serde_json::to_value(&*s.conv.lock().unwrap()).unwrap();
+    assert_eq!(saved["progress"], "EXECUTE returned");
 }

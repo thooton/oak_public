@@ -361,6 +361,9 @@ pub(crate) struct AgentRow {
     pub(crate) working: bool,
     /// Its last report, on hover.
     pub(crate) report: String,
+    /// More on what it is doing (how long, its last progress), on hover
+    /// under the report.
+    pub(crate) detail: String,
 }
 
 /// What the user did in a super agent's box.
@@ -410,32 +413,43 @@ pub(crate) fn effort_for(o: &Model, effort: &str) -> String {
 
 /// The model and effort the super agent runs on.
 fn model_pickers(ui: &mut Ui, b: &SuperBox, act: &mut Option<BoxAction>) {
-    let Some(m) = b.models.iter().find(|m| m.id == b.model) else { return };
+    if let Some((m, e)) = pickers(ui, ("super", &b.salt), &b.models, &b.model, &b.effort, &b.model_tip) {
+        *act = Some(BoxAction::Model(m, e));
+    }
+}
+
+/// A model picker and an effort picker (when the model has efforts) for
+/// `model` at `effort` of `models`, `tip` on hover: the model and effort
+/// picked, if one was. Nothing when `model` isn't one of them.
+fn pickers(ui: &mut Ui, salt: (&str, &str), models: &[Model], model: &str, effort: &str, tip: &str) -> Option<(String, String)> {
+    let m = models.iter().find(|m| m.id == model)?;
+    let mut picked = None;
     ui.horizontal(|ui| {
-        let resp = egui::ComboBox::from_id_salt(("super-model", &b.salt)).selected_text(RichText::new(&m.name).small()).show_ui(ui, |ui| {
-            for o in &b.models {
-                if ui.selectable_label(o.id == b.model, &o.name).clicked() && o.id != b.model {
-                    *act = Some(BoxAction::Model(o.id.clone(), effort_for(o, &b.effort)));
+        let resp = egui::ComboBox::from_id_salt((salt, "model")).selected_text(RichText::new(&m.name).small()).show_ui(ui, |ui| {
+            for o in models {
+                if ui.selectable_label(o.id == model, &o.name).clicked() && o.id != model {
+                    picked = Some((o.id.clone(), effort_for(o, effort)));
                 }
             }
         });
-        if !b.model_tip.is_empty() {
-            resp.response.on_hover_text(&b.model_tip);
+        if !tip.is_empty() {
+            resp.response.on_hover_text(tip);
         }
         if m.efforts.is_empty() {
             return;
         }
-        let resp = egui::ComboBox::from_id_salt(("super-effort", &b.salt)).selected_text(RichText::new(&b.effort).small()).show_ui(ui, |ui| {
+        let resp = egui::ComboBox::from_id_salt((salt, "effort")).selected_text(RichText::new(effort).small()).show_ui(ui, |ui| {
             for e in &m.efforts {
-                if ui.selectable_label(*e == b.effort, e).clicked() && *e != b.effort {
-                    *act = Some(BoxAction::Model(b.model.clone(), e.clone()));
+                if ui.selectable_label(e == effort, e).clicked() && e != effort {
+                    picked = Some((model.to_string(), e.clone()));
                 }
             }
         });
-        if !b.model_tip.is_empty() {
-            resp.response.on_hover_text(&b.model_tip);
+        if !tip.is_empty() {
+            resp.response.on_hover_text(tip);
         }
     });
+    picked
 }
 
 /// The super agent's agents, each a row that opens its tab (whose number
@@ -462,7 +476,8 @@ fn agents_list(ui: &mut Ui, t: &Theme, w: f32, agents: &[AgentRow]) -> Option<i6
             let p = ui.painter();
             p.text(egui::pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, title, font, if a.live { t.ink } else { t.ink3 });
             p.text(egui::pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, &a.state, FontId::proportional(11.5), t.ink3);
-            let resp = if a.report.is_empty() { resp } else { resp.on_hover_text(&a.report) };
+            let hover = [a.report.as_str(), a.detail.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n");
+            let resp = if hover.is_empty() { resp } else { resp.on_hover_text(hover) };
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 open = Some(a.n);
             }
@@ -521,34 +536,79 @@ pub(crate) struct AgentBox {
     pub(crate) state: String,
     /// Stop's tip; empty: no Stop.
     pub(crate) stop: String,
-    /// Its model and effort, in a line; empty: none.
+    /// Its model and effort, in a line; empty: none. Shown when there are
+    /// no pickers (`models` doesn't have `model_id`).
     pub(crate) model: String,
+    /// The models it can be switched to, the one it runs on (`model_id`)
+    /// at `effort`, and what the pickers say on hover.
+    pub(crate) models: Vec<Model>,
+    pub(crate) model_id: String,
+    pub(crate) effort: String,
+    pub(crate) model_tip: String,
+    /// A switch asked for that waits for the request under way ("Switching
+    /// to … after this step"), under the pickers; empty: none.
+    pub(crate) pending: String,
+    /// Pause's tip; empty: no Pause (or Resume, when `paused`).
+    pub(crate) pause: String,
+    pub(crate) paused: bool,
+    /// A line on what it is doing (how long, its last progress), and what
+    /// holds it up (in the error colour); empty: none.
+    pub(crate) detail: String,
+    pub(crate) blocker: String,
+}
+
+/// What the user did in an agent's box.
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AgentAction {
+    Stop,
+    Pause,
+    Resume,
+    /// Run on this model at this effort.
+    Model(String, String),
 }
 
 /// An agent's box in the corner of `area`: its title and whose it is,
-/// what it is doing (with Stop), and its model. True when Stop is pressed.
-/// `more` draws under it (a local agent's notes and tasks).
-pub(crate) fn agent_box(ctx: &egui::Context, t: &Theme, area: Rect, b: &AgentBox, more: impl FnOnce(&mut Ui, f32)) -> bool {
-    let Some(w) = corner_width(area) else { return false };
-    let mut stop = false;
+/// what it is doing (with Stop, and Pause or Resume), its model (pickers
+/// when it can be switched) and a switch waiting to happen. `more` draws
+/// under it (a local agent's notes and tasks).
+pub(crate) fn agent_box(ctx: &egui::Context, t: &Theme, area: Rect, b: &AgentBox, more: impl FnOnce(&mut Ui, f32)) -> Option<AgentAction> {
+    let w = corner_width(area)?;
+    let mut act = None;
     corner_area(ctx, "agent-box", area, |ui| {
         panel_box(ui, t, w, 10, 4.0, |ui| {
             box_header(ui, t, b.icon, &b.title, &b.caption, w);
             ui.horizontal(|ui| {
                 state_label(ui, t, &b.state, b.working);
                 if !b.stop.is_empty() && ui.small_button("Stop").on_hover_text(&b.stop).clicked() {
-                    stop = true;
+                    act = Some(AgentAction::Stop);
+                }
+                if !b.pause.is_empty() {
+                    let (label, what) = if b.paused { ("Resume", AgentAction::Resume) } else { ("Pause", AgentAction::Pause) };
+                    if ui.small_button(label).on_hover_text(&b.pause).clicked() {
+                        act = Some(what);
+                    }
                 }
             });
-            if !b.model.is_empty() {
+            if !b.detail.is_empty() {
+                caption(ui, &b.detail, t.ink3);
+            }
+            if !b.blocker.is_empty() {
+                ui.add(egui::Label::new(RichText::new(&b.blocker).small().color(t.error)).wrap());
+            }
+            if let Some((m, e)) = pickers(ui, ("agent", &b.caption), &b.models, &b.model_id, &b.effort, &b.model_tip) {
+                act = Some(AgentAction::Model(m, e));
+            } else if !b.models.iter().any(|m| m.id == b.model_id) && !b.model.is_empty() {
                 caption(ui, &b.model, t.ink3);
+            }
+            if !b.pending.is_empty() {
+                ui.add(egui::Label::new(RichText::new(&b.pending).small().color(t.accent)).wrap());
             }
         });
         more(ui, w);
     });
-    stop
+    act
 }
-
 
 #[cfg(test)]
 mod tests {

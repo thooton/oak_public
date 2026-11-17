@@ -13,7 +13,7 @@ A plugin can add:
 
 | Part | Rust trait (`oak_sdk`) | C descriptor | What it is |
 | --- | --- | --- | --- |
-| A tab on Home | `HomeTab` | `OakHomeTab` | A tab beside Conversations and Cloud; the plugin draws the cell. Or a link at the right end of the tabs' row (`link`, `OAK_HOME_TAB_LINK`) that opens one of the plugin's own tabs. |
+| A tab on Home | `HomeTab` | `OakHomeTab` | A tab beside Conversations and Cloud; the plugin draws the cell. Or a link at the right end of the tabs' row (`link`, `OAK_HOME_TAB_LINK`) that opens one of the plugin's own tabs, or a page of its own (`page`, `OAK_HOME_TAB_PAGE`) drawn in all of the window under the tabs' row, as Settings is. |
 | Tabs of its own | `TabKind` | `OakTabKind` | Tabs in the strip under keys the plugin owns: their title and icon, their page, whether they have the message box and what a message sent there does, their corner box. |
 | A choice on the New screen | `NewKind` | `OakNewKind` | Beside Local folder and Cloud: its form, and what the first message starts. |
 | A cloud backend | `CloudBackend` | `OakCloudBackend` | Another service cloud sessions run through: its accounts and its requests. Oak's cloud engine, list and transcript do the rest. |
@@ -24,7 +24,7 @@ A plugin can add:
 | A vault | `Vault` | `OakVault` | Somewhere else logins and keys are kept and renewed, for several machines. One at most. |
 | Rows on Settings | `SettingsSection` | `OakSettings` | |
 | A screen before everything | `Gate` | `OakGate` | Shown instead of the app while it says it is shut (a sign-in). |
-| Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, on Home's wallpaper (`home_scene`, under the menu; interface version 4), over a local conversation's transcript (`chat_scene`, clipped to it; version 4), at exit. |
+| Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, in a message box's bottom left corner, on Home's wallpaper (`home_scene`, under the menu; interface version 7), over a local conversation's transcript (`chat_scene`, clipped to it; version 7), at exit. |
 
 Two examples to copy: `plugins/hello` (Rust: a Home tab built from Oak's components, with state
 kept between runs and work on a thread; a theme, a Settings row, a system prompt) and
@@ -143,7 +143,7 @@ color crates); the library exports one symbol.
 
 What a plugin works with:
 
-- **`oak_sdk::view`** is Oak's components (interface version 5), what most pages are made of,
+- **`oak_sdk::view`** is Oak's components (interface version 8), what most pages are made of,
   drawn by Oak in its look and the theme in use: `Page` (a centered column under a title, with a
   back link and buttons at its right), `Heading`, `Section` (in a card, folding), `Card`,
   `Action` (a button: `new`, `primary`, `quiet`, `danger`, `link`, `pill`, `icon`; busy,
@@ -168,13 +168,20 @@ What a plugin works with:
   by shape). It covers what Oak's own screens use, not all of egui: no custom fonts, no
   `LayoutJob`, no meshes or custom shaders. What is missing is added to the table's end.
 - **`&mut dyn App`** is the window, on the UI thread: the theme in use, opening and closing tabs,
-  going Home or to the New screen, the message box's text and attachments, the hint over it, this
+  going Home, to the New screen, to Settings or to a plugin's page, the message box's text and attachments, files pasted or dropped on the window and the system's file picker, the hint over it, this
   machine's conversations, starting one, drawing a transcript or a cloud list as Oak draws its own,
-  and what Oak is doing now (`activity`, version 4: the page, Home's menu and corner buttons, the
+  and what Oak is doing now (`activity`, version 7: the page, Home's menu and corner buttons, the
   window maximized or focused, each conversation's phase such as thinking, writing or a tool),
-  and during `chat_scene` what the transcript shows (`chat_scene`, version 4: the view, the boxes
+  and during `chat_scene` what the transcript shows (`chat_scene`, version 7: the view, the boxes
   over it, the body text's size, its units on screen and where each starts, and its rows of text,
   so something drawn there can stand on a line and scroll with it).
+  A plugin can also work a conversation it is shown: `session(key)` says what it is, what it is
+  doing and how its last turn went (its status, in which Oak says when a safety classifier
+  declined a reply), `set_model` switches it without the picker's question, `send` writes to it as
+  the message box does, `interrupt` stops its turn and `resume` has it answer its last message
+  again. A conversation started from `NewConversation` may name a folder, model, provider, effort
+  and chat of its own, so a plugin can carry work on where another conversation was, on the model
+  it ran.
 - **`oak_sdk::host()`** is Oak's services, from any thread: HTTP with Oak's client
   (`oak_sdk::Request`), Oak's folder, private files, repaints, the usage log, the cloud engine's
   names and accounts, a JSON blackboard plugins tell each other things through (`shared`,
@@ -227,7 +234,7 @@ true zero. How the interface reads (`hello.c` shows each):
   out_user)` for everything else, by name, with JSON arguments ("look", "send", "accounts",
   "token", ...; each descriptor's comment lists its methods). Return `OAK_CALL_UNKNOWN` for a
   method you don't have, and Oak does what it does without it.
-- **Components** (version 5) are the table's functions from `oak_page` to `oak_tone_color`.
+- **Components** (version 8) are the table's functions from `oak_page` to `oak_tone_color`.
   `oak_page`, `oak_section`, `oak_card` and `oak_setting` take a body; `oak_table` and
   `oak_columns` take an `OakCell` callback, called for each cell. Their options are structs as
   above (`OakPage`, `OakItem`, `OakField`, ...). What they say by color is a tone (`OAK_TONE_*`).
@@ -315,7 +322,7 @@ cargo test --lib reloading_picks_up -- --ignored                             # R
 ```
 
 The first also compiles `plugins/hello-c/hello.c` (with `OAK_TEST_CC`, else `CC`, else `gcc` on Windows and `cc` elsewhere). `every_plugin_draws`
-loads whatever `OAK_PLUGINS` holds and draws every Home tab in every theme, Settings, Home's Plugins tab, every
+loads whatever `OAK_PLUGINS` holds and draws every Home tab and plugin page in every theme, Settings, Home's Plugins tab, every
 choice on the New screen, and the tabs `OAK_PLUGIN_TABS` names (keys separated by commas),
 failing if a plugin doesn't load or stops. It runs in a scratch Oak folder, never the user's:
 `OAK_PLUGIN_SEED` names a folder whose files are copied there first (a saved connection to a

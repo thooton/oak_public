@@ -1222,11 +1222,15 @@ fn row_details(ui: &mut Ui, indent: f32, f: impl FnOnce(&mut Ui)) {
 
 /// A tool block's name as the chat shows it: the name the call came with
 /// from another agent (Freebuff's `read_files`), else OAK's own for it.
+/// A call still streaming in is named from its input so far, so a kit's
+/// tool called through LOAD reads as that tool from its first fields.
 pub(crate) fn shown(b: &Value) -> String {
-    match b["_oak_shown"].as_str() {
-        Some(n) => n.to_string(),
-        None => tools::shown_name(&tools::canonical_cow(b["name"].as_str().unwrap_or(""), &b["input"]).0),
+    if let Some(n) = b["_oak_shown"].as_str() {
+        return n.to_string();
     }
+    let partial = b["_oak_partial"].as_str().map(|raw| Value::Object(partial_input(raw)));
+    let input = partial.as_ref().unwrap_or(&b["input"]);
+    tools::shown_name(&tools::canonical_cow(b["name"].as_str().unwrap_or(""), input).0)
 }
 
 /// Each tool's color, for its dot, name and summary. One lightness and
@@ -1570,85 +1574,125 @@ fn command_output(ui: &mut Ui, t: &Theme, id: &str) {
 }
 
 /// The fields of a tool input still streaming in, from its JSON so far:
-/// string values as far as they came (the last one cut off). Other values
-/// are skipped.
+/// string values as far as they came (the last one cut off), numbers and
+/// booleans once they ended, and objects (a call's `input` through LOAD)
+/// the same way. Arrays (and nulls) are skipped.
 pub(crate) fn partial_input(raw: &str) -> serde_json::Map<String, Value> {
     let mut out = serde_json::Map::new();
     let mut it = raw.chars().peekable();
-    let skip_ws = |it: &mut std::iter::Peekable<std::str::Chars>| {
-        while it.peek().is_some_and(|c| c.is_whitespace()) {
-            it.next();
-        }
-    };
-    // A JSON string after its opening quote; true when it ended.
-    let string = |it: &mut std::iter::Peekable<std::str::Chars>| -> (String, bool) {
-        let mut s = String::new();
-        while let Some(c) = it.next() {
-            match c {
-                '"' => return (s, true),
-                '\\' => match it.next() {
-                    Some('n') => s.push('\n'),
-                    Some('t') => s.push('\t'),
-                    Some('r') => s.push('\r'),
-                    Some('b') => s.push('\u{8}'),
-                    Some('f') => s.push('\u{c}'),
-                    Some('u') => {
-                        let hex: String = it.by_ref().take(4).collect();
-                        let Ok(mut code) = u32::from_str_radix(&hex, 16) else { return (s, false) };
-                        if hex.len() < 4 {
-                            return (s, false);
-                        }
-                        if (0xD800..0xDC00).contains(&code) {
-                            // A surrogate pair: the low half follows as \uXXXX.
-                            let next: String = it.by_ref().take(6).collect();
-                            match next.strip_prefix("\\u").and_then(|h| u32::from_str_radix(h, 16).ok()).filter(|_| next.len() == 6) {
-                                Some(low) => code = 0x10000 + ((code - 0xD800) << 10) + (low.wrapping_sub(0xDC00) & 0x3FF),
-                                None => return (s, false),
-                            }
-                        }
-                        s.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
-                    }
-                    Some(c) => s.push(c),
-                    None => return (s, false),
-                },
-                c => s.push(c),
-            }
-        }
-        (s, false)
-    };
     skip_ws(&mut it);
-    if it.next() != Some('{') {
-        return out;
+    if it.next() == Some('{') {
+        partial_object(&mut it, &mut out);
     }
+    out
+}
+
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+fn skip_ws(it: &mut Chars) {
+    while it.peek().is_some_and(|c| c.is_whitespace()) {
+        it.next();
+    }
+}
+
+/// A JSON string after its opening quote; true when it ended.
+fn partial_string(it: &mut Chars) -> (String, bool) {
+    let mut s = String::new();
+    while let Some(c) = it.next() {
+        match c {
+            '"' => return (s, true),
+            '\\' => match it.next() {
+                Some('n') => s.push('\n'),
+                Some('t') => s.push('\t'),
+                Some('r') => s.push('\r'),
+                Some('b') => s.push('\u{8}'),
+                Some('f') => s.push('\u{c}'),
+                Some('u') => {
+                    let hex: String = it.by_ref().take(4).collect();
+                    let Ok(mut code) = u32::from_str_radix(&hex, 16) else { return (s, false) };
+                    if hex.len() < 4 {
+                        return (s, false);
+                    }
+                    if (0xD800..0xDC00).contains(&code) {
+                        // A surrogate pair: the low half follows as \uXXXX.
+                        let next: String = it.by_ref().take(6).collect();
+                        match next.strip_prefix("\\u").and_then(|h| u32::from_str_radix(h, 16).ok()).filter(|_| next.len() == 6) {
+                            Some(low) => code = 0x10000 + ((code - 0xD800) << 10) + (low.wrapping_sub(0xDC00) & 0x3FF),
+                            None => return (s, false),
+                        }
+                    }
+                    s.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                }
+                Some(c) => s.push(c),
+                None => return (s, false),
+            },
+            c => s.push(c),
+        }
+    }
+    (s, false)
+}
+
+/// An object's fields after its opening brace, into `out`; true when it
+/// ended.
+fn partial_object(it: &mut Chars, out: &mut serde_json::Map<String, Value>) -> bool {
     loop {
-        skip_ws(&mut it);
+        skip_ws(it);
         match it.next() {
             Some(',') => continue,
             Some('"') => {}
-            _ => return out,
+            Some('}') => return true,
+            _ => return false,
         }
-        let (key, done) = string(&mut it);
+        let (key, done) = partial_string(it);
         if !done {
-            return out;
+            return false;
         }
-        skip_ws(&mut it);
+        skip_ws(it);
         if it.next() != Some(':') {
-            return out;
+            return false;
         }
-        skip_ws(&mut it);
-        if it.peek() == Some(&'"') {
-            it.next();
-            let (value, done) = string(&mut it);
-            out.insert(key, Value::String(value));
-            if !done {
-                return out;
+        skip_ws(it);
+        match it.peek() {
+            Some('"') => {
+                it.next();
+                let (value, done) = partial_string(it);
+                out.insert(key, Value::String(value));
+                if !done {
+                    return false;
+                }
+                continue;
             }
-            continue;
+            Some('{') => {
+                it.next();
+                let mut inner = serde_json::Map::new();
+                let done = partial_object(it, &mut inner);
+                out.insert(key, Value::Object(inner));
+                if !done {
+                    return false;
+                }
+                continue;
+            }
+            Some(c) if c.is_ascii_digit() || matches!(c, '-' | 't' | 'f' | 'n') => {
+                // A number, true, false or null: kept once it has ended.
+                let mut scalar = String::new();
+                while let Some(&c) = it.peek().filter(|c| !matches!(**c, ',' | '}') && !c.is_whitespace()) {
+                    scalar.push(c);
+                    it.next();
+                }
+                if it.peek().is_none() {
+                    return false;
+                }
+                if let Ok(v) = serde_json::from_str::<Value>(&scalar).map_err(drop).and_then(|v| if v.is_null() { Err(()) } else { Ok(v) }) {
+                    out.insert(key, v);
+                }
+                continue;
+            }
+            _ => {}
         }
-        // Not a string: skip to the next field.
+        // An array: skipped to the next field.
         let (mut depth, mut quoted, mut escaped) = (0i32, false, false);
         loop {
-            let Some(c) = it.peek().copied() else { return out };
+            let Some(c) = it.peek().copied() else { return false };
             if quoted {
                 it.next();
                 match c {
@@ -1679,7 +1723,7 @@ pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize
     let label = if streaming {
         "Thinking…".to_string()
     } else if let Some(n) = b["_oak_tokens"].as_u64().filter(|&n| n > 0) {
-        format!("Thought for {} token{}", with_commas(n), crate::plural(n))
+        format!("Thought for {} token{}", crate::agent::with_commas(n), crate::plural(n))
     } else if let Some(ms) = b["_oak_ms"].as_u64() {
         format!("Thought for {}s", ms.div_ceil(1000).max(1))
     } else {
@@ -1710,18 +1754,6 @@ pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize
     }
 }
 
-/// A count with thousands separators: 12345 → "12,345".
-fn with_commas(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
 
 /// Tool calls from outside a conversation (a plugin's chat,
 /// `oak_sdk::ui::work_block`), drawn as a conversation's are: one block,
@@ -2519,5 +2551,26 @@ mod tests {
         assert!(partial_input(r#"{"pa"#).is_empty());
         assert_eq!(partial_input(r#"{"content": "a\ud83d\ude00b"}"#)["content"], "a😀b");
         assert_eq!(partial_input(r#"{"content": "half \u00"#)["content"], "half ");
+    }
+
+    /// A kit's tool streaming in through LOAD: its `input` read as far as
+    /// it came, so the row is named as that tool from its action on, with
+    /// its summary streaming; a LOAD that loads a kit stays LOAD.
+    #[test]
+    fn a_call_through_load_streams_as_its_tool() {
+        let p = partial_input(r#"{"name": "AGENT", "input": {"action": "send", "id": 3, "message": "Work from 900e"#);
+        assert_eq!(Value::Object(p), serde_json::json!({"name": "AGENT", "input": {"action": "send", "id": 3, "message": "Work from 900e"}}));
+        assert_eq!(Value::Object(partial_input(r#"{"id": 31"#)), serde_json::json!({}), "a number still coming");
+        assert_eq!(Value::Object(partial_input(r#"{"a": -1.5,"b":true , "c": null, "d": false}"#)), serde_json::json!({"a": -1.5, "b": true, "d": false}));
+        let p = partial_input(r#"{"input": {"a": {"b": "c"}, "d": "e"}, "name": "BROWSER", "f": "g"}"#);
+        assert_eq!(Value::Object(p), serde_json::json!({"input": {"a": {"b": "c"}, "d": "e"}, "name": "BROWSER", "f": "g"}));
+        let streaming = |raw: &str| serde_json::json!({"type": "tool_call", "id": "a", "name": "LOAD", "input": {}, "_oak_partial": raw});
+        assert_eq!(shown(&streaming(r#"{"name": "AGENT", "input": {"action": "send", "message": "Wo"#)), "AGENT send");
+        assert_eq!(shown(&streaming(r#"{"name": "AGENT"#)), "LOAD");
+        assert_eq!(shown(&streaming(r#"{"name": "AGENT"}"#)), "LOAD");
+        let load = Value::Object(partial_input(r#"{"name": "AGENT", "input": {"action": "send", "message": "Work"#));
+        let (name, input) = tools::canonical_cow("LOAD", &load);
+        assert_eq!(tool_summary(&name, &input), tool_summary("AGENT_SEND", &serde_json::json!({"message": "Work"})));
+        assert!(tool_summary(&name, &input).contains("Work"));
     }
 }

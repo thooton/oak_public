@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 mod alerts;
 mod memory;
+pub(crate) mod pulse;
 pub(crate) mod prompt;
 mod reply;
 mod rewrite;
@@ -48,7 +49,7 @@ pub(crate) mod title;
 mod tool_calls;
 use prompt::scratchpad;
 pub(crate) use prompt::SCRATCH_ROOT;
-pub use memory::{notes_alert_on, notes_tokens, set_notes_alert, NOTES_ALERT_TOKENS};
+pub use memory::{notes_alert_on, notes_alert_tokens, notes_limit, notes_tokens, set_notes_alert, set_notes_limit, with_commas, DEFAULT_NOTES_LIMIT, NOTES_LIMITS};
 use memory::memory_tool;
 use title::title_for;
 use tool_calls::{Batch, end_ask_request};
@@ -366,6 +367,8 @@ pub struct Live {
     /// paused, as it does no work until resumed.
     tools: usize,
     waiting: usize,
+    /// Its phase (`pulse`) and since when (ms since 1970).
+    phase_at: (&'static str, i64),
 }
 
 /// Counts a tool call in `Live::tools` while it runs (a wait also in
@@ -390,7 +393,7 @@ impl<'a> Running<'a> {
 impl Live {
     /// What the session is doing, in a word, for plugins
     /// (`oak_sdk::host::Doing::phase`), and the tool it is on ("" when none).
-    pub fn phase(&self) -> (&'static str, String) {
+    pub fn plugin_phase(&self) -> (&'static str, String) {
         // The blocks are Oak's own (`reasoning`, `text`, `tool_call`), not
         // a provider's.
         let last_tool = || self.blocks.iter().rev().find(|b| b["type"] == "tool_call").and_then(|b| b["name"].as_str()).unwrap_or("").to_string();
@@ -563,6 +566,10 @@ pub struct Session {
     paused: Arc<AtomicBool>,
     /// Deleted (AGENT_DELETE): everything the worker does stops, and it ends.
     deleted: Arc<AtomicBool>,
+    /// The last turn is to be answered: the worker takes up a transcript
+    /// that ends in the user's message (a conversation just opened, or one
+    /// a plugin asks to resume).
+    resume: Arc<AtomicBool>,
     wake: Sender<()>,
     /// The session's background tasks, shared with its worker (the UI
     /// lists them).
@@ -596,6 +603,14 @@ impl Queued {
 }
 
 
+/// A pause that was waiting for a request when OAK closed holds: the
+/// conversation starts paused. True when it changed.
+fn hold_queued_pause(conv: &mut Conversation) -> bool {
+    let queued = std::mem::take(&mut conv.pause_queued);
+    conv.paused |= queued;
+    queued
+}
+
 impl Session {
     pub fn start(mut conv: Conversation, ctx: eframe::egui::Context) -> Session {
         let tasks = Tasks::open(&conv.id);
@@ -605,6 +620,7 @@ impl Session {
         // comes when it ends, as it would have without the restart.
         let (mut changed, waits) = answer_lost_calls_but(&mut conv, |call| waits_on_known_task(call, &tasks));
         changed |= carry_waits(&mut conv, &waits, tasks.closed_ms(), api::now_ms());
+        changed |= hold_queued_pause(&mut conv);
         // Paused when OAK closed, with the transcript ending in a user turn
         // (tool results or a message the model hasn't answered): the turn
         // carries on once the session is resumed, as it would have without
@@ -638,6 +654,7 @@ impl Session {
             live: Arc::default(),
             interrupt: Arc::default(),
             deleted: Arc::default(),
+            resume: Arc::new(AtomicBool::new(resume)),
             wake: wake.clone(),
             tasks,
         };
@@ -647,6 +664,7 @@ impl Session {
             interrupt: s.interrupt.clone(),
             paused: s.paused.clone(),
             deleted: s.deleted.clone(),
+            resume: s.resume.clone(),
             wake_rx: Mutex::new(wake_rx),
             wake,
             tasks: s.tasks.clone(),
@@ -656,7 +674,6 @@ impl Session {
             warm: Mutex::new(None),
             marks: Mutex::default(),
             files: Mutex::default(),
-            resume: AtomicBool::new(resume),
             open_waits: Mutex::default(),
         };
         (s, w)
@@ -783,6 +800,14 @@ impl Session {
         self.wake();
     }
 
+    /// Says the conversation's last turn is to be answered: the worker
+    /// takes up a transcript that ends in the user's message (a
+    /// conversation just opened, or one whose turn a plugin wants run).
+    pub fn resume_next(&self) {
+        self.resume.store(true, Ordering::SeqCst);
+        self.wake();
+    }
+
     pub fn interrupt(&self) {
         self.interrupt.store(true, Ordering::SeqCst);
     }
@@ -804,6 +829,7 @@ impl Session {
         self.paused.store(on, Ordering::SeqCst);
         let mut c = self.conv.lock().unwrap();
         c.paused = on;
+        c.pause_queued = false;
         c.save();
         drop(c);
         self.wake();
@@ -817,6 +843,11 @@ impl Session {
         let mut l = self.live.lock().unwrap();
         if l.requesting {
             l.pause_queued = true;
+            drop(l);
+            // (Saved, so that it outlasts OAK closing before it takes hold.)
+            let mut c = self.conv.lock().unwrap();
+            c.pause_queued = self.live.lock().unwrap().pause_queued;
+            c.save();
             return true;
         }
         drop(l);
@@ -976,9 +1007,8 @@ struct Worker {
     marks: Mutex<Vec<(MarkKind, String, String)>>,
     /// The files the model read, wrote or edited, as it last saw them.
     files: Mutex<changes::Tracked>,
-    /// The session started paused with an unanswered user turn (OAK
-    /// closed while paused): it carries on once the session is resumed.
-    resume: AtomicBool,
+    /// The last turn is to be answered (see `Session::resume`).
+    resume: Arc<AtomicBool>,
     /// TASK calls whose wait Oak closed on: they run again first thing, for
     /// what was left of their timeout (`carry_on_waits`).
     open_waits: Mutex<Vec<Value>>,
@@ -1029,7 +1059,7 @@ fn last_is(c: &Conversation, role: &str) -> bool {
 }
 
 /// The text of the model's last reply, if the transcript ends in one.
-fn reply_text(c: &Conversation) -> Option<String> {
+pub(crate) fn reply_text(c: &Conversation) -> Option<String> {
     let m = c.messages.last().filter(|m| m["role"] == "assistant")?;
     let texts: Vec<&str> = m["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect();
     Some(texts.join("\n\n"))
@@ -1262,7 +1292,10 @@ impl Worker {
     }
 
     fn set(&self, f: impl FnOnce(&mut Live)) {
-        f(&mut self.live.lock().unwrap());
+        let mut l = self.live.lock().unwrap();
+        f(&mut l);
+        l.mark_phase();
+        drop(l);
         self.ctx.request_repaint();
     }
 
@@ -1331,6 +1364,15 @@ impl Worker {
             }
         }
         let mut c = self.conv.lock().unwrap();
+        // Its last progress (`pulse`): a reply, or a result of a call in the
+        // last reply.
+        let names: Vec<(String, String)> = match role {
+            "user" => c.messages.iter().rev().find(|m| m["role"] == "assistant").and_then(|m| m["content"].as_array()).into_iter().flatten().filter(|b| oak::is_call(b)).map(|b| (b["id"].as_str().unwrap_or_default().to_string(), b["name"].as_str().unwrap_or_default().to_string())).collect(),
+            _ => vec![],
+        };
+        if let Some(what) = pulse::progress_of(role, &content, &names) {
+            (c.progress_at, c.progress) = (now, what);
+        }
         // (Looked at first: changing the last message redoes its saved JSON.)
         match c.messages.last().filter(|last| last["role"] == role) {
             Some(_) => c.messages.last_mut().unwrap()["content"].as_array_mut().unwrap().append(&mut content),
@@ -1871,16 +1913,53 @@ fn revert_to_end(c: &mut Conversation, n: usize) -> bool {
     true
 }
 
+/// How many summaries back a revert can restore what was sent
+/// (`Conversation::earlier`).
+const EARLIER_KEPT: usize = 8;
+
+/// Puts a summary in force, keeping what requests went with until then for
+/// a revert to before its cut (`cut_messages`).
+pub(crate) fn install_summary(c: &mut Conversation, summary: Summary, saved: u64, cost: rolling::Cost) {
+    let earlier = store::Earlier {
+        summary: c.rolling.summary.clone(),
+        cold: c.rolling.cold,
+        measured: c.rolling.measured.clone(),
+        prefix: c.prefix.clone(),
+        memory: c.memory.clone(),
+    };
+    c.earlier.push(earlier);
+    if c.earlier.len() > EARLIER_KEPT {
+        c.earlier.remove(0);
+    }
+    c.rolling.apply(summary, saved, cost);
+}
+
 /// Keeps the first `n` messages, `changed` being the first one that is no
 /// longer as it was: the transcript lines after it go, and so does a
-/// summary that covered it.
+/// summary that covered it. What requests went with before that summary
+/// comes back as it was sent (the summary before it, the system prompt,
+/// tools, session memory and system messages), so they send what they did
+/// then, and its prompt cache, if it still lives, is read again. Only where
+/// that wasn't kept (an older Oak's summary, or more than `EARLIER_KEPT`
+/// back) is it rebuilt.
 fn cut_messages(c: &mut Conversation, n: usize, changed: usize) {
     c.messages.truncate(n);
     c.marks.retain(|m| m.at <= changed);
     if c.rolling.summary.as_ref().is_some_and(|s| s.cut > changed) {
         c.rolling.summary = None;
         c.rolling.measured.clear();
+        while let Some(e) = c.earlier.pop() {
+            if e.summary.as_ref().is_none_or(|s| s.cut <= changed) {
+                c.rolling.summary = e.summary;
+                c.rolling.cold = e.cold;
+                c.rolling.measured = e.measured;
+                c.prefix = e.prefix;
+                c.memory = e.memory;
+                break;
+            }
+        }
     }
+    c.prefix.reverted(&c.messages);
     c.rolling.measured.retain(|m| m.n <= changed);
     c.limit_wait = None;
 }
@@ -2389,7 +2468,7 @@ fn finish_summary(conv: &store::Shared, live: &Mutex<Live>, base: usize, plan: P
                 // The transcript only grows: the line goes where it stands
                 // now, and points back at the cut.
                 add_mark(&mut c, MarkKind::Summarized, text.clone(), String::new(), made_at).done = plan.cut as i64;
-                c.rolling.apply(Summary { cut: plan.cut, text, made_at, clear: plan.clear }, saved, cost);
+                install_summary(&mut c, Summary { cut: plan.cut, text, made_at, clear: plan.clear }, saved, cost);
                 c.save();
             }
             live.lock().unwrap().rolling_failed = None;

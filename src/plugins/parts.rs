@@ -113,6 +113,8 @@ pub(crate) struct HomeTab {
     icon_is_text: bool,
     /// A link at the row's right end that opens the tab `id`.
     link: bool,
+    /// With `link`: it opens a page of its own, which `show` draws.
+    page: bool,
     tip: String,
     order: i32,
     shown: Option<OakAsk>,
@@ -124,7 +126,7 @@ impl HomeTab {
     /// # Safety
     /// `d` is a descriptor a plugin handed over, valid for this call.
     pub(crate) unsafe fn new(d: &OakHomeTab) -> HomeTab {
-        unsafe { HomeTab { id: text(d.id), label: text(d.label), icon: text(d.icon), icon_is_text: d.flags & OAK_ICON_IS_TEXT != 0, link: d.flags & OAK_HOME_TAB_LINK != 0, tip: text(d.tip), order: d.order, shown: d.shown, show: d.show, user: User(d.user) } }
+        unsafe { HomeTab { id: text(d.id), label: text(d.label), icon: text(d.icon), icon_is_text: d.flags & OAK_ICON_IS_TEXT != 0, link: d.flags & OAK_HOME_TAB_LINK != 0, page: d.flags & OAK_HOME_TAB_LINK != 0 && d.flags & OAK_HOME_TAB_PAGE != 0, tip: text(d.tip), order: d.order, shown: d.shown, show: d.show, user: User(d.user) } }
     }
 
     pub(crate) fn id(&self) -> String {
@@ -149,6 +151,11 @@ impl HomeTab {
 
     pub(crate) fn link(&self) -> bool {
         self.link
+    }
+
+    /// A link to a page of the plugin's own (`Page::Plugin`), not to a tab.
+    pub(crate) fn page(&self) -> bool {
+        self.page
     }
 
     pub(crate) fn order(&self) -> i32 {
@@ -590,6 +597,7 @@ pub(crate) struct Hooks {
     frame: Option<OakDo>,
     providers_top: Option<OakBody>,
     exiting: Option<OakDo>,
+    composer_corner: Option<OakBody>,
     home_scene: Option<OakBody>,
     chat_scene: Option<OakBody>,
     user: User,
@@ -597,7 +605,7 @@ pub(crate) struct Hooks {
 
 impl Hooks {
     pub(crate) fn new(d: &OakHooks) -> Hooks {
-        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, home_scene: d.home_scene, chat_scene: d.chat_scene, user: User(d.user) }
+        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, composer_corner: d.composer_corner, home_scene: d.home_scene, chat_scene: d.chat_scene, user: User(d.user) }
     }
 
     pub(crate) fn started(&self, _ctx: &egui::Context) {
@@ -616,6 +624,15 @@ impl Hooks {
 
     pub(crate) fn providers_top(&self, ui: &mut Ui, app: &mut App) {
         api::draw(self.providers_top, self.user, ui, app);
+    }
+
+    pub(crate) fn composer_corner(&self, ui: &mut Ui, app: &mut App) {
+        api::draw(self.composer_corner, self.user, ui, app);
+    }
+
+    /// Whether it draws above a message box's Settings link.
+    pub(crate) fn has_composer_corner(&self) -> bool {
+        self.composer_corner.is_some()
     }
 
     pub(crate) fn home_scene(&self, ui: &mut Ui, app: &mut App) {

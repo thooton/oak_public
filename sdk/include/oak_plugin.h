@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 5
+#define OAK_API_VERSION 8
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -248,6 +248,16 @@ struct OakTextEdit {
     float points;
     /* 0: the default. */
     uint32_t text_color;
+    /* Version 5. With `OAK_EDIT_MARGIN`: the room around the text,
+     * inside the frame (or where it would be).
+     */
+    float margin_left;
+    float margin_right;
+    float margin_top;
+    float margin_bottom;
+    /* The least room it takes, however little text it has (0: none). */
+    float min_width;
+    float min_height;
 };
 
 /* How a container lays out what is drawn in it. */
@@ -418,7 +428,7 @@ struct OakRequest {
 /* A tab on Home. */
 struct OakHomeTab {
     uint32_t size;
-    /* `OAK_ICON_IS_TEXT`, `OAK_HOME_TAB_LINK`. */
+    /* `OAK_ICON_IS_TEXT`, `OAK_HOME_TAB_LINK`, `OAK_HOME_TAB_PAGE`. */
     uint32_t flags;
     void *user;
     /* What `app_go_home` takes. */
@@ -614,6 +624,11 @@ struct OakHooks {
      * started. Its library stays loaded either way.
      */
     OakDo exiting;
+    /* Draws in a message box's bottom left corner, above Oak's
+     * Settings link (where a plugin's switches go): one row, at the
+     * width of the box's corner.
+     */
+    OakBody composer_corner;
     /* Draws over Home's wallpaper, under its menu, every frame Home
      * shows (`ui` is the whole page). Asks for frames of its own
      * (`repaint_after`) to move.
@@ -961,6 +976,8 @@ struct OakLook {
 #define OAK_EDIT_SMALL 256u
 /* Enter doesn't make a newline in a multiline field (Shift+Enter does). */
 #define OAK_EDIT_ENTER_SENDS 512u
+/* Its `margin_*` fields are the room around the text (version 5). */
+#define OAK_EDIT_MARGIN 1024u
 /* `OakLayout.dir`: where the next widget goes. */
 #define OAK_DIR_RIGHT 0u
 #define OAK_DIR_LEFT 1u
@@ -1081,6 +1098,11 @@ struct OakLook {
 /* What hovering it says while it is disabled. */
 #define OAK_RESPONSE_DISABLED_HOVER_TEXT 7u
 #define OAK_RESPONSE_SURRENDER_FOCUS 8u
+/* A menu a click on it opens and closes, under it, `value` points
+ * wide (0: as wide as it is): `body` draws it. The answer has
+ * `OAK_OPEN` while it is open (version 5).
+ */
+#define OAK_RESPONSE_MENU 9u
 #define OAK_CURSOR_DEFAULT 0u
 #define OAK_CURSOR_POINTING_HAND 1u
 #define OAK_CURSOR_TEXT 2u
@@ -1139,6 +1161,10 @@ struct OakLook {
 #define OAK_INPUT_SCROLL 3u
 /* Where the main button last went down. */
 #define OAK_INPUT_PRESS_ORIGIN 4u
+/* Whether any widget has the keyboard (version 5). */
+#define OAK_INPUT_FOCUSED 5u
+/* Whether files are being dragged over the window (version 5). */
+#define OAK_INPUT_FILES_HOVERED 6u
 #define OAK_HTTP_NO_REDIRECTS 1u
 /* No proxy: straight to the address (a service on this machine). */
 #define OAK_HTTP_DIRECT 2u
@@ -1154,6 +1180,12 @@ struct OakLook {
  * tab.
  */
 #define OAK_HOME_TAB_LINK 2u
+/* `OakHomeTab`, with `OAK_HOME_TAB_LINK`: a link to a page of the
+ * plugin's own rather than a tab. A click shows `show` in all of the
+ * window under the tabs' row, as Settings is shown (no tab lit, no
+ * message box), until another tab or Home is picked (version 5).
+ */
+#define OAK_HOME_TAB_PAGE 4u
 /* What something says by its color: badges, notices, progress,
  * stats, toasts, an item's dot (`oak_tone_color`).
  */
@@ -1723,8 +1755,80 @@ struct OakApi {
      */
     uint32_t (*oak_super_agent_box)(const OakRect *area, OakStr json);
 
+    /* `oak_super_agent_box`, with more in it and what was done going to
+     * `out` as JSON: `"stop"`, `"pause"`, `"resume"` or `{"model": [id,
+     * effort]}`; nothing when nothing was. `json` adds to the older box's
+     * (each optional): "models" (as `oak_super_box`'s), "model_id" and
+     * "effort" (it gets model and effort pickers when "models" has
+     * "model_id"; else "model" is shown), "model_tip", "pending" (a switch
+     * waiting for the request under way, under the pickers), "pause"
+     * (Pause's tip; empty: none) and "paused" (the button reads Resume),
+     * "detail" (a line under what it is doing) and "blocker" (what holds
+     * it up, in the error colour). `oak_super_box`'s agents take a
+     * "detail" too, under the report on hover.
+     */
+    void (*oak_super_agent_box_act)(const OakRect *area, OakStr json, OakSink out, void *out_user);
+
+    /* `animate`, taking `seconds` to go from 0 to 1 (linear: the plugin
+     * eases it as it likes).
+     */
+    float (*animate_time)(uint64_t id, bool on, float seconds);
+
+    /* Shows Settings; leaving it comes back to what was shown. */
+    void (*app_go_settings)(void);
+
+    /* Shows the page of the Home tab `id` (an `OAK_HOME_TAB_PAGE` link). */
+    void (*app_go_page)(OakStr id);
+
+    /* What was pasted (pictures) or dropped on the window this frame, as
+     * the message box would attach it: JSON `{"files": [blocks], "errors":
+     * [why one couldn't be]}`. False: nothing came. Whoever takes them
+     * has them: call it only while showing somewhere to attach them.
+     */
+    bool (*take_files)(OakSink out, void *out_user);
+
+    /* Asks for files to attach in the system's dialog: `filter` names
+     * the kinds (`extensions`, one a line; empty: any file), and "Any
+     * file" is offered too. `out` gets JSON as `take_files` gives it;
+     * false when none were picked.
+     */
+    bool (*pick_files)(OakStr filter, OakStr extensions, OakSink out, void *out_user);
+
+    /* A conversation of this machine's, as JSON {id, title, folder, model,
+     * provider, effort, role, chat, busy, status, error, reply}: nothing
+     * (false) when there is none under `key`. `status` is what Oak says it
+     * is doing (a refusal's retry says so in it), `error` a sentence on a
+     * failed turn, and `reply` the text of its last message when that is
+     * the model's.
+     */
+    bool (*app_session)(OakStr key, OakSink out, void *out_user);
+
+    /* Switches conversation `key` to model `model` of provider `provider`
+     * (an id `app_conversations` gives), as its model picker does, without
+     * asking. False with `error` set when there is no such conversation.
+     */
+    bool (*app_set_model)(OakStr key, OakStr provider, OakStr model, OakSink error, void *error_user);
+
+    /* Sends conversation `key` a message from the user, as the message box
+     * does. False with `error` set when there is no such conversation.
+     */
+    bool (*app_send)(OakStr key, OakStr text, OakSink error, void *error_user);
+
+    /* Stops what conversation `key` is doing, as its interrupt does: the
+     * turn ends and what it queued waits. False with `error` set when there
+     * is no such conversation.
+     */
+    bool (*app_interrupt)(OakStr key, OakSink error, void *error_user);
+
+    /* Asks conversation `key` to answer its last turn again, as resuming a
+     * paused one does: for a transcript that ends in a message from the
+     * user that nothing woke to answer (a plugin's own handoff, say).
+     * False with `error` set when there is no such conversation.
+     */
+    bool (*app_resume)(OakStr key, OakSink error, void *error_user);
+
     /* What Oak is doing now, as JSON: `{"page": "home"|"chats"|"settings"|
-     * "usage", "menu" (Home's menu is open), "menu_rect" ([x0, y0, x1,
+     * "usage"|"plugin" (a plugin's page), "menu" (Home's menu is open), "menu_rect" ([x0, y0, x1,
      * y1] or null), "buttons_rect" (Home's corner buttons), "maximized",
      * "fullscreen", "focused", "tasks" (background tasks running),
      * "conversations": [{"id", "title", "busy", "phase": "idle"|

@@ -136,10 +136,16 @@ impl Streaming {
             Event::Input { index, json: d } => {
                 // The input so far, for the UI to show a WRITE or EDIT as
                 // it comes in (taken out when it's done).
+                let last = index + 1 == l.blocks.len();
                 if let Some(b) = l.blocks.get_mut(index) {
                     match b.get_mut("_oak_partial") {
                         Some(Value::String(s)) => s.push_str(&d),
                         _ => b["_oak_partial"] = json!(d),
+                    }
+                    // A kit's tool through LOAD is named as it once its
+                    // input says which.
+                    if last && b["name"] == "LOAD" {
+                        l.status = format!("Writing {}", crate::transcript::shown(b));
                     }
                 }
             }
@@ -258,16 +264,10 @@ impl Worker {
         let now = api::now_ms();
         let start = c.memory.is_none();
         let marks_before = c.marks.len();
-        // Nothing cached is left (expired, another model or account, a
-        // summary): what would otherwise cost a full cache write is free now.
         let provider = c.provider();
-        let cold = provider != api::Provider::Freebuff && c.cache.is_cold(now, c.rolling.base());
-        if cold && !c.rolling.off {
-            let messages = std::mem::take(&mut c.messages);
-            c.rolling.clear_cold(&messages);
-            c.messages = messages;
-        }
-        let memory = memory_for_request(&mut c, now, cold);
+        // What was sent stays as it was (`crate::prefix`): the session memory
+        // is read again only with a summary, like the rest.
+        let memory = memory_for_request(&mut c, now);
         // A chat has no folder, so no scratchpad either.
         let scratch = if c.chat { PathBuf::new() } else { scratchpad(&mut c) };
         let context = memory_context(&c).to_string();
@@ -281,25 +281,70 @@ impl Worker {
         }
         // (A model without effort levels goes without.)
         let effort = Some(effort_for(&c.model, &c.effort).to_string()).filter(|e| !e.is_empty());
-        let tools = if c.chat { tools::chat_definitions() } else { tools::definitions_with_kits(agent.is_some(), c.spawner, local, &kits) };
-        let built = crate::prefix::Pin { day: crate::time::today_utc(), kits, effort, tools, folder: c.folder.display().to_string() };
-        // The stable prefix: the date, kits, tools and effort the cache was
-        // written with, and messages for what changed since (`crate::prefix`).
-        let mode = crate::prefix::mode(provider, &c.model);
         let (n, cut) = (c.messages.len(), c.rolling.base());
-        let pin = match mode {
+        // A kit whose LOAD the view shows stays out of the system prompt and
+        // the prefix's tools (its LOAD's result has its instructions, its
+        // tools join after it); one a summary covers (or loaded with no
+        // LOAD) is in them.
+        let loads = if c.chat { vec![] } else { crate::prefix::loads(&c.messages) };
+        let shown = |k: &String| loads.iter().find(|l| &l.kit == k).filter(|l| l.call >= cut);
+        let defs = |kits: &[String]| if c.chat { tools::chat_definitions() } else { tools::definitions_with_kits(agent.is_some(), c.spawner, local, kits) };
+        let held: Vec<String> = kits.iter().filter(|k| shown(k).is_none()).cloned().collect();
+        let held_tools = defs(&held);
+        let mut joins = vec![];
+        for l in kits.iter().filter_map(shown) {
+            let with = defs(&[held.clone(), vec![l.kit.clone()]].concat());
+            for t in with.iter().filter(|t| !held_tools.iter().any(|h| h["name"] == t["name"])) {
+                let tool = t["name"].as_str().unwrap_or("").to_string();
+                joins.push(crate::prefix::Join { tool, kit: l.kit.clone(), at: l.join, through: l.through });
+            }
+        }
+        let model = c.model.clone();
+        let tools = defs(&kits);
+        // (A session with no NOTE tool, a local model's, has no notes limit to tell.)
+        let notes_limit = if tools.iter().any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("NOTE"))) { super::notes_limit() } else { 0 };
+        let built = crate::prefix::Pin {
+            day: crate::time::today_utc(),
+            kits: kits.clone(),
+            effort,
+            tools,
+            folder: c.folder.display().to_string(),
+            model,
+            system: String::new(),
+            notes_limit,
+        };
+        let base = crate::prefix::Pin { kits: held, tools: held_tools, ..built.clone() };
+        // The prefix as first sent since the last summary: its system prompt,
+        // tools and effort, and messages for what changed since
+        // (`crate::prefix`).
+        let mode = crate::prefix::mode(provider, &c.model);
+        let (chat, role, model_now) = (c.chat, c.role.clone(), c.model.clone());
+        let render = |pin: &crate::prefix::Pin| {
+            // (The folder and model the prompt was first sent with: a CD's
+            // result and a message say the new ones.)
+            let model = if pin.model.is_empty() { &model_now } else { &pin.model };
+            if chat {
+                super::prompt::chat_prompt(&pin.day, model, pin.notes_limit)
+            } else {
+                system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role, pin.notes_limit)
+            }
+        };
+        let (pin, system) = match mode {
             Some(mode) => {
                 let add = last_is(&c, "user");
+                let notes = super::notes_tokens(&c.notes);
                 let effort_per_message = mode == crate::prefix::Mode::Claude && crate::prefix::supports_effort(&c.model);
-                c.prefix.prepare(crate::prefix::Setup { mode, cold, n, cut, add, effort_per_message, now: built })
+                let pin = c.prefix.prepare(crate::prefix::Setup { mode, n, cut, add, effort_per_message, now: built, base, joins, notes });
+                let system = c.prefix.system(render);
+                (pin, system)
             }
-            None => built,
-        };
-        // (The folder the cache was written with: a CD's result says the new one.)
-        let system = if c.chat {
-            super::prompt::chat_prompt(&pin.day, &c.model)
-        } else {
-            system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, &c.model, agent.as_deref(), &pin.kits, &c.role)
+            // Freebuff sends its own prompt and tools: these go to the
+            // sidecar only for what it adds of its own.
+            None => {
+                let pin = crate::prefix::Pin { kits: base.kits, ..built };
+                let system = render(&pin);
+                (pin, system)
+            }
         };
         let tools = Value::Array(pin.tools);
         // Again after a switch to a model whose provider sends other things
@@ -377,6 +422,7 @@ impl Worker {
             self.paused.store(true, Ordering::SeqCst);
             let mut c = self.conv.lock().unwrap();
             c.paused = true;
+            c.pause_queued = false;
             c.save();
         }
     }
@@ -447,6 +493,7 @@ impl Worker {
             let (drawn, viewport) = {
                 let mut l = self.live.lock().unwrap();
                 s.apply(&mut l, batch, ev);
+                l.mark_phase();
                 (l.drawn, l.drawn_viewport.unwrap_or(eframe::egui::ViewportId::ROOT))
             };
             if !s.rewrites.is_empty() {
