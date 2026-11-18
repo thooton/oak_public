@@ -80,15 +80,12 @@ pub fn definitions_with_kits(agent: bool, spawner: bool, local: bool, kits: &[St
         *load = load_tool(&loadable, &servers);
     }
     let mut out = families(all, agent && !spawner);
-    // A loaded server's tools, after Oak's (also one switched off since:
+    // A loaded server's tool, after Oak's (also one switched off since:
     // its calls then say so).
     if !local {
         for k in kits {
             if let Some(server) = crate::mcp::server_of_kit(k) {
-                out.extend(crate::mcp::tool_defs(server).into_iter().map(|mut d| {
-                    d["eager_input_streaming"] = json!(true);
-                    d
-                }));
+                out.extend(crate::mcp::tool_defs(&server));
             }
         }
     }
@@ -104,17 +101,19 @@ pub fn chat_definitions() -> Vec<Value> {
 }
 
 /// The kits a session can load: a subagent has AGENT always (to reach the
-/// main session) and no browser.
+/// main session) and no browser. BROWSER and WINDOW are protocols too
+/// (`crate::mcp`, this repository's `protocols/`): there only while
+/// switched on.
 pub fn kits_for(agent: bool) -> Vec<&'static str> {
-    KITS.iter().map(|(k, _)| *k).filter(|k| !agent || *k == "WINDOW").collect()
+    KITS.iter().map(|(k, _)| *k).filter(|k| !agent || *k == "WINDOW").filter(|k| !NATIVE.contains(k) || crate::mcp::enabled(&k.to_lowercase())).collect()
 }
 
-/// The kits: what each is, as LOAD's description says.
-const KITS: &[(&str, &str)] = &[
-    ("AGENT", "subagents (only when the user asks for them)"),
-    ("BROWSER", "Oak's browser (only when the user explicitly asks you to use the browser tool)"),
-    ("WINDOW", "trying a GUI app on a hidden desktop, without touching the user's screen"),
-];
+/// The kits: what each is, as LOAD's description says (BROWSER's and
+/// WINDOW's from their protocol files).
+const KITS: &[(&str, &str)] = &[("AGENT", "subagents (only when the user asks for them)"), ("BROWSER", ""), ("WINDOW", "")];
+
+/// Oak's kits that are protocols as well.
+const NATIVE: [&str; 2] = ["BROWSER", "WINDOW"];
 
 /// The kit tool OAK runs `tool` belongs to, for a session (`agent`: a
 /// subagent's AGENT is always there).
@@ -122,22 +121,22 @@ pub fn kit_of(tool: &str, agent: bool) -> Option<&'static str> {
     if tool.starts_with("BROWSER_") {
         return Some("BROWSER");
     }
+    if tool.starts_with("WINDOW_") {
+        return Some("WINDOW");
+    }
     (!agent && tool.starts_with("AGENT_")).then_some("AGENT")
 }
 
 /// LOAD, offering `kits` and MCP `servers` (name, what it is).
 fn load_tool(kits: &[&str], servers: &[(String, String)]) -> Value {
-    let list: Vec<String> = KITS.iter().filter(|(k, _)| kits.contains(k)).map(|(k, d)| format!("{k}: {d}")).collect();
+    let describe = |k: &str, d: &str| if d.is_empty() { format!("{k}: {}", crate::mcp::native_description(k)) } else { format!("{k}: {d}") };
+    let list: Vec<String> = KITS.iter().filter(|(k, _)| kits.contains(k)).map(|(k, d)| describe(k, d)).chain(servers.iter().map(|(n, d)| format!("{n}: {d}"))).collect();
     let mut description = format!(
         "Loads a kit: tools or instructions you don't have by default. Its instructions come back as the result, and its tool is yours from then on. Load one only when the task needs it. Kits: {}.",
         list.join("; ")
     );
-    if list.is_empty() {
-        description = "Loads a kit: tools you don't have by default. Its instructions come back as the result, and its tools are yours from then on. Load one only when the task needs it.".into();
-    }
     if !servers.is_empty() {
-        let s: Vec<String> = servers.iter().map(|(n, d)| format!("{n}: {d}")).collect();
-        description += &format!(" MCP servers (each a kit; its tools are named mcp__<server>__<tool>): {}.", s.join("; "));
+        description += " Kits for a program (an MCP server's) have one tool named after the kit, its actions the server's tools.";
     }
     let names: Vec<&str> = kits.iter().copied().chain(servers.iter().map(|(n, _)| n.as_str())).collect();
     json!({
@@ -183,6 +182,7 @@ fn family_intro(family: &str, agent: bool) -> String {
         "PROGRESS" => "Only when the user asks for one.".into(),
         "GOAL" => "Only while a goal is set. A goal is separate from the user's ordinary requests: the user sets it explicitly, it arrives in a <goal> message and stays listed under \"Goal\" in your system prompt until finished. With no goal listed there, there is none: don't use this tool, even for a big task.".into(),
         "BROWSER" => BROWSER_INTRO.into(),
+        "WINDOW" => "GUI apps on Oak's hidden desktop, driven without touching the user's screen, mouse, keyboard or focus; and, with their permission (attach), the user's own windows, driven the same way (they stay where they are). The user sees your current window live beside the transcript. Coordinates are pixels of the window's client area, as in its screenshots.".into(),
         "AGENT" if agent => "The main session (id 0) and its other subagents.".into(),
         "AGENT" => "Subagents: other agents with your tools (except ASK), working in this folder in the background. Their messages, and the final reply each sends when it ends its turn, come to you as <agent-message> blocks with your next request.".into(),
         _ => String::new(),
@@ -359,7 +359,9 @@ fn definitions_with(agent: bool) -> Value {
         tool("BROWSER_OPEN", "start the browser (the user sees it fade in beside the transcript), then go to `url` if given; `width`,`height` set the viewport (default 1920x1080). Its profile (cookies, logins, storage) is the conversation's own, or with `profile` a named one any conversation can open (one browser at a time), to keep logins between them; open with another `profile` switches",
             json!({"url": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"},
                    "profile": {"type": "string", "description": "A named profile (made on first use)"}}), &[]),
-        tool("BROWSER_CLOSE", "end the browser (it fades out); the other actions fail until open", json!({}), &[]),
+        tool("BROWSER_CLOSE", "end the browser (it fades out), or let go of the user's tab; the other actions fail until open", json!({}), &[]),
+        tool("BROWSER_ATTACH", "ask the user for one of their own browser's tabs (Brave, Chrome or Edge with Oak's extension): Oak shows them their tabs with `title` (part of the one you mean) picked first and `why`; the actions then go to the tab they allow (instead of your own browser, which closes) until close, or you get a refusal. For what needs their logins or a page they have open; ask only then, they are asked anew each time",
+            json!({"why": {"type": "string", "description": "What you will do in it, for the user"}, "title": {"type": "string", "description": "Part of the tab's title or address"}}), &["why"]),
         tool("BROWSER_GOTO", "open `url`", json!({"url": {"type": "string"}}), &["url"]),
         tool("BROWSER_BACK", "go back", json!({}), &[]),
         tool("BROWSER_FORWARD", "go forward", json!({}), &[]),
@@ -433,7 +435,44 @@ fn definitions_with(agent: bool) -> Value {
     let list = all.as_array_mut().expect("a list");
     let at = list.iter().position(|d| d["name"] == "BROWSER_HELP").unwrap_or(list.len());
     list.splice(at..at, more.as_array().cloned().unwrap_or_default());
+    // WINDOW's (Windows only: elsewhere WINDOW is instructions).
+    if cfg!(windows) {
+        list.extend(window_definitions().as_array().cloned().unwrap_or_default());
+    }
     all
+}
+
+/// WINDOW's actions (`window_tool.rs`).
+fn window_definitions() -> Value {
+    let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
+        json!({"name": name, "description": description, "input_schema": {"type": "object", "properties": properties, "required": required}, "eager_input_streaming": true})
+    };
+    let window = json!({"type": "string", "description": "A window id from list (hidden:0x…, or user:0x… for one of the user's you attached); default your current window: the one you last launched, attached or acted on (with none, the call fails rather than picking another window). Other agents' Blenders are neither listed nor usable"});
+    let shot = json!({"type": "boolean", "description": "Also return a screenshot after it"});
+    let wait = json!({"type": "integer", "description": "Milliseconds to wait after it, for the app to repaint (default 300)"});
+    let with = |mut p: Value| {
+        p["window"] = window.clone();
+        p["shot"] = shot.clone();
+        p["wait"] = wait.clone();
+        p
+    };
+    json!([
+        tool("WINDOW_LAUNCH", "start `program` (a path, relative to the working folder, or a program on the PATH) with `args` on the hidden desktop, its window `width`x`height` (default 1280x800); waits for its window (up to 60 s) and returns a screenshot. It is yours: it runs until close (or Oak exits), its output goes to a log in the scratchpad",
+            json!({"program": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}, "description": "Literal arguments for ordinary executables. For cmd.exe /c or /k, pass the whole command as one string after the switch, using cmd's quotes (not C backslash escapes); Oak supplies /s and the outer quote pair."}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["program"]),
+        tool("WINDOW_LIST", "the windows on the hidden desktop: id, process, client size, title, and which are yours", json!({}), &[]),
+        tool("WINDOW_SHOT", "a screenshot of the window's client area", json!({"window": window}), &[]),
+        tool("WINDOW_CLICK", "click at `x`,`y`; `button` left (default) or right; `clicks` 2 for a double click", with(json!({"x": {"type": "integer"}, "y": {"type": "integer"}, "button": {"type": "string", "enum": ["left", "right"]}, "clicks": {"type": "integer"}})), &["x", "y"]),
+        tool("WINDOW_MOVE", "rest the pointer at `x`,`y` (hover)", with(json!({"x": {"type": "integer"}, "y": {"type": "integer"}})), &["x", "y"]),
+        tool("WINDOW_DRAG", "press at `x`,`y`, move to `to_x`,`to_y` and let go; `throw` lets go while still moving", with(json!({"x": {"type": "integer"}, "y": {"type": "integer"}, "to_x": {"type": "integer"}, "to_y": {"type": "integer"}, "button": {"type": "string", "enum": ["left", "right"]}, "throw": {"type": "boolean"}})), &["x", "y", "to_x", "to_y"]),
+        tool("WINDOW_SCROLL", "the wheel at `x`,`y`: `lines` positive scrolls up, negative down", with(json!({"x": {"type": "integer"}, "y": {"type": "integer"}, "lines": {"type": "integer"}})), &["x", "y", "lines"]),
+        tool("WINDOW_TYPE", "type `text` where the focus is", with(json!({"text": {"type": "string"}})), &["text"]),
+        tool("WINDOW_KEY", "press `key`, e.g. enter, tab, escape, backspace, delete, up, pagedown, f5, space, a, ctrl+s, shift+tab, alt+f4", with(json!({"key": {"type": "string"}})), &["key"]),
+        tool("WINDOW_RESIZE", "set the window's outer size to `width`x`height`", with(json!({"width": {"type": "integer"}, "height": {"type": "integer"}})), &["width", "height"]),
+        tool("WINDOW_CLOSE", "ask the window to close; an app you launched is ended if it is still running 5 seconds later (not the user's own windows)", json!({"window": window}), &[]),
+        tool("WINDOW_ATTACH", "ask the user for one of their own windows (on their screen): Oak shows them their windows with `title` (part of the one you mean) picked first and `why`; you get the one they allow, as user:0x… and your current window, with a screenshot, or a refusal. Ask only when the task needs their window; they are asked anew each time",
+            json!({"why": {"type": "string", "description": "What you will do in it, for the user"}, "title": {"type": "string", "description": "Part of the window's title or program name"}}), &["why"]),
+        tool("WINDOW_DETACH", "let go of one of the user's windows you attached", json!({"window": window}), &[]),
+    ])
 }
 
 /// AGENT new's input: the name and prompt, and the model and effort to

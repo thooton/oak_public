@@ -37,9 +37,13 @@ impl App {
     }
 
     /// Stops and forgets one conversation, removing its file (and its
-    /// browser's profile).
+    /// browser's profile, and ending the apps it launched on the hidden
+    /// desktop).
     pub(crate) fn delete_transcript(&mut self, id: &str) {
         browser::forget(id);
+        #[cfg(windows)]
+        crate::window_tool::end(id);
+        crate::mcp::blender_run::end(id);
         match self.sessions.get(id) {
             Some(s) => s.delete(),
             None => store::remove_conversation(id),

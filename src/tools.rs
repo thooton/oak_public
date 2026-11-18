@@ -66,7 +66,7 @@ const FAMILIES: &[(&str, &[(&str, &str)])] = &[
     ("GOAL", &[("justify", "GOAL_JUSTIFICATION"), ("finish", "GOAL_FINISH")]),
     ("AGENT", &[("new", "AGENT_NEW"), ("send", "AGENT_SEND"), ("wait", "AGENT_WAIT"), ("list", "AGENT_LIST"), ("set", "AGENT_SET"), ("pause", "AGENT_PAUSE"), ("resume", "AGENT_RESUME"), ("stop", "AGENT_STOP"), ("delete", "AGENT_DELETE")]),
     ("BROWSER", &[
-        ("open", "BROWSER_OPEN"), ("close", "BROWSER_CLOSE"),
+        ("open", "BROWSER_OPEN"), ("close", "BROWSER_CLOSE"), ("attach", "BROWSER_ATTACH"),
         ("goto", "BROWSER_GOTO"), ("back", "BROWSER_BACK"), ("forward", "BROWSER_FORWARD"), ("reload", "BROWSER_RELOAD"),
         ("read", "BROWSER_READ"), ("click", "BROWSER_CLICK"), ("hover", "BROWSER_HOVER"), ("drag", "BROWSER_DRAG"),
         ("type", "BROWSER_TYPE"), ("key", "BROWSER_KEY"), ("scroll", "BROWSER_SCROLL"), ("wait", "BROWSER_WAIT"),
@@ -75,6 +75,11 @@ const FAMILIES: &[(&str, &[(&str, &str)])] = &[
         ("cookies", "BROWSER_COOKIES"), ("set_cookies", "BROWSER_SET_COOKIES"), ("delete_cookies", "BROWSER_DELETE_COOKIES"),
         ("clear_data", "BROWSER_CLEAR_DATA"), ("emulate", "BROWSER_EMULATE"), ("console", "BROWSER_CONSOLE"), ("network", "BROWSER_NETWORK"),
         ("profiles", "BROWSER_PROFILES"), ("help", "BROWSER_HELP"),
+    ]),
+    ("WINDOW", &[
+        ("launch", "WINDOW_LAUNCH"), ("list", "WINDOW_LIST"), ("shot", "WINDOW_SHOT"), ("click", "WINDOW_CLICK"), ("move", "WINDOW_MOVE"),
+        ("drag", "WINDOW_DRAG"), ("scroll", "WINDOW_SCROLL"), ("type", "WINDOW_TYPE"), ("key", "WINDOW_KEY"), ("resize", "WINDOW_RESIZE"),
+        ("close", "WINDOW_CLOSE"), ("attach", "WINDOW_ATTACH"), ("detach", "WINDOW_DETACH"),
     ]),
 ];
 
@@ -96,6 +101,10 @@ fn family_of(tool: &str) -> Option<(&'static str, &'static str)> {
 /// action taken out of the input; any other call is as it came. Fails for
 /// a family call without a known action.
 pub fn canonical(name: &str, input: &Value) -> Result<(String, Value), String> {
+    // A protocol's tool (BLENDER with an action): `crate::mcp`.
+    if let Some(r) = crate::mcp::canonical(name, input) {
+        return r;
+    }
     let Some((_, actions)) = FAMILIES.iter().find(|(f, _)| *f == name) else {
         return Ok((name.to_string(), input.clone()));
     };
@@ -119,13 +128,19 @@ pub fn canonical(name: &str, input: &Value) -> Result<(String, Value), String> {
 /// kit's tool and its input. For showing and naming such calls as the tool
 /// they run (the transcript, which results context clearing keeps); running
 /// them stays LOAD's, which checks the kit is loaded.
-fn through_load<'a>(name: &str, input: &'a Value) -> Option<(&'static str, &'a Value)> {
+fn through_load<'a>(name: &str, input: &'a Value) -> Option<(String, &'a Value)> {
     if name != "LOAD" {
         return None;
     }
     let inner = input.get("input").filter(|v| v.is_object())?;
     let kit = input["name"].as_str()?.trim();
-    FAMILIES.iter().map(|(f, _)| *f).find(|f| f.eq_ignore_ascii_case(kit) && defs::kits_for(false).contains(f)).map(|f| (f, inner))
+    if let Some(f) = FAMILIES.iter().map(|(f, _)| *f).find(|f| f.eq_ignore_ascii_case(kit) && defs::kits_for(false).contains(f)) {
+        return Some((f.to_string(), inner));
+    }
+    // A protocol's tool, called as its family is (not an older Oak's
+    // {"tool", "arguments"}, which LOAD still runs).
+    let family = crate::mcp::family_of_name(kit);
+    (inner.get("action").is_some() && crate::mcp::is_family(&family)).then_some((family, inner))
 }
 
 /// The tool a call runs as (`canonical`'s name), without copying its
@@ -133,7 +148,8 @@ fn through_load<'a>(name: &str, input: &'a Value) -> Option<(&'static str, &'a V
 /// call without a known action) as it is named.
 pub fn canonical_name<'a>(name: &'a str, input: &Value) -> &'a str {
     if let Some((kit, inner)) = through_load(name, input) {
-        return canonical_name(kit, inner);
+        // (A protocol's tool through LOAD stays LOAD here.)
+        return FAMILIES.iter().find(|(f, _)| *f == kit).map_or(name, |(f, _)| canonical_name(f, inner));
     }
     let Some((_, actions)) = FAMILIES.iter().find(|(f, _)| *f == name) else { return name };
     let action = input["action"].as_str().map(|a| a.trim().to_lowercase());
@@ -146,9 +162,10 @@ pub fn canonical_name<'a>(name: &'a str, input: &Value) -> &'a str {
 pub fn canonical_cow<'a>(name: &'a str, input: &'a Value) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, Value>) {
     use std::borrow::Cow;
     if let Some((kit, inner)) = through_load(name, input) {
-        return canonical_cow(kit, inner);
+        let (n, i) = canonical_cow(&kit, inner);
+        return (Cow::Owned(n.into_owned()), Cow::Owned(i.into_owned()));
     }
-    if FAMILIES.iter().any(|(f, _)| *f == name)
+    if (FAMILIES.iter().any(|(f, _)| *f == name) || crate::mcp::is_family(name))
         && let Ok((n, i)) = canonical(name, input)
     {
         return (Cow::Owned(n), Cow::Owned(i));
@@ -162,7 +179,10 @@ pub fn canonical_cow<'a>(name: &'a str, input: &'a Value) -> (std::borrow::Cow<'
 pub fn shown_name(tool: &str) -> String {
     match family_of(tool) {
         Some((family, action)) => format!("{family} {action}"),
-        None => tool.to_string(),
+        None => match crate::mcp::split(tool) {
+            Some((family, action)) => format!("{family} {action}"),
+            None => tool.to_string(),
+        },
     }
 }
 
@@ -171,8 +191,20 @@ pub fn shown_name(tool: &str) -> String {
 pub fn call_name(tool: &str) -> String {
     match family_of(tool) {
         Some((family, action)) => format!("{family} action={action}"),
-        None => tool.to_string(),
+        None => match crate::mcp::split(tool) {
+            Some((family, action)) => format!("{family} action={action}"),
+            None => tool.to_string(),
+        },
     }
+}
+
+/// The names of Oak's own tools as the model gets them (families as one),
+/// which a protocol's tool can't take.
+pub fn tool_names() -> Vec<String> {
+    let mut names: Vec<String> = defs::run_definitions(false, false, false, true).iter().filter_map(|d| d["name"].as_str()).filter(|n| family_of(n).is_none()).map(str::to_string).collect();
+    names.extend(FAMILIES.iter().map(|(f, _)| f.to_string()));
+    names.push("WINDOW".into());
+    names
 }
 
 /// The tools of a session the user started, or (`agent`) of a subagent,
@@ -384,7 +416,7 @@ pub fn repair(name: &str, mut input: Value) -> Value {
     // as it would be called directly.
     if let Some((kit, _)) = through_load(name, &input) {
         let inner = input["input"].take();
-        input["input"] = repair(kit, inner);
+        input["input"] = repair(&kit, inner);
     }
     input
 }
@@ -897,7 +929,7 @@ mod tests {
         // Loading a kit, or a name that isn't a kit's, stays LOAD.
         assert_eq!(canonical_name("LOAD", &json!({"name": "BROWSER"})), "LOAD");
         assert_eq!(canonical_name("LOAD", &json!({"name": "TASK", "input": {"action": "wait"}})), "LOAD");
-        assert_eq!(canonical_name("LOAD", &json!({"name": "WINDOW", "input": {}})), "LOAD");
+        assert_eq!(canonical_name("LOAD", &json!({"name": "WINDOW", "input": {"action": "click", "x": 1, "y": 2}})), "WINDOW_CLICK");
     }
 
     /// A kit's tool called through LOAD is repaired as that tool would be

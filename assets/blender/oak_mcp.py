@@ -7,16 +7,23 @@
 # so Oak's server works with either add-on. Commands run on Blender's main
 # thread (bpy isn't thread-safe), from a timer.
 #
-# Installed by Oak (Home > MCP > Blender > Install add-on) into Blender's user
-# add-ons folder; the server starts with Blender (not in background mode) and
-# the 3D viewport's sidebar (N) has an "Oak" tab to stop or start it.
+# Installed by Oak (Home > Protocols > Blender > Install add-on) into Blender's
+# user add-ons folder; the server starts with Blender (not in background mode)
+# and the 3D viewport's sidebar (N) has an "Oak" tab to stop or start it.
+#
+# A Blender Oak runs on its hidden desktop (Oak's `src/mcp/blender_run.rs`)
+# loads this file itself and calls `start_on` (OAK_MCP_RUN is set there, so an
+# installed copy doesn't start too). Oak shows that Blender in its own window
+# and passes the user's input to it: `window_frame` takes a picture of the
+# window, `simulate` feeds it events (Blender runs with
+# --enable-event-simulate, as it reads keys only from the real keyboard).
 #
 # Anything the model writes runs here with Blender's (and your user's) rights.
 
 bl_info = {
     "name": "Oak MCP",
     "author": "Oak",
-    "version": (1, 0, 0),
+    "version": (1, 2, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Oak",
     "description": "Lets Oak's agents work in this Blender through MCP (a local socket server)",
@@ -25,6 +32,7 @@ bl_info = {
 
 import io
 import json
+import os
 import queue
 import socket
 import threading
@@ -38,6 +46,23 @@ DEFAULT_PORT = 9876
 # Commands waiting for the main thread: (command, reply box).
 _todo = queue.Queue()
 _server = None
+# When the last command came (the pump runs often while they flow).
+_last = 0.0
+# Python property edits need not set bpy.data.is_dirty. Agent code is
+# conservatively dirty until a real save/load, even after a failed script.
+_script_dirty = False
+
+
+@bpy.app.handlers.persistent
+def _saved_or_loaded(_):
+    global _script_dirty
+    _script_dirty = False
+
+
+def _track_saves():
+    for handlers in (bpy.app.handlers.save_post, bpy.app.handlers.load_post):
+        if _saved_or_loaded not in handlers:
+            handlers.append(_saved_or_loaded)
 
 
 class _Reply:
@@ -47,9 +72,14 @@ class _Reply:
 
 
 def _run(command):
+    global _script_dirty
     kind = command.get("type")
     params = command.get("params") or {}
+    if kind == "session_state":
+        return {"status": "success", "result": {"dirty": bool(bpy.data.is_dirty or _script_dirty), "filepath": bpy.data.filepath}}
     if kind == "execute_code":
+        if params.get("track_changes"):
+            _script_dirty = True
         namespace = {"bpy": bpy, "__name__": "__oak_mcp__"}
         out = io.StringIO()
         try:
@@ -63,6 +93,36 @@ def _run(command):
                 message += "\n\nPrinted before the error:\n" + text
             return {"status": "error", "message": message + "\n\n" + tb}
         return {"status": "success", "result": {"executed": True, "result": out.getvalue()}}
+    if kind == "window_frame":
+        win = bpy.context.window_manager.windows[0]
+        area = win.screen.areas[0]
+        with bpy.context.temp_override(window=win, screen=win.screen, area=area):
+            bpy.ops.screen.screenshot(filepath=params["path"])
+        return {"status": "success", "result": {"width": win.width, "height": win.height}}
+    if kind == "simulate":
+        if not getattr(bpy.app, "use_event_simulate", False):
+            return {"status": "error", "message": "This Blender wasn't started with --enable-event-simulate."}
+        win = bpy.context.window_manager.windows[0]
+        done = 0
+        for e in params.get("events", []):
+            # Oak's y runs down from the top; Blender's up from the bottom.
+            x = int(e.get("x", -1))
+            y = int(e.get("y", -1))
+            kw = {}
+            if x >= 0 and y >= 0:
+                kw["x"] = x
+                kw["y"] = win.height - 1 - y
+            for m in ("shift", "ctrl", "alt"):
+                if e.get(m):
+                    kw[m] = True
+            if e.get("unicode"):
+                kw["unicode"] = e["unicode"]
+            try:
+                win.event_simulate(e["type"], e.get("value", "PRESS"), **kw)
+                done += 1
+            except (TypeError, ValueError, RuntimeError) as err:
+                return {"status": "error", "message": "Event %d (%s): %s" % (done, e.get("type"), err)}
+        return {"status": "success", "result": {"events": done}}
     if kind == "get_addon_info":
         return {"status": "success", "result": {"addon": "oak_mcp", "version": list(bl_info["version"]), "blender": bpy.app.version_string}}
     return {"status": "error", "message": "Unknown command type: %s (the Oak MCP add-on runs execute_code)" % kind}
@@ -70,6 +130,8 @@ def _run(command):
 
 def _pump():
     """Runs the waiting commands on the main thread; a timer calls it."""
+    global _last
+    import time
     while True:
         try:
             command, reply = _todo.get_nowait()
@@ -80,7 +142,10 @@ def _pump():
         except BaseException as e:
             reply.value = {"status": "error", "message": "%s: %s" % (type(e).__name__, e)}
         reply.done.set()
-    return 0.05 if _server is not None else None
+        _last = time.monotonic()
+    if _server is None:
+        return None
+    return 0.01 if time.monotonic() - _last < 2.0 else 0.05
 
 
 class _Server:
@@ -168,6 +233,23 @@ def start():
     return None
 
 
+def start_on(port):
+    """Starts the server on `port` (Oak's own Blenders); an error or None."""
+    global _server
+    if _server is not None and _server.port == port:
+        return None
+    stop()
+    _track_saves()
+    try:
+        _server = _Server(port)
+    except OSError as e:
+        return "Port %d is in use: %s" % (port, e)
+    if not bpy.app.timers.is_registered(_pump):
+        bpy.app.timers.register(_pump, first_interval=0.05, persistent=True)
+    print("Oak MCP: listening on 127.0.0.1:%d" % port)
+    return None
+
+
 def stop():
     global _server
     if _server is not None:
@@ -175,6 +257,9 @@ def stop():
         _server = None
     if bpy.app.timers.is_registered(_pump):
         bpy.app.timers.unregister(_pump)
+    for handlers in (bpy.app.handlers.save_post, bpy.app.handlers.load_post):
+        if _saved_or_loaded in handlers:
+            handlers.remove(_saved_or_loaded)
 
 
 _last_error = ""
@@ -244,6 +329,8 @@ _classes = (OAKMCP_Preferences, OAKMCP_OT_start, OAKMCP_OT_stop, OAKMCP_PT_panel
 
 def _auto_start():
     global _last_error
+    if os.environ.get("OAK_MCP_RUN"):
+        return None  # Oak runs this Blender and serves it itself
     prefs = _prefs()
     if prefs is None or prefs.auto_start:
         _last_error = start() or ""

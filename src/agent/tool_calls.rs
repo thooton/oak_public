@@ -295,10 +295,12 @@ impl Worker {
             return self.load(call, input, stop);
         } else if let Some(e) = self.unloaded(name) {
             (e, true, false)
-        } else if name.starts_with("mcp__") {
+        } else if name.starts_with("mcp__") || crate::mcp::split(name).is_some() {
             return self.mcp_call(call, name, input);
         } else if call["name"] == "BROWSER" || name.starts_with("BROWSER_") {
             return self.browser_call(call, canon.as_ref().ok().map(|(n, i)| (n.as_str(), i)));
+        } else if cfg!(windows) && (call["name"] == "WINDOW" || name.starts_with("WINDOW_")) && canon.is_ok() {
+            return self.window_call(call, name, input);
         } else if let Err(e) = &canon {
             (format!("Invalid input: {e}"), true, false)
         } else if let Err(e) = tools::validate(name, input) {
@@ -348,16 +350,18 @@ impl Worker {
 
     /// Why a call of tool `name` can't run yet: its kit isn't loaded.
     pub(crate) fn unloaded(&self, name: &str) -> Option<String> {
-        if name.starts_with("mcp__") {
-            let Some((server, _)) = crate::mcp::resolve_tool(name) else {
-                return Some(format!("No MCP server has a tool {name}."));
+        // A protocol's tool (BLENDER, BLENDER_SCENE_INFO, or an older Oak's
+        // mcp__blender__get_scene_info).
+        if name.starts_with("mcp__") || crate::mcp::split(name).is_some() || crate::mcp::is_family(name) {
+            let server = crate::mcp::resolve_tool(name).map(|(c, _)| c).or_else(|| crate::mcp::named(name).filter(|c| !c.native()));
+            let Some(server) = server else {
+                return Some(format!("No protocol has a tool {name}."));
             };
             let c = self.conv.lock().unwrap();
             if c.chat {
-                return Some(format!("{name} isn't available in a chat."));
+                return Some(format!("{} isn't available in a chat.", server.family));
             }
-            let kit = crate::mcp::kit_id(&server.name);
-            return (!c.prefix.kits.contains(&kit)).then(|| format!("{name} needs its server's kit: call LOAD with name={} first.", server.name));
+            return (!crate::mcp::loaded_in(&c.prefix.kits, &server)).then(|| format!("{} needs its kit: call LOAD with name={} first.", tools::call_name(name), server.family));
         }
         let c = self.conv.lock().unwrap();
         let agent = c.parent.is_some();
@@ -391,7 +395,7 @@ impl Worker {
             if !loaded {
                 return fail(format!("Load {kit} first (LOAD without `input`)."));
             }
-            if kit == "WINDOW" {
+            if kit == "WINDOW" && !cfg!(windows) {
                 return fail("WINDOW is instructions only: it has no tool to call.".into());
             }
             return self.run_call(&json!({"id": call["id"], "name": kit, "input": inner}), stop);
@@ -405,7 +409,7 @@ impl Worker {
             c.save();
         }
         let tool = match mode {
-            _ if kit == "WINDOW" => String::new(),
+            _ if kit == "WINDOW" && !cfg!(windows) => String::new(),
             Some(crate::prefix::Mode::Generic) => format!(
                 "Its tool isn't in your tool list: {}, with name={kit} and the tool's input in `input`, e.g. {{\"name\": \"{kit}\", \"input\": {{\"action\": \"...\"}}}}.\n{}",
                 crate::prefix::THROUGH_LOAD,
@@ -418,68 +422,93 @@ impl Worker {
     }
 
     /// LOAD for an MCP server: connects to it (starting it), adds its kit
-    /// (its tools join the list as Oak's kits' do) and returns its tools and
-    /// instructions. With `input` ({"tool", "arguments"}), calls one of its
-    /// tools through LOAD, where tools can't join the list mid-conversation.
+    /// (its tool joins the list as Oak's kits' do) and returns its tool and
+    /// instructions. With `input` (the tool's: {"action", ...}, or an older
+    /// Oak's {"tool", "arguments"}), calls its tool through LOAD, where
+    /// tools can't join the list mid-conversation.
     fn load_server(&self, call: &Value, server: &crate::mcp::Config, input: &Value) -> (Value, bool) {
         let fail = |e: String| (result_block(call, json!(e), true), false);
-        let kit = crate::mcp::kit_id(&server.name);
+        let kit = crate::mcp::kit_id(server);
         let (mode, loaded, chat) = {
             let c = self.conv.lock().unwrap();
-            (crate::prefix::mode(c.provider(), &c.model), c.prefix.kits.contains(&kit), c.chat)
+            (crate::prefix::mode(c.provider(), &c.model), crate::mcp::loaded_in(&c.prefix.kits, server), c.chat)
         };
         if chat {
-            return fail("MCP servers aren't available in a chat.".into());
+            return fail(format!("{kit} isn't available in a chat."));
         }
         if let Some(inner) = input.get("input").filter(|v| !v.is_null()) {
             if !loaded {
-                return fail(format!("Load {} first (LOAD without `input`).", server.name));
+                return fail(format!("Load {kit} first (LOAD without `input`)."));
             }
-            let Some(tool) = inner["tool"].as_str().or(inner["name"].as_str()) else {
-                return fail("Give `input` as {\"tool\": \"<tool name>\", \"arguments\": {...}}.".into());
+            if let Some(tool) = inner["tool"].as_str().filter(|_| inner.get("action").is_none()) {
+                let tool = tool.rsplit("__").next().unwrap_or(tool);
+                let Some(action) = crate::mcp::offer(server).and_then(|o| crate::mcp::actions(server, &o).into_iter().find(|(_, t)| t["name"] == tool)).map(|(a, _)| a) else {
+                    return fail(format!("{kit} has no tool {tool}."));
+                };
+                let args = inner.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                return self.mcp_call(call, &format!("{kit}_{}", action.to_uppercase()), &args);
+            }
+            return match crate::mcp::canonical(&kit, inner) {
+                Some(Ok((name, args))) => self.mcp_call(call, &name, &args),
+                Some(Err(e)) => fail(format!("Invalid input: {e}")),
+                None => fail(format!("{kit} lists no tools.")),
             };
-            let tool = tool.strip_prefix(&format!("mcp__{}__", server.name)).unwrap_or(tool);
-            let args = inner.get("arguments").cloned().unwrap_or_else(|| {
-                let mut rest = inner.clone();
-                if let Some(o) = rest.as_object_mut() {
-                    o.remove("tool");
-                    o.remove("name");
-                }
-                rest
-            });
-            let name = crate::mcp::tool_name(&server.name, tool);
-            return self.mcp_call(call, &name, &args);
         }
         let name = server.name.clone();
-        let (r, interrupted) = self.abandonable(&format!("Starting {name}"), move || crate::mcp::connect(&name));
+        let (r, interrupted) = self.abandonable(&format!("Starting {}", server.title), move || crate::mcp::connect(&name));
         if let Err(e) = r {
-            return (result_block(call, json!(format!("Couldn't load {}: {e}", server.name)), true), interrupted);
+            return (result_block(call, json!(format!("Couldn't load {kit}: {e}")), true), interrupted);
         }
         if !loaded {
             let mut c = self.conv.lock().unwrap();
-            c.prefix.kits.push(kit);
+            c.prefix.kits.push(kit.clone());
             c.save();
         }
         let through_load = mode == Some(crate::prefix::Mode::Generic);
         let mut text = crate::mcp::load_text(server, through_load);
+        if matches!(server.transport, crate::mcp::Transport::Builtin("blender")) {
+            let caller = self.blender_caller();
+            let canceled = caller.cancelled.clone();
+            let (r, interrupted) = self.abandonable("Starting your private Blender", move || crate::mcp::blender_run::with_caller(caller, || crate::mcp::blender_run::use_own(None, None).map(Some)));
+            if interrupted { canceled.store(true, std::sync::atomic::Ordering::SeqCst); }
+            match r {
+                Ok(Some(note)) => text.push_str(&format!("\n\n{note}")),
+                Ok(None) => text.push_str("\n\nYour private Blender is ready."),
+                Err(e) => return (result_block(call, json!(format!("{text}\n\nThe kit is loaded, but its private Blender could not start: {e}\nIf Blender is portable, use BLENDER action=use_own with program pointing to its executable.")), true), interrupted),
+            }
+        }
         if loaded {
-            text = format!("{} is loaded already (connected again).\n\n{text}", server.name);
+            text = format!("{kit} is loaded already (connected again).\n\n{text}");
         }
         (result_block(call, json!(text), false), false)
     }
 
-    /// A call of an MCP server's tool (`name`: mcp__<server>__<tool>): its
-    /// result as the server gave it (text, pictures), long text saved to
-    /// the scratchpad as EXECUTE's is. The user's message interrupts it.
+    fn blender_caller(&self) -> crate::mcp::blender_run::Caller {
+        let mut c = self.conv.lock().unwrap();
+        let scratch = scratchpad(&mut c);
+        crate::mcp::blender_run::Caller { conv: c.id.clone(), folder: c.folder.clone(), scratch, ..Default::default() }
+    }
+
+    /// A call of a protocol's tool (`name`: BLENDER_SCENE_INFO, or an older
+    /// Oak's mcp__blender__get_scene_info): its result as the server gave
+    /// it (text, pictures), long text saved to the scratchpad as EXECUTE's
+    /// is. The user's message interrupts it.
     fn mcp_call(&self, call: &Value, name: &str, input: &Value) -> (Value, bool) {
+        let fail = |e: String| (result_block(call, json!(e), true), false);
         let Some((server, tool)) = crate::mcp::resolve_tool(name) else {
-            return (result_block(call, json!(format!("No MCP server has a tool {name}.")), true), false);
+            return fail(format!("No protocol has a tool {name}."));
         };
         if !crate::mcp::enabled(&server.name) {
-            return (result_block(call, json!(format!("The user switched the {} MCP server off.", server.name)), true), false);
+            return fail(format!("The user switched {} off (Home > Protocols).", server.family));
         }
-        let args = input.clone();
-        let (r, interrupted) = self.abandonable(&format!("{} ({})", tool, server.name), move || crate::mcp::call(&server, &tool, args));
+        let args = match crate::mcp::arguments(&server, &tool, input) {
+            Ok(a) => a,
+            Err(e) => return fail(format!("Invalid input: {e}")),
+        };
+        let caller = self.blender_caller();
+        let canceled = caller.cancelled.clone();
+        let (r, interrupted) = self.abandonable(&format!("{} ({})", tools::shown_name(name), server.title), move || crate::mcp::blender_run::with_caller(caller, || crate::mcp::call(&server, &tool, args)));
+        if interrupted { canceled.store(true, std::sync::atomic::Ordering::SeqCst); }
         let (blocks, is_error) = match r {
             Ok(r) => r,
             Err(e) => return (result_block(call, json!(e), true), interrupted),
@@ -500,6 +529,42 @@ impl Worker {
             json!(blocks)
         };
         (result_block(call, content, is_error), interrupted)
+    }
+
+    /// A WINDOW call (`name`: its action's tool, WINDOW_CLICK…): runs on
+    /// the hidden desktop (`window_tool.rs`); a shot's picture comes back.
+    fn window_call(&self, call: &Value, name: &str, input: &Value) -> (Value, bool) {
+        #[cfg(windows)]
+        {
+            if let Err(e) = tools::validate(name, input) {
+                return (result_block(call, json!(format!("Invalid input: {e}")), true), false);
+            }
+            let (conv, folder, scratch) = {
+                let mut c = self.conv.lock().unwrap();
+                let scratch = scratchpad(&mut c);
+                (c.id.clone(), c.folder.clone(), scratch)
+            };
+            let (name, input) = (name.to_string(), input.clone());
+            let label = tools::shown_name(&name);
+            let conv2 = conv.clone();
+            if name == "WINDOW_ATTACH" {
+                self.set(|l| l.status = "Waiting for your permission".into());
+            }
+            let (r, interrupted) = self.abandonable(&label, move || crate::window_tool::run(&conv, std::path::Path::new(&folder), &scratch, &name, &input));
+            if interrupted {
+                crate::approval::cancel(&conv2);
+            }
+            match r {
+                Ok(blocks) if blocks.len() == 1 && blocks[0]["type"] == "text" => (result_block(call, blocks[0]["text"].clone(), false), interrupted),
+                Ok(blocks) => (result_block(call, json!(blocks), false), interrupted),
+                Err(e) => (result_block(call, json!(e), true), interrupted),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (name, input);
+            (result_block(call, json!("WINDOW's tool is Windows only."), true), false)
+        }
     }
 
     /// A BROWSER call (`canon`: its action's tool and input, if the action
@@ -529,6 +594,18 @@ impl Worker {
             "BROWSER_OPEN" => {
                 let (ctx, input) = (self.ctx.clone(), input.clone());
                 let (r, interrupted) = self.abandonable("Opening the browser", move || crate::browser::model_open(&conv, &ctx, &input, &folder));
+                return match r {
+                    Ok(s) => (result_block(call, json!(s), false), interrupted),
+                    Err(e) => (result_block(call, json!(e), true), interrupted),
+                };
+            }
+            "BROWSER_ATTACH" => {
+                let (ctx, input, conv2) = (self.ctx.clone(), input.clone(), conv.clone());
+                self.set(|l| l.status = "Waiting for your permission".into());
+                let (r, interrupted) = self.abandonable("Waiting for your permission", move || crate::browser::model_attach(&conv, &ctx, &input));
+                if interrupted {
+                    crate::approval::cancel(&conv2);
+                }
                 return match r {
                     Ok(s) => (result_block(call, json!(s), false), interrupted),
                     Err(e) => (result_block(call, json!(e), true), interrupted),

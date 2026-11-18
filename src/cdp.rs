@@ -1,7 +1,9 @@
 //! A small DevTools-protocol client: one websocket to one target (a tab),
 //! with a reader thread that hands each answer to the call waiting for it
 //! and events to whoever listens. The browser pane drives Chromium with
-//! it.
+//! it. A session can also go through another link (`Cdp::over`): the
+//! user's own browser's tab through Oak's extension (`browser/bridge.rs`),
+//! which hands the answers and events in with `deliver`.
 
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -74,27 +76,37 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A masked client-to-server frame.
 fn ws_frame(opcode: u8, data: &[u8]) -> Vec<u8> {
+    frame(opcode, data, true)
+}
+
+/// A frame, masked (a client's) or not (a server's).
+pub(crate) fn frame(opcode: u8, data: &[u8], masked: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 14);
     out.push(0x80 | opcode);
+    let bit = if masked { 0x80 } else { 0 };
     let n = data.len();
     if n < 126 {
-        out.push(0x80 | n as u8);
+        out.push(bit | n as u8);
     } else if n < 65536 {
-        out.push(0x80 | 126);
+        out.push(bit | 126);
         out.extend((n as u16).to_be_bytes());
     } else {
-        out.push(0x80 | 127);
+        out.push(bit | 127);
         out.extend((n as u64).to_be_bytes());
     }
-    let mask: [u8; 4] = rand::random();
-    out.extend(mask);
-    out.extend(data.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    if masked {
+        let mask: [u8; 4] = rand::random();
+        out.extend(mask);
+        out.extend(data.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    } else {
+        out.extend(data);
+    }
     out
 }
 
 /// One whole server-to-client message: (opcode, payload). Fragments are
 /// joined; control frames come back as their own messages.
-fn ws_read(r: &mut impl Read) -> std::io::Result<(u8, Vec<u8>)> {
+pub(crate) fn ws_read(r: &mut impl Read) -> std::io::Result<(u8, Vec<u8>)> {
     let mut data = vec![];
     let mut opcode = None;
     loop {
@@ -139,11 +151,33 @@ fn ws_read(r: &mut impl Read) -> std::io::Result<(u8, Vec<u8>)> {
 /// A DevTools session with one tab. A reader thread hands each answer to
 /// the call waiting for it, and events to whoever is listening.
 pub(crate) struct Cdp {
-    writer: Mutex<TcpStream>,
+    writer: Mutex<Box<dyn Link>>,
     next: AtomicU64,
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     listeners: Mutex<Vec<(u64, Sender<Value>)>>,
     closed: AtomicBool,
+}
+
+/// Where a session's messages go: a websocket, or another link (`over`).
+pub(crate) trait Link: Send {
+    /// Sends one message (a JSON text).
+    fn send_text(&mut self, text: &str) -> std::io::Result<()>;
+    /// Answers a ping (websockets only).
+    fn pong(&mut self, _payload: &[u8]) {}
+    /// Ends it.
+    fn shut(&mut self) {}
+}
+
+impl Link for TcpStream {
+    fn send_text(&mut self, text: &str) -> std::io::Result<()> {
+        self.write_all(&ws_frame(0x1, text.as_bytes()))
+    }
+    fn pong(&mut self, payload: &[u8]) {
+        let _ = self.write_all(&ws_frame(0xA, payload));
+    }
+    fn shut(&mut self) {
+        let _ = self.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// Events while it lives (`Cdp::listen`).
@@ -188,13 +222,7 @@ impl Cdp {
         }
         sock.set_read_timeout(None).ok();
         let reader = sock.try_clone().map_err(|e| down(e.to_string()))?;
-        let cdp = Arc::new(Cdp {
-            writer: Mutex::new(sock),
-            next: AtomicU64::new(0),
-            pending: Mutex::new(HashMap::new()),
-            listeners: Mutex::new(vec![]),
-            closed: AtomicBool::new(false),
-        });
+        let cdp = Cdp::over(Box::new(sock));
         let c = cdp.clone();
         std::thread::Builder::new()
             .name("cdp".into())
@@ -203,29 +231,51 @@ impl Cdp {
         Ok(cdp)
     }
 
+    /// A session whose messages go through `link`; its answers and events
+    /// come in through `deliver`, and `ended` when the link goes.
+    pub(crate) fn over(link: Box<dyn Link>) -> Arc<Cdp> {
+        Arc::new(Cdp {
+            writer: Mutex::new(link),
+            next: AtomicU64::new(0),
+            pending: Mutex::new(HashMap::new()),
+            listeners: Mutex::new(vec![]),
+            closed: AtomicBool::new(false),
+        })
+    }
+
     fn read_loop(&self, sock: TcpStream) {
         let mut r = BufReader::with_capacity(1 << 16, sock);
         while let Ok((op, payload)) = ws_read(&mut r) {
             match op {
                 0x8 => break,
                 0x9 => {
-                    let _ = self.writer.lock().unwrap().write_all(&ws_frame(0xA, &payload));
+                    self.writer.lock().unwrap().pong(&payload);
                     continue;
                 }
                 0x1 => {}
                 _ => continue,
             }
             let Ok(v) = serde_json::from_slice::<Value>(&payload) else { continue };
-            if let Some(id) = v["id"].as_u64() {
-                if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
-                    let _ = tx.send(v);
-                }
-            } else {
-                for (_, tx) in self.listeners.lock().unwrap().iter() {
-                    let _ = tx.send(v.clone());
-                }
+            self.deliver(v);
+        }
+        self.ended();
+    }
+
+    /// An answer (with its call's id) or an event that came in.
+    pub(crate) fn deliver(&self, v: Value) {
+        if let Some(id) = v["id"].as_u64() {
+            if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
+                let _ = tx.send(v);
+            }
+        } else {
+            for (_, tx) in self.listeners.lock().unwrap().iter() {
+                let _ = tx.send(v.clone());
             }
         }
+    }
+
+    /// The link went: the waiting calls fail and listeners hear `__closed__`.
+    pub(crate) fn ended(&self) {
         self.closed.store(true, Ordering::SeqCst);
         for (_, tx) in self.pending.lock().unwrap().drain() {
             let _ = tx.send(json!({"__closed__": true}));
@@ -253,7 +303,7 @@ impl Cdp {
         let (tx, rx) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, tx);
         let msg = json!({"id": id, "method": method, "params": params}).to_string();
-        if let Err(e) = self.writer.lock().unwrap().write_all(&ws_frame(0x1, msg.as_bytes())) {
+        if let Err(e) = self.writer.lock().unwrap().send_text(&msg) {
             self.pending.lock().unwrap().remove(&id);
             return Err(Error::Down(format!("Couldn't reach the browser: {e}")));
         }
@@ -295,7 +345,7 @@ impl Cdp {
         }
         let id = self.take_id();
         let msg = json!({"id": id, "method": method, "params": params}).to_string();
-        let _ = self.writer.lock().unwrap().write_all(&ws_frame(0x1, msg.as_bytes()));
+        let _ = self.writer.lock().unwrap().send_text(&msg);
     }
 
     pub(crate) fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
@@ -317,6 +367,6 @@ impl Cdp {
 
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        let _ = self.writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
+        self.writer.lock().unwrap().shut();
     }
 }

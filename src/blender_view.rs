@@ -1,14 +1,8 @@
-//! Blender's live view: while the shown conversation has the blender MCP
-//! kit loaded (`mcp.rs`) and Blender answers on its add-on's port, a
-//! picture of Blender's 3D viewport sits beside the transcript where the
-//! browser's preview does (under it when both are shown), see-through until
-//! the pointer is on it, renewed about once a second. A click expands it
-//! over the window (Esc, the X or a click beside it shrinks it back); it is
-//! only a view: the work happens in Blender's own window.
-//!
-//! One background thread does the looking (`worker`), only while something
-//! wants it: the live view (frames) or Home's MCP tab (whether Blender is
-//! reachable, `watch`).
+//! Private Blender live views: the shown agent's own window is rendered
+//! interactively by `window_view::program_preview`, independently of WINDOW
+//! selection. Subagent conversations are eligible too. Only explicit user
+//! attachments use the legacy viewport-only worker here. The Protocols page
+//! also uses that worker to check the user's add-on availability.
 
 use super::*;
 use crate::mcp::blender;
@@ -64,7 +58,7 @@ fn worker() {
         }
         let began = Instant::now();
         let (reach, frame) = match frames {
-            Some(max) => match blender::frame(max) {
+            Some(max) => match blender::frame_on(crate::mcp::blender_run::USER_PORT, max) {
                 Some(img) => (true, Some(img)),
                 // Busy with a long script, or not there.
                 None => (blender::reachable(), None),
@@ -133,17 +127,24 @@ fn texture(ctx: &egui::Context) -> Option<(TextureHandle, [usize; 2])> {
 impl App {
     /// The conversation shown, if it has Blender's kit loaded.
     fn blender_conv(&self) -> Option<String> {
-        let conv = self.browser_conv()?;
+        let conv = self.program_conv()?;
         let s = self.sessions.get(&conv)?;
-        let loaded = s.conv.lock().unwrap().prefix.kits.iter().any(|k| crate::mcp::server_of_kit(k) == Some(blender::NAME));
+        let loaded = s.conv.lock().unwrap().prefix.kits.iter().any(|k| crate::mcp::server_of_kit(k).is_some_and(|c| c.name == blender::NAME));
         (loaded && crate::mcp::enabled(blender::NAME)).then_some(conv)
     }
 
     /// After the transcript (in `view`) and the browser's preview (`above`,
     /// while shown): Blender's live view, and expanded over the window when
     /// clicked.
-    pub(crate) fn blender_preview(&mut self, ctx: &egui::Context, t: &Theme, view: Rect, above: Option<Rect>) {
-        let conv = self.blender_conv();
+    pub(crate) fn blender_preview(&mut self, ctx: &egui::Context, t: &Theme, view: Rect, above: Option<Rect>) -> Option<Rect> {
+        let selected = self.blender_conv();
+        #[cfg(windows)]
+        if let Some(conv) = selected.as_deref() && !crate::mcp::blender_run::users_for(conv) {
+            let window = crate::mcp::blender_run::window_for(conv).filter(|&w| crate::winctl::alive(w));
+            return self.program_preview(ctx, t, view, above, conv, window, "blender");
+        }
+        // Only an explicit user attachment uses the viewport-only renderer.
+        let conv = selected.filter(|c| crate::mcp::blender_run::users_for(c));
         let key = conv.clone().unwrap_or_default();
         let expanded = conv.is_some() && ctx.data(|d| d.get_temp::<bool>(expanded_id(&key))).unwrap_or(false);
         if conv.is_some() {
@@ -152,7 +153,7 @@ impl App {
         let tex = texture(ctx);
         let live = conv.is_some() && reachable() == Some(true) && tex.is_some();
         let alpha = ctx.animate_bool_with_time(Id::unique("blender-view-fade"), live, FADE);
-        let Some((tex, size)) = tex.filter(|_| alpha > 0.0) else { return };
+        let (tex, size) = tex.filter(|_| alpha > 0.0)?;
         let e = ctx.animate_bool_with_time(Id::unique(("blender-view-expand", key.as_str())), expanded && live, EXPAND);
 
         let (col, right, top) = crate::browser_view::preview_slot(ctx, &key, view);
@@ -185,6 +186,7 @@ impl App {
         if e > 0.0 {
             self.blender_lightbox(ctx, t, &key, &tex, size, rect, e);
         }
+        (shown > 0.0).then_some(rect)
     }
 
     /// The view expanded over the window (`e`: how far, from `from`).

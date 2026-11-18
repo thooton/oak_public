@@ -316,13 +316,7 @@ impl State {
             if s.mode.inline_tools() {
                 self.sys.push(SysMsg { tools: vec![t.clone()], ..msg });
             } else if !j.through {
-                let text = match crate::mcp::server_of_kit(&j.kit) {
-                    Some(server) => format!(
-                        "The {} tool isn't in your tool list here: {THROUGH_LOAD}, with name={server} and `input` {{\"tool\": \"{}\", \"arguments\": {{...}}}}. It is:\n{t}",
-                        j.tool, j.tool
-                    ),
-                    None => format!("The {} tool isn't in your tool list here: {THROUGH_LOAD}, with name={} and the tool's input in `input`. It is:\n{t}", j.tool, j.kit),
-                };
+                let text = format!("The {} tool isn't in your tool list here: {THROUGH_LOAD}, with name={} and the tool's input in `input`. It is:\n{t}", j.tool, j.kit);
                 self.sys.push(SysMsg { text, ..msg });
             }
         }

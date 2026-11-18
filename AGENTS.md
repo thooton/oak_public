@@ -23,8 +23,10 @@ The repository:
   part of one, takes its colors and sizes from that `Style` and says which in its doc comment
   and in docs/PLUGINS.md's table. `plugins/hello` and
   `plugins/hello-c`: example plugins in Rust and in C.
+- `protocols/`: Oak's own protocols (Browser, Window, Blender), compiled in (see Protocols).
 - `prompts/`: the system prompt, compiled in. `assets/`: fonts, logos and pictures (with the
-  scripts that make some of them). `linux/`: the self-contained Linux bundle. `scripts/`: checks.
+  scripts that make some of them), Blender's add-on (`blender/`) and the browser extension
+  (`brave-extension/`). `linux/`: the self-contained Linux bundle. `scripts/`: checks.
 
 This file is the description of how Oak behaves that QA checks the app against: keep it true
 with every change, and put here the decisions the code alone doesn't explain. How a part works
@@ -67,7 +69,10 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
 - Against the real services, signed in (a small cost): `live_rolling`, `live_images`,
   `live_agents`, `live_freebuff` (`OAK_TEST_PROMPT`, `OAK_TEST_FOLDER`) and `live_cloud_list`
   (read only), `live_rewrite`, `live_search` and `live_images_search` (`OAK_TEST_QUERY`). `live_hidden_desktop` (Windows, after `cargo build`)
-  opens Oak on a hidden desktop.
+  opens Oak on a hidden desktop. `closes_tk_apps_and_cmd_wrappers` (Windows, after `cargo build`,
+  Python with Tk required; `OAK_TEST_PYTHON` overrides its path) checks literal argument passing,
+  quoted `cmd.exe /c` assignments, normal close and the five-second forced-close fallback; set
+  `OAK_WINDOW_TEST_DIR` for its fixtures and logs.
 - Whole-app tests that open a window: `whole_app_close_with_a_task`, `whole_app_tab_shortcuts`,
   `whole_app_preview_expands_and_fades` (starts a real browser). `upgrade_real_conversations` loads a copy of real
   conversations (`OAK_UPGRADE_FROM`).
@@ -130,7 +135,7 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 
 `%APPDATA%\oak` on Windows, `~/.config/oak` (`$XDG_CONFIG_HOME/oak`) on Linux, or `OAK_DIR` (to try
 a build against a copy of your conversations). Each conversation is a file in `conversations/`
-named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `mcp/` (MCP servers' files), `mcp.json` (the MCP servers switched off), `mcp-cache.json` (what each MCP server offered at its last connection), `mcp-logs/` (each stdio server's stderr, its newest run), `models.json`, the
+named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
@@ -172,7 +177,7 @@ plugins draw on it (`Hooks::home_scene`), and in the bottom right corner the Set
 menu button. The menu is shut at start; the button, Alt+H on Home or a click on the Home tab opens
 it, and Esc, the button (an X then) or a click on the wallpaper shuts it. It is one box: its left
 side has the tabs Conversations and Cloud, then those plugins add, then
-MCP and Plugins (and at the row's right end the links plugins add), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F, which opens the menu too) narrows the list to
+Protocols and Plugins (and at the row's right end the links plugins add), its right side the providers' accounts, a usage preview and the version. The Conversations tab's search field (Ctrl+F, which opens the menu too) narrows the list to
 conversations whose title or folder has every word typed, in any case; Enter opens the first, Esc
 clears it, and the query isn't kept across restarts. The picker beside it sorts the list by the
 latest message or by scratchpad size, biggest first (each row then shows its size; kept in settings).
@@ -195,13 +200,17 @@ it under the buttons (`composer::links_room`) whenever a plugin registers the ho
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
-Home's MCP tab (`src/mcp_view.rs`) lists the MCP servers conversations can load (see MCP servers
-below): Oak's built-in Blender first, then those of the files in `mcp/`, each with a switch (a click
-on the row flips it; off ends its connection), its state (Connected, Starting, Failed), its tool count
-and a line under its name (its command or URL, why it can't be used, or its last error). Open folder
+Home's Protocols tab (`src/mcp_view.rs`) lists the protocols conversations can load (see Protocols
+below): Oak's own (Browser, Window, Blender) first, then those of the files in `protocols/`, each
+with its title, a switch (a click on the row flips it; off ends its connection, and switches Browser
+or Window out of LOAD), its state (Connected, Starting, Failed), its tool count and a line under its
+name (its command or URL, why it can't be used, or its last error). Open folder
 and Reload sit above the list; Reload reads the files again and ends the connections whose
-configuration changed. Blender's row says whether Blender is listening and, until the add-on is
-installed (or while the installed copy differs from Oak's), has Install add-on. The right-click menu
+configuration changed. Home > Protocols' Blender row
+says how many private agent Blenders are running, or whether the user's own is available for an
+explicit attachment, and, until the add-on is installed (or while the installed copy differs from
+Oak's), has Install add-on, needed only for attaching the user's own Blender (agents start their own
+otherwise). The right-click menu
 has Connect (start it now and list its tools again), Disconnect, Open file, Copy path, Open log and,
 for Blender, Install add-on again, Save add-on file (for Blender's Install from Disk), Open Blender,
 Copy Claude Code command and Copy Codex config (both run `oak --mcp blender`).
@@ -302,31 +311,74 @@ can't read.
 (`src/tools/defs.rs`): READ, WRITE, EDIT, EXECUTE, SEARCH, FETCH, SCREENSHOT, DISPLAY, ASK,
 REQUEST_ASK, ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
 `action` and show as tools of their own (`TASK action=wait` is TASK_WAIT). LOAD loads a kit (AGENT,
-BROWSER, WINDOW, or an MCP server by its name): a tool and its instructions, left out of the prompt
-until needed.
+BROWSER, WINDOW, or another protocol by its name): a tool and its instructions, left out of the
+prompt until needed.
 
-**MCP servers** (`src/mcp.rs`). Oak is an MCP client, as Claude Code and Codex are. Each server
-switched on is a kit offered by LOAD (not in chats or to a local model), described by its file's
-`description` or its instructions' first sentence. Loading one starts it (or reconnects), lists its
-tools and returns them with its instructions; its tools then join the conversation's tools as
-`mcp__<server>__<tool>` (Claude Code's names, at most 64 characters) right after that LOAD, as any
-kit's do (`src/prefix.rs`), and once a summary covers the LOAD its instructions join the system
-prompt, under "# MCP Server Instructions". Where the model can't take new tools mid-conversation
-(`prefix::Mode::Generic`), LOAD's text lists them and they are called through LOAD with `input`
-`{"tool", "arguments"}`. A call returns the server's text and pictures (audio and binary resources are
-named, not passed on); long text goes to the scratchpad as EXECUTE's does, the user's message
-interrupts it, and a server that exited is started again once. Servers come from Oak (built in) and
-from `mcp/` in Oak's folder: a JSON file per server named after it (`{"command", "args", "env",
-"cwd"}` for a program on stdio, `{"type": "http", "url", "headers"}` for streamable HTTP, `${VAR}` in
-headers from the environment), or a file with `mcpServers` as Claude Desktop's and `.mcp.json` are;
-optional `description` and `timeout` (seconds per call, default 600). Names of Oak's kits and a name
-used twice are refused (the row says why). The old HTTP+SSE transport and OAuth sign-in aren't
+**WINDOW** (Windows; `src/window_tool.rs`, a family as BROWSER is: `WINDOW action=click` is
+WINDOW_CLICK). GUI apps on the hidden desktop `oak-apps` (`src/winctl.rs`), driven without touching
+the user's screen, mouse, keyboard or focus: `launch` (through `oak --window launch`, a child of
+Oak's in a job object, so the app ends with Oak, `close`, or the conversation's deletion; its output
+goes to a log in the scratchpad; only a window of the app's own process tree counts, so an app that
+hands off to one already running, as Windows 11's Store Notepad does, fails rather than taking the
+user's window), `list`, `shot`, `click`, `move`, `drag`, `scroll`, `type`, `key`, `resize`, `close`.
+Input actions take `shot` (a screenshot after it) and `wait`. Ids read `hidden:0x…`; the window a
+conversation last launched or acted on is its current one, the default for `window`. Everything runs
+on one thread attached to the hidden desktop (`winctl::on_desktop`). Mouse messages go to the
+deepest child control under the point (and to the pressed one until release), keys to the app's
+focused control; a control gets typed text as WM_CHAR alone, since its message loop translates a
+posted key-down into a second character. `attach` (with `why`, and `title` to pick one first) asks
+the user for one of their own windows (visible, titled, unowned, not tool or cloaked windows, not
+Oak's); the one allowed is `user:0x…` and the current window until `detach` or the conversation's
+deletion. It gets the same posted input from the calling thread (`winctl::input_gently`) except that
+it is never moved (hidden windows are moved under the hidden desktop's cursor for apps that read it),
+and it can't be closed. Other `user:` ids, and ids of windows on neither, are refused. Ordinary
+launch arguments use Windows C-runtime quoting (spaces, quotes and trailing backslashes preserved).
+For `cmd.exe /c` or `/k`, give the whole command as one string after the switch, with cmd's own
+quotes: Oak preserves it verbatim and adds `/s` and the outer quote pair cmd strips, rather than
+backslash-escaping its quotes as ordinary executable arguments. Closing a launched window also
+recognizes a first window created by a child of the launcher (for example Python started by cmd).
+The close result clears its current-window state before formatting the window id, which reads that
+state too: holding the mutex across both deadlocked Oak. A bounded subprocess regression test guards
+that path. Launched console programs use `CREATE_NO_WINDOW` (their GUI windows still use the hidden
+desktop, and their output still goes to the log): without it, Windows Terminal could open a console
+on the user's real desktop despite `lpDesktop`. The Tk regression also checks that no console is
+attached. Elsewhere WINDOW stays instructions (Xvfb, xdotool).
+
+**Protocols** (`src/mcp.rs`; MCP servers, as models know them, and Oak's own kits). The user sees
+"Protocols"; the model's prompts say MCP. Oak's own are this repository's `protocols/` files (built
+into Oak): `browser.json` and `window.json` are Oak's BROWSER and WINDOW kits (`"builtin"`, run by
+`src/tools.rs` as before, listed and switched like any protocol; their `description` is LOAD's), and
+`blender.json` the Blender server in Oak's process. Each protocol switched on is a kit offered by
+LOAD (not in chats or to a local model), named after it in upper case (`BLENDER`; `-` as `_`),
+described by its file's `description` or its instructions' first sentence. Loading an MCP server
+starts it (or reconnects), lists its tools and returns them with its instructions; it then joins the
+conversation's tools as one tool named after the kit, as Oak's families are: its `action` picks the
+server's tool, named in lower case without the server's name or a leading `get_` (`BLENDER
+action=scene_info` calls `get_scene_info`, `execute_code` `execute_blender_code`; a name that would
+collide keeps the tool's own), every action's fields side by side (one two actions describe
+differently becomes untyped) and listed per action in its description; a call passes on only its
+action's fields. Calls run and show as Oak's families' do (`BLENDER_SCENE_INFO`, shown "BLENDER
+scene_info"); conversations from before keep working (`mcp:blender` kits, `mcp__blender__…` calls).
+It joins right after that LOAD, as any kit's do (`src/prefix.rs`), and once a summary covers the
+LOAD its instructions (tool names rewritten as `BLENDER action=…`) join the system prompt, under "#
+MCP Server Instructions". Where the model can't take new tools mid-conversation
+(`prefix::Mode::Generic`), LOAD's text describes it and it is called through LOAD with the tool's
+input in `input` (an older `{"tool", "arguments"}` still works). A call returns the server's text and
+pictures (audio and binary resources are named, not passed on); long text goes to the scratchpad as
+EXECUTE's does, the user's message interrupts it, and a server that exited is started again once. The
+user's protocols come from `protocols/` in Oak's folder: a JSON file per server named after it
+(`{"command", "args", "env", "cwd"}` for a program on stdio, `{"type": "http", "url", "headers"}`
+for streamable HTTP, `${VAR}` in headers from the environment), or a file with `mcpServers` as
+Claude Desktop's and `.mcp.json` are; optional `title`, `description`, `timeout` (seconds per call,
+default 600) and `window` (it shows a program's window). A name that would name its tool as one of
+Oak's, one of Oak's own protocols' names and a name used twice are refused (the row says why), as is
+`builtin` outside Oak's own files. The old HTTP+SSE transport and OAuth sign-in aren't
 supported. One connection per server serves every conversation, made on first use; stdio servers end
-with Oak. What a server offered is cached in `mcp-cache.json`, so a conversation's next request lists
+with Oak. What a server offered is cached in `protocol-cache.json`, so a conversation's next request lists
 the tools without starting it; a server saying its tools changed is listed again before its next call.
 Oak answers a server's ping and roots (none) and declines sampling and elicitation.
 
-**Blender** (`src/mcp/blender.rs`, `assets/blender/oak_mcp.py`). The built-in server `blender`
+**Blender** (`src/mcp/blender.rs`, `assets/blender/oak_mcp.py`). The built-in protocol `blender` (the BLENDER kit)
 offers the community Blender MCP server's tools (github.com/ahujasid/mcp-for-blender, as Claude Code
 and Codex users run it): get_scene_info, get_object_info (with its world bounding box),
 get_viewport_screenshot, execute_blender_code (what the code prints; a traceback on error) and the Poly
@@ -341,6 +393,49 @@ usual install folders and Steam) and runs it twice in the background, to copy th
 user add-ons and then switch it on and save its preferences; with no Blender program found it copies
 the file into each of Blender's settings folders (`BLENDER_USER_RESOURCES` overrides where those are).
 `oak --mcp blender` serves the same tools over stdio to other MCP clients.
+
+**Which Blender** (`src/mcp/blender_run.rs`). Loading BLENDER starts one private hidden Blender per
+agent/conversation (including subagents). No shared instance exists and no first-call autodetection
+or fallback selects the user's Blender. `with_caller` scopes the conversation, folder, scratchpad
+and cancellation flag with an unwind-safe guard around LOAD and calls. The instance has its own
+loopback port, `blender-user` settings, `blender-runtime` add-on/bootstrap files, and log in that
+agent's scratchpad. `BLENDER_HOST`/`BLENDER_PORT` apply only to standalone `oak --mcp blender`, not
+agent calls. Older persisted kits start their private instance on first use. A failed LOAD keeps the
+kit available, so an agent can download a portable Blender and call `use_own(program=...)`.
+
+`use_own` accepts an optional `program` (absolute or relative to the conversation folder) and `.blend`
+`file`; a missing executable fails without fallback or destroying a running scene. An existing
+instance is reused, or replaced for a different executable/file only if its scene is saved.
+`restart` and `close` refuse unsaved changes unless `discard=true`. Closed instances stay closed
+until `use_own`/`restart` (or LOAD) reopens; a dead/busy instance fails without redirecting.
+`use_users` is an explicit exclusive attachment to the user's add-on on 9876, never a default: it
+keeps the agent's private scene intact, `use_own` returns to that scene, and a second agent cannot
+attach concurrently. The user's process is never closed by Oak's lifecycle actions. Interactive
+Blender must never be launched directly through TASK/EXECUTE or bound to 9876 (the Minecraft session
+bypassed the hidden launcher that way); background `-b` renders are fine.
+
+Per-agent startup gates prevent duplicate launches without serializing unrelated agents. Ports are
+reserved across startup; retired ports are not reused during Oak's lifetime so stale input cannot
+reach another instance. Cancellation/deletion checks prevent a pending launch from resurrecting a
+deleted agent. Checked RAII kill-on-close jobs own each launcher and its process tree; a pipe
+handshake prevents descendants escaping before job assignment. Cleanup closes the job, frame/input
+state expires, and conversation deletion (the GUI's or AGENT_DELETE's) or Oak shutdown ends all
+private instances. The window a conversation last launched, attached or acted on is its current one:
+actions without `window` go to it, and with none they fail instead of picking some other hidden
+window. A Blender another agent runs is left out of WINDOW's `list` and refused by id, including its
+other windows (`blender_run::can_use`), and so is any app another conversation launched
+(`others_app`, by window or process); closing your own Blender through WINDOW goes through
+`close_blender`'s unsaved-work check. Unsaved work counts Blender's own dirty flag and any agent
+Python (`execute_blender_code`, texture and Poly Haven imports) since the last save or load, tracked
+by the add-on (1.2.0, `session_state`); read-only scene info and screenshots don't count. `restart`
+opens `file` or an empty scene.
+
+The bootstrap calls `start_on(port)`, closes the splash, suppresses old installed copies' auto-start
+on 9876, and enables event simulation (`--enable-event-simulate`). Blender's OpenGL cannot be captured
+through PrintWindow: the add-on's `window_frame` saves `bpy.ops.screen.screenshot` pictures and
+`simulate` feeds `event_simulate` input (y flipped; keys use the last pointer location). WINDOW's
+input/shot and the dedicated interactive Blender preview use these. The preview selects only the
+shown agent's Blender, independently of WINDOW's current app; subagent views work too.
 
 - The system prompt is `prompts/<role>.md` (who the model is; every file but `tools.md` and
   `chat.md` is a role offered on the New screen, `super.md` only as its Super agent; plugins can add roles) with `prompts/tools.md` in place of `{{tools}}`. `{{folder}}`,
@@ -514,13 +609,22 @@ see-through preview sits beside the transcript, between the column and the minim
 transcript's corner when there is no room). A click on it, or Ctrl+Shift+B, expands it over the
 window as an image opens, where the user uses the page; the X, a click beside it, Ctrl+Shift+B or
 Esc go back. Its viewport is its own (1920x1080 CSS pixels until the model resizes it), scaled to
-fit either way, and the model's pointer shows on it as Oak's green cursor. While the conversation
-shown has the blender kit loaded and Blender answers on its add-on's port, Blender's live view
-(`src/blender_view.rs`) sits in the same place (under the browser's preview when both are shown):
-the 3D viewport as Blender draws it, see-through until the pointer is on it, taken about once a
-second (720 pixels on its longer side; 1600 while expanded) by one background thread only while
-something is shown. A click expands it over the window (Esc, the X or a click beside it go back);
-it is a view only, the work is done in Blender's window. It runs on the
+fit either way, and the model's pointer shows on it as Oak's green cursor. While the shown agent has
+BLENDER loaded, its dedicated preview (`src/blender_view.rs`, using the interactive renderer in
+`src/window_view.rs`) shows that agent's whole private Blender window under the browser preview.
+Subagent conversations use the actual shown agent, not their parent. The preview stays with Blender
+when WINDOW selects another app. A click expands it interactively; mouse, wheel and keys go through
+Blender's simulated events, about nine frames a second. Only an explicit user Blender attachment
+uses the viewport-only read-only renderer on 9876. A current non-Blender WINDOW app has its own
+preview under those: each window has its own worker, frame cache and texture id, so a busy agent
+cannot overwrite or stall another's image. Ordinary apps run about fifteen frames a second while
+expanded. Real mouse and focus are untouched. Esc goes to the app unless the pointer is off the
+picture; off-picture Esc, the X or a click beside it returns. When the
+model asks for something of the user's (WINDOW or BROWSER action=attach), a Permission card at the
+transcript's end (`src/approval.rs`) gives the model's reason and the user's windows or tabs, its
+suggestion picked: Allow gives it the one picked, Decline refuses; every request is asked anew, the
+status line says "Waiting for your permission", and a message from the user withdraws it. The
+browser runs on the
 conversation's own profile unless the model opens it on a named one (`open` with `profile`;
 `browser-profiles/<name>`, names in lower case), which every conversation can open, one browser at
 a time: a login made once serves them all, and another conversation's open on it is refused. Opening
@@ -532,7 +636,20 @@ deleted), site data per origin, and overrides with `emulate` (user agent, locale
 color scheme, offline, extra headers, permissions), which a restart applies again. It reads the
 network log, recorded from open (the newest 500 requests, with headers, posted data and bodies), and
 the console, recorded only from its first `console` call because turning on DevTools' Runtime domain
-is something anti-bot scripts detect. The Usage page
+is something anti-bot scripts detect. `attach` (with `why`, and `title` to pick one first) asks the
+user for one of their own browser's tabs instead (Brave, Chrome or Edge with Oak's extension,
+`assets/brave-extension`, loaded unpacked; its id is fixed by the manifest's `key`): Oak lists them
+from the extension and, once one is allowed, works in it as in its own browser (which closes) until
+`close`, which only lets go. The extension connects to `src/browser/bridge.rs` (a WebSocket server
+on 127.0.0.1:47615 started with Oak, accepting only the extension's origin, its handshake's SHA-1
+its own) and passes DevTools commands and events through `chrome.debugger`, so the browser shows
+its debugging bar while Oak has the tab; each tab is a `Cdp` session over that link (`Cdp::over`,
+`deliver`). Nothing of the user's is overridden: no launch, viewport (the tab's size is read before
+each call), user agent, one-page script, downloads, file choosers or closing of other tabs, and
+resize, emulate, the cookie actions and clear_data are refused. A tab closed, its debugging canceled
+or the extension gone ends it, and the view offers to attach to the tab again. Home > Protocols'
+Browser row says whether the extension is connected; its menu's Set up browser extension writes it
+to Oak's folder (`browser-extension/`), opens that and copies its path for Load unpacked. The Usage page
 (`src/usage_view.rs`) charts API-priced cost per 1% of the plan limits, from this machine's usage log
 (`usage.jsonl`; a plugin can add the records other machines made, `oak_sdk::Host::usage_set_shared`). Every text field has a right-click menu (Cut,
 Copy, Paste, Select all; `src/text_menu.rs`) that keeps the selection and the field's focus; a
@@ -544,7 +661,7 @@ in the box Up only moves the cursor.
 **Testing GUI apps off-screen.** `oak --window` (Windows, `src/winctl.rs`) runs a program on a
 hidden desktop and drives it without touching your screen: `"$OAK" --window launch -- app.exe`,
 then `shot`, `record` (frames for a video), `click`, `type`, `key`, `close` (`"$OAK" --window help`
-lists them). The window there is never under the real cursor, so Windows tells the app the pointer
+lists them); the WINDOW tool does the same inside Oak. The window there is never under the real cursor, so Windows tells the app the pointer
 left after every move: `launch` sets `OAK_HIDDEN_DESKTOP` for the app, and Oak then ignores
 egui's `PointerGone` (`raw_input_hook` in `src/lib.rs`) so hover and drags work; and every press,
 release and wheel message follows a fresh move (`point_at`), as winit forgets the position at

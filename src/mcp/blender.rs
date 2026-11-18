@@ -6,10 +6,12 @@
 //! conversations (`mcp::Builtin`), and `oak --mcp blender` serves it over
 //! stdio to any MCP client (`serve_stdio`).
 //!
-//! It reaches Blender through an add-on's socket on localhost:9876
-//! (`BLENDER_HOST`, `BLENDER_PORT`): Oak's (`assets/blender/oak_mcp.py`,
-//! installed by `install_addon`) or the community one, which speak the same
-//! protocol, one JSON command and its JSON answer per connection. Every
+//! Agent calls use their private hidden instance's loopback socket and
+//! isolated settings (`blender_run.rs`). Loading starts one per agent, never
+//! shared and never selected from global BLENDER_HOST/BLENDER_PORT. Those
+//! environment overrides belong only to standalone stdio clients (default
+//! localhost:9876 with Oak's or the community add-on). One JSON command and
+//! answer per connection. Every
 //! tool is Python sent as `execute_code` (scripts below print their answer
 //! as JSON after `MARK`), so both add-ons serve all of them. Poly Haven's
 //! files are downloaded here, then imported by a script, so Blender itself
@@ -39,7 +41,8 @@ const POLYHAVEN: &str = "https://api.polyhaven.com";
 const USER_AGENT: &str = concat!("oak-blender-mcp/", env!("CARGO_PKG_VERSION"));
 
 /// What the model is told with the kit (MCP's `instructions`).
-pub const INSTRUCTIONS: &str = "Works in the user's running Blender, live: changes show in their window at once and stay in the open file until they save it (save only when asked). \
+pub const INSTRUCTIONS: &str = "Loading BLENDER on Windows starts your own private hidden Blender process with isolated scratchpad settings and port. Every agent, including subagents, has an independent instance and dedicated interactive live view. No shared Blender or automatic connection to the user's Blender exists. Calls never fall back to another instance. Save work that should last with bpy.ops.wm.save_as_mainfile: your process ends on close, conversation deletion or Oak exit. \
+use_own returns to your private scene; for a scratchpad/portable installation, give use_own its blender.exe path in program. restart replaces your instance and close ends it: both refuse to discard unsaved work unless explicitly given discard=true. use_users explicitly attaches to the user's Blender (exclusively, never shared between agents), preserving your private scene; use_own returns to it. Save in the user's scene only when asked. Never launch an interactive Blender directly with TASK/EXECUTE or bind it to the user's port 9876. Background renders with -b are fine. get_blender_window_screenshot shows the whole window; the dedicated preview is independent of WINDOW's selected app. \
 Before changing anything, look at the scene with get_scene_info, and take get_viewport_screenshot before and after changes to check the result visually. \
 Do the work with execute_blender_code (bpy, bmesh, mathutils) in small steps, printing what you need to know; a failing script returns its traceback. \
 For assets, Poly Haven (free, CC0) has HDRIs for environment lighting, textures for materials (download_polyhaven_asset, then set_texture) and generic models; prefer them to modelling everything from primitives, unless a primitive is asked for or nothing suitable exists. \
@@ -59,6 +62,13 @@ pub fn tools() -> Value {
             json!({"max_size": {"type": "integer", "description": "Maximum size in pixels for the largest dimension (default: 800)"}}), &[]),
         tool("execute_blender_code", "Execute arbitrary Python code in Blender. Make sure to do it step-by-step by breaking it into smaller chunks. Whatever the code prints is returned; an error returns its traceback.",
             json!({"code": {"type": "string", "description": "The Python code to execute"}}), &["code"]),
+        tool("get_blender_window_screenshot", "Capture Blender's whole window (menus, editors, panels) as the user sees it, in a Blender Oak runs.",
+            json!({"max_size": {"type": "integer", "description": "Maximum size in pixels for the largest dimension (default: 1280)"}}), &[]),
+        tool("use_own_blender", "Start a Blender of your own on Oak's hidden desktop (its own port and scratchpad settings; the user sees it beside the transcript) and send your calls to it from now on. For an installation downloaded to your scratchpad, give its executable path in program: it stays hidden too. Do not launch an interactive copy directly with TASK/EXECUTE or connect it with use_users. Optionally open a .blend file.",
+            json!({"file": {"type": "string", "description": "A .blend file to open (relative to the working folder)"}, "program": {"type": "string", "description": "Path to the Blender executable, e.g. .oak/tmp/tempN/blender/blender.exe (relative to the working folder); omit for the installed Blender. A bad path fails rather than using a different installation."}}), &[]),
+        tool("restart_blender", "Restart only your private hidden Blender. Save first; unsaved work is preserved by refusing unless discard=true. Optionally choose a portable executable or a .blend file.", json!({"program": {"type": "string"}, "file": {"type": "string"}, "discard": {"type": "boolean"}}), &[]),
+        tool("close_blender", "Close your private Blender and detach any user Blender without closing the user's process. Refuses unsaved private work unless discard=true.", json!({"discard": {"type": "boolean"}}), &[]),
+        tool("use_users_blender", "Explicitly attach to the user's Blender on port 9876. Never the default; refused while another agent is attached. Your private scene stays intact; use_own returns to it. Only for work that needs their existing scene.", json!({}), &[]),
         tool("get_polyhaven_status", "Check if PolyHaven integration is enabled in Blender. Returns a message indicating whether PolyHaven features are available.", json!({}), &[]),
         tool("get_polyhaven_categories", "Get a list of categories for a specific asset type on Polyhaven.",
             json!({"asset_type": {"type": "string", "enum": ["hdris", "textures", "models", "all"], "description": "The type of asset to get categories for (hdris, textures, models, all)"}}), &[]),
@@ -128,10 +138,52 @@ pub fn serve_stdio() -> i32 {
 fn call(name: &str, args: &Value) -> Value {
     let text = |s: String, error: bool| json!({"content": [{"type": "text", "text": s}], "isError": error});
     let s = |k: &str| args[k].as_str().map(str::trim).filter(|v| !v.is_empty());
+    match name {
+        "use_own_blender" => return result(super::blender_run::use_own(s("file"), s("program")), None),
+        "restart_blender" => return result(super::blender_run::restart(s("file"), s("program"), args["discard"].as_bool().unwrap_or(false)), None),
+        "close_blender" => return result(super::blender_run::close(args["discard"].as_bool().unwrap_or(false)), None),
+        "use_users_blender" => return result(super::blender_run::use_users(), None),
+        _ => {}
+    }
+    // Those that work in Blender: start it first if nothing answers.
+    let note = if matches!(name, "get_polyhaven_status" | "get_polyhaven_categories" | "search_polyhaven_assets") {
+        None
+    } else {
+        match super::blender_run::ensure() {
+            Ok(n) => n,
+            Err(e) => return text(e, true),
+        }
+    };
+    let mut r = call_in_blender(name, args);
+    if let Some(n) = note
+        && let Some(c) = r["content"].as_array_mut()
+    {
+        c.insert(0, json!({"type": "text", "text": n}));
+    }
+    r
+}
+
+/// A tool's result from Ok(text) or Err(text), after `note`.
+fn result(r: Result<String, String>, note: Option<String>) -> Value {
+    let (s, error) = match r {
+        Ok(s) => (s, false),
+        Err(e) => (e, true),
+    };
+    let s = match note {
+        Some(n) => format!("{n}\n{s}"),
+        None => s,
+    };
+    json!({"content": [{"type": "text", "text": s}], "isError": error})
+}
+
+fn call_in_blender(name: &str, args: &Value) -> Value {
+    let text = |s: String, error: bool| json!({"content": [{"type": "text", "text": s}], "isError": error});
+    let s = |k: &str| args[k].as_str().map(str::trim).filter(|v| !v.is_empty());
     let r = match name {
-        "get_scene_info" => script(&with_params(SCENE_INFO, &json!({"limit": args["limit"].as_u64().unwrap_or(100)}))).map(|v| pretty(&v)),
+        "get_blender_window_screenshot" => return window_screenshot(args["max_size"].as_u64().unwrap_or(1280).clamp(64, 2560) as u32),
+        "get_scene_info" => script_read(&with_params(SCENE_INFO, &json!({"limit": args["limit"].as_u64().unwrap_or(100)}))).map(|v| pretty(&v)),
         "get_object_info" => match s("object_name") {
-            Some(n) => script(&with_params(OBJECT_INFO, &json!({"name": n}))).map(|v| pretty(&v)),
+            Some(n) => script_read(&with_params(OBJECT_INFO, &json!({"name": n}))).map(|v| pretty(&v)),
             None => Err("Give `object_name`.".into()),
         },
         "get_viewport_screenshot" => return screenshot(args["max_size"].as_u64().unwrap_or(800).clamp(64, 1568) as u32),
@@ -193,12 +245,44 @@ fn pretty(v: &Value) -> String {
     out
 }
 
-/// Where the add-on listens.
+/// Where the add-on listens: `BLENDER_PORT`, else this call's Blender's
+/// port (`blender_run::port`).
 fn address() -> (String, u16) {
+    if super::blender_run::has_caller() {
+        return ("127.0.0.1".into(), super::blender_run::port());
+    }
+    let port = std::env::var("BLENDER_PORT").ok().and_then(|p| p.trim().parse().ok()).unwrap_or(super::blender_run::USER_PORT);
+    (host(), port)
+}
+
+fn host() -> String {
     let host = std::env::var("BLENDER_HOST").ok().filter(|h| !h.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into());
-    let host = if host == "localhost" { "127.0.0.1".to_string() } else { host };
-    let port = std::env::var("BLENDER_PORT").ok().and_then(|p| p.trim().parse().ok()).unwrap_or(9876);
-    (host, port)
+    if host == "localhost" { "127.0.0.1".to_string() } else { host }
+}
+
+/// Whether something listens on `port`.
+pub fn reachable_on(port: u16) -> bool {
+    reachable_at("127.0.0.1", port)
+}
+
+fn reachable_at(host: &str, port: u16) -> bool {
+    (host, port).to_socket_addrs().ok().and_then(|mut a| a.next()).is_some_and(|a| TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok())
+}
+
+/// One command to the add-on on `port` (Oak's own Blenders).
+pub fn send_to(port: u16, kind: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+    exchange("127.0.0.1", port, kind, params, timeout)
+}
+
+/// What the model is told when Blender doesn't answer.
+pub fn unreachable_text(port: u16, e: &str) -> String {
+    if super::blender_run::has_caller() {
+        return format!("Your Blender on 127.0.0.1:{port} didn't answer ({e}). It may be busy. Calls were not redirected to another instance; use restart only when needed (save first).");
+    }
+    let host = host();
+    format!(
+        "Couldn't reach Blender on {host}:{port} ({e}). Blender has to be open with the Oak MCP add-on running: Oak installs it from Home > Protocols (the Blender row's Install add-on), and Blender's 3D viewport sidebar (N) has an Oak tab that shows it listening. The community Blender MCP add-on works too, once its server is started. Ask the user to open Blender if it isn't."
+    )
 }
 
 /// Sends one command to the add-on and returns its `result`.
@@ -210,14 +294,14 @@ pub fn send(kind: &str, params: Value) -> Result<Value, String> {
 /// MCP tab and the live view).
 pub fn reachable() -> bool {
     let (host, port) = address();
-    (host.as_str(), port).to_socket_addrs().ok().and_then(|mut a| a.next()).is_some_and(|a| TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok())
+    reachable_at(&host, port)
 }
 
 /// The 3D viewport now, at most `max` pixels on its longer side, for the
 /// live view beside a conversation: None when Blender doesn't answer within
 /// a few seconds (busy with the model's script) or has no viewport.
-pub fn frame(max: u32) -> Option<image::RgbaImage> {
-    let r = send_within("execute_code", json!({"code": with_params(SCREENSHOT, &json!({}))}), Duration::from_secs(5)).ok()?;
+pub fn frame_on(port: u16, max: u32) -> Option<image::RgbaImage> {
+    let r = send_to(port, "execute_code", json!({"code": with_params(SCREENSHOT, &json!({})), "track_changes": false}), Duration::from_secs(5)).ok()?;
     let out = r["result"].as_str()?;
     let (_, j) = out.rsplit_once(MARK)?;
     let v: Value = serde_json::from_str(j.trim()).ok()?;
@@ -230,12 +314,12 @@ pub fn frame(max: u32) -> Option<image::RgbaImage> {
 
 fn send_within(kind: &str, params: Value, timeout: Duration) -> Result<Value, String> {
     let (host, port) = address();
-    let unreachable = |e: String| {
-        format!(
-            "Couldn't reach Blender on {host}:{port} ({e}). Blender has to be open with the Oak MCP add-on running: Oak installs it from Home > MCP (the Blender row's Install add-on), and Blender's 3D viewport sidebar (N) has an Oak tab that shows it listening. The community Blender MCP add-on works too, once its server is started. Ask the user to open Blender if it isn't."
-        )
-    };
-    let addr = (host.as_str(), port).to_socket_addrs().map_err(|e| unreachable(e.to_string()))?.next().ok_or_else(|| unreachable("no address".into()))?;
+    exchange(&host, port, kind, params, timeout)
+}
+
+fn exchange(host: &str, port: u16, kind: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+    let unreachable = |e: String| unreachable_text(port, &e);
+    let addr = (host, port).to_socket_addrs().map_err(|e| unreachable(e.to_string()))?.next().ok_or_else(|| unreachable("no address".into()))?;
     let mut sock = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).map_err(|e| unreachable(e.to_string()))?;
     sock.set_read_timeout(Some(timeout)).ok();
     sock.write_all(json!({"type": kind, "params": params}).to_string().as_bytes()).map_err(|e| format!("Couldn't send to Blender: {e}"))?;
@@ -271,9 +355,16 @@ fn send_within(kind: &str, params: Value, timeout: Duration) -> Result<Value, St
     Ok(reply.get("result").cloned().unwrap_or(Value::Null))
 }
 
-/// Runs Python in Blender; what it printed.
+/// Runs Python in Blender; what it printed. Counts as an unsaved change
+/// (the add-on tracks it until a real save or load): restart and close
+/// then refuse to discard it without discard=true.
 pub fn execute(code: &str) -> Result<String, String> {
-    let r = send("execute_code", json!({"code": code}))?;
+    execute_with(code, true)
+}
+
+/// Read-only helper scripts (scene info, screenshots) don't mark the scene.
+fn execute_with(code: &str, track_changes: bool) -> Result<String, String> {
+    let r = send("execute_code", json!({"code": code, "track_changes": track_changes}))?;
     Ok(match &r["result"] {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -283,7 +374,16 @@ pub fn execute(code: &str) -> Result<String, String> {
 
 /// Runs one of the scripts below and reads the JSON it printed after MARK.
 fn script(code: &str) -> Result<Value, String> {
-    let out = execute(code)?;
+    script_with(code, true)
+}
+
+/// `script` for read-only scripts, which leave the unsaved state as it is.
+fn script_read(code: &str) -> Result<Value, String> {
+    script_with(code, false)
+}
+
+fn script_with(code: &str, track_changes: bool) -> Result<Value, String> {
+    let out = execute_with(code, track_changes)?;
     let Some((_, json)) = out.rsplit_once(MARK) else { return Err(format!("The script gave no answer. It printed:\n{out}")) };
     let v: Value = serde_json::from_str(json.trim()).map_err(|e| format!("The script's answer isn't JSON ({e})"))?;
     match v["error"].as_str() {
@@ -301,7 +401,7 @@ fn with_params(code: &str, params: &Value) -> String {
 
 fn screenshot(max_size: u32) -> Value {
     let shot = || -> Result<Value, String> {
-        let v = script(&with_params(SCREENSHOT, &json!({})))?;
+        let v = script_read(&with_params(SCREENSHOT, &json!({})))?;
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD.decode(v["png"].as_str().unwrap_or("")).map_err(|e| format!("The screenshot didn't come through: {e}"))?;
         let img = image::load_from_memory(&bytes).map_err(|e| format!("The screenshot didn't come through: {e}"))?;
@@ -312,6 +412,29 @@ fn screenshot(max_size: u32) -> Value {
         Ok(json!({"content": [{"type": "image", "data": data, "mimeType": "image/png"}], "isError": false}))
     };
     shot().unwrap_or_else(|e| json!({"content": [{"type": "text", "text": format!("Screenshot failed: {e}")}], "isError": true}))
+}
+
+/// Blender's whole window, from the Blender Oak runs for this call.
+fn window_screenshot(max_size: u32) -> Value {
+    let port = address().1;
+    if super::blender_run::window_of(port).is_none() {
+        return json!({"content": [{"type": "text", "text": "This is the user's own Blender, not one Oak runs: only its 3D viewport can be captured (get_viewport_screenshot)."}], "isError": true});
+    }
+    let Some(img) = super::blender_run::window_frame(port) else {
+        return json!({"content": [{"type": "text", "text": "Blender didn't answer within 5 seconds (busy?)."}], "isError": true});
+    };
+    let (w, h) = (img.width(), img.height());
+    let img = image::DynamicImage::ImageRgba8(img);
+    let img = if w.max(h) > max_size { img.resize(max_size, max_size, image::imageops::FilterType::Triangle) } else { img };
+    let mut png = std::io::Cursor::new(vec![]);
+    if let Err(e) = img.write_to(&mut png, image::ImageFormat::Png) {
+        return json!({"content": [{"type": "text", "text": e.to_string()}], "isError": true});
+    }
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+    let scaled = if img.width() != w { format!(" (shown at {}x{})", img.width(), img.height()) } else { String::new() };
+    let note = format!("Blender's window, {w}x{h}{scaled}:");
+    json!({"content": [{"type": "text", "text": note}, {"type": "image", "data": data, "mimeType": "image/png"}], "isError": false})
 }
 
 // ------------------------------------------------------------ Poly Haven
@@ -853,6 +976,32 @@ mod tests {
     }
 
     #[test]
+    fn portable_blender_is_offered_as_a_hidden_own_instance() {
+        let tools = tools();
+        let own = tools.as_array().unwrap().iter().find(|t| t["name"] == "use_own_blender").unwrap();
+        assert_eq!(own["inputSchema"]["properties"]["program"]["type"], "string");
+        assert!(own["description"].as_str().unwrap().contains("hidden desktop"));
+        assert!(INSTRUCTIONS.contains("give use_own its blender.exe path in program"));
+        assert!(INSTRUCTIONS.contains("Never launch an interactive Blender directly"));
+    }
+
+    #[test]
+    fn offers_private_lifecycle_not_shared_actions() {
+        let ts = tools();
+        let names: Vec<&str> = ts.as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(!names.contains(&"use_shared_blender"));
+        for name in ["use_own_blender", "restart_blender", "close_blender"] { assert!(names.contains(&name)); }
+        assert!(INSTRUCTIONS.contains("Every agent, including subagents"));
+        assert!(INSTRUCTIONS.contains("Calls never fall back"));
+    }
+
+    #[test]
+    fn agent_address_never_inherits_global_defaults() {
+        let c = super::super::blender_run::Caller { conv: "address-isolation-test".into(), ..Default::default() };
+        super::super::blender_run::with_caller(c, || assert_eq!(address(), ("127.0.0.1".into(), 0)));
+    }
+
+    #[test]
     fn params_reach_python_as_a_dict() {
         let code = with_params("print(P)", &json!({"name": "Cube \"x\"\n\\path", "n": 3}));
         assert!(code.contains("P = _json.loads(\""), "{code}");
@@ -890,7 +1039,7 @@ mod tests {
         assert_eq!(shot["isError"], false, "{shot}");
         assert_eq!(shot["content"][0]["type"], "image");
         let t = std::time::Instant::now();
-        let f = frame(720).expect("a frame");
+        let f = frame_on(address().1, 720).expect("a frame");
         println!("frame {}x{} in {:?}", f.width(), f.height(), t.elapsed());
         f.save(std::env::temp_dir().join("oak_blender_frame.png")).unwrap();
         let none = call("get_object_info", &json!({"object_name": "suz"}));
@@ -924,7 +1073,7 @@ mod tests {
         println!("{}", text(&r));
         let r = call("execute_blender_code", &json!({"code": "import bpy\nfor a in bpy.context.screen.areas:\n    if a.type == 'VIEW_3D': a.spaces[0].shading.type = 'MATERIAL'\nbpy.ops.object.select_all(action='DESELECT')"}));
         assert_eq!(r["isError"], false, "{r}");
-        frame(1200).unwrap().save(std::env::temp_dir().join("oak_blender_frame2.png")).unwrap();
+        frame_on(address().1, 1200).unwrap().save(std::env::temp_dir().join("oak_blender_frame2.png")).unwrap();
     }
 
     #[test]

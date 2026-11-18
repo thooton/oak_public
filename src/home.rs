@@ -1151,13 +1151,13 @@ struct HomeTabLook {
 }
 
 /// The left cell's tabs, in order: Conversations, Cloud, the plugins', then
-/// MCP (`mcp_view`) and Plugins (the manager, `plugins_view`) last.
+/// Protocols (`mcp_view`) and Plugins (the manager, `plugins_view`) last.
 fn home_tab_looks() -> Vec<HomeTabLook> {
     let own = |id: &str, icon: &str, label: &str, tip: &str, order| HomeTabLook { id: id.into(), icon: icon.into(), icon_is_text: false, label: label.into(), tip: tip.into(), order };
     let mut tabs = vec![
         own(LOCAL_TAB, "", "Conversations", "This machine's conversations", 0),
         own(CLOUD_TAB, crate::cloud_view::CLOUD_ICON, "Cloud", "Claude Code sessions in Anthropic's cloud, on your Claude accounts", 10),
-        own(crate::mcp_view::TAB, crate::mcp_view::ICON, "MCP", "MCP servers your conversations can load, such as Blender", i32::MAX - 1),
+        own(crate::mcp_view::TAB, crate::mcp_view::ICON, "Protocols", "Programs your conversations can work in, such as Blender and the browser", i32::MAX - 1),
         own(crate::plugins_view::TAB, crate::plugins_view::ICON, "Plugins", "Switch plugins on and off", i32::MAX),
     ];
     for tab in crate::plugins::parts().home_tabs.iter().filter(|tab| !tab.link() && tab.shown()) {

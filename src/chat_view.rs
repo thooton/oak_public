@@ -191,6 +191,9 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         if let Some(a) = &ask {
             tail ^= a.questions.len() as u64 + 1;
         }
+        if crate::approval::waiting(id) {
+            tail ^= 0x9e37_79b9;
+        }
         // Find (Ctrl+F): in the messages, as shown.
         let texts = |u: usize| {
             items[units[u].clone()]
@@ -222,6 +225,7 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
             if !conv.ask_request.is_empty() {
                 ask_reply = ask_request_view(ui, t, &conv.ask_request).or(ask_reply);
             }
+            crate::approval::view(ui, t, id);
             action = queue_view(ui, t, id, &live.queued, editing);
         };
         // The summarized part, always marked: the newest summary's cut,

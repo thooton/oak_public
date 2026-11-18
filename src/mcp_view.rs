@@ -1,10 +1,13 @@
-//! Home's MCP tab: the MCP servers conversations can load (`mcp.rs`), Oak's
-//! built-in Blender first, then those of the files in `mcp/`, each with
-//! its switch, its connection's state and what it offers. The heading has
-//! the folder and Reload (connections whose file changed are ended, to be
-//! made again on next use). Blender's row says whether Blender is reachable
-//! and has Install add-on; right-click a row for the rest (Connect, its
-//! file or log, and for Blender how to use it from Claude Code or Codex).
+//! Home's Protocols tab: the programs conversations can work in (`mcp.rs`:
+//! MCP servers, as models know them, and Oak's Browser and Window kits),
+//! Oak's own first, then those of the files in `protocols/`, each with its
+//! switch, its connection's state and what it offers. The heading has the
+//! folder and Reload (connections whose file changed are ended, to be made
+//! again on next use). Blender's row says whether Blender is reachable and
+//! has Install add-on; Browser's says whether Oak's extension in the user's
+//! own browser is connected; right-click a row for the rest (Connect, its
+//! file or log, for Blender how to use it from Claude Code or Codex, for
+//! Browser Set up browser extension).
 
 use crate::look::{BAR_ROOM, list_rows, row_title_color};
 use crate::mcp::{self, Config, Status};
@@ -15,7 +18,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Home's tab id.
-pub(crate) const TAB: &str = "mcp-servers";
+pub(crate) const TAB: &str = "protocols";
 /// Nerd Font: a plug.
 pub(crate) const ICON: &str = "\u{f1e6}";
 
@@ -71,7 +74,7 @@ fn head_row(ui: &mut Ui, t: &Theme, head: Rect, servers: &[Config]) {
         ui.spacing_mut().item_spacing.x = 6.0;
         let small = |s: &str| RichText::new(s).size(12.0);
         let tip = format!(
-            "Each server is a JSON file in {}, as Claude Code writes them: {{\"command\": \"npx\", \"args\": [...]}} or {{\"type\": \"http\", \"url\": \"...\"}}. A .mcp.json or Claude Desktop config with \"mcpServers\" works as it is.",
+            "Each protocol is a JSON file in {}, as Claude Code writes MCP servers: {{\"command\": \"npx\", \"args\": [...]}} or {{\"type\": \"http\", \"url\": \"...\"}}. A .mcp.json or Claude Desktop config with \"mcpServers\" works as it is.",
             mcp::folder().display()
         );
         if ui.button(small("Open folder")).on_hover_text(tip).clicked() {
@@ -79,7 +82,7 @@ fn head_row(ui: &mut Ui, t: &Theme, head: Rect, servers: &[Config]) {
             let _ = std::fs::create_dir_all(&dir);
             let _ = open::that_detached(&dir);
         }
-        if ui.button(small("Reload")).on_hover_text("Reads the folder again; servers whose file changed restart on their next use.").clicked() {
+        if ui.button(small("Reload")).on_hover_text("Reads the folder again; protocols whose file changed restart on their next use.").clicked() {
             let n = mcp::reload();
             said(if n == 0 { "Reloaded".into() } else { format!("Reloaded; {n} connection{} ended", crate::plural(n)) }, false);
         }
@@ -92,13 +95,13 @@ fn head_row(ui: &mut Ui, t: &Theme, head: Rect, servers: &[Config]) {
         } else {
             let on = servers.iter().filter(|c| c.trouble.is_none() && mcp::enabled(&c.name)).count();
             let up = servers.iter().filter(|c| mcp::status(&c.name) == Status::Ready).count();
-            (format!("{} server{}, {on} on, {up} connected", servers.len(), crate::plural(servers.len())), t.ink3, String::new())
+            (format!("{} protocol{}, {on} on, {up} connected", servers.len(), crate::plural(servers.len())), t.ink3, String::new())
         };
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             let w = ui.available_width();
             let font = FontId::proportional(12.5);
             let r = ui.label(RichText::new(clip_width(ui, &summary, &font, w)).font(font).color(color));
-            let tip = if full.is_empty() { "A server runs with your access to this computer: add only those you trust. Conversations load one with LOAD when a task needs it.".to_string() } else { full };
+            let tip = if full.is_empty() { "A protocol runs with your access to this computer: add only those you trust. Conversations load one when a task needs it.".to_string() } else { full };
             r.on_hover_text(tip);
         });
     });
@@ -151,11 +154,12 @@ fn row(ui: &mut Ui, t: &Theme, c: &Config, rect: Rect, resp: egui::Response) {
     let big = FontId::proportional(14.5);
     let lit = usable && on;
     let color = if lit { row_title_color(t, resp.hovered()) } else { t.ink3 };
-    let name = clip_width(ui, &c.name, &big, (text_right - x).max(0.0));
+    let name = clip_width(ui, &c.title, &big, (text_right - x).max(0.0));
     let r = p.text(egui::pos2(x, y - 9.0), Align2::LEFT_CENTER, name, big, color);
     let offer = mcp::offer(c);
     let n_tools = offer.as_ref().map(|o| o.tools.len());
     let tag = match (c.builtin(), n_tools) {
+        _ if c.native() => format!("built in, {}", c.family),
         (true, Some(n)) => format!("built in, {n} tools"),
         (false, Some(n)) => format!("{n} tool{}", crate::plural(n)),
         _ => String::new(),
@@ -175,6 +179,13 @@ fn row(ui: &mut Ui, t: &Theme, c: &Config, rect: Rect, resp: egui::Response) {
         (e.clone(), t.error)
     } else if blender {
         blender_line(t)
+    } else if c.native() && c.family == "BROWSER" {
+        match crate::browser::bridge::connected() {
+            Some(b) => (format!("Oak's own; its extension in {b} is connected: conversations can ask for your tabs"), t.accent),
+            None => ("Oak's own; right-click to set up the extension that lets it use your own browser's tabs".into(), t.ink3),
+        }
+    } else if c.native() {
+        (format!("Oak's own: conversations load it as {}", c.family), t.ink3)
     } else {
         (c.target(), t.ink3)
     };
@@ -222,9 +233,16 @@ fn row(ui: &mut Ui, t: &Theme, c: &Config, rect: Rect, resp: egui::Response) {
 /// What Blender's row says about Blender.
 fn blender_line(t: &Theme) -> (String, egui::Color32) {
     let installed = mcp::blender::installed_addons();
+    let found = !mcp::blender::find_blender().is_empty();
+    if mcp::blender_run::running_count() > 0 {
+        return (format!("{} private agent Blender instances running", mcp::blender_run::running_count()), t.accent);
+    }
     match crate::blender_view::reachable() {
-        Some(true) => ("Blender is open, its add-on listening".into(), t.accent),
-        _ if installed.is_empty() && mcp::blender::find_blender().is_empty() => ("Install Blender (blender.org), then Install add-on".into(), t.ink3),
+        Some(true) => ("Your Blender is available for explicit attachment; agents start private instances".into(), t.accent),
+        _ if !found => ("Install Blender (blender.org) to let conversations work in it".into(), t.ink3),
+        // Oak starts its own when a conversation needs one.
+        _ if cfg!(windows) && installed.is_empty() => ("Ready; Install add-on to work in your own Blender too".into(), t.ink3),
+        _ if cfg!(windows) => ("Ready; each agent loads its own hidden Blender".into(), t.ink3),
         _ if installed.is_empty() => ("Install the add-on to let conversations work in Blender".into(), t.ink3),
         _ => ("Add-on installed; open Blender to connect".into(), t.ink3),
     }
@@ -234,8 +252,20 @@ fn install(ctx: &egui::Context) {
     in_background(ctx, "Installing the Blender add-on", mcp::blender::install_addon);
 }
 
+/// Writes Oak's browser extension to Oak's folder (`browser-extension`) and
+/// opens the folder: where it is.
+fn set_up_extension() -> Result<std::path::PathBuf, String> {
+    let dir = crate::store::dir().join("browser-extension");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't make {}: {e}", dir.display()))?;
+    for (name, body) in crate::browser::bridge::FILES {
+        std::fs::write(dir.join(name), body).map_err(|e| format!("Couldn't write {name}: {e}"))?;
+    }
+    let _ = open::that_detached(&dir);
+    Ok(dir)
+}
+
 fn menu(ui: &mut Ui, c: &Config, live: bool, ctx: &egui::Context) {
-    if live && ui.button("Connect").on_hover_text("Starts it now and lists its tools again").clicked() {
+    if live && !c.native() && ui.button("Connect").on_hover_text("Starts it now and lists its tools again").clicked() {
         let name = c.name.clone();
         in_background(ctx, &format!("Connecting to {name}"), move || {
             mcp::connect(&name)?;
@@ -258,10 +288,33 @@ fn menu(ui: &mut Ui, c: &Config, live: bool, ctx: &egui::Context) {
             ui.close();
         }
     }
-    let log = crate::store::dir().join("mcp-logs").join(format!("{}.log", c.name));
+    let log = mcp::logs_dir().join(format!("{}.log", c.name));
     if log.is_file() && ui.button("Open log").on_hover_text("What it last wrote to stderr").clicked() {
         let _ = open::that_detached(&log);
         ui.close();
+    }
+    if c.native() && c.family == "BROWSER" {
+        ui.separator();
+        if ui
+            .button("Set up browser extension")
+            .on_hover_text("Writes Oak's extension to a folder and opens it; load it in Brave, Chrome or Edge, and conversations can ask you for one of your tabs (you choose each time)")
+            .clicked()
+        {
+            match set_up_extension() {
+                Ok(dir) => {
+                    ui.ctx().copy_text(dir.display().to_string());
+                    said(
+                        format!(
+                            "Extension written to {} (path copied). In your browser open brave://extensions (or chrome://extensions, edge://extensions), turn on Developer mode, choose Load unpacked and paste the path.",
+                            dir.display()
+                        ),
+                        false,
+                    );
+                }
+                Err(e) => said(e, true),
+            }
+            ui.close();
+        }
     }
     if c.builtin() && c.name == mcp::blender::NAME {
         ui.separator();

@@ -1,22 +1,28 @@
-//! MCP (Model Context Protocol) servers: Oak is their client, as Claude
-//! Code and Codex are. Each server is a kit (LOAD with its name): until a
-//! conversation loads it, it costs nothing and isn't even started; then its
-//! tools join the conversation's tools, named as Claude Code names them
-//! (`mcp__<server>__<tool>`), and its instructions the system prompt.
+//! Protocols (MCP, the Model Context Protocol, as models know it): the
+//! programs conversations can work in, each a kit LOAD offers. Oak is the
+//! client, as Claude Code and Codex are. Until a conversation loads a
+//! protocol it costs nothing and isn't started; then its tool joins the
+//! conversation's tools, one tool named after it (BLENDER) whose `action`
+//! picks the server's tool (`BLENDER action=scene_info`), and its
+//! instructions join the system prompt.
 //!
-//! Where servers come from (`configs`):
-//! - Oak's own, built in (`BUILTIN`): Blender (`mcp/blender.rs`), served in
-//!   Oak's process.
-//! - `mcp/` in Oak's folder: a JSON file per server, named after it
+//! Where protocols come from (`configs`):
+//! - Oak's own, from `protocols/` in this repository (built into Oak):
+//!   Browser and Window are Oak's own kits (`Transport::Native`, run by
+//!   tools.rs), Blender a server in Oak's process (`mcp/blender.rs`).
+//! - `protocols/` in Oak's folder: a JSON file per server, named after it
 //!   (`linear.json`: `{"command": "npx", "args": [...], "env": {...}}`, or
 //!   `{"type": "http", "url": "...", "headers": {...}}`), or a file holding
 //!   several as Claude Desktop's and Claude Code's `.mcp.json` do
 //!   (`{"mcpServers": {"name": {...}}}`), so those can be dropped in as
-//!   they are. Optional: `description` (what LOAD says it is), `timeout`
-//!   (seconds a call may take, default 600), `cwd`.
+//!   they are. Optional: `title`, `description` (what LOAD says it is),
+//!   `timeout` (seconds a call may take, default 600), `cwd`, `window`
+//!   (it shows a program's window). An Oak from before the rename kept them
+//!   in `mcp/`, which is moved.
 //!
-//! Switches (Home > MCP, `mcp_view.rs`) are kept in `mcp.json` in Oak's
-//! folder (`{"off": [names]}`), every server on unless switched off.
+//! Switches (Home > Protocols, `mcp_view.rs`) are kept in `protocols.json`
+//! in Oak's folder (`{"off": [names]}`), every protocol on unless switched
+//! off.
 //!
 //! Transports: stdio (a child process, newline-delimited JSON-RPC; ended
 //! with Oak, through a job object on Windows), streamable HTTP (POST, the
@@ -25,10 +31,12 @@
 //! is made on first use and made again after the server exits.
 //!
 //! What a server offers (its tools, instructions and name) is kept in
-//! `mcp-cache.json`, so requests can list a loaded server's tools without
-//! starting it, and the tab can show them; a connection refreshes it.
+//! `protocol-cache.json`, so requests can list a loaded server's tool
+//! without starting it, and the tab can show them; a connection refreshes
+//! it.
 
 pub mod blender;
+pub mod blender_run;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -50,38 +58,58 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(60);
 /// A tool call's default limit.
 const CALL_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The longest a tool's name can be (OpenAI's limit; Anthropic's is 128).
+/// The longest a server's tool name can be (OpenAI's limit).
 const MAX_TOOL_NAME: usize = 64;
 
-/// Names servers can't take: Oak's own kits.
-const RESERVED: [&str; 4] = ["agent", "browser", "window", "goal"];
+/// Oak's own protocols: this repository's `protocols/` files.
+const OWN: &[(&str, &str)] = &[
+    ("browser", include_str!("../protocols/browser.json")),
+    ("window", include_str!("../protocols/window.json")),
+    ("blender", include_str!("../protocols/blender.json")),
+];
 
-/// Built-in servers: (name, description).
-pub const BUILTIN: &[(&str, &str)] = &[(blender::NAME, "the user's Blender (scene info, viewport screenshots, Python in Blender, Poly Haven assets)")];
+/// The servers `oak --mcp <name>` serves over stdio.
+pub const SERVES: &[&str] = &[blender::NAME];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Transport {
     Stdio { command: String, args: Vec<String>, env: BTreeMap<String, String>, cwd: Option<PathBuf> },
     Http { url: String, headers: BTreeMap<String, String> },
+    /// A server in Oak's process.
     Builtin(&'static str),
+    /// One of Oak's own kits (BROWSER, WINDOW), run by tools.rs.
+    Native(&'static str),
 }
 
-/// A server as configured.
+/// A protocol as configured.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
+    /// Its name as configured (`blender`), which its switch and cache go by.
     pub name: String,
+    /// What the user sees it called (`Blender`).
+    pub title: String,
+    /// Its kit and its tool's name (`BLENDER`).
+    pub family: String,
     pub transport: Transport,
     pub description: String,
     pub timeout: Duration,
-    /// The file it is in (None for a built-in one).
+    /// It shows a program's window (the live view beside the transcript).
+    pub window: bool,
+    /// The file it is in (None for Oak's own).
     pub file: Option<PathBuf>,
     /// Why it can't be used (a file that doesn't read, a name taken).
     pub trouble: Option<String>,
 }
 
 impl Config {
+    /// One of Oak's own (built in or native).
     pub fn builtin(&self) -> bool {
-        matches!(self.transport, Transport::Builtin(_))
+        matches!(self.transport, Transport::Builtin(_) | Transport::Native(_))
+    }
+
+    /// One of Oak's own kits, run by tools.rs rather than through MCP.
+    pub fn native(&self) -> bool {
+        matches!(self.transport, Transport::Native(_))
     }
 
     /// What it runs or reaches, in a line.
@@ -89,7 +117,7 @@ impl Config {
         match &self.transport {
             Transport::Stdio { command, args, .. } => std::iter::once(command.as_str()).chain(args.iter().map(String::as_str)).collect::<Vec<_>>().join(" "),
             Transport::Http { url, .. } => url.clone(),
-            Transport::Builtin(_) => "Built into Oak".into(),
+            Transport::Builtin(_) | Transport::Native(_) => "Built into Oak".into(),
         }
     }
 
@@ -99,9 +127,25 @@ impl Config {
     }
 }
 
-/// The folder of server files.
+/// The folder of the user's protocol files (moved from `mcp/`, where an
+/// Oak from before the rename kept them).
 pub fn folder() -> PathBuf {
-    crate::store::dir().join("mcp")
+    let dir = crate::store::dir().join("protocols");
+    let old = crate::store::dir().join("mcp");
+    if !dir.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &dir);
+    }
+    dir
+}
+
+/// A file in Oak's folder, moved from its name before the rename.
+fn data_file(name: &str, old: &str) -> PathBuf {
+    let path = crate::store::dir().join(name);
+    let before = crate::store::dir().join(old);
+    if !path.exists() && before.exists() {
+        let _ = std::fs::rename(&before, &path);
+    }
+    path
 }
 
 /// A name as tools can carry it: letters, digits, `_` and `-`, no `__`.
@@ -113,23 +157,55 @@ fn clean_name(s: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-/// One server's entry of a file.
-fn parse_entry(name: &str, v: &Value, file: &std::path::Path) -> Config {
-    let mut c = Config { name: clean_name(name), transport: Transport::Builtin(""), description: String::new(), timeout: CALL_TIMEOUT, file: Some(file.to_path_buf()), trouble: None };
-    if c.name.is_empty() {
+/// The kit and tool name of protocol `name`: upper case, `-` as `_`.
+pub fn family_of_name(name: &str) -> String {
+    name.to_uppercase().replace('-', "_")
+}
+
+fn blank(name: &str, file: Option<PathBuf>) -> Config {
+    Config {
+        name: name.to_string(),
+        title: String::new(),
+        family: family_of_name(name),
+        transport: Transport::Builtin(""),
+        description: String::new(),
+        timeout: CALL_TIMEOUT,
+        window: false,
+        file,
+        trouble: None,
+    }
+}
+
+/// One protocol's entry of a file.
+fn parse_entry(name: &str, v: &Value, file: Option<&std::path::Path>) -> Config {
+    let mut c = blank(&clean_name(name), file.map(|f| f.to_path_buf()));
+    if c.name.is_empty() || !c.name.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
         c.name = name.to_string();
-        c.trouble = Some("Its name has none of the letters or digits a tool's name needs.".into());
+        c.trouble = Some("Its name has to start with a letter (a tool is named after it).".into());
         return c;
     }
     let strings = |v: &Value| -> BTreeMap<String, String> {
         v.as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect()
     };
+    c.title = v["title"].as_str().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| c.name.clone());
     c.description = v["description"].as_str().unwrap_or("").trim().to_string();
+    c.window = v["window"].as_bool().unwrap_or(false);
     if let Some(t) = v["timeout"].as_f64().filter(|t| *t > 0.0) {
         c.timeout = Duration::from_secs_f64(t);
     }
     let kind = v["type"].as_str().or(v["transport"].as_str()).unwrap_or("").to_lowercase();
-    if let Some(url) = v["url"].as_str().or(v["serverUrl"].as_str()) {
+    if let Some(own) = v["builtin"].as_str() {
+        // Only Oak's own files name what is built in.
+        c.transport = match (file, own) {
+            (None, "browser") => Transport::Native("BROWSER"),
+            (None, "window") => Transport::Native("WINDOW"),
+            (None, blender::NAME) => Transport::Builtin(blender::NAME),
+            _ => {
+                c.trouble = Some(format!("\"builtin\": \"{own}\" isn't something Oak has built in."));
+                Transport::Builtin("")
+            }
+        };
+    } else if let Some(url) = v["url"].as_str().or(v["serverUrl"].as_str()) {
         if kind == "sse" {
             c.trouble = Some("The old HTTP+SSE transport isn't supported; most servers also answer streamable HTTP (\"type\": \"http\"), often at /mcp.".into());
         }
@@ -144,7 +220,7 @@ fn parse_entry(name: &str, v: &Value, file: &std::path::Path) -> Config {
     c
 }
 
-/// The servers configured in the files of `dir`, sorted by file.
+/// The protocols configured in the files of `dir`, sorted by file.
 fn read_folder(dir: &std::path::Path) -> Vec<Config> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))).collect();
     files.sort();
@@ -154,21 +230,21 @@ fn read_folder(dir: &std::path::Path) -> Vec<Config> {
         let v: Value = match std::fs::read_to_string(&f).map_err(|e| e.to_string()).and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())) {
             Ok(v) => v,
             Err(e) => {
-                out.push(Config { name: clean_name(&stem), transport: Transport::Builtin(""), description: String::new(), timeout: CALL_TIMEOUT, file: Some(f.clone()), trouble: Some(format!("Doesn't read: {e}")) });
+                out.push(Config { trouble: Some(format!("Doesn't read: {e}")), ..blank(&clean_name(&stem), Some(f.clone())) });
                 continue;
             }
         };
         match v.get("mcpServers").or(v.get("servers")).and_then(Value::as_object) {
-            Some(many) => out.extend(many.iter().map(|(name, entry)| parse_entry(name, entry, &f))),
-            None => out.push(parse_entry(&stem, &v, &f)),
+            Some(many) => out.extend(many.iter().map(|(name, entry)| parse_entry(name, entry, Some(&f)))),
+            None => out.push(parse_entry(&stem, &v, Some(&f))),
         }
     }
     out
 }
 
-/// Every server: the built-in ones, then the files' (a name used twice, or
-/// one of Oak's kits, marked as trouble). Read again at most every second
-/// (a request reads them several times).
+/// Every protocol: Oak's own, then the user's files' (a name used twice, or
+/// one that would name its tool as one of Oak's, marked as trouble). Read
+/// again at most every second (a request reads them several times).
 pub fn configs() -> Vec<Config> {
     static LAST: Mutex<Option<(std::time::Instant, Vec<Config>)>> = Mutex::new(None);
     let mut last = LAST.lock().unwrap();
@@ -183,24 +259,28 @@ pub fn configs() -> Vec<Config> {
 }
 
 fn read_configs() -> Vec<Config> {
-    let mut out: Vec<Config> = BUILTIN
-        .iter()
-        .map(|(name, description)| Config { name: name.to_string(), transport: Transport::Builtin(name), description: description.to_string(), timeout: Duration::from_secs(1800), file: None, trouble: None })
-        .collect();
+    let mut out: Vec<Config> = OWN.iter().map(|(name, text)| parse_entry(name, &serde_json::from_str(text).unwrap_or_default(), None)).collect();
+    let taken = crate::tools::tool_names();
     for mut c in read_folder(&folder()) {
         if c.trouble.is_none() {
-            if RESERVED.contains(&c.name.to_lowercase().as_str()) {
-                c.trouble = Some(format!("\"{}\" is the name of one of Oak's kits: rename it.", c.name));
-            } else if let Some(other) = out.iter().find(|o| o.trouble.is_none() && o.name.eq_ignore_ascii_case(&c.name)) {
+            if taken.contains(&c.family) || ["LOAD", "AGENT", "GOAL"].contains(&c.family.as_str()) {
+                c.trouble = Some(format!("Its tool would be called {}, as one of Oak's is: rename it.", c.family));
+            } else if let Some(other) = out.iter().find(|o| o.trouble.is_none() && o.family == c.family) {
                 c.trouble = Some(match &other.file {
-                    None => format!("\"{}\" is Oak's built-in server: rename this one to use both.", c.name),
-                    Some(f) => format!("{} has a server of this name too.", f.display()),
+                    None => format!("\"{}\" is one of Oak's own: rename this one to use both.", c.name),
+                    Some(f) => format!("{} has one of this name too.", f.display()),
                 });
             }
         }
         out.push(c);
     }
     out
+}
+
+/// The protocol `name` is (its name or its family, any case).
+pub fn named(name: &str) -> Option<Config> {
+    let name = name.trim();
+    configs().into_iter().find(|c| c.trouble.is_none() && (c.name.eq_ignore_ascii_case(name) || c.family.eq_ignore_ascii_case(name)))
 }
 
 // ------------------------------------------------------------- switches
@@ -211,14 +291,18 @@ struct Switches {
     off: Vec<String>,
 }
 
-static SWITCHES: LazyLock<Mutex<Switches>> = LazyLock::new(|| Mutex::new(crate::store::read_json(&crate::store::dir().join("mcp.json")).unwrap_or_default()));
+fn switches_path() -> PathBuf {
+    data_file("protocols.json", "mcp.json")
+}
 
-/// Whether server `name` is switched on (they all are until switched off).
+static SWITCHES: LazyLock<Mutex<Switches>> = LazyLock::new(|| Mutex::new(crate::store::read_json(&switches_path()).unwrap_or_default()));
+
+/// Whether protocol `name` is switched on (they all are until switched off).
 pub fn enabled(name: &str) -> bool {
     !SWITCHES.lock().unwrap().off.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
-/// Switches servers on or off; off disconnects them.
+/// Switches protocols on or off; off disconnects them.
 pub fn set_enabled(names: &[String], on: bool) {
     let mut s = SWITCHES.lock().unwrap();
     for n in names {
@@ -227,7 +311,7 @@ pub fn set_enabled(names: &[String], on: bool) {
             s.off.push(n.clone());
         }
     }
-    let _ = crate::store::write_json(&crate::store::dir().join("mcp.json"), &*s);
+    let _ = crate::store::write_json(&switches_path(), &*s);
     drop(s);
     if !on {
         for n in names {
@@ -253,26 +337,27 @@ pub struct Offer {
 }
 
 fn cache_path() -> PathBuf {
-    crate::store::dir().join("mcp-cache.json")
+    data_file("protocol-cache.json", "mcp-cache.json")
 }
 
 static CACHE: LazyLock<Mutex<HashMap<String, Offer>>> = LazyLock::new(|| Mutex::new(crate::store::read_json(&cache_path()).unwrap_or_default()));
 
 /// What server `c` offers: a built-in one's own, else the last listing
-/// (while its configuration is the same).
+/// (while its configuration is the same). None for Oak's native kits.
 pub fn offer(c: &Config) -> Option<Offer> {
-    if let Transport::Builtin(name) = c.transport {
-        return builtin_offer(name);
+    match c.transport {
+        Transport::Builtin(name) => builtin_offer(name),
+        Transport::Native(_) => None,
+        _ => CACHE.lock().unwrap().get(&c.name).filter(|o| o.key == c.key()).cloned(),
     }
-    CACHE.lock().unwrap().get(&c.name).filter(|o| o.key == c.key()).cloned()
 }
 
 fn builtin_offer(name: &str) -> Option<Offer> {
-    let init = builtin(name)?("initialize", &json!({}));
-    let tools = builtin(name)?("tools/list", &json!({})).ok()?;
-    let init = init.ok()?;
+    let handler = builtin(name)?;
+    let init = handler("initialize", &json!({})).ok()?;
+    let tools = handler("tools/list", &json!({})).ok()?;
     Some(Offer {
-        key: format!("{:?}", Transport::Builtin(BUILTIN.iter().find(|(n, _)| *n == name)?.0)),
+        key: String::new(),
         tools: tools["tools"].as_array().cloned().unwrap_or_default(),
         instructions: init["instructions"].as_str().unwrap_or("").to_string(),
         server: format!("{} {}", init["serverInfo"]["name"].as_str().unwrap_or(name), init["serverInfo"]["version"].as_str().unwrap_or("")).trim().to_string(),
@@ -288,21 +373,27 @@ fn remember(name: &str, o: Offer) {
 
 // ------------------------------------------------------------ the kits
 
-/// The servers a conversation can load: switched on and usable, (name,
-/// description).
+/// The MCP servers a conversation can load: switched on and usable, not
+/// Oak's native kits (tools.rs offers those): (family, description).
 pub fn kits() -> Vec<(String, String)> {
     configs()
         .into_iter()
-        .filter(|c| c.trouble.is_none() && enabled(&c.name))
+        .filter(|c| c.trouble.is_none() && !c.native() && enabled(&c.name))
         .map(|c| {
             let desc = if !c.description.is_empty() {
                 c.description.clone()
             } else {
-                offer(&c).map(|o| first_sentence(&o.instructions)).filter(|s| !s.is_empty()).unwrap_or_else(|| "MCP server".into())
+                offer(&c).map(|o| first_sentence(&o.instructions)).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("{} (MCP server)", c.title))
             };
-            (c.name, desc)
+            (c.family, desc)
         })
         .collect()
+}
+
+/// What LOAD says Oak's native kit `family` (BROWSER, WINDOW) is, from its
+/// protocol file.
+pub fn native_description(family: &str) -> String {
+    configs().into_iter().find(|c| c.native() && c.family == family).map(|c| c.description).unwrap_or_default()
 }
 
 fn first_sentence(s: &str) -> String {
@@ -311,48 +402,80 @@ fn first_sentence(s: &str) -> String {
     s[..s.floor_char_boundary(end)].trim().to_string()
 }
 
-/// The kit name a conversation stores for server `name`.
-pub fn kit_id(name: &str) -> String {
-    format!("mcp:{name}")
+/// The kit a conversation stores for server `c`: its family.
+pub fn kit_id(c: &Config) -> String {
+    c.family.clone()
 }
 
-/// The kit LOAD's `name` means: a configured server's (any case, switched
-/// on or not: `kit_id`), else one of Oak's, in upper case.
+/// The kit LOAD's `name` means: a protocol's family (any case, switched on
+/// or not), else what was given, in upper case.
 pub fn kit_named(name: &str) -> String {
-    let name = name.trim();
-    match configs().into_iter().find(|c| c.trouble.is_none() && c.name.eq_ignore_ascii_case(name)) {
-        Some(c) => kit_id(&c.name),
-        None => name.to_uppercase(),
-    }
+    named(name).map(|c| c.family).unwrap_or_else(|| name.trim().to_uppercase())
 }
 
-/// The server a kit id is for.
-pub fn server_of_kit(kit: &str) -> Option<&str> {
-    kit.strip_prefix("mcp:")
+/// The MCP server a kit is (not Oak's native kits): by family, or as an
+/// Oak from before the rename stored it (`mcp:<name>`).
+pub fn server_of_kit(kit: &str) -> Option<Config> {
+    let c = match kit.strip_prefix("mcp:") {
+        Some(name) => configs().into_iter().find(|c| c.name == name)?,
+        None => configs().into_iter().find(|c| c.family == kit)?,
+    };
+    (c.trouble.is_none() && !c.native()).then_some(c)
 }
 
-/// The configured server LOAD's `name` means (any case), if loadable.
+/// Whether a conversation's `kits` have server `c` loaded.
+pub fn loaded_in(kits: &[String], c: &Config) -> bool {
+    kits.iter().any(|k| *k == c.family || k.strip_prefix("mcp:") == Some(c.name.as_str()))
+}
+
+/// The MCP server LOAD's `name` means (any case), if loadable.
 pub fn find(name: &str) -> Option<Config> {
-    let name = name.trim();
-    configs().into_iter().find(|c| c.name.eq_ignore_ascii_case(name) && c.trouble.is_none() && enabled(&c.name))
+    named(name).filter(|c| !c.native() && enabled(&c.name))
 }
 
-/// A server's tool as the model calls it.
-pub fn tool_name(server: &str, tool: &str) -> String {
+/// A server's tool as Oak's older tool names named it (`mcp__<server>__<tool>`).
+fn legacy_name(server: &str, tool: &str) -> String {
     let mut n = format!("mcp__{server}__{}", tool.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect::<String>());
     n.truncate(MAX_TOOL_NAME);
     n
 }
 
-/// The tools of server `name` as the model gets them.
-pub fn tool_defs(name: &str) -> Vec<Value> {
-    let Some(c) = configs().into_iter().find(|c| c.name == name) else { return vec![] };
-    let Some(o) = offer(&c) else { return vec![] };
-    o.tools.iter().map(|t| oak_def(&c.name, t)).collect()
+/// A server tool's action: its name in lower case, without the server's
+/// name in it or a leading `get_` (`get_scene_info` is `scene_info`,
+/// `execute_blender_code` `execute_code`).
+fn action_name(server: &str, tool: &str) -> String {
+    let words = |s: &str| s.to_lowercase().split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect::<Vec<_>>();
+    let all = words(tool);
+    let srv = words(server);
+    let mut w = all.clone();
+    if !srv.is_empty()
+        && let Some(i) = (0..w.len().saturating_sub(srv.len() - 1)).find(|&i| w[i..i + srv.len()] == srv[..])
+        && w.len() > srv.len()
+    {
+        w.drain(i..i + srv.len());
+    }
+    if w.len() > 1 && w[0] == "get" {
+        w.remove(0);
+    }
+    if w.is_empty() { all.join("_") } else { w.join("_") }
 }
 
-/// An MCP tool as an Oak tool definition.
-fn oak_def(server: &str, t: &Value) -> Value {
+/// Server `c`'s tools by action: (action, its tool as MCP lists it).
+pub fn actions(c: &Config, o: &Offer) -> Vec<(String, Value)> {
+    let mut out: Vec<(String, Value)> = vec![];
+    for t in &o.tools {
+        let name = t["name"].as_str().unwrap_or("");
+        let mut a = action_name(&c.name, name);
+        if a.is_empty() || out.iter().any(|(x, _)| *x == a) {
+            a = name.to_lowercase();
+        }
+        out.push((a, t.clone()));
+    }
+    out
+}
+
+/// A tool's input schema as Oak passes it on: an object, no `$schema`.
+fn schema_of(t: &Value) -> Value {
     let mut schema = t["inputSchema"].clone();
     if !schema.is_object() {
         schema = json!({"type": "object", "properties": {}});
@@ -362,72 +485,206 @@ fn oak_def(server: &str, t: &Value) -> Value {
         o.insert("type".into(), json!("object"));
         o.entry("properties").or_insert(json!({}));
     }
-    let mut description = t["description"].as_str().unwrap_or("").trim().to_string();
-    if let Some(title) = t["annotations"]["title"].as_str().or(t["title"].as_str())
-        && description.is_empty()
-    {
-        description = title.to_string();
-    }
-    json!({"name": tool_name(server, t["name"].as_str().unwrap_or("")), "description": description, "input_schema": schema})
+    schema
 }
 
-/// The server and tool (as the server names it) a model's tool name is.
-pub fn resolve_tool(oak_name: &str) -> Option<(Config, String)> {
-    let rest = oak_name.strip_prefix("mcp__")?;
-    let mut configs = configs();
-    // The longest server name first, should one start another.
-    configs.sort_by_key(|c| std::cmp::Reverse(c.name.len()));
-    for c in configs {
-        let Some(tool) = rest.strip_prefix(&c.name).and_then(|r| r.strip_prefix("__")) else { continue };
-        let original = offer(&c).and_then(|o| o.tools.iter().filter_map(|t| t["name"].as_str()).find(|n| tool_name(&c.name, n) == oak_name).map(str::to_string));
-        return Some((c, original.unwrap_or_else(|| tool.to_string())));
+fn description_of(t: &Value) -> String {
+    let d = t["description"].as_str().unwrap_or("").trim();
+    if d.is_empty() { t["annotations"]["title"].as_str().or(t["title"].as_str()).unwrap_or("").to_string() } else { d.to_string() }
+}
+
+/// Server `name`'s tool as the model gets it: one tool named after the
+/// server, its tools as actions (`BLENDER` with `"action": "scene_info"`),
+/// each with what it does and its fields, all fields side by side.
+pub fn tool_defs(c: &Config) -> Vec<Value> {
+    let Some(o) = offer(c) else { return vec![] };
+    let acts = actions(c, &o);
+    if acts.is_empty() {
+        return vec![];
     }
-    None
+    let mut props = serde_json::Map::new();
+    props.insert("action".into(), json!({"type": "string", "enum": acts.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>()}));
+    let mut lines = vec![];
+    for (a, t) in &acts {
+        let schema = schema_of(t);
+        let required: Vec<&str> = schema["required"].as_array().into_iter().flatten().filter_map(|r| r.as_str()).collect();
+        let mut fields = vec![];
+        for (k, v) in schema["properties"].as_object().into_iter().flatten() {
+            fields.push(format!("{k}{}", if required.contains(&k.as_str()) { "" } else { "?" }));
+            match props.get_mut(k) {
+                None => {
+                    props.insert(k.clone(), v.clone());
+                }
+                // A field two actions mean differently: any value, each
+                // action's own description says which.
+                Some(have) if have != v => *have = json!({"description": "Differs by action: see each action's fields"}),
+                _ => {}
+            }
+        }
+        let fields = if fields.is_empty() { String::new() } else { format!(" (fields: {})", fields.join(", ")) };
+        lines.push(format!("- {a}{fields}: {}", description_of(t).replace('\n', " ")));
+    }
+    let intro = if c.description.is_empty() { format!("{} (MCP server {}).", c.title, c.name) } else { format!("{}: {}.", c.title, c.description.trim_end_matches('.')) };
+    let description = format!("{intro} Fields go beside `action`. `action`:\n{}", lines.join("\n"));
+    vec![json!({"name": c.family, "description": description, "input_schema": {"type": "object", "properties": props, "required": ["action"]}, "eager_input_streaming": true})]
+}
+
+/// A call of a protocol's tool (`BLENDER` with its action) as Oak runs and
+/// names it: `BLENDER_SCENE_INFO`, the action taken out of the input. None
+/// when `name` isn't a server's tool; an error for a missing or unknown
+/// action.
+pub fn canonical(name: &str, input: &Value) -> Option<Result<(String, Value), String>> {
+    if !is_family(name) {
+        return None;
+    }
+    let c = configs().into_iter().find(|c| c.family == name && !c.native())?;
+    let acts = offer(&c).map(|o| actions(&c, &o)).unwrap_or_default();
+    let list = acts.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>().join(", ");
+    let Some(action) = input["action"].as_str().map(|a| a.trim().to_lowercase()) else {
+        return Some(Err(format!("Missing required field `action` (one of {list})")));
+    };
+    if !acts.iter().any(|(a, _)| *a == action) {
+        return Some(Err(format!("Unknown action `{action}` for {name}: use one of {list}")));
+    }
+    let mut input = input.clone();
+    if let Some(o) = input.as_object_mut() {
+        o.remove("action");
+    }
+    Some(Ok((format!("{name}_{}", action.to_uppercase()), input)))
+}
+
+/// The protocol families (MCP servers' tools), kept a second at a time:
+/// asked for every call shown.
+fn families() -> Arc<Vec<String>> {
+    static LAST: Mutex<Option<(std::time::Instant, Arc<Vec<String>>)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if let Some((at, f)) = last.as_ref()
+        && at.elapsed() < Duration::from_secs(1)
+    {
+        return f.clone();
+    }
+    let mut f: Vec<String> = configs().into_iter().filter(|c| c.trouble.is_none() && !c.native()).map(|c| c.family).collect();
+    // The longest first, should one start another.
+    f.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    let f = Arc::new(f);
+    *last = Some((std::time::Instant::now(), f.clone()));
+    f
+}
+
+/// Whether `name` is an MCP server's tool (`BLENDER`).
+pub fn is_family(name: &str) -> bool {
+    families().iter().any(|f| f == name)
+}
+
+/// A tool Oak runs (`BLENDER_SCENE_INFO`) as its family and action
+/// (`BLENDER`, `scene_info`).
+pub fn split(tool: &str) -> Option<(String, String)> {
+    families().iter().find_map(|f| tool.strip_prefix(f.as_str()).and_then(|r| r.strip_prefix('_')).filter(|r| !r.is_empty()).map(|r| (f.clone(), r.to_lowercase())))
+}
+
+/// The server and tool (as the server names it) a tool Oak runs is:
+/// `BLENDER_SCENE_INFO`, or an older Oak's `mcp__blender__get_scene_info`.
+pub fn resolve_tool(oak_name: &str) -> Option<(Config, String)> {
+    if let Some(rest) = oak_name.strip_prefix("mcp__") {
+        let mut configs = configs();
+        configs.sort_by_key(|c| std::cmp::Reverse(c.name.len()));
+        for c in configs.into_iter().filter(|c| !c.native()) {
+            let Some(tool) = rest.strip_prefix(&c.name).and_then(|r| r.strip_prefix("__")) else { continue };
+            let original = offer(&c).and_then(|o| o.tools.iter().filter_map(|t| t["name"].as_str()).find(|n| legacy_name(&c.name, n) == oak_name).map(str::to_string));
+            return Some((c, original.unwrap_or_else(|| tool.to_string())));
+        }
+        return None;
+    }
+    let (family, action) = split(oak_name)?;
+    let c = configs().into_iter().find(|c| c.family == family && !c.native())?;
+    let o = offer(&c)?;
+    let tool = actions(&c, &o).into_iter().find(|(a, _)| *a == action).map(|(_, t)| t["name"].as_str().unwrap_or("").to_string())?;
+    Some((c, tool))
+}
+
+/// A call's arguments as server `c`'s tool `tool` takes them: only its own
+/// fields (the model sees every action's side by side), and an error for a
+/// required one missing.
+pub fn arguments(c: &Config, tool: &str, input: &Value) -> Result<Value, String> {
+    let Some(t) = offer(c).and_then(|o| o.tools.into_iter().find(|t| t["name"] == tool)) else { return Ok(input.clone()) };
+    let schema = schema_of(&t);
+    let props = schema["properties"].as_object().cloned().unwrap_or_default();
+    let mut args = input.as_object().cloned().unwrap_or_default();
+    if !props.is_empty() && schema["additionalProperties"] != true {
+        args.retain(|k, _| props.contains_key(k));
+    }
+    for r in schema["required"].as_array().into_iter().flatten().filter_map(|r| r.as_str()) {
+        if !args.contains_key(r) {
+            return Err(format!("Missing required field `{r}`"));
+        }
+    }
+    Ok(Value::Object(args))
+}
+
+/// Server `c`'s text with its tools' names as the model calls them
+/// (`get_scene_info` as `BLENDER action=scene_info`).
+fn with_oak_names(c: &Config, o: &Offer, text: &str) -> String {
+    let mut out = text.to_string();
+    let mut acts = actions(c, o);
+    acts.sort_by_key(|(_, t)| std::cmp::Reverse(t["name"].as_str().unwrap_or("").len()));
+    for (a, t) in acts {
+        let name = t["name"].as_str().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let mut s = String::new();
+        let mut rest = out.as_str();
+        while let Some(i) = rest.find(name) {
+            let before = rest[..i].chars().next_back();
+            let after = rest[i + name.len()..].chars().next();
+            let word = |ch: Option<char>| ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            s.push_str(&rest[..i]);
+            if word(before) || word(after) {
+                s.push_str(name);
+            } else {
+                s.push_str(&format!("{} action={a}", c.family));
+            }
+            rest = &rest[i + name.len()..];
+        }
+        s.push_str(rest);
+        out = s;
+    }
+    out
 }
 
 /// The instructions of the servers among `kits`, for the system prompt.
 pub fn prompt_section(kits: &[String]) -> String {
     let mut parts = vec![];
     for k in kits {
-        let Some(name) = server_of_kit(k) else { continue };
-        let Some(c) = configs().into_iter().find(|c| c.name == name) else { continue };
+        let Some(c) = server_of_kit(k) else { continue };
         if let Some(o) = offer(&c).filter(|o| !o.instructions.trim().is_empty()) {
-            parts.push(format!("## {name}\n{}", o.instructions.trim()));
+            parts.push(format!("## {}\n{}", c.family, with_oak_names(&c, &o, o.instructions.trim())));
         }
     }
     if parts.is_empty() { String::new() } else { format!("# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n{}", parts.join("\n\n")) }
 }
 
-/// LOAD's text for server `c` (`connected`: what the connection found),
-/// and with `through_load` how to call its tools until they join the list.
+/// LOAD's text for server `c`, and with `through_load` how to call its
+/// tool until it joins the list.
 pub fn load_text(c: &Config, through_load: bool) -> String {
     let o = offer(c).unwrap_or_default();
-    let names: Vec<String> = o.tools.iter().map(|t| tool_name(&c.name, t["name"].as_str().unwrap_or(""))).collect();
-    let mut out = format!("Loaded {} (MCP server{}).", c.name, if o.server.is_empty() { String::new() } else { format!(": {}", o.server) });
-    if names.is_empty() {
+    let mut out = format!("Loaded {} (MCP server{}).", c.family, if o.server.is_empty() { String::new() } else { format!(": {}", o.server) });
+    let def = tool_defs(c);
+    if def.is_empty() {
         out += " It lists no tools.";
     } else if through_load {
         out += &format!(
-            " Its tools aren't in your tool list until earlier context is summarized: to use one, {}, with name={} and `input` {{\"tool\": \"<tool name>\", \"arguments\": {{...}}}}.\n\nIts tools:\n",
+            " Its tool isn't in your tool list until earlier context is summarized: {}, with name={} and the tool's input in `input`, e.g. {{\"name\": \"{}\", \"input\": {{\"action\": \"...\"}}}}.\n\n{}",
             crate::prefix::THROUGH_LOAD,
-            c.name
+            c.family,
+            c.family,
+            def[0]["description"].as_str().unwrap_or("")
         );
-        for t in &o.tools {
-            let schema = &t["inputSchema"];
-            let required: Vec<&str> = schema["required"].as_array().into_iter().flatten().filter_map(|r| r.as_str()).collect();
-            let fields: Vec<String> = schema["properties"]
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(k, v)| format!("{k}{}: {}", if required.contains(&k.as_str()) { "" } else { "?" }, v["type"].as_str().unwrap_or("any")))
-                .collect();
-            out += &format!("- {} ({}): {}\n", t["name"].as_str().unwrap_or(""), fields.join(", "), crate::tools::one_line(t["description"].as_str().unwrap_or("")));
-        }
     } else {
-        out += &format!(" Its tools are in your tool list now: {}.", names.join(", "));
+        out += &format!(" The {} tool is in your tool list now.", c.family);
     }
     if !o.instructions.trim().is_empty() {
-        out += &format!("\n\nIts instructions:\n{}", o.instructions.trim());
+        out += &format!("\n\nIts instructions:\n{}", with_oak_names(c, &o, o.instructions.trim()));
     }
     out
 }
@@ -525,6 +782,7 @@ fn connection(c: &Config) -> Result<Arc<dyn Conn>, String> {
 fn open(c: &Config) -> Result<Arc<dyn Conn>, String> {
     let conn: Arc<dyn Conn> = match &c.transport {
         Transport::Builtin(name) => Arc::new(Builtin(builtin(name).ok_or("No such built-in server")?)),
+        Transport::Native(kit) => return Err(format!("{kit} is one of Oak's own kits, not a server to connect to.")),
         Transport::Stdio { .. } => Arc::new(Stdio::start(c)?),
         Transport::Http { url, headers } => Arc::new(Http::new(url, headers)?),
     };
@@ -571,7 +829,7 @@ fn list_tools(conn: &dyn Conn) -> Result<Vec<Value>, String> {
 /// Connects to server `name` now (LOAD, the tab's Connect), refreshing
 /// what it offers.
 pub fn connect(name: &str) -> Result<(), String> {
-    let c = configs().into_iter().find(|c| c.name == name).ok_or_else(|| format!("No MCP server {name}."))?;
+    let c = configs().into_iter().find(|c| c.name == name).ok_or_else(|| format!("No protocol {name}."))?;
     if let Some(t) = &c.trouble {
         return Err(t.clone());
     }
@@ -668,8 +926,13 @@ impl Conn for Builtin {
 /// What waits for the answers to requests: by id.
 type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value, String>>>>>;
 
+/// The folder of stdio servers' stderr logs (moved from `mcp-logs/`).
+pub fn logs_dir() -> PathBuf {
+    data_file("protocol-logs", "mcp-logs")
+}
+
 /// A server run as a child process, speaking JSON-RPC on its stdin and
-/// stdout, one message per line; its stderr goes to `mcp-logs/<name>.log`.
+/// stdout, one message per line; its stderr goes to `protocol-logs/<name>.log`.
 struct Stdio {
     stdin: Stdin,
     child: Mutex<std::process::Child>,
@@ -728,7 +991,7 @@ impl Stdio {
         #[cfg(windows)]
         let job = crate::cdp::job_object(&child);
         let (stdin, stdout, stderr) = (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
-        let logs = crate::store::dir().join("mcp-logs");
+        let logs = logs_dir();
         let _ = std::fs::create_dir_all(&logs);
         let log = logs.join(format!("{}.log", c.name));
         let alive = Arc::new(AtomicBool::new(true));
@@ -1013,6 +1276,7 @@ mod tests {
     #[test]
     fn reads_server_files_as_claude_code_writes_them() {
         let d = scratch("files");
+        std::fs::write(d.join("own.json"), r#"{"builtin": "blender"}"#).unwrap();
         std::fs::write(d.join("linear.json"), r#"{"command": "npx", "args": ["-y", "mcp-remote", "https://mcp.linear.app/sse"], "env": {"A": "1"}, "timeout": 30}"#).unwrap();
         std::fs::write(d.join("claude.json"), r#"{"mcpServers": {"web": {"type": "http", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer ${TOKEN}"}}, "old one": {"type": "sse", "url": "https://x/sse"}, "nothing": {}}}"#).unwrap();
         std::fs::write(d.join("broken.json"), "{nope").unwrap();
@@ -1024,18 +1288,37 @@ mod tests {
         assert!(by("old_one").trouble.as_deref().unwrap().contains("SSE"));
         assert!(by("nothing").trouble.is_some());
         assert!(by("broken").trouble.as_deref().unwrap().starts_with("Doesn't read"));
+        assert!(by("own").trouble.as_deref().unwrap().contains("built in"));
+        assert_eq!((by("old_one").family.as_str(), by("linear").title.as_str()), ("OLD_ONE", "linear"));
     }
 
     #[test]
-    fn tool_names_are_claude_codes() {
-        assert_eq!(tool_name("blender", "get_scene_info"), "mcp__blender__get_scene_info");
-        assert_eq!(tool_name("x", "a.b c"), "mcp__x__a_b_c");
-        assert!(tool_name("a-very-long-server-name", &"t".repeat(80)).len() <= MAX_TOOL_NAME);
+    fn tools_are_named_after_their_protocol() {
+        assert_eq!(action_name("blender", "get_scene_info"), "scene_info");
+        assert_eq!(action_name("blender", "execute_blender_code"), "execute_code");
+        assert_eq!(action_name("blender", "get_blender_info"), "info");
+        assert_eq!(action_name("blender", "get"), "get");
+        assert_eq!(action_name("github", "create_issue"), "create_issue");
+        assert_eq!(action_name("x", "Read.File"), "read_file");
+        assert_eq!(family_of_name("my-server"), "MY_SERVER");
+        assert_eq!(legacy_name("blender", "get_scene_info"), "mcp__blender__get_scene_info");
+        assert!(legacy_name("a-very-long-server-name", &"t".repeat(80)).len() <= MAX_TOOL_NAME);
         assert_eq!(clean_name(" My  server!"), "My_server");
-        let d = oak_def("s", &json!({"name": "t", "description": "Does t.", "inputSchema": {"$schema": "x", "type": "object"}}));
-        assert_eq!(d["name"], "mcp__s__t");
-        assert!(d["input_schema"].get("$schema").is_none());
-        assert!(d["input_schema"]["properties"].is_object());
+        let schema = schema_of(&json!({"name": "t", "inputSchema": {"$schema": "x", "type": "object"}}));
+        assert!(schema.get("$schema").is_none());
+        assert!(schema["properties"].is_object());
+    }
+
+    #[test]
+    fn oaks_own_protocols_are_listed() {
+        let c = read_configs();
+        let names: Vec<&str> = c.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(&names[..3], ["browser", "window", "blender"]);
+        assert!(c[0].native() && c[1].native() && !c[2].native() && c[2].builtin());
+        assert_eq!((c[2].title.as_str(), c[2].family.as_str()), ("Blender", "BLENDER"));
+        assert!(c.iter().take(3).all(|c| c.window && c.trouble.is_none()));
+        assert!(server_of_kit("BROWSER").is_none());
+        assert_eq!(server_of_kit("mcp:blender").unwrap().name, "blender");
     }
 
     #[test]
@@ -1070,7 +1353,7 @@ mod tests {
     }
 
     fn stdio(name: &str, command: &str, args: &[&str]) -> Config {
-        Config { name: name.into(), transport: Transport::Stdio { command: command.into(), args: args.iter().map(|s| s.to_string()).collect(), env: BTreeMap::new(), cwd: None }, description: String::new(), timeout: CALL_TIMEOUT, file: None, trouble: None }
+        Config { transport: Transport::Stdio { command: command.into(), args: args.iter().map(|s| s.to_string()).collect(), env: BTreeMap::new(), cwd: None }, ..blank(name, None) }
     }
 
     /// Oak's own Blender server over stdio (`oak --mcp blender`), as Claude
@@ -1113,7 +1396,7 @@ mod tests {
 
         // Its streamable HTTP mode, on port 3001.
         let mut child = std::process::Command::new(find_program("npx", std::env::var_os("PATH").as_deref())).args(["-y", "@modelcontextprotocol/server-everything", "streamableHttp"]).env("PORT", "3001").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
-        let h = Config { name: "everything_http".into(), transport: Transport::Http { url: "http://localhost:3001/mcp".into(), headers: BTreeMap::new() }, description: String::new(), timeout: CALL_TIMEOUT, file: None, trouble: None };
+        let h = Config { transport: Transport::Http { url: "http://localhost:3001/mcp".into(), headers: BTreeMap::new() }, ..blank("everything_http", None) };
         let mut ok = Err("never tried".to_string());
         for _ in 0..60 {
             ok = connection(&h).map(|_| ());
@@ -1140,17 +1423,38 @@ mod kit_tests {
     fn a_loaded_server_joins_the_tools() {
         let plain = crate::tools::definitions_with_kits(true, false, false, &[]);
         let load = plain.iter().find(|d| d["name"] == "LOAD").unwrap();
-        assert!(load["input_schema"]["properties"]["name"]["enum"].as_array().unwrap().iter().any(|n| n == "blender"), "{load}");
-        assert!(load["description"].as_str().unwrap().contains("MCP servers"));
-        assert!(!plain.iter().any(|d| d["name"].as_str().unwrap().starts_with("mcp__")));
-        let loaded = crate::tools::definitions_with_kits(true, false, false, &[kit_id("blender")]);
-        assert!(loaded.iter().any(|d| d["name"] == "mcp__blender__execute_blender_code"));
-        let (c, tool) = resolve_tool("mcp__blender__get_scene_info").unwrap();
-        assert_eq!((c.name.as_str(), tool.as_str()), ("blender", "get_scene_info"));
-        assert!(prompt_section(&[kit_id("blender")]).starts_with("# MCP Server Instructions"));
-        assert!(load_text(&c, true).contains("call it through LOAD"));
+        assert!(load["input_schema"]["properties"]["name"]["enum"].as_array().unwrap().iter().any(|n| n == "BLENDER"), "{load}");
+        assert!(load["description"].as_str().unwrap().contains("Kits for a program"));
+        assert!(!plain.iter().any(|d| d["name"] == "BLENDER"));
+        let kits = ["BLENDER".to_string()];
+        let loaded = crate::tools::definitions_with_kits(true, false, false, &kits);
+        let tool = loaded.iter().find(|d| d["name"] == "BLENDER").unwrap();
+        let acts = tool["input_schema"]["properties"]["action"]["enum"].as_array().unwrap();
+        assert!(acts.iter().any(|a| a == "scene_info") && acts.iter().any(|a| a == "execute_code"), "{acts:?}");
+        assert!(tool["input_schema"]["properties"]["code"].is_object());
+
+        // Calls: canonical names, shown names, the server's own tool, its arguments.
+        let (name, input) = crate::tools::canonical("BLENDER", &json!({"action": "object_info", "object_name": "Cube", "code": "x"})).unwrap();
+        assert_eq!(name, "BLENDER_OBJECT_INFO");
+        assert_eq!(crate::tools::shown_name(&name), "BLENDER object_info");
+        assert_eq!(crate::tools::call_name(&name), "BLENDER action=object_info");
+        let (c, tool) = resolve_tool(&name).unwrap();
+        assert_eq!((c.name.as_str(), tool.as_str()), ("blender", "get_object_info"));
+        assert_eq!(arguments(&c, &tool, &input).unwrap(), json!({"object_name": "Cube"}));
+        assert!(arguments(&c, &tool, &json!({})).unwrap_err().contains("object_name"));
+        assert!(crate::tools::canonical("BLENDER", &json!({"action": "nope"})).unwrap_err().contains("scene_info"));
+        assert_eq!(resolve_tool("mcp__blender__get_scene_info").unwrap().1, "get_scene_info");
+        let through = json!({"name": "blender", "input": {"action": "scene_info"}});
+        let (n, _) = crate::tools::canonical_cow("LOAD", &through);
+        assert_eq!(n, "BLENDER_SCENE_INFO");
+
+        // Instructions name the tools as the model calls them.
+        let section = prompt_section(&kits);
+        assert!(section.starts_with("# MCP Server Instructions"));
+        assert!(section.contains("BLENDER action=scene_info") && !section.contains("get_scene_info"), "{section}");
+        assert!(load_text(&c, true).contains("name=BLENDER"));
         // A local model gets none of it.
-        let local = crate::tools::definitions_with_kits(true, false, true, &[kit_id("blender")]);
-        assert!(!local.iter().any(|d| d["name"].as_str().unwrap().starts_with("mcp__")));
+        let local = crate::tools::definitions_with_kits(true, false, true, &kits);
+        assert!(!local.iter().any(|d| d["name"] == "BLENDER"));
     }
 }

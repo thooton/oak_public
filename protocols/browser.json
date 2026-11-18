@@ -1,0 +1,6 @@
+{
+  "title": "Browser",
+  "description": "Oak's browser (only when the user explicitly asks you to use the browser tool)",
+  "builtin": "browser",
+  "window": true
+}

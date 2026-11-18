@@ -6,16 +6,23 @@
 // the user's window station. Nothing on it is ever shown; its windows still
 // paint (GPU apps included), and PrintWindow copies them out. Input is posted
 // straight to the window as mouse and keyboard messages, so the real cursor
-// and the foreground window never change.
+// and the foreground window never change. CREATE_NO_WINDOW suppresses
+// consoles: Windows Terminal can otherwise open those on the real desktop.
 //
 // `launch` keeps running while the app does (start it with TASK_NEW): the
-// app's output comes through it, and stopping it stops the app.
+// app's output comes through it, and stopping it stops the app. Ordinary
+// args use C-runtime quoting; cmd.exe /c and /k get their command text
+// verbatim, enclosed once with /s so cmd strips only that outer pair.
+//
+// Inside Oak the same is done in-process (`on_desktop`): the WINDOW tool
+// (`window_tool.rs`) and the live view's input (`window_view.rs`) run their
+// steps on one thread attached to the hidden desktop.
 
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    AttachThreadInput, CreateProcessW, GetCurrentThreadId, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    AttachThreadInput, CREATE_NO_WINDOW, CreateProcessW, GetCurrentThreadId, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
     STARTUPINFOW, WaitForSingleObject,
 };
 
@@ -71,6 +78,44 @@ unsafe extern "system" {
     fn SetProcessDpiAwarenessContext(ctx: isize) -> i32;
     fn GetCursorPos(p: *mut [i32; 2]) -> i32;
     fn ClientToScreen(h: Hwnd, p: *mut [i32; 2]) -> i32;
+    fn ChildWindowFromPointEx(h: Hwnd, p: Pt, flags: u32) -> Hwnd;
+    fn MapWindowPoints(from: Hwnd, to: Hwnd, p: *mut [i32; 2], n: u32) -> i32;
+    fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
+    fn GetAncestor(h: Hwnd, flags: u32) -> Hwnd;
+    fn EnumWindows(f: unsafe extern "system" fn(Hwnd, isize) -> i32, l: isize) -> i32;
+    fn GetWindow(h: Hwnd, cmd: u32) -> Hwnd;
+    fn GetWindowLongPtrW(h: Hwnd, index: i32) -> isize;
+}
+
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmGetWindowAttribute(h: Hwnd, attr: u32, value: *mut c_void, size: u32) -> i32;
+}
+
+thread_local! {
+    /// Input to a window of the user's own desktop: nothing may move it
+    /// (see `under_cursor`).
+    static GENTLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Pt {
+    x: i32,
+    y: i32,
+}
+
+#[repr(C)]
+struct GuiThreadInfo {
+    size: u32,
+    flags: u32,
+    active: Hwnd,
+    focus: Hwnd,
+    capture: Hwnd,
+    menu_owner: Hwnd,
+    move_size: Hwnd,
+    caret: Hwnd,
+    caret_rect: RectI,
 }
 
 #[link(name = "gdi32")]
@@ -115,6 +160,9 @@ the user's screen, mouse, keyboard or focus.
       Starts PROGRAM on the hidden desktop and prints its window once it
       appears. Keeps running while the app does, passing on its output:
       start it with TASK action=new, and TASK action=delete closes the app.
+      Arguments are literal, except cmd.exe /c or /k: pass the whole command
+      as one argument, quoted for cmd (not C backslash-escaped quotes).
+      Oak adds /s and an outer quote pair for cmd to strip.
   list                      Windows on the desktop: id, process, size, title.
   shot FILE.png             Screenshot of the window's client area.
   record DIR SECONDS [FPS]  Screenshots in a row (default 30 a second) into
@@ -220,9 +268,7 @@ fn run(args: &[String]) -> Result<i32, String> {
     }
     // Read before switching desktops: the cursor can't be read from a
     // thread on a desktop that isn't the one receiving input.
-    let mut cursor = [0i32; 2];
-    unsafe { GetCursorPos(&mut cursor) };
-    let _ = CURSOR.set(cursor);
+    read_cursor();
     let desk = Desktop::open(&o.desktop)?;
     match cmd.as_str() {
         "list" => {
@@ -298,48 +344,11 @@ fn run(args: &[String]) -> Result<i32, String> {
             let (x, y) = (n(0)?, n(1)?);
             point_at(w, x, y, 0);
         }
-        "drag" => {
-            let (x1, y1, x2, y2) = (n(0)?, n(1)?, n(2)?, n(3)?);
-            let (down, up, held) = if flag("--right") { (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON) } else { (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON) };
-            point_at(w, x1, y1, 0);
-            post(w, down, held, xy(x1, y1));
-            // Slow enough that even a debug build sees the moves over
-            // several frames (all in one frame, a drag reads as a click).
-            // A throw: a few frames' worth, let go with no pause at the end.
-            let throw = flag("--throw");
-            let (steps, ms) = if throw { (8, 20) } else { (20, 40) };
-            for i in 1..=steps {
-                let (x, y) = (x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps);
-                std::thread::sleep(Duration::from_millis(ms));
-                under_cursor(w, x, y);
-                post(w, WM_MOUSEMOVE, held, xy(x, y));
-            }
-            if !throw {
-                std::thread::sleep(Duration::from_millis(40));
-                point_at(w, x2, y2, held);
-            }
-            post(w, up, 0, xy(x2, y2));
-        }
-        "scroll" => {
-            let (x, y, lines) = (n(0)?, n(1)?, n(2)?);
-            point_at(w, x, y, 0);
-            // The wheel message carries screen coordinates.
-            let mut at = [x, y];
-            unsafe { ClientToScreen(w, &mut at) };
-            let delta = (lines * 120) as i16 as u16 as usize;
-            post(w, WM_MOUSEWHEEL, delta << 16, xy(at[0], at[1]));
-        }
-        "type" => {
-            let text = o.rest.iter().map(|a| unmangle(a)).collect::<Vec<_>>().join(" ");
-            for unit in text.encode_utf16() {
-                type_unit(w, unit);
-            }
-        }
+        "drag" => drag(w, (n(0)?, n(1)?), (n(2)?, n(3)?), flag("--right"), flag("--throw")),
+        "scroll" => scroll(w, n(0)?, n(1)?, n(2)? * 120),
+        "type" => type_text(w, &o.rest.iter().map(|a| unmangle(a)).collect::<Vec<_>>().join(" ")),
         "key" => key(w, o.rest.first().ok_or("key: which key?")?)?,
-        "resize" => {
-            let (width, height) = (n(0)?, n(1)?);
-            unsafe { SetWindowPos(w, std::ptr::null_mut(), 0, 0, width, height, SWP_MOVE_ONLY) };
-        }
+        "resize" => resize(w, n(0)?, n(1)?),
         other => return Err(format!("Unknown command {other}. Run `oak --window help`.")),
     }
     std::thread::sleep(Duration::from_millis(o.wait));
@@ -348,7 +357,7 @@ fn run(args: &[String]) -> Result<i32, String> {
 
 /// The hidden desktop, attached to this thread so its windows can be
 /// enumerated, captured and sent input.
-struct Desktop(*mut c_void);
+pub(crate) struct Desktop(*mut c_void);
 
 impl Desktop {
     fn open(name: &str) -> Result<Desktop, String> {
@@ -419,6 +428,43 @@ fn client_size(w: Hwnd) -> (i32, i32) {
     (r.right, r.bottom)
 }
 
+fn pid_of(w: usize) -> u32 {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(w as Hwnd, &mut pid) };
+    pid
+}
+
+/// Process `root` and every process it started, and they started, now.
+fn descendants(root: u32) -> Vec<u32> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
+    let mut pairs = vec![];
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap.is_null() || snap as isize == -1 {
+            return vec![root];
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut e) != 0 {
+            loop {
+                pairs.push((e.th32ProcessID, e.th32ParentProcessID));
+                if Process32NextW(snap, &mut e) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+    }
+    let mut out = vec![root];
+    let mut i = 0;
+    while i < out.len() {
+        let p = out[i];
+        out.extend(pairs.iter().filter(|(c, parent)| *parent == p && *c != p && !out.contains(c)).map(|(c, _)| *c).collect::<Vec<_>>());
+        i += 1;
+    }
+    out
+}
+
 fn describe(w: usize) -> String {
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(w as Hwnd, &mut pid) };
@@ -434,8 +480,72 @@ fn post(w: Hwnd, msg: u32, wp: usize, lp: isize) {
     unsafe { PostMessageW(w, msg, wp, lp) };
 }
 
-/// Where the real mouse cursor was when the command started.
-static CURSOR: std::sync::OnceLock<[i32; 2]> = std::sync::OnceLock::new();
+/// The window a press went to while its button is held: the moves and the
+/// release go to it, as with real input (the capture).
+static PRESSED: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+
+/// The window that gets the mouse at client point x,y of top-level `w`:
+/// its deepest visible, enabled child there (classic apps are made of
+/// child controls, and posted input isn't routed to them as real input
+/// is), or the one pressed while a button is held; and the point in that
+/// window's client coordinates.
+fn mouse_target(w: Hwnd, x: i32, y: i32) -> (Hwnd, i32, i32) {
+    let mut pt = [x, y];
+    if let Some(p) = *PRESSED.lock().unwrap()
+        && unsafe { IsWindow(p as Hwnd) } != 0
+    {
+        unsafe { MapWindowPoints(w, p as Hwnd, &mut pt, 1) };
+        return (p as Hwnd, pt[0], pt[1]);
+    }
+    let mut cur = w;
+    for _ in 0..32 {
+        // CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT
+        let child = unsafe { ChildWindowFromPointEx(cur, Pt { x: pt[0], y: pt[1] }, 1 | 2 | 4) };
+        if child.is_null() || child == cur {
+            break;
+        }
+        unsafe { MapWindowPoints(cur, child, &mut pt, 1) };
+        cur = child;
+    }
+    (cur, pt[0], pt[1])
+}
+
+/// A mouse message at client point x,y of `w`, to the window there.
+fn mouse(w: Hwnd, msg: u32, wp: usize, x: i32, y: i32) {
+    let (t, cx, cy) = mouse_target(w, x, y);
+    let down = matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | 0x0207 | WM_LBUTTONDBLCLK);
+    let up = matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP | 0x0208);
+    post(t, msg, wp, xy(cx, cy));
+    if down {
+        *PRESSED.lock().unwrap() = Some(t as usize);
+    } else if up && wp & (MK_LBUTTON | MK_RBUTTON | 0x10) == 0 {
+        *PRESSED.lock().unwrap() = None;
+    }
+}
+
+/// The window keys go to in top-level `w`: its thread's focused one when
+/// that is within `w`, else `w`.
+fn key_target(w: Hwnd) -> Hwnd {
+    let thread = unsafe { GetWindowThreadProcessId(w, std::ptr::null_mut()) };
+    let mut g: GuiThreadInfo = unsafe { std::mem::zeroed() };
+    g.size = std::mem::size_of::<GuiThreadInfo>() as u32;
+    if unsafe { GetGUIThreadInfo(thread, &mut g) } != 0 && !g.focus.is_null() && unsafe { GetAncestor(g.focus, 2) } == w {
+        return g.focus; // GA_ROOT
+    }
+    w
+}
+
+/// Where the real mouse cursor was when the command (or `on_desktop` job)
+/// started.
+static CURSOR: std::sync::Mutex<Option<[i32; 2]>> = std::sync::Mutex::new(None);
+
+/// Reads the real cursor; only from a thread on the desktop receiving input.
+fn read_cursor() {
+    let mut cursor = [0i32; 2];
+    if unsafe { GetCursorPos(&mut cursor) } != 0 {
+        *CURSOR.lock().unwrap() = Some(cursor);
+    }
+}
 
 /// Moves the hidden window (never the cursor) so that its client point
 /// x,y lies under the real mouse cursor. Windows decides whether the
@@ -443,7 +553,10 @@ static CURSOR: std::sync::OnceLock<[i32; 2]> = std::sync::OnceLock::new();
 /// the window, the app is told at once that the pointer left, and a click
 /// or hover posted to it can be dropped.
 fn under_cursor(w: Hwnd, x: i32, y: i32) {
-    let Some(&cursor) = CURSOR.get() else { return };
+    if GENTLE.with(|g| g.get()) {
+        return; // the user's window stays where they put it
+    }
+    let Some(cursor) = *CURSOR.lock().unwrap() else { return };
     let mut origin = [0i32; 2];
     let mut r = RectI::default();
     unsafe {
@@ -464,21 +577,63 @@ fn under_cursor(w: Hwnd, x: i32, y: i32) {
 /// this.
 fn point_at(w: Hwnd, x: i32, y: i32, buttons: usize) {
     under_cursor(w, x, y);
-    post(w, WM_MOUSEMOVE, buttons, xy(x + 1, y));
-    post(w, WM_MOUSEMOVE, buttons, xy(x, y));
+    mouse(w, WM_MOUSEMOVE, buttons, x + 1, y);
+    mouse(w, WM_MOUSEMOVE, buttons, x, y);
+}
+
+fn drag(w: Hwnd, (x1, y1): (i32, i32), (x2, y2): (i32, i32), right: bool, throw: bool) {
+    let (down, up, held) = if right { (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON) } else { (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON) };
+    point_at(w, x1, y1, 0);
+    mouse(w, down, held, x1, y1);
+    // Slow enough that even a debug build sees the moves over several
+    // frames (all in one frame, a drag reads as a click). A throw: a few
+    // frames' worth, let go with no pause at the end.
+    let (steps, ms) = if throw { (8, 20) } else { (20, 40) };
+    for i in 1..=steps {
+        let (x, y) = (x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps);
+        std::thread::sleep(Duration::from_millis(ms));
+        under_cursor(w, x, y);
+        mouse(w, WM_MOUSEMOVE, held, x, y);
+    }
+    if !throw {
+        std::thread::sleep(Duration::from_millis(40));
+        point_at(w, x2, y2, held);
+    }
+    mouse(w, up, 0, x2, y2);
+}
+
+/// The wheel at client point x,y: `delta` in wheel units (120 a line,
+/// positive up).
+fn scroll(w: Hwnd, x: i32, y: i32, delta: i32) {
+    point_at(w, x, y, 0);
+    // The wheel message carries screen coordinates.
+    let mut at = [x, y];
+    unsafe { ClientToScreen(w, &mut at) };
+    let (t, _, _) = mouse_target(w, x, y);
+    post(t, WM_MOUSEWHEEL, (delta as i16 as u16 as usize) << 16, xy(at[0], at[1]));
+}
+
+fn type_text(w: Hwnd, text: &str) {
+    for unit in text.encode_utf16() {
+        type_unit(w, unit);
+    }
+}
+
+/// Sets the window's outer size.
+fn resize(w: Hwnd, width: i32, height: i32) {
+    unsafe { SetWindowPos(w, std::ptr::null_mut(), 0, 0, width, height, SWP_MOVE_ONLY) };
 }
 
 fn click(w: Hwnd, x: i32, y: i32, right: bool, double: bool) {
     let (down, up, mk, dbl) =
         if right { (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON, WM_RBUTTONDOWN) } else { (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON, WM_LBUTTONDBLCLK) };
-    let at = xy(x, y);
     point_at(w, x, y, 0);
-    post(w, down, mk, at);
-    post(w, up, 0, at);
+    mouse(w, down, mk, x, y);
+    mouse(w, up, 0, x, y);
     if double {
-        post(w, WM_MOUSEMOVE, 0, at);
-        post(w, dbl, mk, at);
-        post(w, up, 0, at);
+        mouse(w, WM_MOUSEMOVE, 0, x, y);
+        mouse(w, dbl, mk, x, y);
+        mouse(w, up, 0, x, y);
     }
 }
 
@@ -543,10 +698,17 @@ impl Held {
     }
 }
 
+/// Whether `w` is a child control (a classic app's: its message loop
+/// translates key-downs into characters itself, so a character posted too
+/// would come twice).
+fn is_child(w: Hwnd) -> bool {
+    unsafe { GetAncestor(w, 2) != w } // GA_ROOT
+}
+
 fn press(w: Hwnd, vk: u8, ch: Option<u16>, alt: bool) {
     let (down, up) = if alt { (WM_SYSKEYDOWN, WM_SYSKEYUP) } else { (WM_KEYDOWN, WM_KEYUP) };
     post(w, down, vk as usize, key_lparam(vk, false));
-    if let Some(c) = ch {
+    if let Some(c) = ch.filter(|_| !is_child(w)) {
         post(w, WM_CHAR, c as usize, key_lparam(vk, false));
     }
     post(w, up, vk as usize, key_lparam(vk, true));
@@ -555,9 +717,12 @@ fn press(w: Hwnd, vk: u8, ch: Option<u16>, alt: bool) {
 /// Types one UTF-16 unit: as its key when the keyboard layout has one,
 /// else as a bare character.
 fn type_unit(w: Hwnd, unit: u16) {
+    let w = key_target(w);
     let scan = if unit == '\n' as u16 { 0x0D } else { unsafe { VkKeyScanW(unit) } };
     let unit = if unit == '\n' as u16 { '\r' as u16 } else { unit };
-    if scan == -1 {
+    // A control gets the character alone: a key-down would be translated
+    // into it again (and with the keyboard state of the app's thread).
+    if scan == -1 || is_child(w) {
         post(w, WM_CHAR, unit as usize, 1);
     } else {
         let vk = (scan & 0xFF) as u8;
@@ -572,6 +737,7 @@ fn type_unit(w: Hwnd, unit: u16) {
 }
 
 fn key(w: Hwnd, spec: &str) -> Result<(), String> {
+    let w = key_target(w);
     let lower = spec.to_lowercase();
     let mut parts: Vec<&str> = lower.split('+').collect();
     let name = parts.pop().unwrap_or("");
@@ -760,6 +926,29 @@ fn quote(a: &str) -> String {
     out
 }
 
+/// Encodes ordinary executables with C-runtime argument quoting. cmd.exe
+/// instead parses everything after /c or /k as shell syntax: preserve that
+/// text verbatim, with /s and one outer quote pair that cmd strips. In the
+/// tool's args array, pass the whole shell command as one string.
+fn command_line(program: &[&String]) -> String {
+    let cmd = program.first().is_some_and(|p| {
+        p.rsplit(['/', '\\']).next().is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe") || n.eq_ignore_ascii_case("cmd"))
+    });
+    if cmd
+        && let Some(i) = program.iter().skip(1).position(|a| a.eq_ignore_ascii_case("/c") || a.eq_ignore_ascii_case("/k")).map(|i| i + 1)
+    {
+        let mut parts: Vec<String> = program[..i].iter().map(|a| quote(a)).collect();
+        if !program[1..i].iter().any(|a| a.eq_ignore_ascii_case("/s")) {
+            parts.push("/s".into());
+        }
+        parts.push(program[i].to_string());
+        let command = program[i + 1..].iter().map(|a| a.as_str()).collect::<Vec<_>>().join(" ");
+        parts.push(format!("\"{command}\""));
+        return parts.join(" ");
+    }
+    program.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+}
+
 /// `--size`'s "WxH", as a window's outer size.
 fn size_of(s: &str) -> (i32, i32) {
     let (w, h) = s.split_once(['x', 'X']).unwrap_or((s, s));
@@ -767,6 +956,10 @@ fn size_of(s: &str) -> (i32, i32) {
 }
 
 fn launch(o: &Opts) -> Result<i32, String> {
+    // Wait for job assignment before creating any descendant processes.
+    if o.flags.iter().any(|f| f == "--job-wait") {
+        std::io::Read::read_exact(&mut std::io::stdin(), &mut [0u8; 1]).map_err(|e| format!("App launcher lost its owning Oak: {e}"))?;
+    }
     let program: Vec<&String> = match o.rest.iter().position(|a| a == "--") {
         Some(i) => o.rest[i + 1..].iter().collect(),
         None => o.rest.iter().collect(),
@@ -775,7 +968,7 @@ fn launch(o: &Opts) -> Result<i32, String> {
     let size = o.flags.iter().position(|f| f == "--size").and_then(|i| o.flags.get(i + 1)).map(|s| size_of(s));
     let desk = Desktop::create(&o.desktop)?;
     let before = desk.windows();
-    let line = program.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ");
+    let line = command_line(&program);
     let mut cmdline = wide(&line);
     let desk_name = wide(&o.desktop);
     let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
@@ -798,7 +991,11 @@ fn launch(o: &Opts) -> Result<i32, String> {
             std::ptr::null(),
             std::ptr::null(),
             1,
-            0,
+            // A console program (cmd, Python) otherwise allocates a new
+            // console. Windows Terminal can host that on the user's real
+            // desktop, ignoring lpDesktop. GUI windows still use lpDesktop;
+            // stdout/stderr remain the inherited log pipes.
+            CREATE_NO_WINDOW,
             std::ptr::null(),
             std::ptr::null(),
             &si,
@@ -816,7 +1013,11 @@ fn launch(o: &Opts) -> Result<i32, String> {
         if unsafe { WaitForSingleObject(pi.hProcess, 0) } == 0 {
             break;
         }
-        if let Some(&w) = desk.windows().iter().find(|w| !before.contains(w)) {
+        // Only a window of the app or of a program it started: an app that
+        // hands off to one already running (Windows 11's Notepad) would
+        // otherwise pass off that program's window, the user's, as its own.
+        let family = descendants(pi.dwProcessId);
+        if let Some(&w) = desk.windows().iter().find(|w| !before.contains(w) && family.contains(&pid_of(**w))) {
             // Let it settle at its first size before resizing or reporting.
             std::thread::sleep(Duration::from_millis(300));
             if let Some((width, height)) = size {
@@ -829,6 +1030,9 @@ fn launch(o: &Opts) -> Result<i32, String> {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+    if !shown && desk.windows().iter().any(|w| !before.contains(w)) {
+        println!("A window of another program appeared instead (the app handed off to a program already running?); it isn't the app's, so it is left alone.");
     }
     if !shown && unsafe { WaitForSingleObject(pi.hProcess, 0) } != 0 {
         println!("No window after 60s; still waiting for the app to exit.");
@@ -847,6 +1051,227 @@ fn launch(o: &Opts) -> Result<i32, String> {
     Ok(code as i32)
 }
 
+// ------------------------------------------------------------ in Oak
+
+/// The hidden desktop Oak's apps run on.
+pub(crate) const DESKTOP: &str = "oak-apps";
+
+type Job = Box<dyn FnOnce(Option<&Desktop>) + Send>;
+
+/// Hands `job` to Oak's thread attached to the hidden desktop (made once),
+/// to run after the jobs before it. The real cursor is read first, on the
+/// calling thread (see `under_cursor`).
+fn submit(job: Job) -> Result<(), String> {
+    use std::sync::mpsc::{Sender, channel};
+    static JOBS: std::sync::Mutex<Option<Sender<Job>>> = std::sync::Mutex::new(None);
+    read_cursor();
+    let mut jobs = JOBS.lock().unwrap();
+    let sender = jobs.get_or_insert_with(|| {
+        unsafe { SetProcessDpiAwarenessContext(-4) };
+        let (tx, rx) = channel::<Job>();
+        let _ = std::thread::Builder::new().name("hidden-desktop".into()).spawn(move || {
+            let mut desk: Option<Desktop> = None;
+            for job in rx {
+                if desk.is_none() {
+                    desk = Desktop::open(DESKTOP).ok();
+                }
+                job(desk.as_ref());
+            }
+        });
+        tx
+    });
+    sender.send(job).map_err(|_| "The hidden desktop's thread stopped.".to_string())
+}
+
+/// Runs `f` on the hidden desktop's thread and returns what it returns.
+/// `f` gets the desktop, None while it doesn't exist (nothing launched
+/// yet).
+pub(crate) fn on_desktop<R: Send + 'static>(f: impl FnOnce(Option<&Desktop>) -> R + Send + 'static) -> Result<R, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    submit(Box::new(move |d| {
+        let _ = tx.send(f(d));
+    }))?;
+    rx.recv().map_err(|_| "The hidden desktop's thread stopped.".to_string())
+}
+
+/// Runs `f` on the hidden desktop's thread, without waiting for it (the
+/// live view's input, from the UI thread).
+pub(crate) fn post_to_desktop(f: impl FnOnce(Option<&Desktop>) + Send + 'static) {
+    let _ = submit(Box::new(f));
+}
+
+impl Desktop {
+    /// Its windows, largest first.
+    pub(crate) fn list(&self) -> Vec<usize> {
+        self.windows()
+    }
+}
+
+/// Whether `w` is still a window.
+pub(crate) fn alive(w: usize) -> bool {
+    unsafe { IsWindow(w as Hwnd) != 0 }
+}
+
+/// A window's line as `list` prints it: id, process, size, title.
+pub(crate) fn line(w: usize) -> String {
+    describe(w)
+}
+
+pub(crate) fn window_title(w: usize) -> String {
+    title(w as Hwnd)
+}
+
+pub(crate) fn process_of(w: usize) -> u32 {
+    pid_of(w)
+}
+
+/// The window's client area, as a picture.
+pub(crate) fn picture(w: usize) -> Result<image::RgbaImage, String> {
+    let (cw, ch, mut px) = capture(w as Hwnd)?;
+    for p in px.chunks_exact_mut(4) {
+        p.swap(0, 2); // BGRA -> RGBA
+        p[3] = 255;
+    }
+    image::RgbaImage::from_raw(cw, ch, px).ok_or("bad image size".into())
+}
+
+/// The window's client size.
+pub(crate) fn size(w: usize) -> (i32, i32) {
+    client_size(w as Hwnd)
+}
+
+/// The user's own windows that could be offered to the model: visible,
+/// titled, unowned, not tool windows or cloaked ones (suspended apps),
+/// not Oak's; on the calling thread's desktop, front first.
+pub(crate) fn user_windows() -> Vec<usize> {
+    unsafe extern "system" fn each(h: Hwnd, l: isize) -> i32 {
+        let out = unsafe { &mut *(l as *mut Vec<usize>) };
+        const GW_OWNER: u32 = 4;
+        const GWL_EXSTYLE: i32 = -20;
+        const WS_EX_TOOLWINDOW: isize = 0x80;
+        const DWMWA_CLOAKED: u32 = 14;
+        let ok = unsafe { IsWindowVisible(h) != 0 && GetWindowTextLengthW(h) > 0 && GetWindow(h, GW_OWNER).is_null() && GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW == 0 };
+        let mut cloaked = 0u32;
+        let cloaked = unsafe { DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut c_void, 4) } == 0 && cloaked != 0;
+        if ok && !cloaked && pid_of(h as usize) != std::process::id() {
+            out.push(h as usize);
+        }
+        1
+    }
+    let mut out: Vec<usize> = vec![];
+    unsafe { EnumWindows(each, &mut out as *mut _ as isize) };
+    out.retain(|&w| title(w as Hwnd) != "Program Manager");
+    out
+}
+
+/// The name of window `w`'s program (its file name, as `notepad.exe`).
+pub(crate) fn program_of(w: usize) -> String {
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    let pid = pid_of(w);
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return String::new();
+        }
+        let mut buf = [0u16; 1024];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut n) != 0;
+        CloseHandle(h);
+        if !ok {
+            return String::new();
+        }
+        let path = String::from_utf16_lossy(&buf[..n as usize]);
+        path.rsplit(['\\', '/']).next().unwrap_or("").to_string()
+    }
+}
+
+/// `input` to a window of the user's own desktop, on the calling thread:
+/// posted as to a hidden one, but the window is never moved.
+pub(crate) fn input_gently(w: usize, i: Input) -> Result<(), String> {
+    GENTLE.with(|g| g.set(true));
+    let r = input(w, i);
+    GENTLE.with(|g| g.set(false));
+    r
+}
+
+/// `live` to a window of the user's own desktop (see `input_gently`).
+pub(crate) fn live_gently(w: usize, l: Live) {
+    GENTLE.with(|g| g.set(true));
+    live(w, l);
+    GENTLE.with(|g| g.set(false));
+}
+
+/// Input as the WINDOW tool gives it (on the desktop's thread).
+pub(crate) enum Input {
+    Click { x: i32, y: i32, right: bool, double: bool },
+    Move { x: i32, y: i32 },
+    Drag { from: (i32, i32), to: (i32, i32), right: bool, throw: bool },
+    Scroll { x: i32, y: i32, lines: i32 },
+    Type(String),
+    Key(String),
+    Resize { width: i32, height: i32 },
+    Close,
+}
+
+pub(crate) fn input(w: usize, i: Input) -> Result<(), String> {
+    let w = w as Hwnd;
+    match i {
+        Input::Click { x, y, right, double } => click(w, x, y, right, double),
+        Input::Move { x, y } => point_at(w, x, y, 0),
+        Input::Drag { from, to, right, throw } => drag(w, from, to, right, throw),
+        Input::Scroll { x, y, lines } => scroll(w, x, y, lines * 120),
+        Input::Type(text) => type_text(w, &text),
+        Input::Key(spec) => key(w, &spec)?,
+        Input::Resize { width, height } => resize(w, width, height),
+        Input::Close => post(w, WM_CLOSE, 0, 0),
+    }
+    Ok(())
+}
+
+/// The user's pointer and keys, passed on from the live view as they come
+/// (on the desktop's thread): no pauses, buttons held across moves.
+pub(crate) enum Live {
+    Move { x: i32, y: i32, buttons: usize },
+    Button { x: i32, y: i32, button: u8, down: bool, buttons: usize },
+    Wheel { x: i32, y: i32, delta: i32 },
+    Char(u16),
+    Key(String),
+}
+
+/// `buttons` in `Live`: which are held (MK_ flags).
+pub(crate) const HELD_LEFT: usize = MK_LBUTTON;
+pub(crate) const HELD_RIGHT: usize = MK_RBUTTON;
+pub(crate) const HELD_MIDDLE: usize = 0x10;
+
+pub(crate) fn live(w: usize, l: Live) {
+    let w = w as Hwnd;
+    match l {
+        Live::Move { x, y, buttons } => {
+            under_cursor(w, x, y);
+            mouse(w, WM_MOUSEMOVE, buttons, x, y);
+        }
+        Live::Button { x, y, button, down, buttons } => {
+            const WM_MBUTTONDOWN: u32 = 0x0207;
+            let msg = match button {
+                1 => WM_RBUTTONDOWN,
+                2 => WM_MBUTTONDOWN,
+                _ => WM_LBUTTONDOWN,
+            } + if down { 0 } else { 1 };
+            if down {
+                point_at(w, x, y, buttons);
+            } else {
+                under_cursor(w, x, y);
+            }
+            mouse(w, msg, buttons, x, y);
+        }
+        Live::Wheel { x, y, delta } => scroll(w, x, y, delta),
+        Live::Char(unit) => type_unit(w, unit),
+        Live::Key(spec) => {
+            let _ = key(w, &spec);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,6 +1283,42 @@ mod tests {
         assert_eq!(quote(r#"say "hi""#), r#""say \"hi\"""#);
         assert_eq!(quote(r"C:\dir with space\"), r#""C:\dir with space\\""#);
         assert_eq!(quote(""), "\"\"");
+    }
+
+    #[test]
+    fn cmd_commands_keep_their_shell_quotes() {
+        let line = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            command_line(&args.iter().collect::<Vec<_>>())
+        };
+        assert_eq!(line(&["cmd.exe", "/d", "/c", r#"set "NAME=two words" && "C:\Program Files\App\app.exe" "an argument""#]),
+            r#"cmd.exe /d /s /c "set "NAME=two words" && "C:\Program Files\App\app.exe" "an argument"""#);
+        assert_eq!(line(&[r"C:\Windows\System32\CMD.EXE", "/S", "/K", r#""C:\App Folder\app.exe""#]),
+            r#"C:\Windows\System32\CMD.EXE /S /K ""C:\App Folder\app.exe"""#);
+        // Only cmd is special: an ordinary program's /c argument is literal.
+        let args = ["python.exe", "/c", r#"say "hi""#, r"C:\dir with space\", ""];
+        assert_eq!(line(&args), args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" "));
+        assert_eq!(line(&["not-cmd.exe", "/c", "two words"]), "not-cmd.exe /c \"two words\"");
+    }
+
+    #[test]
+    fn cmd_executes_quoted_assignments_and_a_quoted_program() {
+        use std::os::windows::process::CommandExt;
+        let exe = std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+        let command = format!(r#"set "OAK_WINDOW_CMD_QUOTE_PROBE=two words & parentheses (kept)" && "{exe}" /d /c set OAK_WINDOW_CMD_QUOTE_PROBE && exit /b 0"#);
+        for flags in [vec!["/c"], vec!["/d", "/s", "/C"], vec!["/d", "/k"]] {
+            let args: Vec<String> = std::iter::once(exe.clone()).chain(flags.iter().map(|s| s.to_string())).chain(std::iter::once(command.clone())).collect();
+            let line = command_line(&args.iter().collect::<Vec<_>>());
+            let raw = line.strip_prefix(&format!("{} ", quote(&exe))).unwrap();
+            let out = std::process::Command::new(&exe)
+                .raw_arg(raw)
+                .env_remove("OAK_WINDOW_CMD_QUOTE_PROBE")
+                .creation_flags(0x0800_0000)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{line}: {}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "OAK_WINDOW_CMD_QUOTE_PROBE=two words & parentheses (kept)", "{line}");
+        }
     }
 
     /// Launches OAK's own debug build on the hidden desktop, types into it

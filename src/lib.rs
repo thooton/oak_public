@@ -19,6 +19,7 @@ macro_rules! switch {
 
 mod agent;
 mod api;
+mod approval;
 mod cache_ttl;
 mod bench;
 mod browser;
@@ -66,6 +67,10 @@ mod wire_anthropic;
 mod tray;
 #[cfg(windows)]
 mod winctl;
+#[cfg(windows)]
+mod window_tool;
+#[cfg(windows)]
+mod window_view;
 
 // The window's parts, drawn from the state above.
 mod browser_view;
@@ -415,6 +420,8 @@ impl App {
         openrouter::set_routing(&settings.or_routing);
         unslop::set_all(&settings);
         scratch::set_auto(settings.scratch_clear);
+        // The user's browser's extension finds Oak here (browser/bridge.rs).
+        browser::bridge::start();
         let font_job = Arc::new(Mutex::new(FontJob::default()));
         if !markdown::install_face(&cc.egui_ctx, &settings.font) {
             // Chosen, but its files aren't here (yet, or any more): fetch them.
@@ -680,7 +687,11 @@ impl App {
         find::keyboard_target(ui.ctx(), None);
         self.session_box(&ctx, t, central.response.rect);
         let browser = self.browser_preview(&ctx, t, central.response.rect);
-        self.blender_preview(&ctx, t, central.response.rect, browser);
+        let blender = self.blender_preview(&ctx, t, central.response.rect, browser);
+        #[cfg(windows)]
+        self.window_preview(&ctx, t, central.response.rect, blender.or(browser));
+        #[cfg(not(windows))]
+        let _ = blender;
         let Screen::Chat(id) = &self.screen else { return };
         let id = id.clone();
         self.chat_scene(ui, &id);
@@ -840,7 +851,7 @@ pub fn main() -> eframe::Result {
         match args.get(2).map(String::as_str) {
             Some(mcp::blender::NAME) => std::process::exit(mcp::blender::serve_stdio()),
             _ => {
-                eprintln!("oak --mcp <server>: Oak serves {} over stdio.", mcp::BUILTIN.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "));
+                eprintln!("oak --mcp <server>: Oak serves {} over stdio.", mcp::SERVES.join(", "));
                 std::process::exit(2);
             }
         }
@@ -903,6 +914,8 @@ pub fn main() -> eframe::Result {
     freebuff::release();
     // The conversations' browsers, gently, so they keep their cookies.
     browser::shutdown_all();
+    // Private Blender jobs (including pending launches) must not survive.
+    mcp::blender_run::shutdown();
     // The MCP servers Oak started.
     mcp::shutdown();
     // "Restart to update": the new version, now that this one is done.

@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Oak",
+  "version": "1.0.0",
+  "description": "Lets Oak's agent use the tabs you allow it in Oak, through the browser's debugger.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp9yzuJzjfwzMKpm2PmZzj5V4MZWqVm/6VbgX5gvvfaOXVcfejROyfaosdViJY8KEy5D9GdQLakznNZx18kTvem1YcVm/OR0RJDJpGdzRPGkQoYEnH+xFZ2odhtRw0uF/CwsNHyKkcg6wlkUOfxrekd/lE/8/Kplwe5ejQUAmVe6pRpKIDtIkyVM1PSp7LklRXS9lXN0dflgl0B9JDf1tcx/tahJ2n+HnblNZjHZc5+jxNpcFttoZJT12lyLLs6k9z46/YafZ8zznNijBWFs6nnoQQktCdnjU75i5+RS4LnoNpxNAfbYkYTy8hko1VGFjY/6zFbNv/gLqK1ngAkD3BQIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

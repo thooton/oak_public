@@ -18,6 +18,7 @@
 //! conversations (one browser at a time on each), and manage its cookies,
 //! site data, emulation and what it records (`state.rs`).
 
+pub(crate) mod bridge;
 mod state;
 
 pub(crate) use state::model_profiles;
@@ -233,6 +234,11 @@ pub(crate) struct Instance {
     probe: Mutex<Option<Sender<(f32, f32)>>>,
     /// The model's calls running on it.
     agent: AtomicUsize,
+    /// The user's own browser's tab it is (BROWSER attach), through Oak's
+    /// extension (`bridge.rs`): nothing is launched, and nothing of theirs
+    /// is overridden (viewport, user agent, downloads, file choosers, other
+    /// tabs); closing it lets go of the tab.
+    tab: Option<i64>,
 }
 
 static OPEN: LazyLock<Mutex<HashMap<String, Arc<Instance>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -289,11 +295,16 @@ pub(crate) fn open(conv: &str, ctx: &egui::Context) -> Arc<Instance> {
 /// Opens conversation `conv`'s browser on `profile` (named `name`, or the
 /// conversation's own), unless another conversation's browser is on it.
 fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<String>, emulation: state::Emulation) -> Result<Arc<Instance>, String> {
+    open_on(conv, ctx, profile, name, emulation, None)
+}
+
+/// `open_with`, or (`tab`) the user's tab through the extension.
+fn open_on(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<String>, emulation: state::Emulation, tab: Option<i64>) -> Result<Arc<Instance>, String> {
     let mut open = OPEN.lock().unwrap();
     if let Some(i) = open.get(conv) {
         return Ok(i.clone());
     }
-    if open.values().any(|i| i.profile == profile) {
+    if tab.is_none() && open.values().any(|i| i.profile == profile) {
         return Err(format!(
             "The profile {} is in use by another conversation's browser: close it there first, or open another profile.",
             name.as_deref().map_or_else(|| profile.display().to_string(), |n| format!("{n:?}"))
@@ -325,6 +336,7 @@ fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<Str
         texture: Mutex::new(None),
         probe: Mutex::new(None),
         agent: AtomicUsize::new(0),
+        tab,
     });
     open.insert(conv.to_string(), inst.clone());
     drop(open);
@@ -352,6 +364,13 @@ pub(crate) fn restart(conv: &str, ctx: &egui::Context) {
     let conv = conv.to_string();
     std::thread::spawn(move || {
         let (mut profile, mut name, mut size, mut emulation) = (profile_dir(&conv), None, None, None);
+        // The user's tab: attached again (the user restarted it).
+        if let Some(old) = old.as_ref().filter(|o| o.tab.is_some()) {
+            old.shutdown();
+            let _ = open_on(&conv, &ctx, old.profile.clone(), None, Default::default(), old.tab);
+            ctx.request_repaint();
+            return;
+        }
         if let Some(old) = old {
             size = Some(*old.viewport.lock().unwrap());
             emulation = Some(old.emulation.lock().unwrap().clone());
@@ -455,6 +474,9 @@ impl Instance {
     /// Starts the browser and readies its page; the page's events, for
     /// the loop.
     fn start(&self) -> Result<Listener, String> {
+        if let Some(tab) = self.tab {
+            return self.start_attached(tab);
+        }
         let exe = find_browser().ok_or(NO_BROWSER)?;
         std::fs::create_dir_all(&self.profile).map_err(|e| format!("Couldn't make the browser's profile folder: {e}"))?;
         // A browser closed on this profile a moment ago may not have quit yet.
@@ -526,6 +548,43 @@ impl Instance {
             cdp.send("Page.navigate", json!({"url": last}));
         }
         Ok(events)
+    }
+
+    /// Attaches to the user's tab `tab` through the extension and readies
+    /// it as little as the tools need: its events, main frame and network
+    /// log; its size is the tab's.
+    fn start_attached(&self, tab: i64) -> Result<Listener, String> {
+        let cdp = bridge::attach(tab)?;
+        let events = cdp.listen();
+        let call = |m: &str, p: Value| cdp.call(m, p).map_err(|e| e.to_string());
+        call("Page.enable", json!({}))?;
+        let tree = call("Page.getFrameTree", json!({}))?;
+        *self.main_frame.lock().unwrap() = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
+        let url = tree["frameTree"]["frame"]["url"].as_str().unwrap_or("").to_string();
+        let _ = call("Network.enable", json!({"maxPostDataSize": state::POST_MAX}));
+        *self.page.lock().unwrap() = Some(cdp.clone());
+        self.sync_size();
+        self.update_view(|v| v.url = url);
+        Ok(events)
+    }
+
+    /// An attached tab's viewport: the size the user's window gives it.
+    fn sync_size(&self) {
+        let (Some(_), Some(page)) = (self.tab, self.page()) else { return };
+        let Ok(r) = page.call_for("Runtime.evaluate", json!({"expression": "[innerWidth, innerHeight, devicePixelRatio]", "returnByValue": true}), Duration::from_secs(3)) else {
+            return;
+        };
+        let v = &r["result"]["value"];
+        if let (Some(w), Some(h)) = (v[0].as_u64(), v[1].as_u64()) {
+            let mut vp = self.viewport.lock().unwrap();
+            (vp.w, vp.h) = (w.max(1) as u32, h.max(1) as u32);
+            vp.scale = v[2].as_f64().unwrap_or(1.0) as f32;
+        }
+    }
+
+    /// Whether it is the user's own tab.
+    pub(crate) fn attached(&self) -> bool {
+        self.tab.is_some()
     }
 
     /// The DevTools address the starting browser prints (`rx`), once it
@@ -697,6 +756,7 @@ fn run(inst: Arc<Instance>) {
     if !inst.is_closed() {
         let code = inst.child.lock().unwrap().as_mut().and_then(|c| c.try_wait().ok().flatten());
         let why = match code {
+            _ if inst.tab.is_some() => "The user's tab is gone, or let go of (closed, debugging canceled, or the browser or its extension went).".into(),
             Some(s) => format!("The browser quit ({s})."),
             None => "The browser stopped answering.".into(),
         };
@@ -800,6 +860,7 @@ impl Instance {
                     v.note(text);
                 }
             }),
+            "Page.windowOpen" if self.tab.is_some() => {} // the user's browser opens it as it would
             "Page.windowOpen" => {
                 // A new window the page script didn't catch: its address
                 // opens here, and the window goes.
@@ -835,7 +896,7 @@ impl Instance {
     }
 
     fn set_url(&self, url: String) {
-        if url != self.view.lock().unwrap().url {
+        if self.tab.is_none() && url != self.view.lock().unwrap().url {
             let _ = std::fs::write(self.profile.join("oak-last-url"), &url);
         }
         self.update_view(|v| v.url = url);
@@ -969,7 +1030,10 @@ impl Instance {
         if *cur != vp {
             *cur = vp;
             // (Under the lock, so start() can't publish its page between.)
-            if let Some(page) = self.page() {
+            // The user's tab keeps its own size.
+            if self.tab.is_none()
+                && let Some(page) = self.page()
+            {
                 apply_viewport(&page, vp);
             }
             drop(cur);
@@ -1830,6 +1894,19 @@ impl Instance {
         {
             return Err(d);
         }
+        if self.tab.is_some() {
+            if let Some(what) = match name {
+                "BROWSER_RESIZE" => Some("resize"),
+                "BROWSER_EMULATE" => Some("emulate"),
+                "BROWSER_COOKIES" | "BROWSER_SET_COOKIES" | "BROWSER_DELETE_COOKIES" => Some("its cookies"),
+                "BROWSER_CLEAR_DATA" => Some("clear_data"),
+                _ => None,
+            } {
+                let hint = if what == "its cookies" { " Read the page's own with eval (document.cookie) if needed." } else { "" };
+                return Err(format!("Not in the user's own tab ({what} would change their browser; its size is their window's).{hint}"));
+            }
+            self.sync_size();
+        }
         let navs = self.navs();
         let str_of = |k: &str| input[k].as_str().unwrap_or("");
         self.view.lock().unwrap().actor = Actor::Agent;
@@ -2182,14 +2259,49 @@ pub(crate) fn model_open(conv: &str, ctx: &egui::Context, input: &Value, folder:
     Ok(inst.report(&format!("{opened} The viewport is {w}x{h} CSS px.")))
 }
 
+/// BROWSER attach for conversation `conv`: asks the user for one of their
+/// own browser's tabs (`approval.rs`; `title` picks the one meant first,
+/// else their active tab), then works in it instead of its own browser
+/// (which closes) until close.
+pub(crate) fn model_attach(conv: &str, ctx: &egui::Context, input: &Value) -> Result<String, String> {
+    let why = input["why"].as_str().unwrap_or("").trim();
+    if why.is_empty() {
+        return Err("Say why in `why`: the user reads it before choosing.".into());
+    }
+    let tabs = bridge::tabs()?;
+    let hint = input["title"].as_str().unwrap_or("").trim().to_lowercase();
+    let suggested = (!hint.is_empty())
+        .then(|| tabs.iter().position(|t| t.title.to_lowercase().contains(&hint) || t.url.to_lowercase().contains(&hint)))
+        .flatten()
+        .or_else(|| tabs.iter().position(|t| t.active));
+    let choices = tabs.iter().map(|t| crate::approval::Choice { label: if t.title.is_empty() { t.url.clone() } else { t.title.clone() }, detail: t.url.clone() }).collect();
+    let i = crate::approval::ask(conv, "one of your browser tabs", why, choices, suggested)?;
+    let tab = &tabs[i];
+    let mut before = String::new();
+    if let Some(old) = OPEN.lock().unwrap().remove(conv) {
+        before = if old.tab.is_some() { "Let go of the user's other tab. ".into() } else { "Closed your own browser. ".into() };
+        end(old);
+    }
+    let inst = open_on(conv, ctx, profile_dir(conv), None, Default::default(), Some(tab.id))?;
+    let _busy = Busy::new(&inst);
+    inst.ready()?;
+    let (w, h) = inst.viewport_size();
+    Ok(inst.report(&format!(
+        "{before}The user let you use their tab \"{}\" in {}: it is on their screen (and they may use it too), logged in as they are. Your BROWSER actions go to it until close, which lets go of it; resize, emulate, cookies and clear_data aren't available in it. Its viewport is {w}x{h} CSS px.",
+        tab.title,
+        bridge::connected().unwrap_or_else(|| "their browser".into())
+    )))
+}
+
 /// BROWSER close for conversation `conv`: its browser ends (the view fades
 /// it out).
 pub(crate) fn model_close(conv: &str) -> Result<String, String> {
     if !is_open(conv) {
         return Ok("The browser was closed already.".into());
     }
+    let users = get(conv).is_some_and(|i| i.tab.is_some());
     close(conv);
-    Ok("Closed the browser.".into())
+    Ok(if users { "Let go of the user's tab (it stays open in their browser).".into() } else { "Closed the browser.".into() })
 }
 
 /// Runs a BROWSER call (but open, close and screenshot) for conversation `conv`.

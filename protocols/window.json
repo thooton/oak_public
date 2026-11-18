@@ -1,0 +1,6 @@
+{
+  "title": "Window",
+  "description": "trying a GUI app on a hidden desktop, without touching the user's screen",
+  "builtin": "window",
+  "window": true
+}

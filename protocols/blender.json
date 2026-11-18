@@ -1,0 +1,7 @@
+{
+  "title": "Blender",
+  "description": "Blender (scene info, viewport screenshots, Python in Blender, Poly Haven assets)",
+  "builtin": "blender",
+  "window": true,
+  "timeout": 1800
+}

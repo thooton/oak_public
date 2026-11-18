@@ -221,6 +221,15 @@ pub(crate) fn preview_layout(view: Rect, col: Rangef, right: f32, top: f32, size
 }
 
 impl App {
+    /// Windowed protocols also belong to subagents: select the actual
+    /// shown conversation, not the parent/browser-only conversation.
+    pub(crate) fn program_conv(&self) -> Option<String> {
+        if self.page != Page::Chats { return None }
+        let Screen::Chat(id) = &self.screen else { return None };
+        let c = self.sessions.get(id)?.conv.lock().unwrap();
+        (!c.chat && c.side_chat_of.is_none()).then(|| id.clone())
+    }
+
     /// The conversation whose browser the shown screen can have: a
     /// conversation the user started (not a subagent, a side chat, a
     /// plugin's tab or a cloud session).
@@ -602,7 +611,8 @@ fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, k: f32) {
         Status::Ready => {}
         Status::Starting => {
             p.rect_filled(rect, 0.0, t.bg);
-            p.text(rect.center(), Align2::CENTER_CENTER, "Starting the browser…", FontId::proportional(13.0), t.ink3);
+            let what = if inst.attached() { "Attaching to your tab…" } else { "Starting the browser…" };
+            p.text(rect.center(), Align2::CENTER_CENTER, what, FontId::proportional(13.0), t.ink3);
             return;
         }
         Status::Failed(e) | Status::Quit(e) => {
@@ -612,7 +622,7 @@ fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, k: f32) {
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new(e).color(t.error));
                     ui.add_space(10.0);
-                    if ui.button("Restart the browser").clicked() {
+                    if ui.button(if inst.attached() { "Attach to the tab again" } else { "Restart the browser" }).clicked() {
                         browser::restart(&inst.conv, ui.ctx());
                     }
                 });
@@ -867,6 +877,20 @@ fn select_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, k: f32,
 mod tests {
     use super::*;
     use crate::app_hover_test::{Headless, click, conv_json, key, run_frame};
+
+    #[test]
+    fn windowed_protocols_select_the_shown_subagent() {
+        let mut conv = conv_json("windowed-subagent", "Agent Blender", serde_json::json!([]));
+        conv["parent"] = serde_json::json!("parent-agent");
+        conv["agent_id"] = serde_json::json!(7);
+        let (_dir, _h, mut app) = Headless::start("windowed-subagent", &[conv]);
+        app.page = Page::Chats;
+        app.screen = Screen::Chat("windowed-subagent".into());
+        assert_eq!(app.program_conv().as_deref(), Some("windowed-subagent"));
+        assert!(app.browser_conv().is_none(), "browser restrictions stay separate");
+        app.screen = Screen::Chat("missing-agent".into());
+        assert!(app.program_conv().is_none());
+    }
 
     /// A screencast can arrive at CSS resolution even on a HiDPI screen.
     /// Its image must fill the same rectangle that receives page input.

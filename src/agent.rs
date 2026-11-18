@@ -725,6 +725,11 @@ impl Session {
         };
         self.live.lock().unwrap().quiet_stop = true;
         self.deleted.store(true, Ordering::SeqCst);
+        // This path is also used by AGENT_DELETE, without the GUI's
+        // delete_transcript hook: stop pending/private Blender here too.
+        crate::mcp::blender_run::end(&id);
+        #[cfg(windows)]
+        crate::window_tool::end(&id);
         self.tasks.kill_all();
         self.tasks.forget();
         self.wake();
