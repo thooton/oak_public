@@ -185,13 +185,15 @@ the tab menu) reopens the tabs closed since Oak started, newest first, in their 
 never closes its conversation, its draft or its work. A conversation shows its
 transcript with a minimap, the session box (title, folder, provider, model, effort, goal, notes,
 agents, progress meters) and the message box with the smart context, Unslop and account boxes.
+The message box stays docked to the bottom as drafts, attachments and notices change its height,
+including in a side chat.
 A click on the session box's folder opens it in the system's file manager; its right-click menu
 has Open folder and Copy path (a folder that no longer exists can only be copied).
 Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme and Font rows show once a plugin adds a
 choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
-plugin draws one row there, `plugins::COMPOSER_CORNER_H` tall, and the message box makes room for
-it under the buttons (`composer::links_room`) whenever a plugin registers the hook.
+plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
+is clipped to the corner so it cannot move or cover the rest of the composer.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.

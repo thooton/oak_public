@@ -38,7 +38,7 @@ mod parts;
 
 use crate::{App, api as accounts, store};
 use oak_sdk::abi::{ENTRY_SYMBOL, OAK_ABI, OAK_API_VERSION, OakInit, OakPlugin};
-pub(crate) use parts::{CloudBackend, FontDef, HomeTab, Info, NewKind, Parts, SessionKit, TabKind, Tags, Vault};
+pub(crate) use parts::{CloudBackend, FontDef, HomeTab, Hooks, Info, NewKind, Parts, SessionKit, TabKind, Tags, Vault};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -764,24 +764,34 @@ pub(crate) fn exiting() {
     }
 }
 
-/// What plugins draw in a message box's bottom left corner, above Oak's
-/// Settings link: each a row `COMPOSER_CORNER_H` tall, `GAP` apart, its
-/// bottom on the link's top. Returns the top of what was drawn, or
-/// `room.top()` when nothing was.
-pub(crate) fn composer_corner(ui: &mut eframe::egui::Ui, app: &mut App, room: &eframe::egui::Rect) -> f32 {
-    let mut top = room.top();
-    for h in parts().hooks.iter().filter(|h| h.has_composer_corner()) {
-        let bottom = top - 6.0;
-        let area = eframe::egui::Rect::from_min_max(eframe::egui::pos2(room.left(), bottom - COMPOSER_CORNER_H), eframe::egui::pos2(room.right(), bottom));
-        ui.scope_builder(eframe::egui::UiBuilder::new().max_rect(area).layout(eframe::egui::Layout::bottom_up(eframe::egui::Align::LEFT)), |ui| h.composer_corner(ui, app));
-        top = area.top();
+/// Lay out the plugin rows above Settings, starting at `top`. Returns the
+/// vertical space taken, including the gap before the Settings link.
+pub(crate) fn composer_corner(ui: &mut eframe::egui::Ui, app: &mut App, hooks: &[Arc<Hooks>], x: eframe::egui::Rangef, top: f32) -> f32 {
+    use eframe::egui::{Align, Layout, Rect, Shape, UiBuilder};
+    const ROW_H: f32 = 22.0;
+    const ROW_GAP: f32 = 6.0;
+    let mut height = 0.0;
+    let layer = ui.layer_id();
+    for (i, hook) in hooks.iter().enumerate().filter(|(_, h)| h.has_composer_corner()) {
+        let y = top + height;
+        let area = Rect::from_x_y_ranges(x, y..=y + ROW_H);
+        // Even an empty bottom-up UI has an origin. Do not allocate it
+        // into the parent: otherwise it can move the panel's top edge.
+        let mut row = ui.new_child(UiBuilder::new().id_salt(("composer-corner", i))
+            .max_rect(area).layout(Layout::bottom_up(Align::LEFT)));
+        row.shrink_clip_rect(area);
+        let before = row.ctx().graphics(|g| g.get(layer).map_or(0, |p| p.next_idx().0));
+        hook.composer_corner(&mut row, app);
+        // The Rust SDK registers a callback even for the default no-op.
+        // Advance only for a widget or paint, so empty hooks share a slot.
+        if row.min_rect().is_positive() || row.ctx().graphics(|g| g.get(layer).is_some_and(|p| {
+            p.all_entries().skip(before).any(|s| !matches!(s.shape, Shape::Noop))
+        })) {
+            height += ROW_H + ROW_GAP;
+        }
     }
-    top
+    height
 }
-
-/// The height of a plugin's row above the Settings link: one line, a
-/// switch and its padding.
-pub(crate) const COMPOSER_CORNER_H: f32 = 22.0;
 
 /// The plugin tab kind that owns `key`, if one does.
 pub(crate) fn tab_kind(key: &str) -> Option<&'static Arc<TabKind>> {
