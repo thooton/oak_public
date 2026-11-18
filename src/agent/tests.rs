@@ -980,8 +980,9 @@ fn task_notifications_arrive_mid_turn() {
 /// `cargo test live_rolling -- --ignored --nocapture`): a seeded ~30k
 /// conversation passes a low trigger, gets summarized in the background
 /// while the agent runs a tool, and is then asked about something only
-/// the summary still holds. Checks that the summary request is served
-/// from the prompt cache and that the API accepts the rolled view.
+/// the summary still holds. Checks that the summary request reads the
+/// system prompt and tools from the prompt cache and that the API accepts
+/// the summary request and the rolled view.
 #[test]
 #[ignore]
 fn live_rolling() {
@@ -1040,8 +1041,9 @@ fn live_rolling() {
     println!("answer: {answer}");
     assert!(r.last_error.is_none());
     assert_eq!(r.compressions, 1);
-    assert!(cost.cache_read > 20_000, "the summary should read the cached prefix: {cost:?}");
-    assert!(cost.fresh < 3_000, "only the instruction should be new input: {cost:?}");
+    // It sends the chat request's system prompt and tools (read from the
+    // cache) and only the part it replaces, never the part kept.
+    assert!(cost.cache_read > 0, "the summary should read the system prompt and tools from the cache: {cost:?}");
     assert!(r.context < 20_000, "the rolled context is smaller: {}", r.context);
     assert!(answer.contains("PELICAN-42"), "the summary kept the instruction");
 }
@@ -1714,4 +1716,95 @@ fn the_pulse_says_progress_and_blockers() {
     // The last progress is saved with the conversation.
     let saved = serde_json::to_value(&*s.conv.lock().unwrap()).unwrap();
     assert_eq!(saved["progress"], "EXECUTE returned");
+}
+
+/// Every `SENT-<WORD>-<n>` sentinel in `v`, in order, once each.
+fn sentinels_in(v: &Value) -> Vec<String> {
+    let s = v.to_string();
+    let mut out: Vec<String> = vec![];
+    for (i, _) in s.match_indices("SENT-") {
+        let t: String = s[i..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        let t = t.trim_end_matches('-').to_string();
+        if t.matches('-').count() == 2 && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// A summary request carries only what it replaces, as the model saw it:
+/// the summary in use and the messages before the cut (with the prefix's
+/// messages there), then the instruction. Never the part kept verbatim, nor
+/// what the model never saw of the transcript (cleared tool output, another
+/// provider's reasoning, Oak's own keys, the part an earlier summary
+/// covered). On each provider's way of sending the prefix, and Freebuff's
+/// (none).
+#[test]
+fn a_summary_request_carries_only_what_it_replaces() {
+    let user = |t: &str| json!({"role": "user", "content": [oak::text(t)]});
+    let said = |t: &str| json!({"role": "assistant", "content": [oak::text(t)]});
+    let big = format!("SENT-HIDDEN-04 {}", "y".repeat(2_000));
+    let messages = vec![
+        user("SENT-OLD-00"),
+        said("SENT-OLD-01"),
+        user("SENT-REP-02"),
+        json!({"role": "assistant", "content": [{"type": "tool_call", "id": "e1", "name": "EXECUTE", "input": {"command": "SENT-REP-03"}}]}),
+        json!({"role": "user", "content": [{"type": "tool_result", "call_id": "e1", "content": big}]}),
+        json!({"role": "assistant", "content": [
+            {"type": "reasoning", "by": "elsewhere", "text": "SENT-HIDDEN-05"},
+            {"type": "text", "text": "SENT-REP-05", "_oak_note": "SENT-HIDDEN-50"}]}),
+        user("SENT-REP-06"),
+        said("SENT-REP-07"),
+        user("SENT-KEPT-08"),
+        said("SENT-KEPT-09"),
+        user("SENT-KEPT-10"),
+    ];
+    let (n, cut) = (messages.len(), 8);
+    let sys = |at: usize| crate::prefix::SysMsg { at, kind: "date".into(), key: format!("{at}"), text: format!("SENT-SYS-{at:02}"), ..Default::default() };
+    for (provider, model) in [
+        (crate::providers::Kind::Claude, "claude-opus-4-5"),
+        (crate::providers::Kind::OpenRouter, "openai/gpt-5"),
+        (crate::providers::Kind::Codex, "gpt-5.6-sol"),
+        (crate::providers::Kind::Freebuff, "freebuff"),
+    ] {
+        let mut c = Conversation { provider: Some(provider), model: model.into(), messages: messages.clone().into(), ..Default::default() };
+        c.rolling.summary = Some(crate::rolling::Summary { cut: 2, text: "SENT-SUMMARY-1".into(), made_at: 1, clear: 5 });
+        c.prefix.sys = vec![sys(6), sys(8), sys(10)];
+        let what = format!("{provider:?}");
+        let sent = summary_messages(&c, provider, n, cut);
+        let mut expect = vec!["SENT-SUMMARY-1", "SENT-REP-02", "SENT-REP-03", "SENT-REP-05", "SENT-REP-06", "SENT-REP-07"];
+        let mode = crate::prefix::mode(provider, model);
+        if mode.is_some() {
+            expect.push("SENT-SYS-06");
+        }
+        let mut got = sentinels_in(&json!(sent));
+        got.sort();
+        expect.sort();
+        assert_eq!(got, expect, "{what}: {sent:?}");
+        assert!(json!(sent).to_string().contains(crate::rolling::CLEARED), "{what}: cleared output goes as cleared");
+        // Exactly what the chat request sent before the cut.
+        let mut chat = request_messages(&c, &c.messages);
+        if let Some(mode) = mode {
+            c.prefix.fold(&mut chat, 2, n);
+            chat = c.prefix.inject(mode, chat, 2, n);
+        }
+        assert_eq!(sent[..], chat[..sent.len()], "{what}: as the model saw it");
+        assert!(sentinels_in(&chat[sent.len()]).iter().any(|s| s.contains("-08")), "{what}: up to the cut");
+        // The request: the chat request's system prompt and tools, these
+        // messages, then the instruction (its own five-minute breakpoint).
+        let body = oak::Request {
+            provider,
+            model: model.into(),
+            system: "SYSTEM".into(),
+            tools: vec![json!({"name": "T", "description": "d", "input_schema": {"type": "object"}})],
+            messages: chat.clone(),
+            ttl: oak::Ttl::OneHour,
+            anchor: Some(chat.len() - 1),
+            ..Default::default()
+        };
+        let r = summary_request_for(&c, &body, n, cut);
+        assert_eq!((r.system.as_str(), r.tools.len(), r.ttl, r.anchor), ("SYSTEM", 1, oak::Ttl::FiveMinutes, None), "{what}");
+        assert_eq!(r.messages, sent, "{what}");
+        assert!(r.instruction.as_deref().is_some_and(crate::rolling::is_housekeeping), "{what}");
+    }
 }

@@ -397,7 +397,11 @@ the file into each of Blender's settings folders (`BLENDER_USER_RESOURCES` overr
   discard work, killing Oak) and `src/sleeps.rs` refuses sleeps over 5 seconds; the error says
   what to do instead. On Linux each command leads its own process group, killed with it.
 - Smart context (`src/rolling.rs`): past a trigger (120k tokens by default) the older part is
-  summarized in the background, reusing the prompt cache, and the newest ~40k stay verbatim. The
+  summarized in the background and the newest ~40k stay verbatim. The summary request (in the
+  background, or blocking when a request is refused as too long) sends the chat request's system
+  prompt and tools, then only what the summary replaces, as the model saw it (the summary in use
+  and the messages before the cut: no part kept verbatim, cleared tool output, other providers'
+  reasoning or reverted messages; `agent::summary_messages`), then the instruction. The
   transcript only grows: a banner marks where a summary was made and a line where its part ends.
   Old tool output is replaced by a placeholder in requests, and a line marks where that stops:
   only when a summary is made, the one moment what was sent may change. Turning smart context

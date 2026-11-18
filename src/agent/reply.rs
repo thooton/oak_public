@@ -587,11 +587,10 @@ impl Worker {
             }
         }
         let Some(plan) = plan_summary(&c, n, base, usage.prompt) else { return };
-        let prompt = rolling::prompt_for(&c.model, Some(&rolling::describe(&c.messages[plan.cut])));
+        // The request that just finished, with only the part the summary
+        // replaces, as that request sent it, then the instruction.
+        let request = summary_request_for(&c, &body, n, plan.cut);
         drop(c);
-        // The request that just finished, plus the instruction: all but the
-        // instruction was cached by that request.
-        let request = rolling::summary_request(body.clone(), &prompt);
         self.set(|l| l.compacting = true);
         let reverts = self.live.lock().unwrap().reverts;
         let (conv, live, ctx) = (self.conv.clone(), self.live.clone(), self.ctx.clone());
@@ -604,8 +603,9 @@ impl Worker {
 
     /// The request was too long for the model (the API refuses those at
     /// once, unbilled). If a summary is on its way, wait for it; otherwise
-    /// summarize right away from a prefix short enough to send (no cache
-    /// reuse on this path). Requests never wait for a summary otherwise.
+    /// summarize right away, sending only the part the summary replaces (as
+    /// the background summary does). Requests never wait for a summary
+    /// otherwise.
     pub(super) fn summarize_now(&self, error: &str) -> Result<(), String> {
         while self.live.lock().unwrap().compacting {
             self.set(|l| l.status = "Waiting for the context summary: the conversation outgrew the model's context".into());
@@ -625,11 +625,8 @@ impl Worker {
             .find_map(|d| d.parse::<u64>().ok().filter(|&t| t > 1000))
             .unwrap_or(c.rolling.context);
         let plan = plan_summary(&c, n, base, total).ok_or("nothing old enough to summarize")?;
-        let mut request = body.clone();
-        request.messages = request_messages(&c, &c.messages[..plan.cut]);
+        let request = summary_request_for(&c, &body, n, plan.cut);
         drop(c);
-        let prompt = rolling::prompt_for(&request.model, None);
-        let request = rolling::summary_request(request, &prompt);
         self.set(|l| {
             l.compacting = true;
             l.status = "Summarizing older context to make room".into();
