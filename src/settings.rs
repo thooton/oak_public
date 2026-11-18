@@ -72,6 +72,8 @@ impl App {
             store::save_settings(&self.settings);
         }
 
+        self.unslop_prompt_row(ui, t);
+
         // What plugins add to this page, each a row.
         let mut sections: Vec<_> = crate::plugins::parts().settings.iter().collect();
         sections.sort_by_key(|s| s.order());
@@ -125,6 +127,36 @@ impl App {
             }
             ui.end_row();
         }
+    }
+
+    /// The Unslop prompt row: the prompt in an editable box. Save puts it in
+    /// use for later rewrites, for this run only (memory, not disk); Reset
+    /// brings back the built-in one, in the box and in use.
+    fn unslop_prompt_row(&mut self, ui: &mut Ui, t: &Theme) {
+        let current = crate::unslop::prompt();
+        let draft = self.unslop_prompt.get_or_insert_with(|| current.clone());
+        caption(ui, "Unslop prompt", t.ink3);
+        ui.vertical(|ui| {
+            ui.set_max_width(520.0);
+            ui.add(TextEdit::multiline(draft).id(Id::new("unslop-prompt")).desired_width(520.0).desired_rows(8));
+            ui.horizontal(|ui| {
+                let save = ui.add_enabled(*draft != current, egui::Button::new("Save"));
+                if save.on_hover_text("Uses this prompt for later rewrites until Oak restarts.").clicked() {
+                    crate::unslop::set_prompt(Some(draft.clone()));
+                }
+                let reset = ui.add_enabled(*draft != crate::unslop::PROMPT || current != crate::unslop::PROMPT, egui::Button::new("Reset"));
+                if reset.on_hover_text("Restores the built-in prompt.").clicked() {
+                    *draft = crate::unslop::PROMPT.to_string();
+                    crate::unslop::set_prompt(None);
+                }
+                if current != crate::unslop::PROMPT {
+                    caption(ui, "Custom prompt in use until restart.", t.ink3);
+                } else if *draft != current {
+                    caption(ui, "Unsaved changes.", t.ink3);
+                }
+            });
+        });
+        ui.end_row();
     }
 
     /// An Off/On row for the switch `field`, which `apply` puts in force

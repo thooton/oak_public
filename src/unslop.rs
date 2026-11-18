@@ -44,6 +44,21 @@ Preserve the meaning, uncertainty, and completion status. Keep every stated caus
 
 Use neutral language and short sentences. Never use bullets, middle dots, or em dashes as separators between labels, metadata, or sentences; use commas, parentheses, or spacing instead. Actual lists are fine."#;
 
+/// The prompt set in Settings for this run, in place of `PROMPT` (kept in
+/// memory only: a restart goes back to `PROMPT`).
+static PROMPT_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The prompt rewrites use now.
+pub fn prompt() -> String {
+    PROMPT_OVERRIDE.lock().unwrap().clone().unwrap_or_else(|| PROMPT.to_string())
+}
+
+/// Sets the prompt for later rewrites; `None` (or `PROMPT` itself) goes back
+/// to `PROMPT`.
+pub fn set_prompt(p: Option<String>) {
+    *PROMPT_OVERRIDE.lock().unwrap() = p.filter(|p| p != PROMPT);
+}
+
 /// The switches: Unslop itself, then No drafts, Rewrite thinking and
 /// Rewrite notes, which apply only with it on.
 const ON: usize = 0;
@@ -507,7 +522,7 @@ fn body(text: &str) -> crate::oak::Request {
         max_tokens: 16000,
         purpose: crate::oak::Purpose::Unslop,
         ttl: crate::oak::Ttl::Off,
-        messages: vec![json!({"role": "user", "content": [crate::oak::text(&format!("{PROMPT}\n\n<input>\n{text}\n</input>"))]})],
+        messages: vec![json!({"role": "user", "content": [crate::oak::text(&format!("{}\n\n<input>\n{text}\n</input>", prompt().trim()))]})],
         ..Default::default()
     }
 }

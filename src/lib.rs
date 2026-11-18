@@ -285,6 +285,9 @@ struct App {
     codex_login: Option<codex::Login>,
     codex_paste: String,
     codex_error: Option<String>,
+    /// The Unslop prompt as edited in Settings (filled from the one in use
+    /// when first shown).
+    unslop_prompt: Option<String>,
     sessions: HashMap<String, Session>,
     /// The retained side conversation open in the right-hand pane.
     side_chat: Option<String>,
