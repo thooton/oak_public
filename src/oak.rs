@@ -98,8 +98,8 @@ pub enum Purpose {
     Title,
     /// A subagent's prompt, rewritten.
     Rewrite,
-    /// A reply's text, rewritten without the slop.
-    Unslop,
+    /// A plugin's request (`model_stream`), by the name it gives it.
+    Plugin(&'static str),
 }
 
 impl Purpose {
@@ -110,7 +110,7 @@ impl Purpose {
             Purpose::Summary => "summary",
             Purpose::Title => "title",
             Purpose::Rewrite => "agent prompt rewrite",
-            Purpose::Unslop => "unslop",
+            Purpose::Plugin(name) => name,
         }
     }
 }

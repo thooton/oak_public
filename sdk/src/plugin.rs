@@ -17,7 +17,9 @@
 //! - `SettingsSection`: rows on the plugin's own settings page;
 //! - `Gate`: a screen that comes before everything (signing in somewhere);
 //! - `Hooks`: at startup, every frame, at the top of Home's Providers, in a
-//!   message box's corner, at exit.
+//!   message box's corner, at exit;
+//! - `Rewriter`: what transcripts show in place of the model's own words;
+//! - `ComposerBox`: a box beside the message box.
 //!
 //! Parts are `Send + Sync` and take `&self`: a plugin keeps what changes
 //! behind its own locks (or in statics; the library is never unloaded,
@@ -374,6 +376,68 @@ pub trait Hooks: Send + Sync {
     fn exiting(&self) {}
 }
 
+/// What gets rewritten now (`Rewriter::rewrites`). Thinking and notes
+/// only with `replies` on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rewrites {
+    /// The replies' text, as each reply ends.
+    pub replies: bool,
+    /// The thinking, as it streams in.
+    pub thinking: bool,
+    /// The notes, for the notes box.
+    pub notes: bool,
+    /// The transcript shows the rewrites alone, without the "Drafted a
+    /// message" rows that open on the model's own text.
+    pub no_drafts: bool,
+}
+
+impl Rewrites {
+    pub fn bits(self) -> u32 {
+        [(self.replies, OAK_REWRITE_REPLIES), (self.thinking, OAK_REWRITE_THINKING), (self.notes, OAK_REWRITE_NOTES), (self.no_drafts, OAK_REWRITE_NO_DRAFTS)]
+            .iter()
+            .filter(|(on, _)| *on)
+            .fold(0, |b, (_, f)| b | f)
+    }
+}
+
+/// What a conversation's transcript shows in place of the model's own
+/// words: its replies' text, its thinking and its notes, rewritten for the
+/// user as they come (Oak 9). What the model is sent never changes. Oak
+/// keeps each rewrite in its block, under `key`, shows it as it streams
+/// in (the model's own text a click away) and starts again the rewrites
+/// left unfinished. Only the user's own conversations are rewritten, not
+/// subagents'. One rewriter at a time: the first registered.
+pub trait Rewriter: Send + Sync {
+    /// The key a block's rewrite is kept under: it starts with `_oak_`.
+    /// Keep it from one version to the next, or saved rewrites stop showing.
+    fn key(&self) -> String;
+    /// What gets rewritten now. Asked often and from any thread: answer
+    /// quickly. What was marked already is rewritten whatever it answers.
+    fn rewrites(&self) -> Rewrites;
+    /// The notes' rewrites are made under this number: one made under
+    /// another is made again.
+    fn epoch(&self) -> u32 { 0 }
+    /// The complete sections of thinking `text` (what isn't marked yet) to
+    /// rewrite now, as byte ranges of it; `done`: the thinking has ended,
+    /// and all of it goes. None: a thinking block is rewritten whole once
+    /// it ends.
+    fn sections(&self, _text: &str, _done: bool) -> Option<Vec<(usize, usize)>> { None }
+    /// Rewrites one piece (a reply's text block, a section of thinking, a
+    /// note), on a thread of Oak's: `progress` gets the rewrite so far as
+    /// it grows. The rewrite or why it failed, and what it cost (dollars).
+    fn rewrite(&self, text: &str, progress: &mut dyn FnMut(&str)) -> (Result<String, String>, f64);
+}
+
+/// A box in a conversation's message box row, left of its buttons, framed
+/// and as tall as smart context's box beside it (Oak 9): switches for what
+/// a plugin does to every conversation. The row makes room for it only
+/// while there is one, and drops it before smart context when the window
+/// is narrow. Only the first registered shows.
+pub trait ComposerBox: Send + Sync {
+    /// Draws inside the frame, top to bottom, rows as tall as small text.
+    fn show(&self, ui: &mut Ui, app: &mut dyn App);
+}
+
 
 /// What one of a part's named calls answers (`abi::OakCall`).
 enum Reply {
@@ -498,6 +562,8 @@ type Safe = Box<dyn Vault>;
 type Section = Box<dyn SettingsSection>;
 type Door = Box<dyn Gate>;
 type Life = Box<dyn Hooks>;
+type Words = Box<dyn Rewriter>;
+type Switches = Box<dyn ComposerBox>;
 
 unsafe extern "C" fn home_shown(user: *mut c_void) -> bool {
     outer(|| false, || unsafe { part::<Home>(user) }.shown())
@@ -666,6 +732,49 @@ unsafe extern "C" fn hooks_exiting(user: *mut c_void) {
     outer(|| (), || unsafe { part::<Life>(user) }.exiting())
 }
 
+unsafe extern "C" fn rewriter_rewrites(user: *mut c_void) -> u32 {
+    outer(|| 0, || unsafe { part::<Words>(user) }.rewrites().bits())
+}
+
+unsafe extern "C" fn rewriter_rewrite(user: *mut c_void, text: OakStr, progress: OakTake, progress_user: *mut c_void, out: OakSink, out_user: *mut c_void, cost: *mut f64) -> bool {
+    let (result, spent) = outer(
+        || (Err(STOPPED.to_string()), 0.0),
+        || {
+            let mut tell = |so_far: &str| unsafe { progress(progress_user, s(so_far)) };
+            unsafe { part::<Words>(user) }.rewrite(unsafe { str_of(text) }, &mut tell)
+        },
+    );
+    if !cost.is_null() {
+        unsafe { *cost = spent };
+    }
+    let (ok, said) = match &result {
+        Ok(t) => (true, t),
+        Err(e) => (false, e),
+    };
+    unsafe { give(out, out_user, said.as_bytes()) };
+    ok
+}
+
+unsafe extern "C" fn rewriter_call(user: *mut c_void, method: OakStr, args: OakStr, data: OakBytes, out: OakSink, out_user: *mut c_void) -> i64 {
+    unsafe {
+        called::<Words>(user, method, args, data, out, out_user, |r, method, a, data| match method {
+            "epoch" => Reply::Done(r.epoch() as i64),
+            "sections" => {
+                let text = std::str::from_utf8(data).unwrap_or("");
+                match r.sections(text, a["done"].as_bool().unwrap_or(false)) {
+                    Some(list) => Value::from(list.into_iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>()).into(),
+                    None => Reply::Unknown,
+                }
+            }
+            _ => Reply::Unknown,
+        })
+    }
+}
+
+unsafe extern "C" fn composer_box_show(user: *mut c_void, ui: *mut OakUi) {
+    outer(|| (), || unsafe { part::<Switches>(user) }.show(&mut Ui::raw(ui), &mut Window::default()))
+}
+
 fn size_of<T>() -> u32 {
     std::mem::size_of::<T>() as u32
 }
@@ -820,5 +929,26 @@ impl Registrar {
             chat_scene: Some(hooks_chat_scene),
         };
         unsafe { (api().add_hooks)(&d) };
+    }
+
+    /// What transcripts show in place of the model's words (Oak 9).
+    pub fn rewriter(&mut self, rewriter: impl Rewriter + 'static) {
+        let key = rewriter.key();
+        let d = OakRewriter {
+            size: size_of::<OakRewriter>(),
+            flags: 0,
+            user: keep::<Words>(Box::new(rewriter)),
+            key: s(&key),
+            rewrites: Some(rewriter_rewrites),
+            rewrite: Some(rewriter_rewrite),
+            call: Some(rewriter_call),
+        };
+        unsafe { (api().add_rewriter)(&d) };
+    }
+
+    /// A box beside the message box (Oak 9).
+    pub fn composer_box(&mut self, b: impl ComposerBox + 'static) {
+        let d = OakComposerBox { size: size_of::<OakComposerBox>(), flags: 0, user: keep::<Switches>(Box::new(b)), show: Some(composer_box_show) };
+        unsafe { (api().add_composer_box)(&d) };
     }
 }

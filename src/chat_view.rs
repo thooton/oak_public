@@ -596,9 +596,9 @@ mod tests {
                 // The reply's rewrite streams in, a few words a frame.
                 0 => {
                     let mut c = shared.lock().unwrap();
-                    c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Earlier.", unslop::KEY: {"id": "kept-early"}}]}));
+                    c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Earlier.", rewrites::key(): {"id": "kept-early"}}]}));
                     c.messages.push(serde_json::json!({"role": "user", "content": [{"type": "text", "text": "Go on"}]}));
-                    c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Latest.", unslop::KEY: {"id": "kept-latest"}}]}));
+                    c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Latest.", rewrites::key(): {"id": "kept-latest"}}]}));
                 }
                 // A reply ending in text (whether it ends the turn depends
                 // on what streams in after it), then a call and its result
@@ -641,8 +641,8 @@ mod tests {
             }
             let before = builds();
             for (i, live) in lives.iter().enumerate() {
-                unslop::set_job_text("kept-early", &"early ".repeat(i));
-                unslop::set_job_text("kept-latest", &"latest ".repeat(i));
+                rewrites::set_job_text("kept-early", &"early ".repeat(i));
+                rewrites::set_job_text("kept-latest", &"latest ".repeat(i));
                 let conv = shared.lock().unwrap();
                 let (units, sigs, msgs, split) = fresh(&conv, live);
                 let mut b = Built::take(id, &conv);

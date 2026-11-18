@@ -59,7 +59,7 @@ mod time;
 mod token_rate;
 mod tools;
 mod toolbin;
-mod unslop;
+mod rewrites;
 mod update;
 mod usage;
 mod web;
@@ -289,9 +289,6 @@ struct App {
     codex_login: Option<codex::Login>,
     codex_paste: String,
     codex_error: Option<String>,
-    /// The Unslop prompt as edited in Settings (filled from the one in use
-    /// when first shown).
-    unslop_prompt: Option<String>,
     sessions: HashMap<String, Session>,
     /// When the sessions' messages were last swept (`agent::forget_messages`).
     messages_swept: Option<std::time::Instant>,
@@ -431,7 +428,6 @@ impl App {
         agent::set_notes_limit(settings.notes_limit);
         openrouter::set_title_model(&settings.title_model);
         openrouter::set_routing(&settings.or_routing);
-        unslop::set_all(&settings);
         scratch::set_auto(settings.scratch_clear);
         // The user's browser's extension finds Oak here (browser/bridge.rs).
         browser::bridge::start();
@@ -982,7 +978,7 @@ fn read_conversations() -> Preloaded {
     // loading threads first, as that reads them all.
     let conversations = store::load_conversations_then(&|c, raw| {
         agent::look_for_lost_calls(c, raw);
-        unslop::look(c, raw);
+        rewrites::look(c, raw);
     });
     let read = t.elapsed();
     // Their tasks' records (reading each task's output) on every core.

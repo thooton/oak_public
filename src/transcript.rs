@@ -456,10 +456,10 @@ pub(crate) enum Item<'a> {
     /// second (when the provider reported its output token count); true
     /// with Unslop, how its rewrite stands; true when it ends the model's
     /// turn.
-    Text(&'a str, (usize, usize), Option<i64>, Option<f64>, Option<unslop::State<'a>>, bool),
+    Text(&'a str, (usize, usize), Option<i64>, Option<f64>, Option<rewrites::State<'a>>, bool),
     /// A thinking block; true while it is still streaming; with Rewrite
     /// thinking, how its rewrite stands.
-    Thinking(&'a Value, (usize, usize), bool, Option<unslop::Thoughts>),
+    Thinking(&'a Value, (usize, usize), bool, Option<rewrites::Thoughts>),
     /// A tool call, and its message and block.
     Tool(&'a Value, (usize, usize)),
     /// A DISPLAY call: the files it shows, in the chat itself.
@@ -478,21 +478,21 @@ pub(crate) struct RevertAt<'a> {
 /// `draft`: the reply streaming in will be rewritten (Unslop): its text
 /// once done, its thinking (with Rewrite thinking) as it comes.
 fn push_assistant<'a>(out: &mut Vec<Item<'a>>, b: &'a Value, key: (usize, usize), live: bool, draft: bool) {
-    let [kind, text, name, at, tps, ms, rewrite] = crate::fields(b, ["type", "text", "name", "_oak_at", "_oak_tps", "_oak_ms", unslop::KEY]);
+    let [kind, text, name, at, tps, ms, rewrite] = crate::fields(b, ["type", "text", "name", "_oak_at", "_oak_tps", "_oak_ms", rewrites::key()]);
     let text = text.and_then(Value::as_str);
     match kind.and_then(Value::as_str).unwrap_or("") {
         "text" => {
             if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                let rewrite = rewrite.map(unslop::state_of).or(if draft { Some(unslop::State::Drafting) } else { None });
+                let rewrite = rewrite.map(rewrites::state_of).or(if draft { Some(rewrites::State::Drafting) } else { None });
                 out.push(Item::Text(text, key, at.and_then(Value::as_i64), tps.and_then(Value::as_f64), rewrite, false));
             }
         }
         "reasoning" => {
             // Thinking streaming in that will be rewritten shows none of
             // itself until its rewrite does.
-            let rewrite = rewrite.and_then(|_| unslop::thoughts(b, live)).or_else(|| {
-                (draft && unslop::thinking() && text.is_some_and(|t| !t.trim().is_empty()))
-                    .then(|| unslop::Thoughts { pending: true, ..Default::default() })
+            let rewrite = rewrite.and_then(|_| rewrites::thoughts(b, live)).or_else(|| {
+                (draft && rewrites::thinking() && text.is_some_and(|t| !t.trim().is_empty()))
+                    .then(|| rewrites::Thoughts { pending: true, ..Default::default() })
             });
             out.push(Item::Thinking(b, key, live && ms.is_none(), rewrite))
         }
@@ -713,7 +713,7 @@ pub(crate) fn cleared_split(conv: &Conversation, items: &[Item], msgs: &[usize],
 /// The reply streaming in (`live`), added to the items and messages
 /// `conv_items` gave.
 pub(crate) fn push_live<'a>(out: &mut Vec<Item<'a>>, msgs: &mut Vec<usize>, conv: &Conversation, live: &'a Live) {
-    let draft = unslop::applies(conv);
+    let draft = rewrites::applies(conv);
     for (bi, b) in live.blocks.iter().enumerate() {
         push_assistant(out, b, (usize::MAX, bi), true, draft);
     }
@@ -736,10 +736,10 @@ pub(crate) fn refresh<'a>(x: &mut Item<'a>, conv: &'a Conversation) {
     match x {
         Item::Text(_, (mi, bi), .., rewrite, _) => {
             if let Some(b) = conv.messages.get(*mi).and_then(|m| m["content"].get(*bi)) {
-                *rewrite = b.get(unslop::KEY).map(unslop::state_of);
+                *rewrite = b.get(rewrites::key()).map(rewrites::state_of);
             }
         }
-        Item::Thinking(b, _, _, rewrite) => *rewrite = unslop::thoughts(b, false),
+        Item::Thinking(b, _, _, rewrite) => *rewrite = rewrites::thoughts(b, false),
         _ => {}
     }
 }
@@ -1722,7 +1722,7 @@ fn partial_object(it: &mut Chars, out: &mut serde_json::Map<String, Value>) -> b
 /// API gave no count, "Thought for Ns"); clicking shows the (summarized)
 /// thinking when there is any, or with Rewrite thinking its rewrite
 /// (sections streaming in, "Rewriting…" while more is to come).
-pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize), streaming: bool, rewrite: Option<&unslop::Thoughts>, in_block: bool) {
+pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize), streaming: bool, rewrite: Option<&rewrites::Thoughts>, in_block: bool) {
     let label = if streaming {
         "Thinking…".to_string()
     } else if let Some(n) = b["_oak_tokens"].as_u64().filter(|&n| n > 0) {
@@ -1853,11 +1853,11 @@ pub(crate) fn unit_sig(run: &[Item], results: &Results) -> u64 {
             Item::Image(b, r) | Item::File(b, r) => (*b as *const Value as usize, r.map(|r| (r.msg, r.block))).hash(&mut h),
             Item::Text(s, key, _, tps, rewrite, end) => {
                 (s.len(), key, tps.map(f64::to_bits), end).hash(&mut h);
-                rewrite.as_ref().map(|r| (unslop::no_drafts(), match r {
-                    unslop::State::Drafting => (0, 0),
-                    unslop::State::Streaming(t) => (1, t.len()),
-                    unslop::State::Done(t) => (2, t.len()),
-                    unslop::State::Failed(e) => (3, e.len()),
+                rewrite.as_ref().map(|r| (rewrites::no_drafts(), match r {
+                    rewrites::State::Drafting => (0, 0),
+                    rewrites::State::Streaming(t) => (1, t.len()),
+                    rewrites::State::Done(t) => (2, t.len()),
+                    rewrites::State::Failed(e) => (3, e.len()),
                 })).hash(&mut h);
             }
             Item::Thinking(b, key, streaming, rewrite) => {
@@ -2014,12 +2014,12 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
 
 /// What a text block shows with Unslop: the rewrite once there is one,
 /// the model's own text if it failed (empty while either is coming).
-pub(crate) fn shown_text<'a>(text: &'a str, r: &'a unslop::State) -> &'a str {
+pub(crate) fn shown_text<'a>(text: &'a str, r: &'a rewrites::State) -> &'a str {
     match r {
-        unslop::State::Drafting => "",
-        unslop::State::Streaming(s) => s,
-        unslop::State::Done(s) => s,
-        unslop::State::Failed(_) => text,
+        rewrites::State::Drafting => "",
+        rewrites::State::Streaming(s) => s,
+        rewrites::State::Done(s) => s,
+        rewrites::State::Failed(_) => text,
     }
 }
 
@@ -2028,10 +2028,10 @@ pub(crate) fn shown_text<'a>(text: &'a str, r: &'a unslop::State) -> &'a str {
 /// comes). With No drafts, just the rewrite, after "Writing…" while the
 /// model drafts and the rewrite starts. Returns the reply's rect, for its
 /// message bar.
-fn unslop_view(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize), r: &unslop::State) -> Rect {
-    let no_drafts = unslop::no_drafts();
+fn unslop_view(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize), r: &rewrites::State) -> Rect {
+    let no_drafts = rewrites::no_drafts();
     if !no_drafts {
-        let drafting = matches!(r, unslop::State::Drafting);
+        let drafting = matches!(r, rewrites::State::Drafting);
         let (rect, open, hovered) = row(ui, t, key_id("unslop-open", key), true, false);
         let color = if hovered { t.ink2 } else { t.ink3 };
         let p = ui.painter();
@@ -2050,10 +2050,10 @@ fn unslop_view(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize), r: &unsl
         }
     }
     match r {
-        unslop::State::Drafting | unslop::State::Streaming(_) if shown_text(text, r).is_empty() => {
+        rewrites::State::Drafting | rewrites::State::Streaming(_) if shown_text(text, r).is_empty() => {
             ui.label(RichText::new(if no_drafts { "Writing…" } else { "Rewriting…" }).color(t.ink3)).rect
         }
-        unslop::State::Failed(e) => {
+        rewrites::State::Failed(e) => {
             let r = ui.scope(|ui| markdown(ui, t, text, key)).response.rect;
             caption(ui, &format!("Rewrite failed: {e}"), t.error);
             r

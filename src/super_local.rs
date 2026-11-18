@@ -261,7 +261,7 @@ impl App {
         rows.sort_by_key(|(r, _)| (!r.working, std::cmp::Reverse(r.n)));
         let convs: Vec<(i64, String)> = rows.iter().map(|(r, c)| (r.n, c.clone())).collect();
         b.agents = rows.into_iter().map(|(r, _)| r).collect();
-        crate::unslop::start_notes(&s.conv, ctx);
+        crate::rewrites::start_notes(&s.conv, ctx);
         let mut info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
         for a in &mut info.agents {
             a.3 = self.sessions.get(&a.2).map_or(AgentState::Idle, AgentState::of);
@@ -362,7 +362,7 @@ impl App {
             // Its "for 2m" and "40s ago" count on.
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
-        crate::unslop::start_notes(&s.conv, ctx);
+        crate::rewrites::start_notes(&s.conv, ctx);
         let mut info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
         for a in &mut info.agents {
             a.3 = self.sessions.get(&a.2).map_or(AgentState::Idle, AgentState::of);

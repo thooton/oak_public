@@ -251,7 +251,7 @@ impl App {
         };
         if let Some(s) = self.sessions.get(&key) {
             // Rewrite notes (Unslop): new and changed notes go to be rewritten.
-            unslop::start_notes(&s.conv, ctx);
+            rewrites::start_notes(&s.conv, ctx);
         }
         let mut info = SessionInfo::new(self.sessions.get(&key), &self.settings, models, |m| self.model_name(m));
         for a in &mut info.agents {
@@ -874,12 +874,12 @@ pub(crate) fn notes_box(ui: &mut Ui, t: &Theme, w: f32, notes: &[store::Note], o
             let font = egui::TextStyle::Small.resolve(ui.style());
             for n in notes {
                 let ink = |color| egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
-                let state = unslop::note_state(n, own);
+                let state = rewrites::note_state(n, own);
                 let (text, color, failed) = match &state {
                     None => (n.text.trim(), t.ink2, None),
-                    Some(unslop::State::Done(s)) => (s.trim(), t.ink2, None),
-                    Some(unslop::State::Streaming(s)) if !s.trim().is_empty() => (s.trim(), t.ink2, None),
-                    Some(unslop::State::Failed(e)) => (n.text.trim(), t.ink2, Some(e)),
+                    Some(rewrites::State::Done(s)) => (s.trim(), t.ink2, None),
+                    Some(rewrites::State::Streaming(s)) if !s.trim().is_empty() => (s.trim(), t.ink2, None),
+                    Some(rewrites::State::Failed(e)) => (n.text.trim(), t.ink2, Some(e)),
                     Some(_) => ("Rewriting…", t.ink3, None),
                 };
                 let mut job = egui::text::LayoutJob::default();

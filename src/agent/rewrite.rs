@@ -11,8 +11,8 @@ use super::*;
 /// theirs as plain messages).
 const ENABLED: bool = false;
 
-/// The model that rewrites (OpenRouter's Gemma 4 31B, as Unslop's).
-const MODEL: &str = crate::unslop::MODEL;
+/// The model that rewrites (OpenRouter's Gemma 4 31B).
+const MODEL: &str = "google/gemma-4-31b-it";
 
 /// What Gemma is asked; the prompt follows it in `<input>` tags, and the
 /// rewrite comes back in `<output>` tags.

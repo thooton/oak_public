@@ -202,7 +202,8 @@ the previous one (round the ends), Ctrl+1 to Ctrl+8 pick one, Ctrl+9 the last, a
 the tab menu) reopens the tabs closed since Oak started, newest first, in their places. Closing a tab
 never closes its conversation, its draft or its work. A conversation shows its
 transcript with a minimap, the session box (title, folder, provider, model, effort, goal, notes,
-agents, progress meters) and the message box with the smart context, Unslop and account boxes.
+agents, progress meters) and the message box with the smart context and account boxes (and a
+plugin's box left of its buttons: Unslop's).
 The message box stays docked to the bottom as drafts, attachments and notices change its height,
 including in a side chat.
 A click on the session box's folder opens it in the system's file manager; its right-click menu
@@ -565,10 +566,12 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   right-click menu, or double-click its title in the session box; `src/rename.rs`) replaces the
   title, a title still being made included; the id, history and file stay (the file takes the
   new name). Subagents keep theirs, since sessions address them by it.
-- Unslop (`src/unslop.rs`): replies, and optionally thinking and notes, are rewritten for the
-  user by Gemma 4 31B through OpenRouter; the model's context keeps its own text. Turning
-  Rewrite notes (or Unslop) off clears the note rewrites (a new `unslop_notes_epoch`), so
-  they are made again once it is back on.
+- Rewrites (`src/rewrites.rs`): a plugin's rewriter (`Rewriter`; Unslop, a private plugin)
+  has replies, and optionally thinking and notes, rewritten for the user; the model's context
+  keeps its own text. Oak keeps the rewrites in their blocks (under the rewriter's key, which
+  starts with `_oak_` and so is never sent), shows them and starts the unfinished ones again;
+  the plugin says what is rewritten, picks thinking's sections and does the rewriting. A new
+  epoch from the rewriter drops the notes' rewrites, so they are made again.
 - Losing the GPU device ultrapauses the conversations at work and restarts Oak (`src/gpu.rs`).
   On Windows Oak sets up Direct3D 12 alone (the other backends cost a quarter of a second at
   every start); should that fail it starts again with every backend (`OAK_GPU_ALL_BACKENDS`).

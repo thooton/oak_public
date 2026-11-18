@@ -1,151 +1,157 @@
-// Unslop: the transcript shows the model's messages to the user rewritten by
-// Gemma 4 31B (through OpenRouter) in concise, neutral prose. What
+// Rewrites: what a plugin's rewriter (`oak_sdk::Rewriter`, Unslop's) shows
+// in a conversation's transcript in place of the model's own words: its
+// replies' text, its thinking and its notes, rewritten for the user. What
 // the model is sent never changes: the rewrite lives in the text block's
-// `_oak_unslop` key, which (like every `_oak_` key) is dropped before sending.
+// key (the rewriter's, `_oak_unslop` for Unslop's), which (like every
+// `_oak_` key) is dropped before sending. The plugin does the rewriting
+// (`Rewriting::rewrite`) and says what is rewritten now; Oak keeps the
+// state, starts the work and shows it.
 //
 // The marker goes through three states:
 //   {"id": "..."}                    being rewritten (the text streams into JOBS)
 //   {"id": "...", "text": "..."}     rewritten
 //   {"id": "...", "error": "..."}    the rewrite failed; the original shows
-// Only replies finished while the switch is on are marked; turning it off
-// leaves marked ones as they are. With No drafts on, the transcript leaves
-// out the "Drafted a message" rows too: a marked block shows only its
-// rewrite (or the original, when the rewrite failed).
+// Only replies finished while the rewriter rewrites replies are marked;
+// switching it off leaves marked ones as they are. With No drafts, the
+// transcript leaves out the "Drafted a message" rows too: a marked block
+// shows only its rewrite (or the original, when the rewrite failed).
 //
-// Rewrite thinking: a thinking block is rewritten in sections while it
-// streams in (`mark_thinking`), each as soon as it is complete: a paragraph
-// (a bold header paragraph goes with the one after it, and short ones run
-// together up to `SECTION` bytes). Its marker lists them by byte range:
+// Thinking is rewritten in sections while it streams in (`mark_thinking`),
+// each as soon as the rewriter says it is complete (Unslop's: a paragraph,
+// a bold header going with the one after it, short ones running together).
+// Its marker lists them by byte range:
 //   {"parts": [{"id", "start", "end", "text"?, "error"?}, ...]}
 // A section's rewrite can finish while its block is still in the reply
 // streaming in: it waits in JOBS until the reply joins the conversation
 // (`settle`).
 //
-// Rewrite notes: each note is rewritten for the notes box
-// (`Note::rewrite`, dropped when the note changes); the notes the model
-// sees stay as they are. Turning Rewrite notes (or Unslop) off moves to a
-// new epoch (`Settings::unslop_notes_epoch`): rewrites from an earlier one
-// are dropped and made again, in each conversation as it next shows them.
+// Notes: each note is rewritten for the notes box (`Note::rewrite`,
+// dropped when the note changes); the notes the model sees stay as they
+// are. The rewriter's epoch (`Rewriting::epoch`) moving on drops the
+// rewrites made under an earlier one: they are made again, in each
+// conversation as it next shows them.
 
-use crate::api::Sse;
-use crate::oak::Event;
 use crate::store::{Conversation, Note, Rewrite};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-pub const KEY: &str = "_oak_unslop";
-pub const MODEL: &str = "google/gemma-4-31b-it";
+use oak_sdk::abi::{OAK_REWRITE_NO_DRAFTS, OAK_REWRITE_NOTES, OAK_REWRITE_REPLIES, OAK_REWRITE_THINKING};
 
-pub const PROMPT: &str = r#"Rewrite the text in `<input></input>` as concise, direct prose. Return only the rewrite inside `<output></output>`.
-
-Treat the reader as a competent adult. Never condescend or overexplain. Remove redundant help text, unsolicited tutorials, praise, reassurance, ceremonial apologies, and deferential filler. Explain non-obvious consequences and risks, not obvious actions. Do not add advice or explanations.
-
-Preserve the meaning, uncertainty, and completion status. Keep every stated cause, reason, alternative, suggestion, name, number, command, path, link, phone number, and external resource exactly as given. Preserve code verbatim. Do not invent facts, reasons, restrictions, or claims of success. An error, missing tool, missing permission, or failing build is not a policy refusal.
-
-Use neutral language and short sentences. Never use bullets, middle dots, or em dashes as separators between labels, metadata, or sentences; use commas, parentheses, or spacing instead. Actual lists are fine."#;
-
-/// The prompt set in Settings for this run, in place of `PROMPT` (kept in
-/// memory only: a restart goes back to `PROMPT`).
-static PROMPT_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
-
-/// The prompt rewrites use now.
-pub fn prompt() -> String {
-    PROMPT_OVERRIDE.lock().unwrap().clone().unwrap_or_else(|| PROMPT.to_string())
+/// What does the rewriting: a plugin's (`plugins::parts`), or a test's.
+pub(crate) trait Rewriting: Send + Sync {
+    /// The key its rewrites are kept under in a block.
+    fn key(&self) -> &'static str;
+    /// What it rewrites now: `OAK_REWRITE_*`.
+    fn bits(&self) -> u32;
+    /// The notes' rewrites from another epoch are made again.
+    fn epoch(&self) -> u32;
+    /// The complete sections of thinking `text` to rewrite now (all of it,
+    /// `done`), as byte ranges of it. None: it has no say.
+    fn sections(&self, text: &str, done: bool) -> Option<Vec<(usize, usize)>>;
+    /// Rewrites `text`, telling `progress` the rewrite so far: the rewrite
+    /// or why it failed, and what it cost (dollars).
+    fn rewrite(&self, text: &str, progress: &mut dyn FnMut(&str)) -> (Result<String, String>, f64);
 }
-
-/// Sets the prompt for later rewrites; `None` (or `PROMPT` itself) goes back
-/// to `PROMPT`.
-pub fn set_prompt(p: Option<String>) {
-    *PROMPT_OVERRIDE.lock().unwrap() = p.filter(|p| p != PROMPT);
-}
-
-/// The switches: Unslop itself, then No drafts, Rewrite thinking and
-/// Rewrite notes, which apply only with it on.
-const ON: usize = 0;
-const NO_DRAFTS: usize = 1;
-const THINKING: usize = 2;
-const NOTES: usize = 3;
-const SWITCHES: usize = 4;
 
 #[cfg(not(test))]
-static FLAGS: [AtomicBool; SWITCHES] = [const { AtomicBool::new(false) }; SWITCHES];
-// Per test thread, so a test turning them on doesn't reach sessions that
-// other tests run meanwhile.
+fn rewriter() -> Option<&'static dyn Rewriting> {
+    crate::plugins::parts().rewriters.first().map(|r| &**r as &dyn Rewriting)
+}
+
+/// The rewriter tests use: Unslop's key, and switches per test thread (so
+/// a test turning them on doesn't reach sessions that other tests run
+/// meanwhile). Its sections are paragraphs; it doesn't rewrite.
+#[cfg(test)]
+pub(crate) struct TestRewriter;
+
 #[cfg(test)]
 thread_local! {
-    static FLAGS: [AtomicBool; SWITCHES] = const { [const { AtomicBool::new(false) }; SWITCHES] };
+    static TEST_BITS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-fn set_flag(i: usize, on: bool) {
-    #[cfg(not(test))]
-    FLAGS[i].store(on, Ordering::Relaxed);
-    #[cfg(test)]
-    FLAGS.with(|f| f[i].store(on, Ordering::Relaxed));
-}
-
-fn flag(i: usize) -> bool {
-    #[cfg(not(test))]
-    return FLAGS[i].load(Ordering::Relaxed);
-    #[cfg(test)]
-    FLAGS.with(|f| f[i].load(Ordering::Relaxed))
-}
-
-pub fn set(on: bool) {
-    set_flag(ON, on)
-}
-
-/// The notes epoch (`Settings::unslop_notes_epoch`): a note's rewrite from
-/// another is stale.
-#[cfg(not(test))]
-static EPOCH: AtomicU32 = AtomicU32::new(0);
+/// Sets the test rewriter's switches (`OAK_REWRITE_*`) and notes epoch, on
+/// this thread.
 #[cfg(test)]
-thread_local! {
-    static EPOCH: AtomicU32 = const { AtomicU32::new(0) };
+pub(crate) fn set_test(bits: u32, epoch: u32) {
+    TEST_BITS.with(|b| b.set((bits, epoch)));
 }
 
-fn set_epoch(e: u32) {
-    #[cfg(not(test))]
-    EPOCH.store(e, Ordering::Relaxed);
-    #[cfg(test)]
-    EPOCH.with(|x| x.store(e, Ordering::Relaxed));
+#[cfg(test)]
+impl Rewriting for TestRewriter {
+    fn key(&self) -> &'static str {
+        "_oak_unslop"
+    }
+
+    fn bits(&self) -> u32 {
+        TEST_BITS.with(|b| b.get().0)
+    }
+
+    fn epoch(&self) -> u32 {
+        TEST_BITS.with(|b| b.get().1)
+    }
+
+    fn sections(&self, text: &str, done: bool) -> Option<Vec<(usize, usize)>> {
+        let mut out = vec![];
+        let mut pos = 0;
+        let mut ends: Vec<usize> = text.match_indices("\n\n").map(|(i, _)| i).collect();
+        if done {
+            ends.push(text.len());
+        }
+        for end in ends {
+            if !text[pos..end].trim().is_empty() {
+                out.push((pos, end));
+            }
+            pos = end + 2;
+        }
+        Some(out)
+    }
+
+    fn rewrite(&self, _: &str, _: &mut dyn FnMut(&str)) -> (Result<String, String>, f64) {
+        (Err("Tests don't rewrite.".into()), 0.0)
+    }
 }
 
-fn epoch() -> u32 {
-    #[cfg(not(test))]
-    return EPOCH.load(Ordering::Relaxed);
-    #[cfg(test)]
-    EPOCH.with(|x| x.load(Ordering::Relaxed))
+#[cfg(test)]
+fn rewriter() -> Option<&'static dyn Rewriting> {
+    Some(&TestRewriter)
 }
 
+/// The key rewrites are kept under in a block ("" with no rewriter: no
+/// block has it).
+pub fn key() -> &'static str {
+    rewriter().map_or("", |r| r.key())
+}
+
+fn bit(b: u32) -> bool {
+    rewriter().is_some_and(|r| r.bits() & b != 0)
+}
+
+/// Replies are rewritten as they end (and with it, what the other
+/// switches turn on).
 pub fn on() -> bool {
-    flag(ON)
+    bit(OAK_REWRITE_REPLIES)
 }
 
 /// No drafts: the transcript shows a marked block's rewrite alone, without
 /// the "Drafted a message" row over it.
 pub fn no_drafts() -> bool {
-    flag(NO_DRAFTS)
+    bit(OAK_REWRITE_NO_DRAFTS)
 }
 
-/// Rewrite thinking: thinking blocks are rewritten as they stream in.
+/// Thinking is rewritten as it streams in.
 pub fn thinking() -> bool {
-    flag(THINKING)
+    bit(OAK_REWRITE_THINKING)
 }
 
-/// Rewrite notes: the notes box shows the notes rewritten.
+/// The notes box shows the notes rewritten.
 fn notes_switched_on() -> bool {
-    flag(NOTES)
+    bit(OAK_REWRITE_NOTES)
 }
 
-/// Sets the four switches, and the notes epoch, as `settings` has them.
-pub fn set_all(settings: &crate::store::Settings) {
-    set(settings.unslop);
-    set_flag(NO_DRAFTS, settings.unslop_no_drafts);
-    set_flag(THINKING, settings.unslop_thinking);
-    set_flag(NOTES, settings.unslop_notes);
-    set_epoch(settings.unslop_notes_epoch);
+/// The notes epoch: a note's rewrite from another is stale.
+fn epoch() -> u32 {
+    rewriter().map_or(0, |r| r.epoch())
 }
 
 /// A rewrite under way: the output so far, and once it has ended, how (kept
@@ -198,7 +204,7 @@ fn job_text(id: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The state of a block whose `KEY` field is `m`.
+/// The state of a block whose rewriter's field is `m`.
 pub fn state_of(m: &Value) -> State<'_> {
     match (m["text"].as_str(), m["error"].as_str()) {
         (Some(t), _) => State::Done(t),
@@ -216,86 +222,66 @@ pub fn applies(conv: &Conversation) -> bool {
 
 /// Marks a finished reply's text blocks for rewriting. True if any were.
 pub fn mark(blocks: &mut [Value]) -> bool {
+    let k = key();
+    if k.is_empty() {
+        return false;
+    }
     let mut any = false;
     for b in blocks.iter_mut().filter(|b| b["type"] == "text" && b.get("_oak_file").is_none()) {
-        if b["text"].as_str().is_some_and(|t| !t.trim().is_empty()) && b.get(KEY).is_none() {
-            b[KEY] = json!({ "id": new_id() });
+        if b["text"].as_str().is_some_and(|t| !t.trim().is_empty()) && b.get(k).is_none() {
+            b[k] = json!({ "id": new_id() });
             any = true;
         }
     }
     any
 }
 
-/// Thinking goes to be rewritten in sections of at least this many bytes
-/// (once their last paragraph is complete); a bold header paragraph starts
-/// a new one.
-const SECTION: usize = 600;
-
 /// Rewrite thinking: marks the sections of the thinking block `b` that are
 /// complete and not marked yet (all the rest, `done`: the block has ended),
-/// and returns them, as (id, text), for `start_parts`.
+/// as the rewriter divides it, and returns them, as (id, text), for
+/// `start_parts`.
 pub fn mark_thinking(b: &mut Value, done: bool) -> Vec<(String, String)> {
+    let Some(r) = rewriter() else { return vec![] };
+    let k = r.key();
     let text = b["text"].as_str().unwrap_or("");
-    let from = b[KEY]["parts"].as_array().and_then(|p| p.last()).and_then(|p| p["end"].as_u64()).unwrap_or(0) as usize;
+    let from = b[k]["parts"].as_array().and_then(|p| p.last()).and_then(|p| p["end"].as_u64()).unwrap_or(0) as usize;
     let new: Vec<(String, usize, usize, String)> =
-        sections(text, from, done).into_iter().map(|(s, e)| (new_id(), s, e, text[s..e].to_string())).collect();
+        sections(r, text, from, done).into_iter().map(|(s, e)| (new_id(), s, e, text[s..e].to_string())).collect();
     if new.is_empty() {
         return vec![];
     }
     let parts: Vec<Value> = new.iter().map(|(id, s, e, _)| json!({"id": id, "start": s, "end": e})).collect();
     let mut parts = Some(parts);
-    if let Some(a) = b[KEY]["parts"].as_array_mut() {
+    if let Some(a) = b[k]["parts"].as_array_mut() {
         a.extend(parts.take().unwrap_or_default());
     }
     if let Some(parts) = parts {
-        b[KEY] = json!({ "parts": parts });
+        b[k] = json!({ "parts": parts });
     }
     new.into_iter().map(|(id, _, _, t)| (id, t)).collect()
 }
 
-/// The complete sections of `text` from byte `from` on (`done`: the text is
-/// all there), as byte ranges: paragraphs (split at blank lines, trimmed), a
-/// bold header paragraph going with what follows it, and short paragraphs
-/// running together up to `SECTION` bytes.
-fn sections(text: &str, from: usize, done: bool) -> Vec<(usize, usize)> {
+/// The sections of `text` from byte `from` on to rewrite now, as byte
+/// ranges of `text`: the rewriter's, or (when it has no say) the rest,
+/// trimmed, once it is `done`.
+fn sections(r: &dyn Rewriting, text: &str, from: usize, done: bool) -> Vec<(usize, usize)> {
     let Some(rest) = text.get(from..) else { return vec![] };
-    // The complete paragraphs: all but the last are followed by a blank line.
-    let mut paras = vec![];
-    let mut pos = 0;
-    let mut seps: Vec<usize> = rest.match_indices("\n\n").map(|(i, _)| i).collect();
-    if done {
-        seps.push(rest.len());
-    }
-    for sep in seps {
-        let seg = &rest[pos..sep];
-        if !seg.trim().is_empty() {
-            let lead = seg.len() - seg.trim_start().len();
-            paras.push((from + pos + lead, from + pos + seg.trim_end().len()));
+    let mut spans = r.sections(rest, done).unwrap_or_else(|| {
+        let lead = rest.len() - rest.trim_start().len();
+        if done && !rest.trim().is_empty() { vec![(lead, rest.trim_end().len())] } else { vec![] }
+    });
+    // In order, apart, each with something in it: what the rewriter got
+    // wrong goes.
+    spans.sort();
+    let mut end = 0;
+    spans.retain(|&(a, b)| {
+        let keep = a >= end && rest.get(a..b).is_some_and(|t| !t.trim().is_empty());
+        if keep {
+            end = b;
         }
-        pos = sep + 2;
-    }
-    let header = |(s, e): (usize, usize)| !text[s..e].contains('\n') && is_bold_header(&text[s..e]);
-    let mut out = vec![];
-    // The section being gathered, and whether its last paragraph is a header.
-    let mut cur: Option<(usize, usize, bool)> = None;
-    for p in paras {
-        let h = header(p);
-        cur = Some(match cur {
-            Some((s, e, false)) if h || e - s >= SECTION => {
-                out.push((s, e));
-                (p.0, p.1, h)
-            }
-            Some((s, _, _)) => (s, p.1, h),
-            None => (p.0, p.1, h),
-        });
-    }
-    // Long enough, it can go: whatever comes next starts a section of its own.
-    if let Some((s, e, last_header)) = cur
-        && (done || (!last_header && e - s >= SECTION))
-    {
-        out.push((s, e));
-    }
-    out
+        keep
+    });
+    spans.into_iter().map(|(a, b)| (from + a, from + b)).collect()
 }
 
 /// How a thinking block's rewrite stands, for the transcript.
@@ -319,7 +305,7 @@ fn span(part: &Value) -> (usize, usize) {
 /// in the reply streaming in, so thinking past the marked sections is still
 /// to be rewritten; otherwise that shows as it is.
 pub fn thoughts(b: &Value, live: bool) -> Option<Thoughts> {
-    let parts = b.get(KEY)?.get("parts")?.as_array()?;
+    let parts = b.get(key()).filter(|_| !key().is_empty())?.get("parts")?.as_array()?;
     let text = b["text"].as_str().unwrap_or("");
     let mut out = Thoughts::default();
     let mut pieces: Vec<String> = vec![];
@@ -438,6 +424,10 @@ fn apply(c: &mut Conversation, id: &str, result: &Result<String, String>) -> boo
         }
         return true;
     }
+    let k = key();
+    if k.is_empty() {
+        return false;
+    }
     let set = |m: &mut Value| match result {
         Ok(t) => m["text"] = json!(t),
         Err(e) => m["error"] = json!(e),
@@ -445,7 +435,7 @@ fn apply(c: &mut Conversation, id: &str, result: &Result<String, String>) -> boo
     // Found first, so only the message with it counts as changed (its
     // saved JSON is redone, `store::Messages`).
     let has = |m: &Value| {
-        m["content"].as_array().into_iter().flatten().filter_map(|b| b.get(KEY)).any(|m| m["id"] == id || m["parts"].as_array().is_some_and(|ps| ps.iter().any(|p| p["id"] == id)))
+        m["content"].as_array().into_iter().flatten().filter_map(|b| b.get(k)).any(|m| m["id"] == id || m["parts"].as_array().is_some_and(|ps| ps.iter().any(|p| p["id"] == id)))
     };
     // (In what is held, or else in what is on disk.)
     let i = match c.messages.iter().rposition(has) {
@@ -458,7 +448,7 @@ fn apply(c: &mut Conversation, id: &str, result: &Result<String, String>) -> boo
         None => return false,
     };
     for b in c.messages[i]["content"].as_array_mut().into_iter().flatten() {
-        let Some(m) = b.get_mut(KEY) else { continue };
+        let Some(m) = b.get_mut(k) else { continue };
         if m["id"] == id {
             set(m);
             return true;
@@ -494,7 +484,10 @@ pub fn settle(conv: &Arc<crate::store::Shared>) {
 /// (Inside a JSON string a quote is escaped: only a key, or a string of
 /// just the key, matches.)
 pub fn look(c: &mut crate::store::Conversation, raw: &[&[u8]]) {
-    let key = format!("\"{KEY}\"");
+    if key().is_empty() {
+        return;
+    }
+    let key = format!("\"{}\"", key());
     let finder = memchr::memmem::Finder::new(key.as_bytes());
     c.messages.rewrites_from = raw.iter().position(|m| finder.find(m).is_some() && serde_json::from_slice::<Value>(m).map_or(true, |m| has_marker(&m)));
 }
@@ -502,11 +495,15 @@ pub fn look(c: &mut crate::store::Conversation, raw: &[&[u8]]) {
 /// Whether message `m` has a rewrite still to do (`start` would start it):
 /// a marker without its text or an error, in a reply.
 pub fn has_marker(m: &Value) -> bool {
+    let k = key();
+    if k.is_empty() {
+        return false;
+    }
     let open = |m: &Value| m.get("text").is_none() && m.get("error").is_none();
     m["role"] == "assistant"
         && m["content"].as_array().is_some_and(|c| {
             c.iter().any(|b| {
-                b.get(KEY).filter(|m| open(m)).is_some_and(|m| match m["parts"].as_array() {
+                b.get(k).filter(|m| open(m)).is_some_and(|m| match m["parts"].as_array() {
                     Some(parts) => parts.iter().any(open),
                     None => true,
                 })
@@ -531,13 +528,17 @@ pub fn start(conv: &Arc<crate::store::Shared>, ctx: &eframe::egui::Context) {
         }
     }
     settle(conv);
+    let k = key();
+    if k.is_empty() {
+        return;
+    }
     // (The markers without a text or an error, with what to rewrite.)
     let pending: Vec<(String, String)> = {
         let c = conv.lock().unwrap();
         let open = |m: &Value| m.get("text").is_none() && m.get("error").is_none();
         let mut out = vec![];
         for b in c.messages.iter().filter(|m| m["role"] == "assistant").flat_map(|m| m["content"].as_array().into_iter().flatten()) {
-            let Some(m) = b.get(KEY).filter(|m| open(m)) else { continue };
+            let Some(m) = b.get(k).filter(|m| open(m)) else { continue };
             match m["parts"].as_array() {
                 Some(parts) => {
                     let text = b["text"].as_str().unwrap_or("");
@@ -576,106 +577,19 @@ pub fn start_parts(parts: Vec<(String, String)>, conv: &Arc<crate::store::Shared
     }
 }
 
-/// The rewrite request for `text`.
-fn body(text: &str) -> crate::oak::Request {
-    crate::oak::Request {
-        provider: crate::providers::Kind::OpenRouter,
-        model: MODEL.into(),
-        max_tokens: 16000,
-        purpose: crate::oak::Purpose::Unslop,
-        ttl: crate::oak::Ttl::Off,
-        messages: vec![json!({"role": "user", "content": [crate::oak::text(&format!("{}\n\n<input>\n{text}\n</input>", prompt().trim()))]})],
-        ..Default::default()
-    }
-}
-
-/// What to show of the reply `raw`: what is inside `<output>`, without the
-/// closing tag. While it streams (`done` false), nothing before `<output>`
-/// comes, and the end is held back while it could be the start of
-/// `</output>`. A finished reply without the tags is taken whole.
-pub fn output(raw: &str, done: bool) -> String {
-    const OPEN: &str = "<output>";
-    const CLOSE: &str = "</output>";
-    let body = match raw.find(OPEN) {
-        Some(i) => &raw[i + OPEN.len()..],
-        None if done => raw,
-        None => return String::new(),
-    };
-    let mut body = match body.find(CLOSE) {
-        Some(i) => &body[..i],
-        None => body,
-    };
-    if !done {
-        for n in (1..CLOSE.len()).rev() {
-            if body.ends_with(&CLOSE[..n]) {
-                body = &body[..body.len() - n];
-                break;
-            }
-        }
-    }
-    split_bold_headers(body.trim())
-}
-
-/// A line that is all bold (`**Header**`, maybe with a colon after) with
-/// text right under it gets a blank line after it, so it shows as a header
-/// of its own instead of running into the paragraph (the rewrite model
-/// writes them that way). Not inside code blocks.
-fn split_bold_headers(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 16);
-    let mut fence = false;
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        if crate::instructions::is_fence(line) {
-            fence = !fence;
-        }
-        out += line;
-        if lines.peek().is_some() {
-            out.push('\n');
-            if !fence && is_bold_header(line) && lines.peek().is_some_and(|n| !n.trim().is_empty()) {
-                out.push('\n');
-            }
-        }
-    }
-    out
-}
-
-/// A line that is all bold, maybe with a colon after: a header.
-fn is_bold_header(l: &str) -> bool {
-    let l = l.trim();
-    let l = l.strip_suffix(':').unwrap_or(l);
-    ["**", "__"].iter().any(|m| l.len() > 2 * m.len() && l.starts_with(m) && l.ends_with(m) && !l[m.len()..l.len() - m.len()].contains(m))
-}
-
+/// Rewrites `id`'s `text` with the rewriter, and puts the rewrite in its
+/// place.
 fn run(id: String, text: String, conv: Arc<crate::store::Shared>, ctx: eframe::egui::Context) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let req = body(&text);
-    std::thread::spawn(move || crate::openrouter::stream(req, tx));
-    let mut raw = String::new();
-    let mut cost = 0.0;
-    let mut result: Result<String, String> = Err("The rewrite ended early.".into());
-    for m in rx {
-        match m {
-            Sse::Event(Event::Cost(c)) => cost += c,
-            Sse::Event(Event::Text { text, .. }) => {
-                raw += &text;
-                let shown = output(&raw, false);
-                if let Some(j) = JOBS.lock().unwrap().get_mut(&id) {
-                    j.text = shown;
-                }
-                ctx.request_repaint();
+    let (result, cost) = match rewriter() {
+        Some(r) => r.rewrite(&text, &mut |so_far: &str| {
+            if let Some(j) = JOBS.lock().unwrap().get_mut(&id) {
+                j.text = so_far.to_string();
             }
-            Sse::Done => {
-                let out = output(&raw, true);
-                result = if out.is_empty() { Err("The rewrite came back empty.".into()) } else { Ok(out) };
-                break;
-            }
-            Sse::Err(e) => {
-                result = Err(e);
-                break;
-            }
-            _ => {}
-        }
-    }
+            ctx.request_repaint();
+        }),
+        None => (Err("The plugin that rewrote it is gone.".into()), 0.0),
+    };
+    let result = result.and_then(|t| if t.trim().is_empty() { Err("The rewrite came back empty.".into()) } else { Ok(t) });
     // Into its block; a block still in the reply streaming in gets it when
     // the reply joins the conversation (`settle`, which looks under the
     // same lock).
@@ -697,30 +611,7 @@ fn run(id: String, text: String, conv: Arc<crate::store::Shared>, ctx: eframe::e
 mod tests {
     use super::*;
 
-    /// Only what is inside `<output>` shows, without a partial closing tag,
-    /// and nothing at all until the opening tag has streamed in.
-    #[test]
-    fn output_between_the_tags() {
-        assert_eq!(output("Sure.\n<output>\nHello there.\n</output>", true), "Hello there.");
-        assert_eq!(output("<output>Hello</out", false), "Hello");
-        assert_eq!(output("<output>Hello <", false), "Hello");
-        assert_eq!(output("<outp", false), "");
-        assert_eq!(output("Plain reply", true), "Plain reply");
-        assert_eq!(output("Plain reply", false), "");
-        assert_eq!(output("<output>a < b</output> trailing", true), "a < b");
-    }
-
-    /// A bold header line gets a blank line after it, unless it is inside a
-    /// code block or not the whole line.
-    #[test]
-    fn bold_headers_get_their_own_paragraph() {
-        let f = |s: &str| output(&format!("<output>{s}</output>"), true);
-        assert_eq!(f("**Prompt Update**\nI have updated it."), "**Prompt Update**\n\nI have updated it.");
-        assert_eq!(f("**Notes:**\n- one"), "**Notes:**\n\n- one");
-        assert_eq!(f("**Done**\n\nAlready apart."), "**Done**\n\nAlready apart.");
-        assert_eq!(f("**a** and **b**\nnext"), "**a** and **b**\nnext");
-        assert_eq!(f("```\n**x**\ny\n```"), "```\n**x**\ny\n```");
-    }
+    const KEY: &str = "_oak_unslop";
 
     /// Marked text blocks are the ones that hold text, once, and the marker
     /// never reaches the model.
@@ -742,30 +633,40 @@ mod tests {
         assert!(!serde_json::to_string(&crate::rolling::view(&[msg], None)).unwrap().contains(KEY), "never sent to the model");
     }
 
-    /// Thinking goes in sections: a header with its paragraph, sent once the
-    /// next header is complete; short paragraphs run together up to SECTION.
+    /// Thinking goes in the rewriter's sections, from where the marked
+    /// ones end; without its say, whole once it ends. Sections that overlap
+    /// or hold nothing go.
     #[test]
     fn thinking_sections() {
-        let text = "**Planning**\n\nI will read the files.\n\n**Reading**\n\nLooking at x.";
-        let got = |from, done| sections(text, from, done).into_iter().map(|(s, e)| &text[s..e]).collect::<Vec<_>>();
-        assert_eq!(got(0, false), ["**Planning**\n\nI will read the files."]);
-        assert_eq!(got(0, true), ["**Planning**\n\nI will read the files.", "**Reading**\n\nLooking at x."]);
-        // A header alone, or a paragraph not yet ended, waits.
-        assert!(sections("**Planning**\n\n", 0, false).is_empty());
-        // No headers (DeepSeek): paragraphs run together to SECTION bytes.
-        let para = |c: char| c.to_string().repeat(400);
-        let long = format!("{}\n\n{}\n\n{}\n\n", para('a'), para('b'), para('c'));
-        let s = sections(&long, 0, false);
-        assert_eq!(&long[s[0].0..s[0].1], format!("{}\n\n{}", para('a'), para('b')));
-        // Multibyte text and odd spacing don't trip it.
-        let odd = "  é ü\n\n\n\n**Ö**\n\nñ  \n\n";
-        let s = sections(odd, 0, true);
-        assert_eq!(s.iter().map(|&(a, b)| &odd[a..b]).collect::<Vec<_>>(), ["é ü", "**Ö**\n\nñ"]);
-        assert!(sections(odd, 99, true).is_empty());
+        struct Says(Option<Vec<(usize, usize)>>);
+        impl Rewriting for Says {
+            fn key(&self) -> &'static str {
+                KEY
+            }
+            fn bits(&self) -> u32 {
+                0
+            }
+            fn epoch(&self) -> u32 {
+                0
+            }
+            fn sections(&self, _: &str, _: bool) -> Option<Vec<(usize, usize)>> {
+                self.0.clone()
+            }
+            fn rewrite(&self, _: &str, _: &mut dyn FnMut(&str)) -> (Result<String, String>, f64) {
+                (Err(String::new()), 0.0)
+            }
+        }
+        let text = "  é ü\n\nmore  ";
+        assert!(sections(&Says(None), text, 0, false).is_empty(), "no say: waits for the end");
+        assert_eq!(sections(&Says(None), text, 0, true), [(2, 13)]);
+        assert_eq!(sections(&Says(None), text, 9, true), [(9, 13)]);
+        assert!(sections(&Says(None), text, 99, true).is_empty());
+        let says = Says(Some(vec![(4, 6), (0, 3), (2, 4), (5, 5), (6, 7), (7, 99)]));
+        assert_eq!(sections(&says, "abcdefghi", 1, false), [(1, 4), (5, 7), (7, 8)]);
     }
 
-    /// Streamed in pieces, a thinking block is marked section by section,
-    /// each once, in order.
+    /// Streamed in pieces, a thinking block is marked section by section
+    /// (the test rewriter's: paragraphs), each once, in order.
     #[test]
     fn thinking_marked_as_it_streams() {
         let full = "**One**\n\nFirst part.\n\n**Two**\n\nSecond part, longer.\n\n**Three**\n\nLast.";
@@ -775,11 +676,11 @@ mod tests {
             b["text"] = json!(b["text"].as_str().unwrap().to_string() + std::str::from_utf8(chunk).unwrap());
             sent.extend(mark_thinking(&mut b, false));
         }
-        assert_eq!(sent.len(), 2, "the last section waits for the block's end");
+        assert_eq!(sent.len(), 5, "the last section waits for the block's end");
         sent.extend(mark_thinking(&mut b, true));
         assert!(mark_thinking(&mut b, true).is_empty(), "marked once");
         let texts: Vec<&str> = sent.iter().map(|(_, t)| t.as_str()).collect();
-        assert_eq!(texts, ["**One**\n\nFirst part.", "**Two**\n\nSecond part, longer.", "**Three**\n\nLast."]);
+        assert_eq!(texts, ["**One**", "First part.", "**Two**", "Second part, longer.", "**Three**", "Last."]);
         // Never sent to the model.
         let msg = json!({"role": "assistant", "content": [b]});
         assert!(!serde_json::to_string(&crate::rolling::view(&[msg], None)).unwrap().contains(KEY));
@@ -836,20 +737,18 @@ mod tests {
         assert!(!apply(&mut c, &format!("{NOTE}gone"), &Ok("x".into())));
     }
 
-    /// Turning Rewrite notes off moves to a new epoch: the rewrites made
-    /// before stop showing and are made again; failed ones too.
+    /// A new epoch: the notes' rewrites made before stop showing and are
+    /// made again; failed ones too.
     #[test]
     fn note_rewrites_clear_with_a_new_epoch() {
-        set(true);
-        set_flag(NOTES, true);
-        set_epoch(0);
+        set_test(OAK_REWRITE_REPLIES | OAK_REWRITE_NOTES, 0);
         let mut c = Conversation { deleted: true, ..Default::default() };
         c.notes.push(Note { id: 1, text: "a".into(), rewrite: Some(Rewrite { id: "note-old1".into(), text: Some("A.".into()), ..Default::default() }) });
         c.notes.push(Note { id: 2, text: "b".into(), rewrite: Some(Rewrite { id: "note-old2".into(), error: Some("HTTP 500".into()), ..Default::default() }) });
         assert_eq!(notes_to_do(&mut c), (vec![], false), "this epoch's, done or failed, stay");
         assert_eq!(note_state(&c.notes[0], true), Some(State::Done("A.")));
 
-        set_epoch(1);
+        set_test(OAK_REWRITE_REPLIES | OAK_REWRITE_NOTES, 1);
         assert_eq!(note_state(&c.notes[0], true), Some(State::Streaming(String::new())), "stale: shows as being rewritten");
         let (todo, marked) = notes_to_do(&mut c);
         assert!(marked);
@@ -860,7 +759,6 @@ mod tests {
         }
         // An old rewrite finishing late finds no place.
         assert!(!apply(&mut c, "note-old1", &Ok("A.".into())));
-        set_flag(NOTES, false);
-        set(false);
+        set_test(0, 0);
     }
 }

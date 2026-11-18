@@ -25,6 +25,8 @@ A plugin can add:
 | Its settings page | `SettingsSection` | `OakSettings` | Rows on a page of the plugin's own, which the gear on its row on Home's Plugins tab opens (and Settings in the row's right-click menu), in the window as Settings is; its X or Esc goes back. Never on Settings itself. |
 | A screen before everything | `Gate` | `OakGate` | Shown instead of the app while it says it is shut (a sign-in). |
 | Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, in a message box's bottom left corner, on Home's wallpaper (`home_scene`, under the menu; interface version 7), over a local conversation's transcript (`chat_scene`, clipped to it; version 7), at exit. |
+| Rewrites | `Rewriter` | `OakRewriter` | What a conversation's transcript shows in place of the model's own words (interface version 9): its replies' text, its thinking (in the sections the plugin picks) and its notes, rewritten as they come; the model is sent its own text still. Oak keeps each rewrite in its block under the rewriter's `_oak_` key, shows it streaming in ("Drafted a message" opens on the model's own text, unless No drafts) and starts again what was left unfinished; the plugin says what is rewritten and does the rewriting (often with `model_stream`). The user's own conversations only, not subagents'. The first registered. |
+| A box beside the message box | `ComposerBox` | `OakComposerBox` | Framed like smart context's and as tall, left of the message box's buttons (version 9): switches for what the plugin does to every conversation. The row makes room for it only while there is one, and drops it before smart context when the window is narrow. The first registered. |
 
 Two examples to copy: `plugins/hello` (Rust: a Home tab built from Oak's components, with state
 kept between runs and work on a thread; a theme, a settings page, a system prompt) and
@@ -245,6 +247,10 @@ true zero. How the interface reads (`hello.c` shows each):
   `app_`, `oak_`, `window`, `texture_`, work on the UI thread, inside a callback Oak made. The
   rest (HTTP, files, `repaint`, `share`, usage, cloud, `toast`, `spawn`, `prefs_get`,
   `prefs_set`) work from any thread.
+- **Models** (version 9): `model_stream` asks a model for a reply through one of Oak's providers,
+  with the user's logins and keys, and waits for it, handing over each event (`{"text"}`,
+  `{"thinking"}`, `{"cost"}`, `{"retry"}`) as it streams in. It names its usage log (`usage`,
+  "plugin" when not given), so its cost shows on the Usage page apart. Not on the UI thread.
 
 ## Changing how components look
 

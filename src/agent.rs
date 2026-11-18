@@ -698,7 +698,7 @@ impl Session {
         *w.open_waits.lock().unwrap() = waits;
         // Rewrites left unfinished when OAK closed carry on; progress meters
         // run again, each when it is next due.
-        crate::unslop::start(&s.conv, &w.ctx);
+        crate::rewrites::start(&s.conv, &w.ctx);
         crate::progress::watch(&s.conv, &w.ctx);
         // Tasks left running when OAK closed report their end again.
         w.watch_revived();
@@ -1940,14 +1940,14 @@ impl Worker {
             b.as_object_mut().unwrap().remove("_oak_raw");
         }
         if !blocks.is_empty() {
-            let unslop = crate::unslop::applies(&self.conv.lock().unwrap()) && crate::unslop::mark(&mut blocks);
-            let rewrote = blocks.iter().any(|b| b.get(crate::unslop::KEY).is_some());
+            let unslop = crate::rewrites::applies(&self.conv.lock().unwrap()) && crate::rewrites::mark(&mut blocks);
+            let rewrote = blocks.iter().any(|b| b.get(crate::rewrites::key()).is_some());
             self.push("assistant", blocks);
             if unslop {
-                crate::unslop::start(&self.conv, &self.ctx);
+                crate::rewrites::start(&self.conv, &self.ctx);
             } else if rewrote {
                 // Thinking rewritten while the reply streamed in.
-                crate::unslop::settle(&self.conv);
+                crate::rewrites::settle(&self.conv);
             }
         }
         calls

@@ -65,7 +65,7 @@ impl App {
         let (resp, box_rect) = self.message_box(ui, t, lay.chat, top, id);
         if resp.has_focus() { self.side_active = false; }
         let base_bottom = box_rect.bottom().max(top + COMPOSER_H);
-        let link_end = lay.unslop.map_or(lay.buttons, |u| u.min) - 8.0;
+        let link_end = lay.plugin_box.map_or(lay.buttons, |u| u.min) - 8.0;
         let left = area.left() + GAP;
         let bottom = base_bottom + plugins::composer_corner(ui, self, hooks, Rangef::new(left, link_end), base_bottom - SETTINGS_H);
         let row = |x: Rangef| Rect::from_x_y_ranges(x, bottom - COMPOSER_H..=bottom);
@@ -205,16 +205,16 @@ impl App {
         }
     }
 
-    /// The boxes along the row, each in `row` of its span: Unslop left of
-    /// the buttons, and smart context and the account right of the message
-    /// box.
+    /// The boxes along the row, each in `row` of its span: a plugin's
+    /// (Unslop's) left of the buttons, and smart context and the account
+    /// right of the message box.
     fn side_boxes(&mut self, ui: &mut Ui, t: &Theme, lay: &ComposerLayout, row: impl Fn(Rangef) -> Rect) {
-        let session = chat_session(&self.screen, &self.sessions);
-        if let Some(x) = lay.unslop {
+        if let (Some(x), Some(b)) = (lay.plugin_box, plugins::parts().composer_boxes.first()) {
             ui.scope_builder(UiBuilder::new().max_rect(row(x)), |ui| {
-                unslop_panel(ui, t, &mut self.settings, x.span());
+                side_box(ui, t, x.span(), |ui| b.show(ui, self));
             });
         }
+        let session = chat_session(&self.screen, &self.sessions);
         if let Some(&x) = lay.boxes.first() {
             ui.scope_builder(UiBuilder::new().max_rect(row(x)), |ui| {
                 rolling_panel(ui, t, session, &mut self.settings, &mut self.size_inputs, x.span());
@@ -521,9 +521,9 @@ pub(crate) struct ComposerLayout {
     /// The message box: the transcript's column, unless the boxes need
     /// some of it.
     pub(crate) chat: Rangef,
-    /// The Unslop box, left of the buttons (up to `BOX_W` wide, against
-    /// them), when there is room.
-    pub(crate) unslop: Option<Rangef>,
+    /// A plugin's box (`ComposerBox`: Unslop's), left of the buttons (up
+    /// to `BOX_W` wide, against them), when there is one and room for it.
+    pub(crate) plugin_box: Option<Rangef>,
     /// Smart context, then the account (dropped in that order from the
     /// right when the window gets narrow).
     boxes: Vec<Rangef>,
@@ -536,12 +536,13 @@ impl ComposerLayout {
         let col = if boxed { chat_column(area) } else { transcript_x(area) };
         let (left, right) = (area.min + GAP, area.max - GAP);
         // What goes when the window gets narrow, in order: Settings' label,
-        // the account box, the Unslop box, smart context. However narrow,
+        // the account box, a plugin's box, smart context. However narrow,
         // the corner keeps room for the Settings gear: it is the only way
         // to Settings.
-        let tries = [(true, SETTINGS_W, 2usize), (true, GEAR_W, 2), (true, GEAR_W, 1), (false, GEAR_W, 1)];
-        for (unslop, link, n) in tries {
-            let lead = left + link + 8.0 + if unslop { MIN_BOX_W + 8.0 } else { 0.0 } + BTN + 8.0;
+        let boxed_plugin = !plugins::parts().composer_boxes.is_empty();
+        let tries = [(boxed_plugin, SETTINGS_W, 2usize), (boxed_plugin, GEAR_W, 2), (boxed_plugin, GEAR_W, 1), (false, GEAR_W, 1)];
+        for (plugin_box, link, n) in tries {
+            let lead = left + link + 8.0 + if plugin_box { MIN_BOX_W + 8.0 } else { 0.0 } + BTN + 8.0;
             let chat_left = col.min.max(lead);
             let chat_right = col.max.min(right - n as f32 * (MIN_BOX_W + 8.0));
             if chat_right - chat_left < MIN_INPUT_W {
@@ -551,12 +552,12 @@ impl ComposerLayout {
             let x0 = chat_right + 8.0;
             let w = (right - x0 - 8.0 * (n - 1) as f32) / n as f32;
             let boxes = (0..n).map(|i| Rangef::new(x0 + i as f32 * (w + 8.0), x0 + i as f32 * (w + 8.0) + w)).collect();
-            let unslop = unslop.then(|| Rangef::new((buttons - 8.0 - BOX_W).max(left + link + 8.0), buttons - 8.0));
-            return ComposerLayout { buttons, chat: Rangef::new(chat_left, chat_right), unslop, boxes };
+            let plugin_box = plugin_box.then(|| Rangef::new((buttons - 8.0 - BOX_W).max(left + link + 8.0), buttons - 8.0));
+            return ComposerLayout { buttons, chat: Rangef::new(chat_left, chat_right), plugin_box, boxes };
         }
         let chat_left = col.min.max(left + GEAR_W + 8.0 + BTN + 8.0);
         let chat = Rangef::new(chat_left, col.max.min(right).max(chat_left + 40.0));
-        ComposerLayout { buttons: chat_left - 8.0 - BTN, chat, unslop: None, boxes: vec![] }
+        ComposerLayout { buttons: chat_left - 8.0 - BTN, chat, plugin_box: None, boxes: vec![] }
     }
 }
 
@@ -651,57 +652,6 @@ pub(crate) fn settings_link(ui: &mut Ui, t: &Theme, room: Rect) -> (Rect, bool) 
         chevron_v(p, egui::pos2(g.right() + 9.0, rect.center().y), true, color);
     }
     (rect, resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Settings").clicked())
-}
-
-/// Unslop, in a box like smart context's, left of the buttons: its
-/// switch, and under it the switches that work with it on (greyed out with
-/// it off). They are for every conversation.
-pub(crate) fn unslop_panel(ui: &mut Ui, t: &Theme, settings: &mut Settings, w: f32) -> egui::Response {
-    side_box(ui, t, w, |ui| {
-        let on = settings.unslop;
-        let notes_showed = on && settings.unslop_notes;
-        let mut changed = false;
-        let tip = "Shows the model's messages rewritten by Gemma 4 31B through OpenRouter, paid from its credits. The model's context is unchanged. Not for subagents.";
-        if switch_row(ui, t, "Unslop", t.ink2, tip, on) {
-            settings.unslop = !on;
-            changed = true;
-        }
-        ui.add_space(2.0);
-        let rows: [(&str, &str, &mut bool); 3] = [
-            ("No drafts", "Hides the model's drafts: only the rewrites show", &mut settings.unslop_no_drafts),
-            ("Rewrite thinking", "Rewrites thinking summaries as they stream in", &mut settings.unslop_thinking),
-            ("Rewrite notes", "Shows the notes rewritten; the model's notes are unchanged. Turning it off clears the rewrites", &mut settings.unslop_notes),
-        ];
-        for (label, tip, value) in rows {
-            ui.add_enabled_ui(on, |ui| {
-                if switch_row(ui, t, label, t.ink3, tip, *value) {
-                    *value = !*value;
-                    changed = true;
-                }
-            });
-        }
-        if changed {
-            // Rewritten notes no longer show: the rewrites go, to be made
-            // again (with the prompt then in use) once they show again.
-            if notes_showed && !(settings.unslop && settings.unslop_notes) {
-                settings.unslop_notes_epoch = settings.unslop_notes_epoch.wrapping_add(1);
-            }
-            unslop::set_all(settings);
-            store::save_settings(settings);
-        }
-    })
-    .response
-}
-
-/// A box's row: `label` (in `color`, `tip` under the pointer) and a
-/// switch at the right. True when the switch is clicked.
-fn switch_row(ui: &mut Ui, t: &Theme, label: &str, color: Color32, tip: &str, on: bool) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).small().color(color)).on_hover_text(tip);
-        // A little smaller than smart context's (egui fades it in a disabled row).
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| switch(ui, t, on, vec2(26.0, 13.0)).clicked()).inner
-    })
-    .inner
 }
 
 /// A square button (30 px, or 28 `small`) with a painted icon, beside the

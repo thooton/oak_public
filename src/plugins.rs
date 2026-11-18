@@ -699,7 +699,7 @@ pub fn report() -> i32 {
     }
     let p = parts();
     println!(
-        "Registered: {} Home tab{}, {} tab kind{}, {} New kind{}, {} cloud backend{}, {} session kit{}, {} theme{}, {} font{}, {} role{}, {} settings section{}, {} gate{}, {} hook set{}, {}.",
+        "Registered: {} Home tab{}, {} tab kind{}, {} New kind{}, {} cloud backend{}, {} session kit{}, {} theme{}, {} font{}, {} role{}, {} settings section{}, {} gate{}, {} hook set{}, {} rewriter{}, {} composer box{}, {}.",
         p.home_tabs.len(), oak_sdk::plural(p.home_tabs.len()),
         p.tab_kinds.len(), oak_sdk::plural(p.tab_kinds.len()),
         p.new_kinds.len(), oak_sdk::plural(p.new_kinds.len()),
@@ -711,6 +711,8 @@ pub fn report() -> i32 {
         p.settings.len(), oak_sdk::plural(p.settings.len()),
         p.gates.len(), oak_sdk::plural(p.gates.len()),
         p.hooks.len(), oak_sdk::plural(p.hooks.len()),
+        p.rewriters.len(), oak_sdk::plural(p.rewriters.len()),
+        p.composer_boxes.len(), oak_sdk::plural(p.composer_boxes.len()),
         if p.vault.is_some() { "a vault" } else { "no vault" },
     );
     found.iter().any(|f| f.trouble.is_some()) as i32

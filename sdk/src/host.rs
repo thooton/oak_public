@@ -497,6 +497,27 @@ impl Host {
         let json = checked(|out, user| unsafe { (api().file_block)(s(&path.to_string_lossy()), bytes(data), out, user) })?;
         serde_json::from_str(&json).map_err(|e| e.to_string())
     }
+
+    /// Asks a model for a reply through one of Oak's providers, with the
+    /// user's logins and keys, and waits for it to end (Oak 9; not on the
+    /// UI thread). `request`: `{"model", "messages", "provider"?,
+    /// "system"?, "max_tokens"?, "thinking"?, "effort"?, "usage"?}`
+    /// (`abi`'s `model_stream`). `event` gets each event of the reply as it
+    /// streams in: `{"text"}`, `{"thinking"}`, `{"cost"}`, `{"retry"}`.
+    /// Err: why it failed.
+    pub fn model_stream(&self, request: &Value, event: &mut dyn FnMut(&Value)) -> Result<(), String> {
+        unsafe extern "C" fn take(user: *mut c_void, text: OakStr) {
+            let event = unsafe { &mut *(user as *mut &mut dyn FnMut(&Value)) };
+            let v: Value = serde_json::from_str(unsafe { crate::rt::str_of(text) }).unwrap_or(Value::Null);
+            crate::rt::carry(|| event(&v));
+        }
+        let json = request.to_string();
+        let mut event = event;
+        let user = &mut event as *mut &mut dyn FnMut(&Value) as *mut c_void;
+        let r = checked(|out, out_user| unsafe { (api().model_stream)(s(&json), take, user, out, out_user) }).map(drop);
+        crate::rt::rethrow();
+        r
+    }
 }
 
 /// The window, while a plugin draws in it.

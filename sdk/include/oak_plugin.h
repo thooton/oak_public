@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 8
+#define OAK_API_VERSION 9
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -75,6 +75,8 @@ typedef struct OakChoice OakChoice;
 typedef struct OakSlider OakSlider;
 typedef struct OakTable OakTable;
 typedef struct OakLook OakLook;
+typedef struct OakRewriter OakRewriter;
+typedef struct OakComposerBox OakComposerBox;
 
 /* Text, borrowed for the call: UTF-8, `len` bytes, no terminator needed. */
 struct OakStr {
@@ -138,6 +140,21 @@ typedef bool (*OakInit)(const OakApi *api);
  * `oak_columns`).
  */
 typedef void (*OakCell)(void *user, OakUi *ui, size_t row, size_t column);
+
+/* Takes one piece of text (what a rewrite wrote so far, an event of
+ * a model's reply), borrowed for the call.
+ */
+typedef void (*OakTake)(void *user, OakStr text);
+
+/* A number of `OAK_*` flags, asked now. */
+typedef uint32_t (*OakBits)(void *user);
+
+/* Rewrites `text`, waiting for the rewrite (on a thread of Oak's):
+ * `progress` gets the rewrite so far whenever it grows; at the end
+ * `out` gets the rewrite (true) or why it failed (false), and `cost`
+ * what it cost, in dollars (0 when free).
+ */
+typedef bool (*OakRewrite)(void *user, OakStr text, OakTake progress, void *progress_user, OakSink out, void *out_user, double *cost);
 
 /* A rectangle in the window, in points: its top left and bottom right. */
 struct OakRect {
@@ -889,6 +906,64 @@ struct OakLook {
     float text_scale;
 };
 
+/* What a conversation's transcript shows in place of the model's own
+ * words (`add_rewriter`): its replies' text, its thinking and its
+ * notes, rewritten for the user as they come. What the model is sent
+ * never changes. Oak keeps the work's state in the conversation, in
+ * the blocks' `key` (saved with it, never sent), shows each rewrite
+ * as it streams in (the model's own text a click away) and starts
+ * the rewrites left unfinished again. Only the user's own
+ * conversations are rewritten, not subagents'. One rewriter at a
+ * time: the first registered.
+ */
+struct OakRewriter {
+    uint32_t size;
+    uint32_t flags;
+    void *user;
+    /* The key a block's rewrite is kept under: it starts with
+     * `_oak_` (which no request carries). Keep it the same from one
+     * version to the next, or saved rewrites stop showing.
+     */
+    OakStr key;
+    /* What gets rewritten now: `OAK_REWRITE_*`. Asked often and from
+     * any thread: answer quickly. Blocks marked already keep their
+     * rewrites whatever it answers.
+     */
+    OakBits rewrites;
+    /* Rewrites one piece: a reply's text block, a section of
+     * thinking, a note. Several run at once, each on a thread of its
+     * own.
+     */
+    OakRewrite rewrite;
+    /* Its other calls. `sections` (`{"done"}`, the thinking not yet
+     * marked as `data`): the complete sections of it to rewrite now,
+     * as JSON `[[start, end], ...]` (byte offsets into `data`); with
+     * `done` the thinking has ended and all of it goes. Without it,
+     * a thinking block is rewritten whole once it ends. `epoch`: a
+     * number the notes' rewrites are made under, answered as the
+     * call's value; a note's rewrite made under another is made
+     * again (without it, 0: they are kept).
+     */
+    OakCall call;
+};
+
+/* A box in a conversation's message box row, left of its buttons
+ * (`add_composer_box`), framed and as tall as the row's other boxes:
+ * where switches for what a plugin does to every conversation go.
+ * The row makes room for it only while one is registered, and drops
+ * it before smart context when the window is narrow. Only the first
+ * registered shows.
+ */
+struct OakComposerBox {
+    uint32_t size;
+    uint32_t flags;
+    void *user;
+    /* Draws inside the frame: `ui` lays out top to bottom, as wide as
+     * the box less its margins.
+     */
+    OakBody show;
+};
+
 /* A response's flags. */
 #define OAK_HOVERED 1u
 #define OAK_CLICKED 2u
@@ -1285,6 +1360,16 @@ struct OakLook {
 /* `OakTable`: rows lit under the pointer and clicked; no heading row. */
 #define OAK_TABLE_CLICK 1u
 #define OAK_TABLE_NO_HEAD 2u
+/* `OakRewriter.rewrites`: the replies' text, as each reply ends; the
+ * thinking, as it streams in, and the notes, for the notes box (both
+ * only with the replies'); and the
+ * model's drafts left out of the transcript (only the rewrites show,
+ * not the "Drafted a message" rows that open on the model's text).
+ */
+#define OAK_REWRITE_REPLIES 1u
+#define OAK_REWRITE_THINKING 2u
+#define OAK_REWRITE_NOTES 4u
+#define OAK_REWRITE_NO_DRAFTS 8u
 
 /* The functions Oak gives a plugin. */
 struct OakApi {
@@ -1969,6 +2054,27 @@ struct OakApi {
      * (and egui's widgets take its colors); scopes in scopes add to it.
      */
     void (*oak_look_scope)(OakUi *ui, const OakLook *look, OakBody body, void *user);
+
+    /* What transcripts show in place of the model's words. */
+    void (*add_rewriter)(const OakRewriter *part);
+
+    /* A box beside the message box. */
+    void (*add_composer_box)(const OakComposerBox *part);
+
+    /* Asks a model for a reply through one of Oak's providers, with the
+     * user's logins and keys, and waits for it to end. `request` is JSON:
+     * `{"model", "provider"?, "messages", "system"?, "max_tokens"?,
+     * "thinking"?, "effort"?, "usage"?}`; `messages` in Oak's format
+     * (`{"role", "content": [{"type": "text", "text"}]}`), `provider` an
+     * id ("openrouter", "claude", ...; by default whoever serves
+     * `model`), `usage` the name the usage log gives the request (by
+     * default "plugin"). No prompt cache is written. Each event of the
+     * reply goes to `event` as it streams in, as JSON: `{"text"}` (more of
+     * the reply), `{"thinking"}`, `{"cost"}` (dollars, where the provider
+     * charges), `{"retry"}` (why it is tried again). True: the reply
+     * ended; false: `error` got why it failed.
+     */
+    bool (*model_stream)(OakStr request, OakTake event, void *user, OakSink error, void *error_user);
 };
 
 /* Text from a C string, and from a literal. */

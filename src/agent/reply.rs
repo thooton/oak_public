@@ -124,7 +124,7 @@ impl Streaming {
                 if let Some(b) = l.blocks.get_mut(index) {
                     append(b, "text", &text);
                     if self.rewrite_thinking {
-                        self.rewrites.extend(crate::unslop::mark_thinking(b, false));
+                        self.rewrites.extend(crate::rewrites::mark_thinking(b, false));
                     }
                 }
             }
@@ -158,7 +158,7 @@ impl Streaming {
                 {
                     b["_oak_ms"] = json!(t.elapsed().as_millis() as u64);
                     if self.rewrite_thinking {
-                        self.rewrites.extend(crate::unslop::mark_thinking(b, true));
+                        self.rewrites.extend(crate::rewrites::mark_thinking(b, true));
                     }
                 }
                 if oak::is_call(b) {
@@ -447,7 +447,7 @@ impl Worker {
             thread,
             // Rewrite thinking (Unslop): sections go to be rewritten as they
             // come in, the rest when their block ends.
-            rewrite_thinking: crate::unslop::applies(&self.conv.lock().unwrap()) && crate::unslop::thinking(),
+            rewrite_thinking: crate::rewrites::applies(&self.conv.lock().unwrap()) && crate::rewrites::thinking(),
             ..Default::default()
         };
         // Output speed, from the provider's output token count only.
@@ -499,7 +499,7 @@ impl Worker {
                 (l.drawn, l.drawn_viewport.unwrap_or(eframe::egui::ViewportId::ROOT))
             };
             if !s.rewrites.is_empty() {
-                crate::unslop::start_parts(std::mem::take(&mut s.rewrites), &self.conv, &self.ctx);
+                crate::rewrites::start_parts(std::mem::take(&mut s.rewrites), &self.conv, &self.ctx);
             }
             // A delta only changes the transcript; any other event may
             // change what Home and the tabs show (the account's limits).
