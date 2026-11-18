@@ -141,7 +141,9 @@ impl App {
         let key = match self.home_list.as_str() {
             CLOUD_TAB => ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| cloud_list_view(ui, t, cloud::Provider::OWN)).inner,
             crate::plugins_view::TAB => {
-                ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| crate::plugins_view::show(ui, t, chats));
+                if let Some(id) = ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| crate::plugins_view::show(ui, t, chats)).inner {
+                    self.open_plugin_settings(&id);
+                }
                 None
             }
             crate::mcp_view::TAB => {
@@ -1158,7 +1160,7 @@ fn home_tab_looks() -> Vec<HomeTabLook> {
         own(LOCAL_TAB, "", "Conversations", "This machine's conversations", 0),
         own(CLOUD_TAB, crate::cloud_view::CLOUD_ICON, "Cloud", "Claude Code sessions in Anthropic's cloud, on your Claude accounts", 10),
         own(crate::mcp_view::TAB, crate::mcp_view::ICON, "Protocols", "Programs your conversations can work in, such as Blender and the browser", i32::MAX - 1),
-        own(crate::plugins_view::TAB, crate::plugins_view::ICON, "Plugins", "Switch plugins on and off", i32::MAX),
+        own(crate::plugins_view::TAB, crate::plugins_view::ICON, "Plugins", "Plugins, their switches and settings", i32::MAX),
     ];
     for tab in crate::plugins::parts().home_tabs.iter().filter(|tab| !tab.link() && tab.shown()) {
         let id = tab.id();

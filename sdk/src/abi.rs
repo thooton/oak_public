@@ -667,13 +667,16 @@ c_structs! {
         pub call: Option<OakCall>,
     }
 
-    /// Rows on the Settings page, under a heading.
+    /// Rows on the plugin's own settings page, which its row on Home's
+    /// Plugins tab opens (a gear); under `title` when the plugin has
+    /// several, or one titled other than the plugin. (Earlier Oaks showed
+    /// them on Settings.)
     pub struct OakSettings {
         pub size: u32,
         pub flags: u32,
         pub user: *mut c_void,
         pub title: OakStr,
-        /// Lower first, after Oak's own rows.
+        /// Lower first.
         pub order: i32,
         pub show: Option<OakBody>,
     }

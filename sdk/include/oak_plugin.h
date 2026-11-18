@@ -586,13 +586,17 @@ struct OakVault {
     OakCall call;
 };
 
-/* Rows on the Settings page, under a heading. */
+/* Rows on the plugin's own settings page, which its row on Home's
+ * Plugins tab opens (a gear); under `title` when the plugin has
+ * several, or one titled other than the plugin. (Earlier Oaks showed
+ * them on Settings.)
+ */
 struct OakSettings {
     uint32_t size;
     uint32_t flags;
     void *user;
     OakStr title;
-    /* Lower first, after Oak's own rows. */
+    /* Lower first. */
     int32_t order;
     OakBody show;
 };

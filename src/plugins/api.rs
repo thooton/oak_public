@@ -480,7 +480,7 @@ impl HostApi for Oak {
     }
 
     unsafe extern "C" fn add_settings(part: *const OakSettings) {
-        registering(|p| p.settings.push(Arc::new(parts::SettingsSection::new(&read(part)))));
+        registering(|p| p.settings.push((String::new(), Arc::new(parts::SettingsSection::new(&read(part))))));
     }
 
     unsafe extern "C" fn add_gate(part: *const OakGate) {

@@ -139,7 +139,7 @@ impl App {
             page: match self.page {
                 Page::Home => "home",
                 Page::Chats => "chats",
-                Page::Settings => "settings",
+                Page::Settings | Page::PluginSettings => "settings",
                 Page::Usage => "usage",
                 Page::Plugin => "plugin",
             }

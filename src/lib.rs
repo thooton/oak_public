@@ -194,6 +194,9 @@ enum Page {
     /// A plugin's page (`App::plugin_page`): a link at the right end of
     /// Home's tabs' row opens it (`oak_sdk::HomeTab::page`).
     Plugin,
+    /// A plugin's settings page (`App::plugin_settings_page`), opened from
+    /// its row on Home's Plugins tab.
+    PluginSettings,
 }
 
 /// A quick hasher (FxHash's step) for what is hashed every frame: the
@@ -304,6 +307,10 @@ struct App {
     page: Page,
     /// The page Settings was opened from: its X goes back there.
     settings_from: Option<Page>,
+    /// The plugin whose settings page is shown, and the page it was opened
+    /// from.
+    plugin_settings: String,
+    plugin_settings_from: Option<Page>,
     /// The message being written, and its attachments: the open tab's
     /// draft (each conversation, and the new one, keeps its own).
     input: String,
@@ -658,6 +665,7 @@ impl eframe::App for App {
         match self.page {
             Page::Home => { central(&mut |ui| self.home(ui, &t)); }
             Page::Settings => { central(&mut |ui| self.settings_page(ui, &t)); }
+            Page::PluginSettings => { central(&mut |ui| self.plugin_settings_page(ui, &t)); }
             Page::Usage => {
                 let mut back = false;
                 central(&mut |ui| back = usage_view::page(ui, &t, &mut self.usage));

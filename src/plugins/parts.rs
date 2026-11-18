@@ -541,7 +541,7 @@ impl Vault {
     }
 }
 
-/// Rows on the Settings page.
+/// Rows on a plugin's settings page (`App::plugin_settings_page`).
 pub(crate) struct SettingsSection {
     title: String,
     order: i32,
@@ -669,7 +669,8 @@ pub(crate) struct Parts {
     pub(crate) fonts: Vec<Arc<FontDef>>,
     pub(crate) roles: Vec<Role>,
     pub(crate) vault: Option<Arc<Vault>>,
-    pub(crate) settings: Vec<Arc<SettingsSection>>,
+    /// By the id of the plugin that registered each (its settings page).
+    pub(crate) settings: Vec<(String, Arc<SettingsSection>)>,
     pub(crate) gates: Vec<Arc<Gate>>,
     pub(crate) hooks: Vec<Arc<Hooks>>,
 }
@@ -689,5 +690,12 @@ impl Parts {
         self.settings.extend(more.settings);
         self.gates.extend(more.gates);
         self.hooks.extend(more.hooks);
+    }
+
+    /// The settings sections of the plugin `id`, in their order.
+    pub(crate) fn settings_of(&self, id: &str) -> Vec<Arc<SettingsSection>> {
+        let mut of: Vec<_> = self.settings.iter().filter(|(p, _)| p == id).map(|(_, s)| s.clone()).collect();
+        of.sort_by_key(|s| s.order());
+        of
     }
 }

@@ -208,13 +208,19 @@ including in a side chat.
 A click on the session box's folder opens it in the system's file manager; its right-click menu
 has Open folder and Copy path (a folder that no longer exists can only be copied).
 Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme and Font rows show once a plugin adds a
-choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings.
+choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings, and so are their
+settings: Settings holds none of a plugin's controls.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
 plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
 is clipped to the corner so it cannot move or cover the rest of the composer.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
+A running plugin that has settings (`SettingsSection`s) has a gear on its row, left of the switch,
+and Settings in the row's right-click menu: either opens the plugin's own settings page
+(`App::plugin_settings_page`, `src/settings.rs`), drawn in the window as Settings is, under the
+plugin's name with its sections down the box (each titled when it has several); its X or Esc goes
+back to the Plugins tab. What a plugin saves stays where it always kept it.
 Home's Protocols tab (`src/mcp_view.rs`) lists the protocols conversations can load (see Protocols
 below): Oak's own (Browser, Window, Blender) first, then those of the files in `protocols/`, each
 with its title, a switch (a click on the row flips it; off ends its connection, and switches Browser

@@ -14,7 +14,7 @@
 //! - `ThemeDef`, `FontDef`: a theme, a font, for Settings to offer;
 //! - `Role`: a system prompt;
 //! - `Vault`: somewhere else logins and keys are kept;
-//! - `SettingsSection`: rows on the Settings page;
+//! - `SettingsSection`: rows on the plugin's own settings page;
 //! - `Gate`: a screen that comes before everything (signing in somewhere);
 //! - `Hooks`: at startup, every frame, at the top of Home's Providers, in a
 //!   message box's corner, at exit.
@@ -327,10 +327,12 @@ pub trait Vault: Send + Sync {
     fn token(&self, kind: &str, id: &str, refused: Option<&str>) -> Result<Value, String>;
 }
 
-/// Rows on the Settings page, under a heading.
+/// Rows on the plugin's own settings page, which its row on Home's
+/// Plugins tab opens (a gear); under its title when the plugin has
+/// several, or one titled other than the plugin.
 pub trait SettingsSection: Send + Sync {
     fn title(&self) -> String;
-    /// Lower first, after Oak's own rows.
+    /// Lower first.
     fn order(&self) -> i32 { 100 }
     fn show(&self, ui: &mut Ui, app: &mut dyn App);
 }
@@ -790,7 +792,7 @@ impl Registrar {
         unsafe { (api().add_vault)(&d) };
     }
 
-    /// Rows on Settings.
+    /// Rows on the plugin's settings page.
     pub fn settings(&mut self, section: impl SettingsSection + 'static) {
         let title = section.title();
         let d = OakSettings { size: size_of::<OakSettings>(), flags: 0, title: s(&title), order: section.order(), show: Some(section_show), user: keep::<Section>(Box::new(section)) };

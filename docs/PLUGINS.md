@@ -22,12 +22,12 @@ A plugin can add:
 | A font | `FontDef` | `OakFontDef` | Four faces, offered on Settings; it can download them when first picked. |
 | A system prompt | `Role` | `OakRole` | Offered on the New screen (or only given by the plugin's own `NewKind`). |
 | A vault | `Vault` | `OakVault` | Somewhere else logins and keys are kept and renewed, for several machines. One at most. |
-| Rows on Settings | `SettingsSection` | `OakSettings` | |
+| Its settings page | `SettingsSection` | `OakSettings` | Rows on a page of the plugin's own, which the gear on its row on Home's Plugins tab opens (and Settings in the row's right-click menu), in the window as Settings is; its X or Esc goes back. Never on Settings itself. |
 | A screen before everything | `Gate` | `OakGate` | Shown instead of the app while it says it is shut (a sign-in). |
 | Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, in a message box's bottom left corner, on Home's wallpaper (`home_scene`, under the menu; interface version 7), over a local conversation's transcript (`chat_scene`, clipped to it; version 7), at exit. |
 
 Two examples to copy: `plugins/hello` (Rust: a Home tab built from Oak's components, with state
-kept between runs and work on a thread; a theme, a Settings row, a system prompt) and
+kept between runs and work on a thread; a theme, a settings page, a system prompt) and
 `plugins/hello-c/hello.c` (C, one file: the same kind of Home tab, through `oak_view.h`).
 
 ## Using plugins
@@ -322,7 +322,7 @@ cargo test --lib reloading_picks_up -- --ignored                             # R
 ```
 
 The first also compiles `plugins/hello-c/hello.c` (with `OAK_TEST_CC`, else `CC`, else `gcc` on Windows and `cc` elsewhere). `every_plugin_draws`
-loads whatever `OAK_PLUGINS` holds and draws every Home tab and plugin page in every theme, Settings, Home's Plugins tab, every
+loads whatever `OAK_PLUGINS` holds and draws every Home tab and plugin page in every theme, Settings, each plugin's settings page, Home's Plugins tab, every
 choice on the New screen, and the tabs `OAK_PLUGIN_TABS` names (keys separated by commas),
 failing if a plugin doesn't load or stops. It runs in a scratch Oak folder, never the user's:
 `OAK_PLUGIN_SEED` names a folder whose files are copied there first (a saved connection to a
@@ -348,7 +348,7 @@ A Rust plugin can also be tested in Oak's own test process, without building a l
 - `src/plugins.rs`: finding, loading and reloading libraries. `src/plugins/api.rs`: Oak's side of the
   table, every function of it. `src/plugins/parts.rs`: a plugin's parts as Oak calls them.
   `src/plugin_app.rs`: what the window does for plugins.
-- `src/plugins_view.rs`: Home's Plugins tab, the manager.
+- `src/plugins_view.rs`: Home's Plugins tab, the manager (and the gear to each plugin's settings page).
 - Where parts are used: `home.rs` (tabs, Providers), `tabs.rs`, `composer.rs`, `session_box.rs`,
   `new_screen.rs`, `cloud.rs` (backends and kits), `api/vault.rs`, `theme.rs`, `markdown.rs`
-  (fonts), `settings.rs`, `agent/prompt.rs` (roles).
+  (fonts), `settings.rs` (Settings, and each plugin's settings page), `agent/prompt.rs` (roles).
