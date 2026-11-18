@@ -497,7 +497,7 @@ fn user_event(id: &str, text: &str, images: &[Value], session: &str) -> Value {
     let content = if images.is_empty() {
         Value::String(text.to_string())
     } else {
-        let mut c: Vec<Value> = images.iter().map(|b| json!({"type": "image", "source": {"type": "base64", "media_type": b["media_type"], "data": b["data"]}})).collect();
+        let mut c: Vec<Value> = images.iter().map(|b| json!({"type": "image", "source": {"type": "base64", "media_type": b["media_type"], "data": crate::blobs::data_of(b)}})).collect();
         if !text.trim().is_empty() {
             c.push(json!({"type": "text", "text": text}));
         }

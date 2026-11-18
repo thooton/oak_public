@@ -20,6 +20,10 @@ pub fn dir() -> PathBuf {
 /// over it. `private` makes it readable by its owner only (mode 0600 on
 /// Unix, as the vault keeps its logins).
 fn write_replacing(path: &std::path::Path, data: &[u8], private: bool) -> std::io::Result<()> {
+    write_replacing_as(path, data, private, true)
+}
+
+fn write_replacing_as(path: &std::path::Path, data: &[u8], private: bool, sync: bool) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
@@ -36,7 +40,7 @@ fn write_replacing(path: &std::path::Path, data: &[u8], private: bool) -> std::i
         let _ = private;
         let mut f = opts.open(&tmp)?;
         f.write_all(data)?;
-        f.sync_all()
+        if sync { f.sync_all() } else { Ok(()) }
     })();
     match written.and_then(|()| std::fs::rename(&tmp, path)) {
         Ok(()) => Ok(()),
@@ -50,6 +54,13 @@ fn write_replacing(path: &std::path::Path, data: &[u8], private: bool) -> std::i
 /// Writes a file whole or not at all (see `write_replacing`).
 pub fn write_atomic(path: &std::path::Path, data: impl AsRef<[u8]>) -> std::io::Result<()> {
     write_replacing(path, data.as_ref(), false)
+}
+
+/// `write_atomic` without waiting for the data to reach the disk: for files
+/// named after what they hold, checked before they are used again
+/// (`blobs`), where a thousand waits would be most of the time taken.
+pub fn write_atomic_unsynced(path: &std::path::Path, data: impl AsRef<[u8]>) -> std::io::Result<()> {
+    write_replacing_as(path, data.as_ref(), false, false)
 }
 
 /// Writes a file only its owner can read, whole or not at all: the vault's token, access tokens and keys.
@@ -155,6 +166,13 @@ pub struct SharedGuard<'a> {
     rev: &'a std::sync::atomic::AtomicU64,
 }
 
+impl Shared {
+    /// Locks the conversation if no one holds it.
+    pub fn try_lock(&self) -> Option<SharedGuard<'_>> {
+        self.conv.try_lock().ok().map(|g| SharedGuard { g, rev: &self.rev })
+    }
+}
+
 impl SharedGuard<'_> {
     /// The conversation's revision: the same until it is next changed.
     pub fn rev(&self) -> u64 {
@@ -177,36 +195,131 @@ impl std::ops::DerefMut for SharedGuard<'_> {
     }
 }
 
-/// A conversation's messages, read as a `Vec<Value>`, with each one's JSON
-/// as last saved: a save serializes only the messages added or changed
-/// since (`Conversation::save`). Changing a message goes through the
-/// methods here, which forget the saved JSON from that message on.
-///
-/// Loaded from its file, a conversation's messages are kept as that JSON
-/// and parsed when first read: one never opened or worked on this run
-/// takes about the size of its file in memory, not two thirds more.
-pub struct Messages {
-    /// Unset until read, when `saved` holds every message.
-    list: std::sync::OnceLock<Vec<Value>>,
-    /// The JSON of `list[..saved.len()]`, one entry a message.
-    saved: std::sync::Mutex<Vec<std::sync::Arc<[u8]>>>,
-    /// Looked at while unread: no call was left without a result
-    /// (`agent::answer_lost_calls`), and no rewrite marker is in them
-    /// (`unslop::start`).
-    pub(crate) no_lost_calls: bool,
-    pub(crate) no_rewrites: bool,
+/// Where a conversation's messages are on disk: its file and each
+/// message's bytes in it (`start..end`), as the writer last wrote it (or
+/// as it was loaded). Shared with the writer, which updates it as it
+/// renames a new file into place; readers hold it while they read.
+#[derive(Default)]
+pub(crate) struct Disk {
+    path: Option<PathBuf>,
+    ranges: Vec<(u64, u64)>,
+    /// The last save (`Messages::queued`) that is on disk.
+    written: u64,
+    /// Another copy of the conversation wrote its file since: these ranges
+    /// are no longer what it holds.
+    lost: bool,
 }
 
-/// How many conversations' messages were parsed (the frame benchmark).
+impl Disk {
+    /// The bytes of messages `from..to` as the file has them (with what
+    /// separates them), and where they start.
+    fn read(&self, from: usize, to: usize) -> std::io::Result<(Vec<u8>, u64)> {
+        use std::io::{Read, Seek};
+        let bad = || std::io::Error::other("no such messages on disk");
+        if self.lost || from >= to || to > self.ranges.len() {
+            return Err(bad());
+        }
+        let (start, end) = (self.ranges[from].0, self.ranges[to - 1].1);
+        let mut f = std::fs::File::open(self.path.as_ref().ok_or_else(bad)?)?;
+        f.seek(std::io::SeekFrom::Start(start))?;
+        let mut buf = vec![0; (end - start) as usize];
+        f.read_exact(&mut buf)?;
+        Ok((buf, start))
+    }
+
+    /// Messages `from..to`, parsed (`Null` for any that can't be read).
+    fn messages(&self, from: usize, to: usize) -> Vec<Value> {
+        if from >= to {
+            return vec![];
+        }
+        #[cfg(test)]
+        PARSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match self.read(from, to) {
+            Ok((buf, start)) => self.ranges[from..to].iter().map(|&(a, b)| serde_json::from_slice(&buf[(a - start) as usize..(b - start) as usize]).unwrap_or_default()).collect(),
+            Err(e) => {
+                crate::startup::note(format!("Couldn't read messages {from}..{to} of {:?}: {e}", self.path));
+                vec![Value::Null; to - from]
+            }
+        }
+    }
+}
+
+/// How many messages, at least, are read when a conversation is opened
+/// (and each time earlier ones are needed); then more, while they come to
+/// less than `WINDOW_BYTES` and `WINDOW_MAX` messages.
+pub const WINDOW_MIN: usize = 60;
+const WINDOW_BYTES: u64 = 1_500_000;
+const WINDOW_MAX: usize = 400;
+
+/// Where a window of messages ending at `end` starts, by their sizes.
+fn window_start(ranges: &[(u64, u64)], end: usize) -> usize {
+    let mut start = end;
+    let mut bytes = 0;
+    while start > 0 {
+        let n = end - start;
+        bytes += ranges[start - 1].1 - ranges[start - 1].0;
+        if n >= WINDOW_MIN && (bytes > WINDOW_BYTES || n >= WINDOW_MAX) {
+            break;
+        }
+        start -= 1;
+    }
+    start
+}
+
+/// A user message of tool results only: it reads with the call before it.
+fn results_only(m: &Value) -> bool {
+    m["role"] == "user" && m["content"].as_array().is_some_and(|c| !c.is_empty() && c.iter().all(|b| b["type"] == "tool_result"))
+}
+
+/// The messages held: `list` has every message, those before `base` as
+/// `Null` (on disk only).
+struct Window {
+    base: usize,
+    list: Vec<Value>,
+}
+
+/// A conversation's messages. Only its file's metadata is read at start:
+/// the messages are read from it when first looked at, and then only the
+/// last ones (a window: `WINDOW_MIN`); earlier ones as they are needed
+/// (`load_from`, `load_earlier`: scrolling up, a request that sends them).
+/// Through `Deref` they read as a `Vec<Value>` of every message, with
+/// `Null` in place of those not read. Changing a message goes through the
+/// methods here, which keep track of what is as last saved: a save writes
+/// only the messages changed since, and copies the rest from the file
+/// (`Conversation::save`). Messages before `base` that are on disk as they
+/// are can be let go again (`forget_before`).
+///
+/// Pictures are kept as files of their own (`crate::blobs`): a message
+/// added or changed has its pictures' data moved out at the next change
+/// or save.
+pub struct Messages {
+    win: std::sync::OnceLock<Window>,
+    disk: std::sync::Arc<std::sync::Mutex<Disk>>,
+    /// How many messages there are, while none is read.
+    stored: usize,
+    /// The last message, read alone while the window isn't (`last`).
+    tail: std::sync::OnceLock<Value>,
+    /// The first `saved` messages are as the last save (or the file) has
+    /// them.
+    saved: std::sync::atomic::AtomicUsize,
+    /// Saves made (the writer puts the last one written in `Disk::written`).
+    queued: std::sync::atomic::AtomicU64,
+    /// Messages from here may hold picture data (`blobs::externalize`).
+    norm_from: usize,
+    /// Looked at in the file (`load_conversations_then`): the first message
+    /// with a call left without a result (`agent::answer_lost_calls`), and
+    /// the first with a rewrite marker (`unslop::start`). `Some(0)` when not
+    /// looked at.
+    pub(crate) lost_from: Option<usize>,
+    pub(crate) rewrites_from: Option<usize>,
+    /// What the messages before a `base` say of kits loaded
+    /// (`prefix::loads_of`), kept while nothing before it changes.
+    pub(crate) loads_memo: std::sync::Mutex<Option<(usize, crate::prefix::Loads)>>,
+}
+
+/// How many times messages were read from disk (the frame benchmark).
 #[cfg(test)]
 pub(crate) static PARSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn parse_messages(saved: &[std::sync::Arc<[u8]>]) -> Vec<Value> {
-    #[cfg(test)]
-    PARSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // (Each was read from JSON as one value: it reads again.)
-    saved.iter().map(|m| serde_json::from_slice(m).unwrap_or_default()).collect()
-}
 
 impl Default for Messages {
     fn default() -> Messages {
@@ -214,38 +327,252 @@ impl Default for Messages {
     }
 }
 
+fn lock_disk(d: &std::sync::Mutex<Disk>) -> std::sync::MutexGuard<'_, Disk> {
+    d.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Messages {
-    // Parsed, the file's JSON is let go: a conversation only looked at
-    // doesn't hold both (its next save serializes it all).
-    fn list(&self) -> &Vec<Value> {
-        self.list.get_or_init(|| parse_messages(&std::mem::take(&mut *self.saved.lock().unwrap_or_else(|e| e.into_inner()))))
-    }
-
-    fn list_mut(&mut self) -> &mut Vec<Value> {
-        if self.list.get().is_none() {
-            let list = parse_messages(&std::mem::take(self.saved.get_mut().unwrap_or_else(|e| e.into_inner())));
-            let _ = self.list.set(list);
+    /// Messages kept in a file, at `ranges` in it (none read yet).
+    fn stored(ranges: Vec<(u64, u64)>) -> Messages {
+        let n = ranges.len();
+        Messages {
+            win: std::sync::OnceLock::new(),
+            disk: std::sync::Arc::new(std::sync::Mutex::new(Disk { ranges, ..Default::default() })),
+            stored: n,
+            tail: std::sync::OnceLock::new(),
+            saved: n.into(),
+            queued: 0.into(),
+            norm_from: n,
+            lost_from: Some(0),
+            rewrites_from: Some(0),
+            loads_memo: Default::default(),
         }
-        self.list.get_mut().unwrap()
     }
 
-    /// Forgets the saved JSON of message `i` and those after it.
+    /// The window, read when first needed: the last messages.
+    fn win(&self) -> &Window {
+        self.win.get_or_init(|| {
+            let disk = lock_disk(&self.disk);
+            let mut base = window_start(&disk.ranges, self.stored);
+            let mut tail = disk.messages(base, self.stored);
+            // (Not starting at results without their calls.)
+            while base > 0 && tail.first().is_some_and(results_only) {
+                base -= 1;
+                tail.insert(0, disk.messages(base, base + 1).pop().unwrap_or_default());
+            }
+            let mut list = vec![Value::Null; base];
+            list.append(&mut tail);
+            Window { base, list }
+        })
+    }
+
+    /// Whether any message has been read (or made here).
+    pub fn loaded(&self) -> bool {
+        self.win.get().is_some()
+    }
+
+    /// The first message held (the ones before it are on disk only); the
+    /// message count when none is read.
+    pub fn base(&self) -> usize {
+        self.win.get().map_or(self.stored, |w| w.base)
+    }
+
+    pub fn len(&self) -> usize {
+        self.win.get().map_or(self.stored, |w| w.list.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The last message, reading only it when none is read yet.
+    pub fn last(&self) -> Option<&Value> {
+        if let Some(w) = self.win.get() {
+            return w.list.last();
+        }
+        let n = self.stored.checked_sub(1)?;
+        Some(self.tail.get_or_init(|| lock_disk(&self.disk).messages(n, n + 1).pop().unwrap_or_default()))
+    }
+
+    /// Reads the messages from `i` on that aren't held yet.
+    pub fn load_from(&mut self, i: usize) {
+        let base = self.win().base;
+        if i >= base {
+            return;
+        }
+        let got = lock_disk(&self.disk).messages(i, base);
+        let w = self.win.get_mut().unwrap();
+        for (slot, m) in w.list[i..base].iter_mut().zip(got) {
+            *slot = m;
+        }
+        w.base = i;
+    }
+
+    /// Every message, read.
+    pub fn load_all(&mut self) {
+        self.load_from(0);
+    }
+
+    /// Reads the next earlier part (`window_start`), not starting at
+    /// results without their calls. False when everything is read.
+    pub fn load_earlier(&mut self) -> bool {
+        let base = self.win().base;
+        if base == 0 {
+            return false;
+        }
+        let mut from = window_start(&lock_disk(&self.disk).ranges, base).min(base - 1);
+        self.load_from(from);
+        while from > 0 && results_only(&self.win().list[from]) {
+            from -= 1;
+            self.load_from(from);
+        }
+        true
+    }
+
+    /// Up to where (`k` at most) messages could be let go: the file has
+    /// them as they are (every save is written, and none of them changed
+    /// since). Not between a call and its results.
+    pub fn forgettable(&self, k: usize) -> Option<usize> {
+        let w = self.win.get()?;
+        let mut k = k.min(self.saved.load(std::sync::atomic::Ordering::SeqCst)).min(w.list.len());
+        while k > w.base && k < w.list.len() && results_only(&w.list[k]) {
+            k -= 1;
+        }
+        if k <= w.base || !self.on_disk(k) {
+            return None;
+        }
+        Some(k)
+    }
+
+    /// Whether the file holds the first `k` messages as they are now.
+    fn on_disk(&self, k: usize) -> bool {
+        let d = lock_disk(&self.disk);
+        !d.lost && d.path.is_some() && d.ranges.len() >= k && k <= self.saved.load(std::sync::atomic::Ordering::SeqCst) && d.written == self.queued.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Lets the messages before `k` go when they can be (`forgettable`).
+    /// True when it did.
+    pub fn forget_before(&mut self, k: usize) -> bool {
+        let Some(k) = self.forgettable(k) else { return false };
+        let w = self.win.get_mut().unwrap();
+        // A rewrite still to do in what goes is found again (`unslop::start`).
+        if let Some(i) = (w.base..k).find(|&i| crate::unslop::has_marker(&w.list[i])) {
+            self.rewrites_from = Some(self.rewrites_from.map_or(i, |r| r.min(i)));
+        }
+        for m in &mut w.list[w.base..k] {
+            *m = Value::Null;
+        }
+        w.base = k;
+        true
+    }
+
+    /// Whether every message could be let go (`unload`).
+    pub fn unloadable(&self) -> bool {
+        self.loaded() && self.on_disk(self.len())
+    }
+
+    /// Lets every message go, as when the conversation was read at start,
+    /// when the file has them as they are. True when it did.
+    pub fn unload(&mut self) -> bool {
+        if !self.unloadable() {
+            return false;
+        }
+        let n = self.len();
+        let w = self.win.take().unwrap();
+        if let Some(i) = (w.base..n).find(|&i| crate::unslop::has_marker(&w.list[i])) {
+            self.rewrites_from = Some(self.rewrites_from.map_or(i, |r| r.min(i)));
+        }
+        self.stored = n;
+        self.tail = std::sync::OnceLock::new();
+        self.norm_from = n;
+        true
+    }
+
+    /// Where the window of the last messages starts (as they are on disk).
+    pub fn tail_start(&self) -> usize {
+        let d = lock_disk(&self.disk);
+        let n = self.len().min(d.ranges.len());
+        window_start(&d.ranges, n)
+    }
+
+    /// Messages `from..to` without holding them: those held are copied,
+    /// the rest read from disk.
+    pub fn read_range(&self, from: usize, to: usize) -> Vec<Value> {
+        let to = to.min(self.len());
+        if from >= to {
+            return vec![];
+        }
+        let base = self.base();
+        let mut out = if from < base { lock_disk(&self.disk).messages(from, base.min(to)) } else { vec![] };
+        if let Some(held) = self.win.get().and_then(|w| w.list.get(base.max(from).min(to)..to)) {
+            out.extend(held.iter().cloned());
+        }
+        out
+    }
+
+    /// Goes through messages `0..to` that aren't held a part at a time,
+    /// read from disk, with the index of each part's first.
+    pub fn each_on_disk(&self, to: usize, mut f: impl FnMut(usize, &[Value])) {
+        const PART: usize = 200;
+        let to = to.min(self.base());
+        for from in (0..to).step_by(PART) {
+            let part = lock_disk(&self.disk).messages(from, (from + PART).min(to));
+            f(from, &part);
+        }
+    }
+
+    /// The message at `i` and those after it are to change: they are read,
+    /// pictures added since the last change are moved to files, and what
+    /// is as saved ends before `i`.
     fn changed(&mut self, i: usize) -> &mut Vec<Value> {
-        self.list_mut();
-        self.saved.get_mut().unwrap_or_else(|e| e.into_inner()).truncate(i);
-        self.list.get_mut().unwrap()
+        self.load_from(i);
+        self.forget_memos(i);
+        let from = self.norm_from;
+        let w = self.win.get_mut().unwrap();
+        for m in w.list.iter_mut().skip(from) {
+            crate::blobs::externalize(m);
+        }
+        let n = w.list.len();
+        self.norm_from = i.min(n);
+        self.saved.fetch_min(i.min(n), std::sync::atomic::Ordering::SeqCst);
+        &mut self.win.get_mut().unwrap().list
     }
 
-    pub fn push(&mut self, m: Value) {
-        self.list_mut().push(m);
+    /// What is kept of the messages before a base goes if message `i` is
+    /// among them.
+    fn forget_memos(&mut self, i: usize) {
+        let memo = self.loads_memo.get_mut().unwrap_or_else(|e| e.into_inner());
+        if memo.as_ref().is_some_and(|(at, _)| *at > i) {
+            *memo = None;
+        }
+    }
+
+    pub fn push(&mut self, mut m: Value) {
+        crate::blobs::externalize(&mut m);
+        let n = self.len();
+        self.changed(n).push(m);
+        self.norm_from = n + 1;
     }
 
     pub fn truncate(&mut self, n: usize) {
+        let base = self.win().base;
+        if n < base {
+            // (Read back to a window's worth before the cut.)
+            let w = self.win.get_mut().unwrap();
+            w.list.truncate(n);
+            w.base = n;
+            self.forget_memos(n);
+            self.saved.fetch_min(n, std::sync::atomic::Ordering::SeqCst);
+            self.norm_from = self.norm_from.min(n);
+            let from = window_start(&lock_disk(&self.disk).ranges, n);
+            self.load_from(from);
+            return;
+        }
         self.changed(n).truncate(n);
     }
 
     pub fn last_mut(&mut self) -> Option<&mut Value> {
-        let n = self.list().len();
+        let n = self.len();
         self.changed(n.saturating_sub(1)).last_mut()
     }
 
@@ -253,52 +580,71 @@ impl Messages {
         self.changed(i).get_mut(i)
     }
 
-    /// Every message, to change any of them.
+    /// Every message (all read), to change any of them.
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Value> {
         self.changed(0).iter_mut()
     }
 
-    /// Each message's JSON as read from the file, while none has been read
-    /// (parsed) yet.
-    pub fn unread(&self) -> Option<Vec<std::sync::Arc<[u8]>>> {
-        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
-        self.list.get().is_none().then(|| saved.clone())
+    /// What a save writes for each message: the JSON of those changed since
+    /// the last, the rest copied from the file. The next save counts them
+    /// as saved.
+    fn entries(&self) -> (Vec<Entry>, u64) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let saved = self.saved.load(SeqCst);
+        let entries = match self.win.get() {
+            None => (0..self.stored).map(Entry::Disk).collect(),
+            Some(w) => {
+                let mut buf = vec![];
+                (0..w.list.len())
+                    .map(|i| {
+                        if i < saved {
+                            return Entry::Disk(i);
+                        }
+                        buf.clear();
+                        let m = &w.list[i];
+                        if crate::blobs::has_inline(m) {
+                            let mut m = m.clone();
+                            crate::blobs::externalize(&mut m);
+                            serde_json::to_writer(&mut buf, &m).unwrap();
+                        } else {
+                            serde_json::to_writer(&mut buf, m).unwrap();
+                        }
+                        Entry::Bytes(buf.as_slice().into())
+                    })
+                    .collect()
+            }
+        };
+        self.saved.store(self.len(), SeqCst);
+        (entries, self.queued.fetch_add(1, SeqCst) + 1)
     }
 
-    /// Each message's JSON, brought up to date: only the messages without
-    /// it are serialized (none, when they were never read).
-    fn json(&self) -> Vec<std::sync::Arc<[u8]>> {
-        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(list) = self.list.get() {
-            let from = saved.len();
-            let mut buf = vec![];
-            for m in &list[from..] {
-                buf.clear();
-                serde_json::to_writer(&mut buf, m).unwrap();
-                saved.push(buf.as_slice().into());
-            }
-        }
-        saved.clone()
+    /// Every message, read (those not held, from disk).
+    fn all(&self) -> Vec<Value> {
+        self.read_range(0, self.len())
     }
 }
 
 impl From<Vec<Value>> for Messages {
     fn from(list: Vec<Value>) -> Messages {
-        Messages { list: list.into(), saved: Default::default(), no_lost_calls: false, no_rewrites: false }
+        Messages {
+            win: Window { base: 0, list }.into(),
+            disk: Default::default(),
+            stored: 0,
+            tail: std::sync::OnceLock::new(),
+            saved: 0.into(),
+            queued: 0.into(),
+            norm_from: 0,
+            lost_from: Some(0),
+            rewrites_from: Some(0),
+            loads_memo: Default::default(),
+        }
     }
 }
 
 impl std::ops::Deref for Messages {
     type Target = Vec<Value>;
     fn deref(&self) -> &Vec<Value> {
-        self.list()
-    }
-}
-
-impl<I: std::slice::SliceIndex<[Value]>> std::ops::Index<I> for Messages {
-    type Output = I::Output;
-    fn index(&self, i: I) -> &I::Output {
-        &self.list()[i]
+        &self.win().list
     }
 }
 
@@ -308,10 +654,20 @@ impl std::ops::IndexMut<usize> for Messages {
     }
 }
 
+impl<I: std::slice::SliceIndex<[Value]>> std::ops::Index<I> for Messages {
+    type Output = I::Output;
+    fn index(&self, i: I) -> &I::Output {
+        &self.win().list[i]
+    }
+}
+
+/// A copy holds every message (read from disk as needed) and has no file
+/// of its own until saved.
 impl Clone for Messages {
     fn clone(&self) -> Messages {
-        let saved = self.saved.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        Messages { list: self.list.clone(), saved: saved.into(), no_lost_calls: self.no_lost_calls, no_rewrites: self.no_rewrites }
+        let mut m: Messages = self.all().into();
+        (m.lost_from, m.rewrites_from) = (self.lost_from, self.rewrites_from);
+        m
     }
 }
 
@@ -319,31 +675,31 @@ impl<'a> IntoIterator for &'a Messages {
     type Item = &'a Value;
     type IntoIter = std::slice::Iter<'a, Value>;
     fn into_iter(self) -> Self::IntoIter {
-        self.list().iter()
+        self.win().list.iter()
     }
 }
 
 impl PartialEq for Messages {
     fn eq(&self, other: &Messages) -> bool {
-        self.list() == other.list()
+        self.len() == other.len() && self.all() == other.all()
     }
 }
 
 impl PartialEq<Vec<Value>> for Messages {
     fn eq(&self, other: &Vec<Value>) -> bool {
-        self.list() == other
+        self.len() == other.len() && self.all() == *other
     }
 }
 
 impl PartialEq<Messages> for [Value] {
     fn eq(&self, other: &Messages) -> bool {
-        self == other.list().as_slice()
+        other.len() == self.len() && other.all() == self
     }
 }
 
 impl std::fmt::Debug for Messages {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.list().fmt(f)
+        self.all().fmt(f)
     }
 }
 
@@ -351,20 +707,49 @@ thread_local! {
     /// `Conversation::save` is serializing everything but the messages,
     /// which it adds from their saved JSON.
     static WITHOUT_MESSAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A conversation file is being read (`read_conversation`): where its
+    /// bytes are, so the messages are only located, not parsed.
+    static READING: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
 }
 
 impl Serialize for Messages {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        if WITHOUT_MESSAGES.get() { [(); 0].serialize(s) } else { self.list().serialize(s) }
+        use serde::ser::SerializeSeq;
+        if WITHOUT_MESSAGES.get() {
+            return [(); 0].serialize(s);
+        }
+        let mut seq = s.serialize_seq(Some(self.len()))?;
+        for m in &self.all() {
+            seq.serialize_element(m)?;
+        }
+        seq.end()
     }
 }
 
 impl<'de> Deserialize<'de> for Messages {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Messages, D::Error> {
-        let raw = Vec::<Box<serde_json::value::RawValue>>::deserialize(d)?;
-        let saved = raw.iter().map(|m| m.get().as_bytes().into()).collect::<Vec<_>>();
-        Ok(Messages { list: std::sync::OnceLock::new(), saved: saved.into(), no_lost_calls: false, no_rewrites: false })
+        let Some((at, len)) = READING.get() else {
+            return Ok(Vec::<Value>::deserialize(d)?.into());
+        };
+        let raw = Vec::<&'de serde_json::value::RawValue>::deserialize(d)?;
+        let mut ranges = Vec::with_capacity(raw.len());
+        for m in raw {
+            let start = (m.get().as_ptr() as usize).wrapping_sub(at);
+            if start + m.get().len() > len {
+                return Err(serde::de::Error::custom("a message outside the file"));
+            }
+            ranges.push((start as u64, (start + m.get().len()) as u64));
+        }
+        Ok(Messages::stored(ranges))
     }
+}
+
+/// A message in a save: its JSON, or the file's copy of it as the save
+/// before had it (`Messages::entries`).
+#[derive(Clone)]
+enum Entry {
+    Bytes(std::sync::Arc<[u8]>),
+    Disk(usize),
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -625,6 +1010,7 @@ impl Conversation {
         }
         let provider = crate::providers::Kind::of(&self.model);
         if self.format.0 == 0 {
+            self.messages.load_all();
             self.messages = crate::oak::from_anthropic(&self.messages, provider.id()).into();
         }
         self.provider = Some(provider);
@@ -673,6 +1059,10 @@ pub struct Rewrite {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `Settings::unslop_notes_epoch` when it was made: one from an earlier
+    /// epoch is dropped and made again (`unslop::start_notes`).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub epoch: u32,
 }
 
 /// A message the model asked to get every `every_min` minutes.
@@ -876,7 +1266,8 @@ impl Conversation {
 
 impl Conversation {
     /// What its file holds: `serde_json::to_vec(self)`, with only the
-    /// messages changed since the last save serialized.
+    /// messages changed since the last save serialized (the rest copied
+    /// from the file as it is written).
     fn data(&self) -> Data {
         // Everything but the messages, with `"messages":[]` where they go.
         // (Its first match is the field: inside a JSON string a quote is
@@ -888,39 +1279,86 @@ impl Conversation {
         const FIELD: &[u8] = b"\"messages\":[";
         let at = rest.windows(FIELD.len()).position(|w| w == FIELD).expect("a messages field") + FIELD.len();
         let after = rest.split_off(at);
-        Data { before: rest, messages: self.messages.json(), after }
+        let (messages, seq) = self.messages.entries();
+        Data { before: rest, messages, after, disk: self.messages.disk.clone(), seq }
     }
 }
 
 /// A conversation's file: its messages' JSON, comma separated, between
-/// `before` and `after`.
+/// `before` and `after`; `disk` is where the messages it copies are, and
+/// it is the conversation's save `seq`.
 struct Data {
     before: Vec<u8>,
-    messages: Vec<std::sync::Arc<[u8]>>,
+    messages: Vec<Entry>,
     after: Vec<u8>,
+    disk: std::sync::Arc<std::sync::Mutex<Disk>>,
+    seq: u64,
 }
 
 impl Data {
     fn len(&self) -> usize {
-        self.before.len() + self.messages.iter().map(|m| m.len() + 1).sum::<usize>().saturating_sub(1) + self.after.len()
+        self.before.len() + self.messages.iter().map(|m| if let Entry::Bytes(b) = m { b.len() + 1 } else { 1 }).sum::<usize>() + self.after.len()
     }
 
-    fn write_to(&self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    /// Takes the messages that a save made before this one (`earlier`, of
+    /// the same conversation, never written) has changed, where this one
+    /// would copy them from the file.
+    fn carry(&mut self, earlier: &Data) {
+        if !std::sync::Arc::ptr_eq(&self.disk, &earlier.disk) {
+            return;
+        }
+        for e in &mut self.messages {
+            if let Entry::Disk(i) = *e
+                && let Some(was) = earlier.messages.get(i)
+            {
+                *e = was.clone();
+            }
+        }
+    }
+
+    /// Writes the file to `out`, copying from `old` (the file as `ranges`
+    /// has it) what isn't new. Each message's place in what is written.
+    fn write_to(&self, out: &mut impl std::io::Write, mut old: Option<(&mut std::fs::File, &[(u64, u64)])>) -> std::io::Result<Vec<(u64, u64)>> {
+        use std::io::{Read, Seek};
+        let mut at = self.before.len() as u64;
         out.write_all(&self.before)?;
-        for (i, m) in self.messages.iter().enumerate() {
+        let mut ranges = Vec::with_capacity(self.messages.len());
+        let mut i = 0;
+        while i < self.messages.len() {
             if i > 0 {
                 out.write_all(b",")?;
+                at += 1;
             }
-            out.write_all(m)?;
+            match &self.messages[i] {
+                Entry::Bytes(b) => {
+                    out.write_all(b)?;
+                    ranges.push((at, at + b.len() as u64));
+                    at += b.len() as u64;
+                    i += 1;
+                }
+                // A run of the file's messages in order: copied in one go.
+                Entry::Disk(first) => {
+                    let mut last = *first;
+                    while matches!(self.messages.get(i + 1 + last - first), Some(Entry::Disk(n)) if *n == last + 1) {
+                        last += 1;
+                    }
+                    let Some((f, old)) = old.as_mut().filter(|(_, r)| last < r.len()) else {
+                        return Err(std::io::Error::other("a message that isn't on disk"));
+                    };
+                    let (start, end) = (old[*first].0, old[last].1);
+                    f.seek(std::io::SeekFrom::Start(start))?;
+                    let copied = std::io::copy(&mut (&mut **f).take(end - start), out)?;
+                    if copied != end - start {
+                        return Err(std::io::Error::other("the file is shorter than it was"));
+                    }
+                    ranges.extend(old[*first..=last].iter().map(|&(a, b)| (a - start + at, b - start + at)));
+                    at += end - start;
+                    i += last - first + 1;
+                }
+            }
         }
-        out.write_all(&self.after)
-    }
-
-    #[cfg(test)]
-    fn bytes(&self) -> Vec<u8> {
-        let mut v = vec![];
-        self.write_to(&mut v).unwrap();
-        v
+        out.write_all(&self.after)?;
+        Ok(ranges)
     }
 }
 
@@ -944,21 +1382,57 @@ struct Queue {
 /// The saves not yet written, and the writer's (and `flush`'s) wake-up.
 static QUEUE: std::sync::LazyLock<(std::sync::Mutex<Queue>, std::sync::Condvar)> = std::sync::LazyLock::new(Default::default);
 
+/// The copies of each conversation (by id) whose messages its file holds:
+/// one that writes it leaves the others with nothing on disk
+/// (`Disk::lost`), as their places in it are no longer right.
+static OWNERS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<DiskRef>>>> = std::sync::LazyLock::new(Default::default);
+
+type DiskRef = std::sync::Weak<std::sync::Mutex<Disk>>;
+
+/// `disk` wrote conversation `id`'s file: the other copies lose theirs.
+fn own(id: &str, disk: &std::sync::Arc<std::sync::Mutex<Disk>>) {
+    let others = OWNERS.lock().unwrap().insert(id.to_string(), vec![std::sync::Arc::downgrade(disk)]);
+    for other in others.into_iter().flatten().filter_map(|w| w.upgrade()) {
+        if !std::sync::Arc::ptr_eq(&other, disk) {
+            lock_disk(&other).lost = true;
+        }
+    }
+}
+
+/// `disk` was read from conversation `id`'s file, as it is now.
+fn read_from(id: &str, disk: &std::sync::Arc<std::sync::Mutex<Disk>>) {
+    let mut owners = OWNERS.lock().unwrap();
+    let copies = owners.entry(id.to_string()).or_default();
+    copies.retain(|w| w.strong_count() > 0);
+    copies.push(std::sync::Arc::downgrade(disk));
+}
+
 /// The writer thread: writes the saves in the order they were made, only
-/// the newest of a conversation's when several wait.
+/// the newest of a conversation's when several wait (with what those
+/// before it changed). A save that couldn't be written is carried into the
+/// conversation's next one the same way.
 fn write_conversations() {
     let (lock, wake) = &*QUEUE;
+    let mut failed: std::collections::HashMap<String, Data> = Default::default();
     loop {
-        let writes = {
+        let mut writes: Vec<Option<Write>> = {
             let mut q = wake.wait_while(lock.lock().unwrap(), |q| q.writes.is_empty()).unwrap();
             q.busy = true;
-            std::mem::take(&mut q.writes)
+            std::mem::take(&mut q.writes).into_iter().map(Some).collect()
         };
-        for (i, w) in writes.iter().enumerate() {
-            if !writes[i + 1..].iter().any(|later| later.id == w.id) {
-                write_conversation(w);
-            } else {
+        for i in 0..writes.len() {
+            let Some(mut w) = writes[i].take() else { continue };
+            if let Some(earlier) = failed.remove(&w.id) {
+                w.data.carry(&earlier);
+            }
+            if let Some(later) = writes[i + 1..].iter_mut().flatten().find(|l| l.id == w.id) {
+                later.data.carry(&w.data);
                 crate::bench::log(&w.id, "save_superseded", serde_json::json!({"from": format!("{}:{}", w.from.file(), w.from.line())}));
+                continue;
+            }
+            if let Err(e) = write_conversation(&w) {
+                eprintln!("Couldn't save conversation {}: {e}", w.id);
+                failed.insert(w.id, w.data);
             }
         }
         lock.lock().unwrap().busy = false;
@@ -966,23 +1440,49 @@ fn write_conversations() {
     }
 }
 
-fn write_conversation(w: &Write) {
+fn write_conversation(w: &Write) -> std::io::Result<()> {
     let conversations = conversations_dir();
     let path = conversations.join(&w.name);
     let tmp = conversations.join(format!("{}.tmp", w.id));
+    let copies = w.data.messages.iter().any(|e| matches!(e, Entry::Disk(_)));
+    let (old_path, old_ranges, lost) = {
+        let d = lock_disk(&w.data.disk);
+        (d.path.clone(), if copies { d.ranges.clone() } else { vec![] }, d.lost)
+    };
+    if copies && lost {
+        return Err(std::io::Error::other("another copy of the conversation wrote its file"));
+    }
+    // (Only the writer changes the file: it is read without the lock.)
+    let mut old = match (copies, old_path) {
+        (false, _) => None,
+        (true, Some(p)) => Some(std::fs::File::open(p)?),
+        (true, None) => return Err(std::io::Error::other("no file to copy messages from")),
+    };
     let written = std::fs::File::create(&tmp).and_then(|f| {
         let mut out = std::io::BufWriter::with_capacity(1 << 16, f);
-        w.data.write_to(&mut out)?;
-        std::io::Write::flush(&mut out)
+        let ranges = w.data.write_to(&mut out, old.as_mut().map(|f| (f, old_ranges.as_slice())))?;
+        std::io::Write::flush(&mut out)?;
+        Ok(ranges)
     });
-    if written.is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-        let old = FILES.lock().unwrap().insert(w.id.clone(), w.name.clone());
-        let old = old.unwrap_or_else(|| format!("{}.json", w.id));
-        if old != w.name {
-            let _ = std::fs::remove_file(conversations.join(old));
-        }
+    drop(old);
+    let renamed = written.and_then(|ranges| {
+        let mut d = lock_disk(&w.data.disk);
+        std::fs::rename(&tmp, &path)?;
+        (d.path, d.ranges, d.written) = (Some(path), ranges, w.data.seq);
+        Ok(())
+    });
+    if let Err(e) = renamed {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    own(&w.id, &w.data.disk);
+    let old = FILES.lock().unwrap().insert(w.id.clone(), w.name.clone());
+    let old = old.unwrap_or_else(|| format!("{}.json", w.id));
+    if old != w.name {
+        let _ = std::fs::remove_file(conversations.join(old));
     }
     crate::bench::log(&w.id, "save", serde_json::json!({"ms": w.started.elapsed().as_secs_f64() * 1000.0, "bytes": w.data.len(), "from": format!("{}:{}", w.from.file(), w.from.line())}));
+    Ok(())
 }
 
 /// Waits until every save made so far is on disk.
@@ -1023,24 +1523,218 @@ pub fn remove_conversation(id: &str) {
     let _ = std::fs::remove_file(conversations.join(format!("{id}.json")));
 }
 
-/// Reads and parses conversation files on every core (most of Oak's
-/// startup is this), the biggest first; in `files`' order.
-fn read_all(files: &[std::fs::DirEntry], look: &(dyn Fn(&mut Conversation) + Sync)) -> Vec<Option<Conversation>> {
+/// What `look` is given of a conversation as it is read: each message's
+/// JSON, as the file has it.
+pub type Look = dyn Fn(&mut Conversation, &[&[u8]]) + Sync;
+
+/// Reads a conversation file: everything but its messages, which are only
+/// located (`Messages::stored`), and `look` done to it while its bytes
+/// are at hand. Pictures still in it as data are moved to their files
+/// first (`blobs`), and the file written again without them, once.
+#[cfg(test)]
+pub(crate) fn read_conversation(path: &std::path::Path, look: &Look) -> Option<Conversation> {
+    read_file(path, look).map(|r| r.0)
+}
+
+/// `read_conversation`, and what the index keeps of it.
+fn read_file(path: &std::path::Path, look: &Look) -> Option<(Conversation, Indexed)> {
+    let buf = std::fs::read(path).ok()?;
+    READING.set(Some((buf.as_ptr() as usize, buf.len())));
+    let c = serde_json::from_slice::<Conversation>(&buf);
+    READING.set(None);
+    let mut c = c.ok()?;
+    let ranges = lock_disk(&c.messages.disk).ranges.clone();
+    let raw: Vec<&[u8]> = ranges.iter().map(|&(a, b)| &buf[a as usize..b as usize]).collect();
+    if c.format.0 > 0 && raw.iter().any(|m| may_hold_picture(m)) {
+        let moved: Vec<Option<Vec<u8>>> = raw
+            .iter()
+            .map(|m| {
+                let mut v: Value = serde_json::from_slice(m).ok().filter(|_| may_hold_picture(m))?;
+                crate::blobs::externalize(&mut v).then(|| serde_json::to_vec(&v).unwrap())
+            })
+            .collect();
+        if moved.iter().any(Option::is_some) {
+            let mut out = Vec::with_capacity(buf.len() / 4);
+            let mut at = 0;
+            for (&(a, b), m) in ranges.iter().zip(&moved) {
+                if let Some(m) = m {
+                    out.extend_from_slice(&buf[at..a as usize]);
+                    out.extend_from_slice(m);
+                    at = b as usize;
+                }
+            }
+            out.extend_from_slice(&buf[at..]);
+            // (Its time kept: of two files of one conversation, the one
+            // saved last is the one kept.)
+            let modified = std::fs::metadata(path).and_then(|m| m.modified());
+            if write_atomic(path, &out).is_ok() {
+                if let Ok(t) = modified {
+                    let _ = std::fs::File::options().write(true).open(path).and_then(|f| f.set_modified(t));
+                }
+                drop(out);
+                drop(raw);
+                drop(buf);
+                return read_file(path, look);
+            }
+        }
+    }
+    lock_disk(&c.messages.disk).path = Some(path.to_path_buf());
+    look(&mut c, &raw);
+    // The file without its messages' JSON.
+    let meta = match (ranges.first(), ranges.last()) {
+        (Some(&(first, _)), Some(&(_, last))) => [&buf[..first as usize], &buf[last as usize..]].concat(),
+        _ => buf.clone(),
+    };
+    let indexed = Indexed { meta, ranges, lost_from: c.messages.lost_from, rewrites_from: c.messages.rewrites_from };
+    Some((c, indexed))
+}
+
+/// What the index (`INDEX`) keeps of a conversation file, to start without
+/// reading it again while it is unchanged: the file without its messages,
+/// where each message is in it, and what `look` found in them.
+struct Indexed {
+    meta: Vec<u8>,
+    ranges: Vec<(u64, u64)>,
+    lost_from: Option<usize>,
+    rewrites_from: Option<usize>,
+}
+
+impl Indexed {
+    /// The conversation it was made from (at `path`), its messages left on
+    /// disk.
+    fn conversation(&self, path: &std::path::Path) -> Option<Conversation> {
+        READING.set(Some((self.meta.as_ptr() as usize, self.meta.len())));
+        let c = serde_json::from_slice::<Conversation>(&self.meta);
+        READING.set(None);
+        let mut c = c.ok().filter(|c| c.messages.is_empty())?;
+        c.messages = Messages::stored(self.ranges.clone());
+        lock_disk(&c.messages.disk).path = Some(path.to_path_buf());
+        (c.messages.lost_from, c.messages.rewrites_from) = (self.lost_from, self.rewrites_from);
+        Some(c)
+    }
+}
+
+/// The index of the conversation files, in their folder: for each file
+/// (by name, size and time) what `Indexed` keeps, so that a start reads
+/// only the files changed since the last. Written after each start, in
+/// the background; a cache only (any file it doesn't match is read).
+const INDEX: &str = "index.bin";
+const INDEX_MAGIC: &[u8] = b"OAKINDEX1\n";
+
+/// A file's size and time, as the index tells them apart.
+fn stamp(e: &std::fs::DirEntry) -> Option<(u64, u64)> {
+    let m = e.metadata().ok()?;
+    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((m.len(), t.as_nanos() as u64))
+}
+
+type Index = std::collections::HashMap<String, ((u64, u64), Indexed)>;
+
+fn read_index() -> Index {
+    std::fs::read(conversations_dir().join(INDEX)).map(|b| parse_index(&b)).unwrap_or_default()
+}
+
+/// The index from its bytes (`index_bytes`); empty if they don't read.
+fn parse_index(buf: &[u8]) -> Index {
+    let mut out = std::collections::HashMap::new();
+    let Some(mut r) = buf.strip_prefix(INDEX_MAGIC) else { return out };
+    fn take<'a>(r: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        let (a, b) = r.split_at_checked(n)?;
+        *r = b;
+        Some(a)
+    }
+    let u64_ = |r: &mut &[u8]| take(r, 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+    let u32_ = |r: &mut &[u8]| take(r, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let opt = |v: u64| (v != u64::MAX).then_some(v as usize);
+    let entry = |r: &mut &[u8]| -> Option<(String, (u64, u64), Indexed)> {
+        let n = u32_(r)? as usize;
+        let name = String::from_utf8(take(r, n)?.to_vec()).ok()?;
+        let stamp = (u64_(r)?, u64_(r)?);
+        let (lost_from, rewrites_from) = (opt(u64_(r)?), opt(u64_(r)?));
+        let n = u32_(r)? as usize;
+        let meta = take(r, n)?.to_vec();
+        let n = u32_(r)? as usize;
+        let mut ranges = Vec::with_capacity(n);
+        let mut at = u64_(r)?;
+        for _ in 0..n {
+            let (gap, len) = (u32_(r)? as u64, u32_(r)? as u64);
+            ranges.push((at + gap, at + gap + len));
+            at += gap + len;
+        }
+        Some((name, stamp, Indexed { meta, ranges, lost_from, rewrites_from }))
+    };
+    while !r.is_empty() {
+        let Some((name, stamp, i)) = entry(&mut r) else { return Default::default() };
+        out.insert(name, (stamp, i));
+    }
+    out
+}
+
+fn write_index(entries: &[(String, (u64, u64), std::sync::Arc<Indexed>)]) {
+    let _ = write_atomic_unsynced(&conversations_dir().join(INDEX), index_bytes(entries));
+}
+
+fn index_bytes(entries: &[(String, (u64, u64), std::sync::Arc<Indexed>)]) -> Vec<u8> {
+    let mut out = INDEX_MAGIC.to_vec();
+    let opt = |v: Option<usize>| v.map_or(u64::MAX, |v| v as u64);
+    for (name, (size, time), i) in entries {
+        out.extend((name.len() as u32).to_le_bytes());
+        out.extend(name.as_bytes());
+        out.extend(size.to_le_bytes());
+        out.extend(time.to_le_bytes());
+        out.extend(opt(i.lost_from).to_le_bytes());
+        out.extend(opt(i.rewrites_from).to_le_bytes());
+        out.extend((i.meta.len() as u32).to_le_bytes());
+        out.extend(&i.meta);
+        out.extend((i.ranges.len() as u32).to_le_bytes());
+        out.extend(0u64.to_le_bytes());
+        let mut at = 0;
+        for &(a, b) in &i.ranges {
+            out.extend(((a - at) as u32).to_le_bytes());
+            out.extend(((b - a) as u32).to_le_bytes());
+            at = b;
+        }
+    }
+    out
+}
+
+/// Whether a message's JSON may hold a picture's data.
+fn may_hold_picture(m: &[u8]) -> bool {
+    use memchr::memmem::find;
+    find(m, br#""type":"image""#).is_some() && find(m, br#""data":""#).is_some()
+}
+
+/// Reads conversation files on every core, the biggest first; in `files`'
+/// order. Those unchanged since the index was written aren't read: the
+/// index has what is needed of them (`Indexed`). The index is then written
+/// again, in the background, when anything changed.
+fn read_all(files: &[std::fs::DirEntry], look: &Look) -> Vec<Option<Conversation>> {
+    let index = read_index();
+    let stamps: Vec<Option<(u64, u64)>> = files.iter().map(stamp).collect();
+    let names: Vec<String> = files.iter().map(|f| f.file_name().to_string_lossy().into_owned()).collect();
     let mut order: Vec<usize> = (0..files.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(files[i].metadata().map_or(0, |m| m.len())));
+    order.sort_by_key(|&i| std::cmp::Reverse(stamps[i].map_or(0, |s| s.0)));
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let read = std::sync::atomic::AtomicUsize::new(0);
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(files.len()).max(1);
-    let bytes: u64 = files.iter().map(|f| f.metadata().map_or(0, |m| m.len())).sum();
-    crate::startup::note(format!("Conversation files: {} ({:.1} MB), read on {threads} threads", files.len(), bytes as f64 / 1e6));
-    let mut parsed: Vec<(usize, Option<Conversation>)> = std::thread::scope(|s| {
+    let bytes: u64 = stamps.iter().flatten().map(|s| s.0).sum();
+    type Got = (usize, Option<(Conversation, std::sync::Arc<Indexed>)>);
+    let mut parsed: Vec<Got> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 s.spawn(|| {
                     let mut out = vec![];
                     while let Some(&i) = order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
-                        let mut c = read_json::<Conversation>(&files[i].path());
-                        c.iter_mut().for_each(look);
-                        out.push((i, c));
+                        let path = files[i].path();
+                        let known = index.get(&names[i]).filter(|(st, _)| Some(*st) == stamps[i]).and_then(|(_, x)| Some((x.conversation(&path)?, x)));
+                        let got = match known {
+                            Some((c, x)) => Some((c, std::sync::Arc::new(Indexed { meta: x.meta.clone(), ranges: x.ranges.clone(), ..*x }))),
+                            None => {
+                                read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                read_file(&path, look).map(|(c, x)| (c, std::sync::Arc::new(x)))
+                            }
+                        };
+                        out.push((i, got));
                     }
                     out
                 })
@@ -1048,21 +1742,30 @@ fn read_all(files: &[std::fs::DirEntry], look: &(dyn Fn(&mut Conversation) + Syn
             .collect();
         workers.into_iter().flat_map(|w| w.join().unwrap()).collect()
     });
+    let read = read.into_inner();
+    crate::startup::note(format!("Conversation files: {} ({:.1} MB), {read} read (the rest as indexed) on {threads} threads", files.len(), bytes as f64 / 1e6));
     parsed.sort_by_key(|p| p.0);
-    parsed.into_iter().map(|p| p.1).collect()
+    // (Restamped: a file moved out of its pictures was written again.)
+    let entries: Vec<(String, (u64, u64), std::sync::Arc<Indexed>)> =
+        parsed.iter().filter_map(|(i, got)| Some((names[*i].clone(), stamp(&files[*i]).or(stamps[*i])?, got.as_ref()?.1.clone()))).collect();
+    if read > 0 || entries.len() != index.len() {
+        std::thread::spawn(move || write_index(&entries));
+    }
+    parsed.into_iter().map(|p| p.1.map(|g| g.0)).collect()
 }
 
 /// `load_conversations_then`, looking at nothing.
 #[cfg(test)]
 pub fn load_conversations() -> Vec<Conversation> {
-    load_conversations_then(&|_| {})
+    load_conversations_then(&|_, _| {})
 }
 
-/// Every saved conversation, with `look` done to each as soon as it is
-/// read, on the thread that read it (while its file's JSON is at hand). A
-/// conversation found under two names (OAK stopped between writing the new
-/// file and removing the old one) is loaded from the one saved last.
-pub fn load_conversations_then(look: &(dyn Fn(&mut Conversation) + Sync)) -> Vec<Conversation> {
+/// Every saved conversation (its messages left on disk until looked at),
+/// with `look` done to each as soon as it is read, on the thread that
+/// read it (while its file's JSON is at hand). A conversation found under
+/// two names (OAK stopped between writing the new file and removing the
+/// old one) is loaded from the one saved last.
+pub fn load_conversations_then(look: &Look) -> Vec<Conversation> {
     flush();
     let mut found: std::collections::HashMap<String, (std::time::SystemTime, String, Conversation)> = Default::default();
     let mut stale = vec![];
@@ -1098,6 +1801,7 @@ pub fn load_conversations_then(look: &(dyn Fn(&mut Conversation) + Sync)) -> Vec
         // Files from before transcripts were named after their sessions
         // get their name now.
         let renamed = name != c.file_name();
+        read_from(&id, &c.messages.disk);
         FILES.lock().unwrap().insert(id, name);
         if renamed || upgraded {
             c.save();
@@ -1179,6 +1883,10 @@ pub struct Settings {
     pub unslop_thinking: bool,
     /// With Unslop, the notes box shows the notes rewritten.
     pub unslop_notes: bool,
+    /// Counts the times rewritten notes stopped showing (Unslop or Rewrite
+    /// notes turned off): the rewrites made before are dropped, and made
+    /// again once both are on.
+    pub unslop_notes_epoch: u32,
     /// The model is told to tidy up its notes once they pass
     /// `agent::notes_alert_tokens`.
     pub notes_alert: bool,
@@ -1234,6 +1942,7 @@ impl Default for Settings {
             unslop_no_drafts: false,
             unslop_thinking: false,
             unslop_notes: false,
+            unslop_notes_epoch: 0,
             notes_alert: true,
             notes_limit: crate::agent::DEFAULT_NOTES_LIMIT,
             title_model: crate::openrouter::TITLE_CHOICES[0].0.into(),
@@ -1294,17 +2003,23 @@ mod tests {
     }
 
     /// A save writes what serializing the whole conversation would, however
-    /// its messages changed since the last one (only those are redone).
+    /// its messages changed since the last one (only those are redone, the
+    /// rest copied from the file).
     #[test]
     fn save_writes_the_whole_conversation() {
         use serde_json::json;
         let mut c = super::Conversation {
-            id: "1".into(),
+            id: format!("unit-test-whole-{}", crate::api::now_ms()),
             title: "\"messages\":[] in a title".into(),
             messages: vec![json!({"role": "user", "content": [{"type": "text", "text": "\"messages\":[1]"}]})].into(),
             ..Default::default()
         };
-        let same = |c: &super::Conversation| assert_eq!(String::from_utf8(c.data().bytes()).unwrap(), serde_json::to_string(c).unwrap());
+        let same = |c: &super::Conversation| {
+            c.save();
+            flush();
+            let on_disk = std::fs::read_to_string(conversations_dir().join(c.file_name())).unwrap();
+            assert_eq!(on_disk, serde_json::to_string(c).unwrap());
+        };
         same(&c);
         c.messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": "two"}]}));
         c.messages.push(json!({"role": "user", "content": [{"type": "text", "text": "three"}]}));
@@ -1322,15 +2037,145 @@ mod tests {
         same(&c);
         c.messages.iter_mut().for_each(|m| m["seen"] = json!(true));
         same(&c);
-        let copy = c.clone();
-        c.messages.push(json!({"role": "assistant", "content": []}));
-        same(&copy);
+        // Saves made faster than they are written: each carries what the
+        // one before changed.
+        for i in 0..5 {
+            c.messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": format!("quick {i}")}]}));
+            c.save();
+        }
         same(&c);
-        c.messages = Vec::new().into();
-        same(&c);
-        let loaded: super::Conversation = serde_json::from_slice(&copy.data().bytes()).unwrap();
-        assert_eq!(loaded.messages, copy.messages);
+        let loaded = load_conversations().into_iter().find(|l| l.id == c.id).unwrap();
+        assert!(!loaded.messages.loaded(), "only the metadata is read at start");
+        assert_eq!(loaded.messages.len(), c.messages.len());
+        assert_eq!(loaded.messages.last(), c.messages.last());
+        assert_eq!(loaded.messages, c.messages);
         same(&loaded);
+        remove_conversation(&c.id);
+    }
+
+    /// A conversation started from the index is the one its file holds,
+    /// with what `look` found in it; a file that changed is read again.
+    #[test]
+    fn the_index_stands_for_unchanged_files() {
+        use serde_json::json;
+        let c = Conversation {
+            id: format!("unit-test-index-{}", crate::api::now_ms()),
+            title: "indexed".into(),
+            messages: vec![
+                json!({"role": "user", "content": [{"type": "text", "text": "one"}]}),
+                json!({"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "READ", "input": {}}]}),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        c.save();
+        flush();
+        let path = conversations_dir().join(c.file_name());
+        let look = |c: &mut Conversation, raw: &[&[u8]]| crate::agent::look_for_lost_calls(c, raw);
+        let (read, x) = read_file(&path, &look).unwrap();
+        assert_eq!(read.messages.lost_from, Some(Some(1)).flatten());
+        let entry = (c.file_name(), (7, 9), std::sync::Arc::new(x));
+        let index = parse_index(&index_bytes(&[entry]));
+        let ((size, time), x) = &index[&c.file_name()];
+        assert_eq!((*size, *time), (7, 9));
+        let from_index = x.conversation(&path).unwrap();
+        assert!(!from_index.messages.loaded());
+        assert_eq!(from_index.messages.lost_from, read.messages.lost_from);
+        assert_eq!(serde_json::to_string(&from_index).unwrap(), serde_json::to_string(&c).unwrap());
+        assert!(parse_index(b"OAKINDEX1\n\x05").is_empty(), "a broken index is no index");
+        // Through `load_conversations`: the first start indexes it, the next
+        // starts from the index; a change is read from the file.
+        let load = || load_conversations().into_iter().find(|l| l.id == c.id).unwrap();
+        assert_eq!(load().messages, c.messages);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(load().messages, c.messages);
+        let mut changed = load();
+        changed.messages.push(json!({"role": "user", "content": [{"type": "text", "text": "two"}]}));
+        changed.save();
+        flush();
+        assert_eq!(load().messages.len(), 3);
+        remove_conversation(&c.id);
+    }
+
+    /// An opened conversation holds its last messages; earlier ones are
+    /// read as they are needed, and let go again once on disk as they are.
+    #[test]
+    fn messages_are_held_from_the_end() {
+        use serde_json::json;
+        let big = "x".repeat(10_000);
+        let msg = |i: usize| match i % 2 {
+            0 => json!({"role": "user", "content": [{"type": "text", "text": format!("{i} {big}")}]}),
+            _ => json!({"role": "assistant", "content": [{"type": "text", "text": format!("{i}")}]}),
+        };
+        let all: Vec<Value> = (0..1000).map(msg).collect();
+        let c = Conversation { id: format!("unit-test-window-{}", crate::api::now_ms()), messages: all.clone().into(), ..Default::default() };
+        c.save();
+        flush();
+        let mut l = load_conversations().into_iter().find(|l| l.id == c.id).unwrap();
+        assert_eq!((l.messages.len(), l.messages.base()), (1000, 1000));
+        let base = l.messages.iter().count() - l.messages.iter().filter(|m| !m.is_null()).count();
+        assert_eq!(base, l.messages.base());
+        assert!((600..=1000 - WINDOW_MIN).contains(&base), "a window's worth: {base}");
+        assert_eq!(l.messages[999], all[999]);
+        assert!(l.messages[base - 1].is_null());
+        assert!(l.messages.load_earlier());
+        let earlier = l.messages.base();
+        assert!(earlier < base && l.messages[earlier..] == all[earlier..]);
+        assert_eq!(l.messages.read_range(0, 3), all[..3].to_vec());
+        // A change to a message on disk only reads it first.
+        l.messages[5]["content"][0]["text"] = json!("five");
+        assert_eq!(l.messages.base(), 5);
+        assert!(!l.messages.forget_before(900), "not on disk as it is yet");
+        l.save();
+        flush();
+        assert!(l.messages.forget_before(900));
+        assert_eq!(l.messages.base(), 900);
+        assert!(l.messages[899].is_null());
+        l.messages.push(msg(1000));
+        l.save();
+        flush();
+        let mut want = all.clone();
+        want[5]["content"][0]["text"] = json!("five");
+        want.push(msg(1000));
+        assert_eq!(l.messages, want);
+        // Cut back before what is held: a window before the cut is read.
+        l.messages.truncate(300);
+        assert!(l.messages.base() < 300 && l.messages[299] == want[299]);
+        l.save();
+        flush();
+        let again = load_conversations().into_iter().find(|a| a.id == c.id).unwrap();
+        assert_eq!(again.messages, want[..300].to_vec());
+        remove_conversation(&c.id);
+    }
+
+    /// Pictures saved in a transcript as data move to their files at the
+    /// next start; what a request sends of them is as it was.
+    #[test]
+    fn pictures_move_out_of_transcripts() {
+        use base64::Engine;
+        use serde_json::json;
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
+        let mut png = std::io::Cursor::new(vec![]);
+        img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+        let id = format!("unit-test-pictures-{}", crate::api::now_ms());
+        let msgs = vec![
+            json!({"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image", "media_type": "image/png", "data": data}]}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": "seen"}]}),
+        ];
+        let mut v = serde_json::to_value(Conversation { id: id.clone(), ..Default::default() }).unwrap();
+        v["messages"] = json!(msgs);
+        let path = conversations_dir().join(format!("{id}.json"));
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let c = load_conversations().into_iter().find(|c| c.id == id).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&data) && text.contains("\"blob\""), "{text}");
+        let b = &c.messages[0]["content"][1];
+        assert_eq!(crate::blobs::data_of(b).unwrap(), data);
+        let mut sent = c.messages.to_vec();
+        crate::blobs::inline(&mut sent);
+        assert_eq!(sent, msgs);
+        remove_conversation(&id);
     }
 
     /// A deleted agent's tokens add up in its parent, and old transcripts

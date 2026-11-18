@@ -135,7 +135,20 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 
 `%APPDATA%\oak` on Windows, `~/.config/oak` (`$XDG_CONFIG_HOME/oak`) on Linux, or `OAK_DIR` (to try
 a build against a copy of your conversations). Each conversation is a file in `conversations/`
-named after its folder and title, with its id last. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
+named after its folder and title, with its id last. Pictures in conversations are files of their
+own in `images/`, named after the SHA-256 of their bytes (`src/blobs.rs`): an image block names its
+file (`blob`) and size (`_oak_size`) instead of holding base64 `data`, which goes back in only as a
+request is sent (`api::stream`). Pictures still saved as data are moved out at the next start
+(only data that reads back byte for byte, so requests send what they did); files are never
+deleted. At start only each conversation's metadata is read, and where each message is in its
+file, while the window is set up (`preload` in `src/lib.rs`): from `conversations/index.bin` for
+the files unchanged since the last start (by size and time; a cache, rewritten after a start that
+read any file), else from the file. A conversation's messages are read when first looked at, and then only the last ones
+(`store::Messages`); earlier ones as the view scrolls near them (`chat_view::read_back`) or a
+request sends them (from the summary's cut on). Messages on disk as they are are let go again
+when nothing needs them (`agent::forget_messages`: all of a conversation not shown for ten
+minutes, else those well above its view; never while it works). A save writes only the
+messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
@@ -522,9 +535,13 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   title, a title still being made included; the id, history and file stay (the file takes the
   new name). Subagents keep theirs, since sessions address them by it.
 - Unslop (`src/unslop.rs`): replies, and optionally thinking and notes, are rewritten for the
-  user by Gemma 4 31B through OpenRouter; the model's context keeps its own text.
+  user by Gemma 4 31B through OpenRouter; the model's context keeps its own text. Turning
+  Rewrite notes (or Unslop) off clears the note rewrites (a new `unslop_notes_epoch`), so
+  they are made again once it is back on.
 - Losing the GPU device ultrapauses the conversations at work and restarts Oak (`src/gpu.rs`).
-  On Windows Oak prefers Direct3D 12; `WGPU_BACKEND` picks another.
+  On Windows Oak sets up Direct3D 12 alone (the other backends cost a quarter of a second at
+  every start); should that fail it starts again with every backend (`OAK_GPU_ALL_BACKENDS`).
+  `WGPU_BACKEND` picks another.
 
 **Chats** (`Conversation::chat`). The New screen's Chat, beside Local folder, starts a
 conversation that is no project: no folder, role or goal, just a model and effort. Its system

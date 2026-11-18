@@ -635,16 +635,19 @@ fn lost_calls_answered_as_read_from_the_file() {
         vec![msg("assistant", json!([{"type": "text", "text": "tool_call"}])), json!("not a message")],
         vec![json!({"content": [call(json!("x"))], "role": "assistant", "extra": {"role": "user"}}), msg("user", json!([result(json!("x"))]))],
     ];
+    let file = crate::store::conversations_dir().join(format!("unit-test-lost-{}.json", crate::api::now_ms()));
     for messages in cases {
         let mut mem = Conversation { messages: messages.clone().into(), ..Default::default() };
-        let mut read: Conversation = serde_json::from_slice(&serde_json::to_vec(&mem).unwrap()).unwrap();
+        std::fs::write(&file, serde_json::to_vec(&mem).unwrap()).unwrap();
+        let mut read = crate::store::read_conversation(&file, &look_for_lost_calls).unwrap();
         let mended = answer_lost_calls(&mut mem);
         assert_eq!(answer_lost_calls(&mut read), mended, "{messages:?}");
         if !mended && messages.iter().all(Value::is_object) {
-            assert!(read.messages.unread().is_some(), "parsed for nothing: {messages:?}");
+            assert!(!read.messages.loaded(), "read for nothing: {messages:?}");
         }
         assert_eq!(read.messages, mem.messages);
     }
+    let _ = std::fs::remove_file(&file);
 }
 
 /// Calls run together unless they must not: ASK goes alone, and calls

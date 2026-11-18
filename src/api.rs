@@ -1501,7 +1501,9 @@ impl Fail {
     }
 }
 
-fn stream(req: crate::oak::Request, cont: Option<(String, usize)>, thread: bool, tx: Sender<Sse>) {
+fn stream(mut req: crate::oak::Request, cont: Option<(String, usize)>, thread: bool, tx: Sender<Sse>) {
+    // Pictures go as data (transcripts name their files: `blobs`).
+    crate::blobs::inline(&mut req.messages);
     // Any other provider's request goes to that provider, whole (none has
     // server threads).
     match req.provider {
@@ -1715,6 +1717,16 @@ pub fn probe_thinking(model: &str, tool: bool) -> Result<String, String> {
 /// price) and generates nothing, and reading a five-minute entry restarts
 /// its lifetime. Recorded as "keepalive". Returns the reply's usage.
 pub fn keep_warm(req: &crate::oak::Request) -> Result<crate::oak::Usage, String> {
+    // Pictures as the request had them (`stream`).
+    let inlined;
+    let req = if crate::blobs::any_file(&req.messages) {
+        let mut r = req.clone();
+        crate::blobs::inline(&mut r.messages);
+        inlined = r;
+        &inlined
+    } else {
+        req
+    };
     let body = generating_nothing(req);
     // The betas the conversation's requests go with (`stream`).
     let mut betas: Vec<&str> = if threads() { vec![THREADS_BETA] } else { vec![] };

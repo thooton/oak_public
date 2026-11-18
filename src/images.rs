@@ -137,44 +137,56 @@ struct Cached {
 }
 
 thread_local! {
-    /// By the hash of the block's data.
+    /// By the block's `key`.
     static CACHE: RefCell<HashMap<u64, Cached>> = RefCell::new(HashMap::new());
 }
 
-fn key(data: &str) -> u64 {
-    crate::hash_of(data)
+/// The cache key of an image block: its data's hash, or its file's name's
+/// (`blobs`: a file is named after what it holds).
+fn key(block: &Value) -> u64 {
+    match block["data"].as_str() {
+        Some(d) => crate::hash_of(d),
+        None => crate::hash_of(&("file", block["blob"].as_str().unwrap_or(""))),
+    }
 }
 
-/// The size of the image in base64 `data`, from its header alone.
-fn read_size(data: &str) -> Option<[usize; 2]> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+/// The size of the image in a block: as its file's reference has it, or
+/// from its header.
+fn read_size(block: &Value) -> Option<[usize; 2]> {
+    if let Some([w, h]) = block["_oak_size"].as_array().map(|s| s.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect::<Vec<_>>()).and_then(|s| <[usize; 2]>::try_from(s).ok())
+        && w > 0
+        && h > 0
+    {
+        return Some([w, h]);
+    }
+    let bytes = crate::blobs::bytes_of(block)?;
     let (w, h) = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()?;
     Some([w as usize, h as usize])
 }
 
-fn decode(ctx: &egui::Context, key: u64, data: &str) -> Option<TextureHandle> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+fn decode(ctx: &egui::Context, key: u64, block: &Value) -> Option<TextureHandle> {
+    let bytes = crate::blobs::bytes_of(block)?;
     let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
     Some(ctx.load_texture(format!("image-{key}"), color, egui::TextureOptions::LINEAR))
 }
 
-/// The size of the image in base64 `data` (hashed to `key`), read once.
-fn size(key: u64, data: &str) -> Option<[usize; 2]> {
-    CACHE.with(|c| c.borrow_mut().entry(key).or_insert_with(|| Cached { size: read_size(data), tex: None, used: 0.0 }).size)
+/// The size of the image in `block` (hashed to `key`), read once.
+fn size(key: u64, block: &Value) -> Option<[usize; 2]> {
+    CACHE.with(|c| c.borrow_mut().entry(key).or_insert_with(|| Cached { size: read_size(block), tex: None, used: 0.0 }).size)
 }
 
-/// The texture of the image in base64 `data` (hashed to `key`), decoded
-/// the first time it is drawn (None if it can't be).
-fn texture(ctx: &egui::Context, key: u64, data: &str) -> Option<TextureHandle> {
+/// The texture of the image in `block` (hashed to `key`), decoded the
+/// first time it is drawn (None if it can't be).
+fn texture(ctx: &egui::Context, key: u64, block: &Value) -> Option<TextureHandle> {
     let now = ctx.input(|i| i.time);
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        let e = c.entry(key).or_insert_with(|| Cached { size: read_size(data), tex: None, used: now });
+        let e = c.entry(key).or_insert_with(|| Cached { size: read_size(block), tex: None, used: now });
         e.used = now;
         if e.tex.is_none() && e.size.is_some() {
-            e.tex = decode(ctx, key, data);
+            e.tex = decode(ctx, key, block);
             // What can't be decoded isn't shown, whatever its header says.
             e.size = e.tex.as_ref().map(|t| t.size());
         }
@@ -217,9 +229,8 @@ pub fn forget_unseen(ctx: &egui::Context) {
 /// room). Clicking it opens it in the in-app viewer (`viewer`). Its pixels
 /// are only decoded when it is on screen.
 pub fn show(ui: &mut Ui, block: &Value, max_h: f32) -> Option<egui::Response> {
-    let data = block["data"].as_str().unwrap_or("");
-    let key = key(data);
-    let Some([w, h]) = size(key, data).map(|s| s.map(|v| v as f32)) else {
+    let key = key(block);
+    let Some([w, h]) = size(key, block).map(|s| s.map(|v| v as f32)) else {
         ui.label(egui::RichText::new("[image that couldn't be shown]").small());
         return None;
     };
@@ -227,7 +238,7 @@ pub fn show(ui: &mut Ui, block: &Value, max_h: f32) -> Option<egui::Response> {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w * scale, h * scale), egui::Sense::click());
     let seen = ui.is_rect_visible(rect) && ui.ctx().content_rect().intersects(rect);
     if (seen || resp.clicked())
-        && let Some(tex) = texture(ui.ctx(), key, data)
+        && let Some(tex) = texture(ui.ctx(), key, block)
     {
         egui::Image::new(&tex).paint_at(ui, rect);
         if resp.clicked() {
@@ -461,10 +472,7 @@ fn close_button(ui: &Ui, rect: egui::Rect, style: &ViewerStyle) -> bool {
 
 /// Writes the image to a temp file and opens it with the default viewer.
 fn open_externally(block: &Value) {
-    let Some(bytes) = block["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
-    else {
-        return;
-    };
+    let Some(bytes) = crate::blobs::bytes_of(block) else { return };
     let ext = block["media_type"].as_str().map(|m| match m { "image/jpeg" => "jpg", "image/gif" => "gif", "image/webp" => "webp", _ => "png" }).unwrap_or("png");
     let path = std::env::temp_dir().join(format!("oak-image-{:x}.{ext}", crate::hash_of(&bytes)));
     if std::fs::write(&path, &bytes).is_ok() {

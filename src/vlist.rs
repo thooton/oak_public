@@ -143,6 +143,9 @@ pub struct List {
     tops: std::cell::RefCell<Vec<f32>>,
     /// A unit's measured height changed since `est` was worked out.
     est_stale: bool,
+    /// Where each unit starts in its owner's terms (a transcript's: the
+    /// message), as last given to `rebase`.
+    firsts: Vec<usize>,
 }
 
 impl Default for List {
@@ -168,6 +171,7 @@ impl Default for List {
             scene_view: Rect::NOTHING,
             tops: Default::default(),
             est_stale: true,
+            firsts: vec![],
         }
     }
 }
@@ -232,6 +236,50 @@ impl List {
         if self.anchor.0 > last {
             self.anchor = (last, 0.0);
         }
+    }
+
+    /// Units came or went at the start (a transcript read further back, or
+    /// let go of its start): `firsts` is where each unit starts now, in
+    /// the terms of the last call. The view keeps its place, and the units
+    /// kept their heights. Called before `sync`.
+    pub fn rebase(&mut self, firsts: &[usize]) {
+        let (Some(&was), Some(&now)) = (self.firsts.first(), firsts.first()) else {
+            self.firsts = firsts.to_vec();
+            return;
+        };
+        if now < was {
+            self.shift(firsts.partition_point(|&m| m < was) as isize);
+        } else if now > was {
+            self.shift(-(self.firsts.partition_point(|&m| m < now) as isize));
+        }
+        if self.firsts != firsts {
+            self.firsts = firsts.to_vec();
+        }
+    }
+
+    /// `n` units were added at the start (fewer than none: taken away).
+    fn shift(&mut self, n: isize) {
+        if n == 0 {
+            return;
+        }
+        if n > 0 {
+            let n = n as usize;
+            self.units.splice(0..0, (0..n).map(|_| Unit::default()));
+            self.anchor.0 += n;
+            self.shown = (self.shown.0 + n, self.shown.1 + n);
+        } else {
+            let n = (-n as usize).min(self.units.len());
+            self.units.drain(..n);
+            self.anchor = if self.anchor.0 >= n { (self.anchor.0 - n, self.anchor.1) } else { (0, 0.0) };
+            self.shown = (self.shown.0.saturating_sub(n), self.shown.1.saturating_sub(n));
+        }
+        self.drawn = None;
+        self.heights_changed(0);
+    }
+
+    /// The view is within `screens` of its height from the top.
+    pub fn near_top(&self, screens: f32) -> bool {
+        self.pos() < self.view_h * screens
     }
 
     pub fn height(&self, i: usize) -> f32 {

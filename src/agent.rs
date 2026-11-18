@@ -314,6 +314,9 @@ pub struct Live {
     pub drawn: u64,
     /// The viewport that drew it (a side chat has its own pass counter).
     pub drawn_viewport: Option<eframe::egui::ViewportId>,
+    /// When the transcript was last drawn, and the first message its view
+    /// showed then: what `forget_messages` keeps of it while it is shown.
+    pub shown: Option<(Instant, usize)>,
     pub status: String,
     /// The assistant reply streaming in right now.
     pub blocks: Vec<Value>,
@@ -615,8 +618,14 @@ fn hold_queued_pause(conv: &mut Conversation) -> bool {
 }
 
 impl Session {
-    pub fn start(mut conv: Conversation, ctx: eframe::egui::Context) -> Session {
+    pub fn start(conv: Conversation, ctx: eframe::egui::Context) -> Session {
         let tasks = Tasks::open(&conv.id);
+        Session::start_with(conv, ctx, tasks)
+    }
+
+    /// `start`, with the conversation's tasks already read (`Tasks::open`:
+    /// at Oak's start, for every conversation at once, on every core).
+    pub fn start_with(mut conv: Conversation, ctx: eframe::egui::Context, tasks: Arc<Tasks>) -> Session {
         // Closed while a tool ran: its call has no result, which the API
         // refuses, so it gets one saying so. But a TASK wait on a task Oak
         // still knows carries on (`Worker::carry_on_waits`): its result
@@ -1061,6 +1070,39 @@ fn append(b: &mut Value, key: &str, s: &str) {
     }
 }
 
+/// How long after its transcript was last drawn a conversation keeps the
+/// messages its view had read (`forget_messages`).
+const SHOWN_HOLD: Duration = Duration::from_secs(600);
+
+/// Lets go of the messages a conversation holds that nothing needs (they
+/// are read from its file again when they are): all of them once its
+/// transcript hasn't been shown for a while, else those well above its
+/// view, keeping the last ones. Not while it works (its requests send
+/// them), nor what isn't on disk as it is yet.
+pub(crate) fn forget_messages(conv: &store::Shared, live: &Mutex<Live>) {
+    let Ok(l) = live.try_lock() else { return };
+    if l.busy {
+        return;
+    }
+    let shown = l.shown.filter(|(at, _)| at.elapsed() < SHOWN_HOLD).map(|(_, m)| m);
+    drop(l);
+    let Some(mut c) = conv.try_lock() else { return };
+    match shown {
+        None => {
+            if c.messages.unloadable() {
+                c.messages.unload();
+            }
+        }
+        Some(first) => {
+            let k = first.saturating_sub(2 * store::WINDOW_MIN).min(c.messages.tail_start());
+            // (Only enough to be worth reading again.)
+            if c.messages.forgettable(k).is_some_and(|k| k >= c.messages.base() + store::WINDOW_MIN) {
+                c.messages.forget_before(k);
+            }
+        }
+    }
+}
+
 /// Whether the transcript ends in a message of `role`.
 fn last_is(c: &Conversation, role: &str) -> bool {
     c.messages.last().is_some_and(|m| m["role"] == role)
@@ -1205,6 +1247,7 @@ impl Worker {
     /// the session is gone.
     fn sleep_idle(&self) -> bool {
         self.idle();
+        forget_messages(&self.conv, &self.live);
         let mut ping = self.keep_alive_due();
         if ping.is_some_and(|at| at <= api::now_ms()) {
             self.keep_warm();
@@ -1986,9 +2029,10 @@ const STOPPED_RESULT: &str = "No result: the user stopped this call before it fi
 /// the transcript (OAK closed or crashed while it ran).
 const LOST_RESULT: &str = "No result: Oak closed while this call was running, so it may not have finished. Check its effects before relying on them, and run it again if needed.";
 
-/// Whether any call in messages kept as JSON has no result, as
-/// `answer_lost_calls` would find; None when they don't read as it expects.
-fn lost_calls_in(messages: &[std::sync::Arc<[u8]>]) -> Option<bool> {
+/// The first message (index) with a call that has no result, in messages
+/// as JSON, as `answer_lost_calls` would find; `Some(None)` when there is
+/// none, None when they don't read as it expects.
+fn lost_calls_in(messages: &[&[u8]]) -> Option<Option<usize>> {
     #[derive(serde::Deserialize)]
     struct Message<'a> {
         #[serde(default)]
@@ -2016,7 +2060,8 @@ fn lost_calls_in(messages: &[std::sync::Arc<[u8]>]) -> Option<bool> {
     };
     // From the end, with the message after each.
     let mut next: Option<(Value, Vec<Block>)> = None;
-    for m in messages.iter().rev() {
+    let mut first = None;
+    for (i, m) in messages.iter().enumerate().rev() {
         let (role, blocks) = read(m)?;
         let mut calls = blocks.iter().filter(|b| b.kind == "tool_call").peekable();
         if role == "assistant" && calls.peek().is_some() {
@@ -2028,22 +2073,19 @@ fn lost_calls_in(messages: &[std::sync::Arc<[u8]>]) -> Option<bool> {
             if let Some(answered) = answered
                 && calls.any(|call| !answered.contains(&&call.id))
             {
-                return Some(true);
+                first = Some(i);
             }
         }
         next = Some((role, blocks));
     }
-    Some(false)
+    Some(first)
 }
 
-/// Looks for calls without a result in a conversation not yet read from
-/// its file, as `answer_lost_calls` will (to do it ahead, in parallel).
-pub(crate) fn look_for_lost_calls(c: &mut Conversation) {
-    if let Some(raw) = c.messages.unread()
-        && lost_calls_in(&raw) == Some(false)
-    {
-        c.messages.no_lost_calls = true;
-    }
+/// Looks for calls without a result in a conversation as it is read from
+/// its file (`raw`, its messages' JSON), as `answer_lost_calls` will: it
+/// then reads only from the first.
+pub(crate) fn look_for_lost_calls(c: &mut Conversation, raw: &[&[u8]]) {
+    c.messages.lost_from = lost_calls_in(raw).unwrap_or(Some(0));
 }
 
 /// Gives every tool call without a result one (`LOST_RESULT`), so the
@@ -2060,13 +2102,14 @@ pub(crate) fn answer_lost_calls(c: &mut Conversation) -> bool {
 /// last reply, with at most its results after it) that `carry_on` picks:
 /// they stay unanswered, to run again, and are returned.
 pub(crate) fn answer_lost_calls_but(c: &mut Conversation, carry_on: impl Fn(&Value) -> bool) -> (bool, Vec<Value>) {
-    // Not yet read from its file: looked at there, without parsing it all
-    // (every conversation is looked at, at every start).
-    if let Some(raw) = c.messages.unread()
-        && (c.messages.no_lost_calls || lost_calls_in(&raw) == Some(false))
-    {
-        c.messages.no_lost_calls = true;
+    // Not yet read from its file, and none found there (every conversation
+    // is looked at, at every start): nothing is read. Otherwise, what is
+    // held is looked at, and the messages on disk from the first found.
+    if !c.messages.loaded() && c.messages.lost_from.is_none() {
         return (false, vec![]);
+    }
+    if let Some(i) = c.messages.lost_from.take() {
+        c.messages.load_from(i);
     }
     let n = c.messages.len();
     let role = |i: usize| c.messages[i]["role"].clone();
@@ -2078,9 +2121,8 @@ pub(crate) fn answer_lost_calls_but(c: &mut Conversation, carry_on: impl Fn(&Val
     };
     let mut kept = vec![];
     let mut changed = false;
-    for i in 0..n {
-        // (Looked at in place: every conversation is, at every start, and
-        // nearly every call has its result.)
+    for i in c.messages.base()..n {
+        // (Looked at in place: nearly every call has its result.)
         let m = &c.messages[i];
         if m["role"] != "assistant" {
             continue;
@@ -2434,7 +2476,8 @@ fn request_messages(c: &Conversation, messages: &[Value]) -> Vec<Value> {
 
 /// What to summarize of the first `n` messages of a request built on the
 /// summary cut `base`, whose prompt came to `total` tokens.
-fn plan_summary(c: &Conversation, n: usize, base: usize, total: u64) -> Option<Plan> {
+fn plan_summary(c: &mut Conversation, n: usize, base: usize, total: u64) -> Option<Plan> {
+    c.messages.load_from(base);
     let cleared = c.rolling.cleared_to();
     let keep = rolling::config_for(&c.model).keep;
     rolling::plan(&c.messages[..n.min(c.messages.len())], base, cleared, total, &c.rolling.measured, keep, true)

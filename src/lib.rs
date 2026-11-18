@@ -22,6 +22,7 @@ mod api;
 mod approval;
 mod cache_ttl;
 mod bench;
+mod blobs;
 mod browser;
 mod cdp;
 mod changes;
@@ -289,6 +290,8 @@ struct App {
     /// when first shown).
     unslop_prompt: Option<String>,
     sessions: HashMap<String, Session>,
+    /// When the sessions' messages were last swept (`agent::forget_messages`).
+    messages_swept: Option<std::time::Instant>,
     /// The retained side conversation open in the right-hand pane.
     side_chat: Option<String>,
     side_deleting: bool,
@@ -443,17 +446,13 @@ impl App {
             gateway::start_in_app();
         }
         startup::step("accounts and gateway");
-        // Calls left without a result and unfinished rewrites are looked for
-        // in every conversation as it starts (`Session::start`): in the
-        // loading threads first, as that reads them all.
-        let conversations = store::load_conversations_then(&|c| {
-            agent::look_for_lost_calls(c);
-            unslop::look(c);
-        });
-        startup::step(format!("{} conversations read", conversations.len()));
+        // (Read while the window was being set up: `preload`.)
+        let (conversations, tasks) = take_preloaded();
+        startup::step(format!("{} conversations and their tasks read", conversations.len()));
         let sessions = conversations
             .into_iter()
-            .map(|c| (c.id.clone(), Session::start(c, cc.egui_ctx.clone())))
+            .zip(tasks)
+            .map(|(c, t)| (c.id.clone(), Session::start_with(c, cc.egui_ctx.clone(), t)))
             .collect();
         startup::step("conversations started");
         // Their tasks left running when OAK closed are theirs again.
@@ -598,6 +597,13 @@ impl eframe::App for App {
         let mode = if self.settings.click_zoom { images::ZoomMode::Click } else { images::ZoomMode::Scroll };
         images::viewer(ui.ctx(), TITLE_H, &style, mode);
         images::forget_unseen(ui.ctx());
+        // Messages nothing needs are let go every few seconds.
+        if self.messages_swept.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
+            self.messages_swept = Some(std::time::Instant::now());
+            for s in self.sessions.values() {
+                agent::forget_messages(&s.conv, &s.live);
+            }
+        }
         // Ctrl+A in a message's text selects the whole message (before the
         // labels see the keys).
         select::begin(ui);
@@ -892,6 +898,7 @@ pub fn main() -> eframe::Result {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions { viewport, wgpu_options: gpu::wgpu_options(), ..Default::default() };
+    preload();
     startup::step("ready for the window");
     let run = || eframe::run_native("OAK", options, Box::new(|cc| Ok(Box::new(App::new(cc)))));
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
@@ -903,6 +910,12 @@ pub fn main() -> eframe::Result {
         }
         Err(payload) => std::panic::resume_unwind(payload),
     };
+    // No window with Direct3D 12 alone: started again with every backend.
+    if let Err(e) = &result
+        && gpu::relaunch_with_all_backends(&e.to_string())
+    {
+        return Ok(());
+    }
     // The tasks' records, for the next start (those left running first
     // detached, if the close dialog said so); what else commands left
     // running goes.
@@ -933,6 +946,42 @@ pub fn main() -> eframe::Result {
     #[cfg(not(windows))]
     drop(kept);
     result
+}
+
+/// The conversations and their tasks, read (`read_conversations`).
+type Preloaded = (Vec<Conversation>, Vec<Arc<tasks::Tasks>>);
+
+/// The conversations being read in the background (`preload`).
+static PRELOAD: Mutex<Option<std::thread::JoinHandle<Preloaded>>> = Mutex::new(None);
+
+/// Starts reading the conversations and their tasks while the window and
+/// the graphics are set up (neither needs the other).
+fn preload() {
+    *PRELOAD.lock().unwrap() = Some(std::thread::spawn(read_conversations));
+}
+
+/// What `preload` read (read now if it wasn't started).
+fn take_preloaded() -> Preloaded {
+    let started = PRELOAD.lock().unwrap().take();
+    started.and_then(|h| h.join().ok()).unwrap_or_else(read_conversations)
+}
+
+/// Every conversation, and its tasks' records.
+fn read_conversations() -> Preloaded {
+    let t = std::time::Instant::now();
+    // Calls left without a result and unfinished rewrites are looked for
+    // in every conversation as it starts (`Session::start`): in the
+    // loading threads first, as that reads them all.
+    let conversations = store::load_conversations_then(&|c, raw| {
+        agent::look_for_lost_calls(c, raw);
+        unslop::look(c, raw);
+    });
+    let read = t.elapsed();
+    // Their tasks' records (reading each task's output) on every core.
+    let ids: Vec<&str> = conversations.iter().map(|c| c.id.as_str()).collect();
+    let tasks = tasks::open_all(&ids);
+    startup::note(format!("Conversations read in {} ms, their tasks in {} ms more (beside the window's setup)", read.as_millis(), (t.elapsed() - read).as_millis()));
+    (conversations, tasks)
 }
 
 #[cfg(test)]

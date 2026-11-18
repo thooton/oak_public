@@ -282,11 +282,13 @@ impl Worker {
         // (A model without effort levels goes without.)
         let effort = Some(effort_for(&c.model, &c.effort).to_string()).filter(|e| !e.is_empty());
         let (n, cut) = (c.messages.len(), c.rolling.base());
+        // What the request sends is read (from the summary's cut on).
+        c.messages.load_from(cut);
         // A kit whose LOAD the view shows stays out of the system prompt and
         // the prefix's tools (its LOAD's result has its instructions, its
         // tools join after it); one a summary covers (or loaded with no
         // LOAD) is in them.
-        let loads = if c.chat { vec![] } else { crate::prefix::loads(&c.messages) };
+        let loads = if c.chat { vec![] } else { crate::prefix::loads_of(&c.messages) };
         let shown = |k: &String| loads.iter().find(|l| &l.kit == k).filter(|l| l.call >= cut);
         let defs = |kits: &[String]| if c.chat { tools::chat_definitions() } else { tools::definitions_with_kits(agent.is_some(), c.spawner, local, kits) };
         let held: Vec<String> = kits.iter().filter(|k| shown(k).is_none()).cloned().collect();
@@ -586,7 +588,7 @@ impl Worker {
                 return;
             }
         }
-        let Some(plan) = plan_summary(&c, n, base, usage.prompt) else { return };
+        let Some(plan) = plan_summary(&mut c, n, base, usage.prompt) else { return };
         let prompt = rolling::prompt_for(&c.model, Some(&rolling::describe(&c.messages[plan.cut])));
         drop(c);
         // The request that just finished, plus the instruction: all but the
@@ -612,7 +614,7 @@ impl Worker {
             std::thread::sleep(Duration::from_millis(100));
         }
         let (body, n, base) = self.request_body();
-        let c = self.conv.lock().unwrap();
+        let mut c = self.conv.lock().unwrap();
         if c.rolling.off {
             return Err("smart context is off for this conversation".into());
         }
@@ -624,7 +626,7 @@ impl Worker {
             .split(|ch: char| !ch.is_ascii_digit())
             .find_map(|d| d.parse::<u64>().ok().filter(|&t| t > 1000))
             .unwrap_or(c.rolling.context);
-        let plan = plan_summary(&c, n, base, total).ok_or("nothing old enough to summarize")?;
+        let plan = plan_summary(&mut c, n, base, total).ok_or("nothing old enough to summarize")?;
         let mut request = body.clone();
         request.messages = request_messages(&c, &c.messages[..plan.cut]);
         drop(c);

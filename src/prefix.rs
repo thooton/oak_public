@@ -261,25 +261,62 @@ fn loads_kit(b: &Value) -> Option<String> {
 }
 
 /// Each kit's first LOAD in `messages` that worked, in order.
+#[cfg(test)]
 pub fn loads(messages: &[Value]) -> Vec<Load> {
-    let mut out: Vec<Load> = vec![];
-    let mut open: Vec<(Value, String, usize)> = vec![];
-    for (k, m) in messages.iter().enumerate() {
-        for b in m["content"].as_array().into_iter().flatten() {
-            if let Some(kit) = loads_kit(b) {
-                open.push((b["id"].clone(), kit, k));
-            } else if b["type"] == "tool_result"
-                && let Some(i) = open.iter().position(|(id, ..)| *id == b["call_id"])
-            {
-                let (_, kit, call) = open.swap_remove(i);
-                if b["is_error"] != true && !out.iter().any(|l| l.kit == kit) {
-                    let through = b["content"].as_str().is_some_and(|t| t.contains(THROUGH_LOAD));
-                    out.push(Load { kit, call, join: k + 1, through });
+    let mut f = Loads::default();
+    f.add(0, messages);
+    f.out
+}
+
+/// `loads` of a conversation's messages: those on disk only are read once
+/// (in parts) and what they hold kept, until what is held starts
+/// elsewhere (`Messages::loads_memo`).
+pub fn loads_of(messages: &crate::store::Messages) -> Vec<Load> {
+    let base = messages.base();
+    let mut f = {
+        let mut memo = messages.loads_memo.lock().unwrap_or_else(|e| e.into_inner());
+        match memo.as_ref().filter(|(at, _)| *at == base) {
+            Some((_, f)) => f.clone(),
+            None => {
+                let mut f = Loads::default();
+                messages.each_on_disk(base, |k, part| f.add(k, part));
+                *memo = Some((base, f.clone()));
+                f
+            }
+        }
+    };
+    f.add(base, &messages[base..]);
+    f.out
+}
+
+/// `loads`, worked out a part at a time.
+#[derive(Clone, Default)]
+pub struct Loads {
+    out: Vec<Load>,
+    /// The LOAD calls without a result yet: id, kit, message.
+    open: Vec<(Value, String, usize)>,
+}
+
+impl Loads {
+    /// Goes on with `messages`, the first of which is message `from`.
+    fn add(&mut self, from: usize, messages: &[Value]) {
+        for (k, m) in messages.iter().enumerate() {
+            let k = from + k;
+            for b in m["content"].as_array().into_iter().flatten() {
+                if let Some(kit) = loads_kit(b) {
+                    self.open.push((b["id"].clone(), kit, k));
+                } else if b["type"] == "tool_result"
+                    && let Some(i) = self.open.iter().position(|(id, ..)| *id == b["call_id"])
+                {
+                    let (_, kit, call) = self.open.swap_remove(i);
+                    if b["is_error"] != true && !self.out.iter().any(|l| l.kit == kit) {
+                        let through = b["content"].as_str().is_some_and(|t| t.contains(THROUGH_LOAD));
+                        self.out.push(Load { kit, call, join: k + 1, through });
+                    }
                 }
             }
         }
     }
-    out
 }
 
 impl State {
@@ -328,9 +365,9 @@ impl State {
     /// stays is sent as it was. (A pin holds a kit whose LOAD went only if
     /// the revert went back past the summary that covered the LOAD: that
     /// summary goes, and its cut with it, which renews the pin.)
-    pub fn reverted(&mut self, messages: &[Value]) {
+    pub fn reverted(&mut self, messages: &crate::store::Messages) {
         let n = messages.len();
-        let loads = loads(messages);
+        let loads = loads_of(messages);
         self.kits.retain(|k| loads.iter().any(|l| &l.kit == k));
         self.sys.retain(|m| m.at <= n);
         self.folded = self.folded.min(n);
@@ -938,7 +975,7 @@ mod tests {
             pin: Some(Pin { kits: vec!["BROWSER".into()], ..Default::default() }),
             cut: Some(0),
         };
-        s.reverted(&[m("user", "go"), call, result]);
+        s.reverted(&vec![m("user", "go"), call, result].into());
         assert_eq!(s.kits, ["AGENT"]);
         assert_eq!(s.sys.len(), 1);
         assert_eq!(s.folded, 3);

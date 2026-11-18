@@ -145,7 +145,7 @@ impl Frame {
 /// agent's), with `tail` at its end (its state hashed in `tail_sig`).
 pub(crate) fn read_only_view(ui: &mut Ui, t: &Theme, conv: &store::Conversation, live: &Live, list: &mut vlist::List, tail_sig: u64, tail: impl FnMut(&mut Ui)) {
     let frame = Frame::new(ui.max_rect());
-    let (mut items, _, results) = items_at(conv, live);
+    let (mut items, msgs, results) = items_at(conv, live);
     for x in &mut items {
         if let Item::UserText(_, r, ..) | Item::Image(_, r) | Item::File(_, r) = x {
             *r = None;
@@ -154,6 +154,7 @@ pub(crate) fn read_only_view(ui: &mut Ui, t: &Theme, conv: &store::Conversation,
     let units = units(&items);
     let mut sigs: Vec<u64> = units.iter().map(|u| unit_sig(&items[u.clone()], &results)).collect();
     sigs.push(tail_sig);
+    rebase(list, &units, &msgs);
     list.sync(&sigs, frame.col.span());
     crate::transcript::for_conversation(&conv.id, || frame.show(ui, t, list, &items, &units, &results, None, tail, |_| None, None));
 }
@@ -161,6 +162,8 @@ pub(crate) fn read_only_view(ui: &mut Ui, t: &Theme, conv: &store::Conversation,
 /// A conversation's transcript. Returns what was done to the queue.
 pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mut vlist::List, editing: &mut Option<Editing>, agents_pausing: bool) -> Option<QueueAction> {
     let frame = Frame::new(ui.max_rect());
+    let jump = ui.data_mut(|d| d.remove_temp::<usize>(Id::unique(JUMP_REQUEST)));
+    read_back(&s.conv, list, jump);
     let conv = s.conv.lock().unwrap();
     let mut live = s.live.lock().unwrap();
     live.drawn = ui.ctx().cumulative_pass_nr();
@@ -175,6 +178,8 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
     // streams in: their results are the reply's.
     let mut built = None;
     let mut fresh = None;
+    // The first message the view shows.
+    let shown_from;
     {
         let (items, msgs, results, units, mut sigs, split) = if let Some(early) = &live.early {
             let (items, msgs, mut results) = items_at(&conv, &live);
@@ -206,14 +211,16 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
                 })
                 .collect()
         };
+        rebase(list, &units, msgs);
         let find = crate::find::begin(ui, id, &sigs, texts, list.first_shown());
         sigs.push(tail);
         list.sync(&sigs, frame.col.span());
         // The unit a message starts (the first one at or after it).
         let unit_of = |msg: usize| units.iter().position(|u| msgs[u.start] >= msg).unwrap_or(units.len());
-        if let Some(msg) = ui.data_mut(|d| d.remove_temp::<usize>(Id::unique(JUMP_REQUEST))) {
+        if let Some(msg) = jump {
             list.jump_to(unit_of(msg), frame.view.height());
         }
+        shown_from = units.get(list.first_shown()).map_or(usize::MAX, |u| msgs[u.start]);
         // The end: what OAK is doing, then its questions and the queue.
         let tail = |ui: &mut Ui| {
             transcript_status(ui, t, &conv, &live, agents_pausing);
@@ -248,12 +255,43 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         b.put_back(id, ui.ctx().cumulative_pass_nr());
     }
     live.ask = ask;
+    live.shown = Some((std::time::Instant::now(), shown_from));
     drop(live);
     drop(conv);
     if let Some(accept) = ask_reply {
         s.answer_ask_request(accept);
     }
     action
+}
+
+/// How near the top (in view heights) earlier messages are read.
+const READ_BACK_SCREENS: f32 = 2.0;
+
+/// Reads earlier messages of the transcript in `conv` when the view is
+/// near the top of what is held, or a jump goes to a message before it.
+/// (`rebase` keeps the view's place.)
+fn read_back(conv: &store::Shared, list: &vlist::List, jump: Option<usize>) {
+    let near = list.near_top(READ_BACK_SCREENS);
+    let (base, loaded) = {
+        let c = conv.lock().unwrap();
+        (c.messages.base(), c.messages.loaded())
+    };
+    if base == 0 || !loaded {
+        return;
+    }
+    match jump {
+        Some(msg) if msg < base => conv.lock().unwrap().messages.load_from(msg.saturating_sub(store::WINDOW_MIN)),
+        _ if near => {
+            conv.lock().unwrap().messages.load_earlier();
+        }
+        _ => {}
+    }
+}
+
+/// Tells `list` where its units start (messages came or went at the start).
+fn rebase(list: &mut vlist::List, units: &[Range<usize>], msgs: &[usize]) {
+    let firsts: Vec<usize> = units.iter().map(|u| msgs.get(u.start).copied().unwrap_or(usize::MAX)).collect();
+    list.rebase(&firsts);
 }
 
 /// The unit the line marking cleared tool output goes over: the one that

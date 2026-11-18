@@ -289,8 +289,16 @@ impl App {
     /// this Oak's, after a restart, when nothing was sent from its tab yet).
     fn last_sent_in_conversation(&self) -> Option<String> {
         let Screen::Chat(id) = &self.screen else { return None };
-        let c = self.sessions.get(id)?.conv.lock().unwrap();
-        last_user_text(&c.messages)
+        let mut c = self.sessions.get(id)?.conv.lock().unwrap();
+        // (Read further back while the messages held have none.)
+        loop {
+            if let Some(text) = last_user_text(&c.messages[c.messages.base()..]) {
+                return Some(text);
+            }
+            if !c.messages.load_earlier() {
+                return None;
+            }
+        }
     }
 
     /// Asks for files to attach: any kind.
@@ -634,6 +642,7 @@ pub(crate) fn settings_link(ui: &mut Ui, t: &Theme, room: Rect) -> (Rect, bool) 
 pub(crate) fn unslop_panel(ui: &mut Ui, t: &Theme, settings: &mut Settings, w: f32) -> egui::Response {
     side_box(ui, t, w, |ui| {
         let on = settings.unslop;
+        let notes_showed = on && settings.unslop_notes;
         let mut changed = false;
         let tip = "Shows the model's messages rewritten by Gemma 4 31B through OpenRouter, paid from its credits. The model's context is unchanged. Not for subagents.";
         if switch_row(ui, t, "Unslop", t.ink2, tip, on) {
@@ -644,7 +653,7 @@ pub(crate) fn unslop_panel(ui: &mut Ui, t: &Theme, settings: &mut Settings, w: f
         let rows: [(&str, &str, &mut bool); 3] = [
             ("No drafts", "Hides the model's drafts: only the rewrites show", &mut settings.unslop_no_drafts),
             ("Rewrite thinking", "Rewrites thinking summaries as they stream in", &mut settings.unslop_thinking),
-            ("Rewrite notes", "Shows the notes rewritten; the model's notes are unchanged", &mut settings.unslop_notes),
+            ("Rewrite notes", "Shows the notes rewritten; the model's notes are unchanged. Turning it off clears the rewrites", &mut settings.unslop_notes),
         ];
         for (label, tip, value) in rows {
             ui.add_enabled_ui(on, |ui| {
@@ -655,6 +664,11 @@ pub(crate) fn unslop_panel(ui: &mut Ui, t: &Theme, settings: &mut Settings, w: f
             });
         }
         if changed {
+            // Rewritten notes no longer show: the rewrites go, to be made
+            // again (with the prompt then in use) once they show again.
+            if notes_showed && !(settings.unslop && settings.unslop_notes) {
+                settings.unslop_notes_epoch = settings.unslop_notes_epoch.wrapping_add(1);
+            }
             unslop::set_all(settings);
             store::save_settings(settings);
         }

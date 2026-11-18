@@ -24,16 +24,32 @@ const TOO_SOON: Duration = Duration::from_secs(60);
 /// How long the ultrapaused conversations get to record what they stopped.
 const GRACE: Duration = Duration::from_secs(3);
 
-/// How Oak sets up wgpu: on Windows it prefers Direct3D 12 (Windows' own
-/// path, which rides out driver resets and a GPU shared with VMs best),
-/// then Vulkan; a discrete GPU before an integrated one. `WGPU_BACKEND`
-/// still picks the backend when set.
+/// Set for an Oak started again because Direct3D 12 alone couldn't draw
+/// (`relaunch_with_all_backends`).
+const ALL_BACKENDS_VAR: &str = "OAK_GPU_ALL_BACKENDS";
+/// This Oak looks at every backend (`ALL_BACKENDS_VAR`).
+static ALL_BACKENDS: AtomicBool = AtomicBool::new(false);
+/// Only Direct3D 12 was looked at.
+static DX12_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// How Oak sets up wgpu: on Windows only Direct3D 12 (Windows' own path,
+/// which rides out driver resets and a GPU shared with VMs best; Windows
+/// always has it, with its software renderer at worst), as setting up the
+/// other backends only to pass them over takes a quarter of a second at
+/// every start. Should it fail, Oak starts again looking at every backend
+/// (`relaunch_with_all_backends`): Direct3D 12, then Vulkan; a discrete
+/// GPU before an integrated one. `WGPU_BACKEND` still picks the backend
+/// when set.
 pub(crate) fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
     if cfg!(windows)
         && std::env::var_os("WGPU_BACKEND").is_none()
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(new) = &mut options.wgpu_setup
     {
+        if !ALL_BACKENDS.load(Ordering::SeqCst) {
+            new.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+            DX12_ONLY.store(true, Ordering::SeqCst);
+        }
         new.native_adapter_selector = Some(std::sync::Arc::new(|adapters, surface| {
             use eframe::wgpu::{Backend, DeviceType};
             crate::startup::step("graphics adapters found");
@@ -108,6 +124,11 @@ static RESTARTED: AtomicBool = AtomicBool::new(false);
 /// losing the device (the variable then goes, so that the commands Oak runs,
 /// and an Oak started again to update, don't have it).
 pub(crate) fn init() {
+    if std::env::var_os(ALL_BACKENDS_VAR).is_some() {
+        ALL_BACKENDS.store(true, Ordering::SeqCst);
+        // SAFETY: no other thread runs yet.
+        unsafe { std::env::remove_var(ALL_BACKENDS_VAR) };
+    }
     if std::env::var_os(RESTARTED_VAR).is_some() {
         RESTARTED.store(true, Ordering::SeqCst);
         // SAFETY: no other thread runs yet.
@@ -165,4 +186,15 @@ pub(crate) fn relaunch() {
     let mut cmd = std::process::Command::new(exe);
     cmd.args(std::env::args_os().skip(1)).env(RESTARTED_VAR, crate::api::now_ms().to_string());
     let _ = cmd.spawn();
+}
+
+/// The window couldn't be set up (`error`) with Direct3D 12 alone: Oak
+/// starts again looking at every backend. False when it already did.
+pub(crate) fn relaunch_with_all_backends(error: &str) -> bool {
+    if !DX12_ONLY.load(Ordering::SeqCst) {
+        return false;
+    }
+    crate::log_crash(&format!("Direct3D 12 couldn't draw the window ({error}): starting again with every graphics backend."));
+    let Ok(exe) = std::env::current_exe() else { return false };
+    std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(ALL_BACKENDS_VAR, "1").spawn().is_ok()
 }

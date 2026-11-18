@@ -634,7 +634,9 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
     // The user turns' blocks, read once (kept between turns, so built
     // without a new allocation each).
     let mut blocks: Vec<UserBlock> = vec![];
-    for (mi, m) in conv.messages.iter().enumerate() {
+    // (From the first message held: those before it are read as the view
+    // nears them, `chat_view::read_back`.)
+    for (mi, m) in conv.messages.iter().enumerate().skip(conv.messages.base()) {
         if let Some((at, text, time)) = legacy
             && at == mi
         {

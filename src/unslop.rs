@@ -23,14 +23,16 @@
 //
 // Rewrite notes: each note is rewritten for the notes box
 // (`Note::rewrite`, dropped when the note changes); the notes the model
-// sees stay as they are.
+// sees stay as they are. Turning Rewrite notes (or Unslop) off moves to a
+// new epoch (`Settings::unslop_notes_epoch`): rewrites from an earlier one
+// are dropped and made again, in each conversation as it next shows them.
 
 use crate::api::Sse;
 use crate::oak::Event;
 use crate::store::{Conversation, Note, Rewrite};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 pub const KEY: &str = "_oak_unslop";
@@ -94,6 +96,29 @@ pub fn set(on: bool) {
     set_flag(ON, on)
 }
 
+/// The notes epoch (`Settings::unslop_notes_epoch`): a note's rewrite from
+/// another is stale.
+#[cfg(not(test))]
+static EPOCH: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+thread_local! {
+    static EPOCH: AtomicU32 = const { AtomicU32::new(0) };
+}
+
+fn set_epoch(e: u32) {
+    #[cfg(not(test))]
+    EPOCH.store(e, Ordering::Relaxed);
+    #[cfg(test)]
+    EPOCH.with(|x| x.store(e, Ordering::Relaxed));
+}
+
+fn epoch() -> u32 {
+    #[cfg(not(test))]
+    return EPOCH.load(Ordering::Relaxed);
+    #[cfg(test)]
+    EPOCH.with(|x| x.load(Ordering::Relaxed))
+}
+
 pub fn on() -> bool {
     flag(ON)
 }
@@ -114,12 +139,13 @@ fn notes_switched_on() -> bool {
     flag(NOTES)
 }
 
-/// Sets the four switches as `settings` has them.
+/// Sets the four switches, and the notes epoch, as `settings` has them.
 pub fn set_all(settings: &crate::store::Settings) {
     set(settings.unslop);
     set_flag(NO_DRAFTS, settings.unslop_no_drafts);
     set_flag(THINKING, settings.unslop_thinking);
     set_flag(NOTES, settings.unslop_notes);
+    set_epoch(settings.unslop_notes_epoch);
 }
 
 /// A rewrite under way: the output so far, and once it has ended, how (kept
@@ -150,6 +176,7 @@ fn new_id() -> String {
 }
 
 /// How a marked text block (or a note) stands, for the transcript.
+#[derive(Debug, PartialEq)]
 pub enum State<'a> {
     /// The model is still writing it (the reply streaming in).
     Drafting,
@@ -347,8 +374,9 @@ pub fn note_state(n: &Note, own: bool) -> Option<State<'_>> {
         return None;
     }
     Some(match &n.rewrite {
-        // Marked on the next frame (`start_notes`).
+        // Marked (again) on the next frame (`start_notes`).
         None => State::Streaming(String::new()),
+        Some(r) if r.epoch != epoch() => State::Streaming(String::new()),
         Some(Rewrite { text: Some(t), .. }) => State::Done(t),
         Some(Rewrite { error: Some(e), .. }) => State::Failed(e),
         Some(r) => State::Streaming(job_text(&r.id)),
@@ -356,36 +384,47 @@ pub fn note_state(n: &Note, own: bool) -> Option<State<'_>> {
 }
 
 /// Rewrite notes: starts rewrites of the notes of `conv` that have none
-/// (new, or changed since), and again of any left unfinished when Oak
-/// closed. Cheap with nothing to do, so it runs every frame.
+/// (new, or changed since) or only one from an earlier epoch, and again of
+/// any left unfinished when Oak closed. Cheap with nothing to do, so it
+/// runs every frame.
 pub fn start_notes(conv: &Arc<crate::store::Shared>, ctx: &eframe::egui::Context) {
-    let todo: Vec<(String, String)> = {
+    let todo = {
         let mut c = conv.lock().unwrap();
         if !(notes_switched_on() && applies(&c)) {
             return;
         }
-        let mut todo = vec![];
-        let mut marked = false;
-        for n in c.notes.iter_mut() {
-            match &n.rewrite {
-                None => {
-                    let id = format!("{NOTE}{}", new_id());
-                    n.rewrite = Some(Rewrite { id: id.clone(), ..Default::default() });
-                    todo.push((id, n.text.clone()));
-                    marked = true;
-                }
-                Some(r) if r.text.is_none() && r.error.is_none() && !JOBS.lock().unwrap().contains_key(&r.id) => {
-                    todo.push((r.id.clone(), n.text.clone()));
-                }
-                _ => {}
-            }
-        }
+        let (todo, marked) = notes_to_do(&mut c);
         if marked {
             c.save();
         }
         todo
     };
     start_parts(todo, conv, ctx);
+}
+
+/// The notes of `c` to rewrite (marker id, text), the ones with no rewrite
+/// of this epoch marked first; and whether any were.
+fn notes_to_do(c: &mut Conversation) -> (Vec<(String, String)>, bool) {
+    let mut todo = vec![];
+    let mut marked = false;
+    let epoch = epoch();
+    for n in c.notes.iter_mut() {
+        match &n.rewrite {
+            // (A stale one's rewrite under way, if any, then finds no place
+            // to land and is dropped: `run`.)
+            r if r.as_ref().is_none_or(|r| r.epoch != epoch) => {
+                let id = format!("{NOTE}{}", new_id());
+                n.rewrite = Some(Rewrite { id: id.clone(), epoch, ..Default::default() });
+                todo.push((id, n.text.clone()));
+                marked = true;
+            }
+            Some(r) if r.text.is_none() && r.error.is_none() && !JOBS.lock().unwrap().contains_key(&r.id) => {
+                todo.push((r.id.clone(), n.text.clone()));
+            }
+            _ => {}
+        }
+    }
+    (todo, marked)
 }
 
 /// Puts a finished rewrite in its place in `c`: a text block's marker, a
@@ -408,7 +447,16 @@ fn apply(c: &mut Conversation, id: &str, result: &Result<String, String>) -> boo
     let has = |m: &Value| {
         m["content"].as_array().into_iter().flatten().filter_map(|b| b.get(KEY)).any(|m| m["id"] == id || m["parts"].as_array().is_some_and(|ps| ps.iter().any(|p| p["id"] == id)))
     };
-    let Some(i) = c.messages.iter().rposition(has) else { return false };
+    // (In what is held, or else in what is on disk.)
+    let i = match c.messages.iter().rposition(has) {
+        Some(i) => i,
+        None if c.messages.base() > 0 => {
+            c.messages.load_all();
+            let Some(i) = c.messages.iter().rposition(has) else { return false };
+            i
+        }
+        None => return false,
+    };
     for b in c.messages[i]["content"].as_array_mut().into_iter().flatten() {
         let Some(m) = b.get_mut(KEY) else { continue };
         if m["id"] == id {
@@ -441,18 +489,29 @@ pub fn settle(conv: &Arc<crate::store::Shared>) {
     }
 }
 
-/// Looks for rewrite markers in a conversation not yet read from its file,
-/// without parsing it. (Inside a JSON string a quote is escaped: only a
-/// key, or a string of just the key, matches.)
-pub fn look(c: &mut crate::store::Conversation) {
-    if c.messages.no_rewrites {
-        return;
-    }
-    if let Some(raw) = c.messages.unread() {
-        let key = format!("\"{KEY}\"");
-        let finder = memchr::memmem::Finder::new(key.as_bytes());
-        c.messages.no_rewrites = !raw.iter().any(|m| finder.find(m).is_some());
-    }
+/// Looks for rewrites still to do in a conversation as it is read from its
+/// file (`raw`, its messages' JSON): only messages with a marker are parsed.
+/// (Inside a JSON string a quote is escaped: only a key, or a string of
+/// just the key, matches.)
+pub fn look(c: &mut crate::store::Conversation, raw: &[&[u8]]) {
+    let key = format!("\"{KEY}\"");
+    let finder = memchr::memmem::Finder::new(key.as_bytes());
+    c.messages.rewrites_from = raw.iter().position(|m| finder.find(m).is_some() && serde_json::from_slice::<Value>(m).map_or(true, |m| has_marker(&m)));
+}
+
+/// Whether message `m` has a rewrite still to do (`start` would start it):
+/// a marker without its text or an error, in a reply.
+pub fn has_marker(m: &Value) -> bool {
+    let open = |m: &Value| m.get("text").is_none() && m.get("error").is_none();
+    m["role"] == "assistant"
+        && m["content"].as_array().is_some_and(|c| {
+            c.iter().any(|b| {
+                b.get(KEY).filter(|m| open(m)).is_some_and(|m| match m["parts"].as_array() {
+                    Some(parts) => parts.iter().any(open),
+                    None => true,
+                })
+            })
+        })
 }
 
 /// Settles finished rewrites, then starts one for each marked block of
@@ -460,12 +519,15 @@ pub fn look(c: &mut crate::store::Conversation) {
 /// way (just marked, or left unfinished when Oak closed).
 pub fn start(conv: &Arc<crate::store::Shared>, ctx: &eframe::egui::Context) {
     // Not yet read from its file, and with no marker in it: nothing to do,
-    // and nothing parsed (every conversation starts here, at every start).
+    // and nothing read (every conversation starts here, at every start).
+    // Otherwise the messages from the first marker are read.
     {
         let mut c = conv.lock().unwrap();
-        look(&mut c);
-        if c.messages.no_rewrites && c.messages.unread().is_some() && JOBS.lock().unwrap().is_empty() {
+        if c.messages.rewrites_from.is_none() && !c.messages.loaded() && JOBS.lock().unwrap().is_empty() {
             return;
+        }
+        if let Some(i) = c.messages.rewrites_from.take() {
+            c.messages.load_from(i);
         }
     }
     settle(conv);
@@ -772,5 +834,33 @@ mod tests {
         assert!(apply(&mut c, &nid, &Ok("I am on step two of five.".into())));
         assert_eq!(c.notes[0].rewrite.as_ref().unwrap().text.as_deref(), Some("I am on step two of five."));
         assert!(!apply(&mut c, &format!("{NOTE}gone"), &Ok("x".into())));
+    }
+
+    /// Turning Rewrite notes off moves to a new epoch: the rewrites made
+    /// before stop showing and are made again; failed ones too.
+    #[test]
+    fn note_rewrites_clear_with_a_new_epoch() {
+        set(true);
+        set_flag(NOTES, true);
+        set_epoch(0);
+        let mut c = Conversation { deleted: true, ..Default::default() };
+        c.notes.push(Note { id: 1, text: "a".into(), rewrite: Some(Rewrite { id: "note-old1".into(), text: Some("A.".into()), ..Default::default() }) });
+        c.notes.push(Note { id: 2, text: "b".into(), rewrite: Some(Rewrite { id: "note-old2".into(), error: Some("HTTP 500".into()), ..Default::default() }) });
+        assert_eq!(notes_to_do(&mut c), (vec![], false), "this epoch's, done or failed, stay");
+        assert_eq!(note_state(&c.notes[0], true), Some(State::Done("A.")));
+
+        set_epoch(1);
+        assert_eq!(note_state(&c.notes[0], true), Some(State::Streaming(String::new())), "stale: shows as being rewritten");
+        let (todo, marked) = notes_to_do(&mut c);
+        assert!(marked);
+        assert_eq!(todo.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        for (n, (id, _)) in c.notes.iter().zip(&todo) {
+            let r = n.rewrite.as_ref().unwrap();
+            assert_eq!((&r.id, r.epoch, &r.text, &r.error), (id, 1, &None, &None));
+        }
+        // An old rewrite finishing late finds no place.
+        assert!(!apply(&mut c, "note-old1", &Ok("A.".into())));
+        set_flag(NOTES, false);
+        set(false);
     }
 }

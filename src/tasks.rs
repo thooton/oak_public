@@ -1142,6 +1142,31 @@ fn sweep_output() {
     });
 }
 
+/// `Tasks::open` for each conversation of `ids`, on every core (each
+/// task's output is read), in that order.
+pub fn open_all(ids: &[&str]) -> Vec<Arc<Tasks>> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(ids.len()).max(1);
+    let mut out: Vec<(usize, Arc<Tasks>)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut mine = vec![];
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(id) = ids.get(i) else { break };
+                        mine.push((i, Tasks::open(id)));
+                    }
+                    mine
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().unwrap()).collect()
+    });
+    out.sort_by_key(|o| o.0);
+    out.into_iter().map(|o| o.1).collect()
+}
+
 pub fn fmt_duration(d: Duration) -> String {
     let s = d.as_secs();
     if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{}h{:02}m", s / 3600, s / 60 % 60) }

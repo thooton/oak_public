@@ -8,7 +8,10 @@
 //! Blocks, by `type`:
 //!
 //! - `text`: `{text}`
-//! - `image`: `{media_type, data}`, the data in base64
+//! - `image`: `{media_type, data}`, the data in base64; in a stored
+//!   conversation, `{media_type, blob, _oak_size}` instead: the file in
+//!   Oak's `images` folder that holds it (`crate::blobs`), put back as
+//!   data when a request goes out (`api::stream`)
 //! - `document`: `{media_type, data, title}`: a PDF in base64, or plain text
 //!   (`text/plain`) as it is
 //! - `reasoning`: `{text, sig?, by?, redacted?}`: what the model thought. `by`
