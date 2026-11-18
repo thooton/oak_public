@@ -203,13 +203,15 @@ the tab menu) reopens the tabs closed since Oak started, newest first, in their 
 never closes its conversation, its draft or its work. A conversation shows its
 transcript with a minimap, the session box (title, folder, provider, model, effort, goal, notes,
 agents, progress meters) and the message box with the smart context, Unslop and account boxes.
+The message box stays docked to the bottom as drafts, attachments and notices change its height,
+including in a side chat.
 A click on the session box's folder opens it in the system's file manager; its right-click menu
 has Open folder and Copy path (a folder that no longer exists can only be copied).
 Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme and Font rows show once a plugin adds a
 choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
-plugin draws one row there, `plugins::COMPOSER_CORNER_H` tall, and the message box makes room for
-it under the buttons (`composer::links_room`) whenever a plugin registers the hook.
+plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
+is clipped to the corner so it cannot move or cover the rest of the composer.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
@@ -265,7 +267,8 @@ can't read.
   another has much more. A key the provider rejects is skipped the same way. With every account
   used up, Oak waits for the first reset, or until an account is signed in or comes free early: an
   account refused for its limit is usable again once a usage reading taken after the refusal shows
-  its 5-hour and weekly limits below 100% (a reset used here or anywhere else), and waiting
+  its 5-hour and weekly limits below 100% (a reset used here or anywhere else; a verified Ultra
+  account has no 5-hour limit, and its weekly one is enough), and waiting
   sessions try again then. Shared 5-hour/weekly limits apply to every Claude model; model-scoped
   quotas (including Fable's `limits[].scope.model`, even with a null id) apply only to that family.
   They hold on every plan: Max includes Fable but caps it too, and a used-up allowance is refused
@@ -280,7 +283,18 @@ can't read.
 - A Claude account's plan is read from its profile: Pro, Max, Ultra, Team Standard or Team
   Premium. Max and Ultra are the two sizes of Max (rate-limit tiers `..._max_5x` and `..._max_20x`);
   accounts, the usage log and vaults keep them as "Max 5x" and "Max 20x", the names they had
-  before, and only what Oak shows says Max and Ultra (`api::plan_label`).
+  before, and only what Oak shows says Max and Ultra (`api::plan_label`). Summed on Home, each
+  account's limits count by its plan's usage over Pro (`providers_view::weight`): Max 5x and Ultra
+  10x, as Anthropic states them since October 30, 2026 (Max 5x Pro every 5 hours and every week,
+  Ultra 10x Pro every week and no 5-hour limit once verified; the old "20x" was per 5 hours).
+- A used-up week holds the 5-hour window too (`api::effective_limits`): while an account's (or
+  a Codex login's) shared weekly limit is at 100%, its 5-hour limit counts as 100% until the week
+  resets, whatever that window reads, on its card and in the composer (its hover says so, with
+  what the window itself reads), in the reset dialog's "used" line and in Home's summed lines,
+  whose 5-hour reset is then the week's. Rotation already holds such an account until the week's
+  reset, so a 5-hour reset frees nothing. A model's own quota (Fable's week) holds only that
+  family and leaves the 5-hour window as read, and a plan without a 5-hour window (a verified
+  Ultra) is given none. The readings themselves (the usage log, `/v1/status`) stay as sent.
 - Usage-limit resets (`src/api/resets.rs`, `src/resets_view.rs`): the resets Anthropic offers a
   Claude account ("Full reset", "Fable reset", "5-hour reset", "Weekly reset", as Claude Code's
   /limit-reset lists them) come in its usage report (`/api/oauth/usage?cedar_ember=1`, read at
@@ -501,7 +515,11 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   discard work, killing Oak) and `src/sleeps.rs` refuses sleeps over 5 seconds; the error says
   what to do instead. On Linux each command leads its own process group, killed with it.
 - Smart context (`src/rolling.rs`): past a trigger (120k tokens by default) the older part is
-  summarized in the background, reusing the prompt cache, and the newest ~40k stay verbatim. The
+  summarized in the background and the newest ~40k stay verbatim. The summary request (in the
+  background, or blocking when a request is refused as too long) sends the chat request's system
+  prompt and tools, then only what the summary replaces, as the model saw it (the summary in use
+  and the messages before the cut: no part kept verbatim, cleared tool output, other providers'
+  reasoning or reverted messages; `agent::summary_messages`), then the instruction. The
   transcript only grows: a banner marks where a summary was made and a line where its part ends.
   Old tool output is replaced by a placeholder in requests, and a line marks where that stops:
   only when a summary is made, the one moment what was sent may change. Turning smart context

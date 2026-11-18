@@ -4,13 +4,17 @@
 // verbatim. Each later summary folds in the previous one, so the model always
 // has one running timeline plus a verbatim tail.
 //
-// Cost: the summary request is the chat request that just finished, resent
-// with the summary instruction appended to its last message, so the whole
-// prefix is read from the prompt cache and only the instruction is new input.
+// Input: the summary request holds only what the summary replaces, as the
+// model last saw it (the earlier summary and the messages before the cut,
+// `agent::summary_messages`), then the instruction: never the part kept
+// verbatim, nor what the transcript holds that requests leave out (tool
+// output already cleared, other providers' reasoning, transcript lines,
+// what a revert took back). Its system prompt and tools are the chat
+// request's, read from the cache; the messages before the cut are read
+// from it only where a chat request's entry ending there is still alive.
 //
 // The transcript on disk is never rewritten; only what is sent changes.
 
-use crate::tools::{Head, one_line};
 use crate::api::{self, Sse};
 use crate::oak::{Event, Request};
 use crate::providers::Kind;
@@ -800,11 +804,11 @@ FORMAT:
 
 /// The summary instruction. Phrased as the user's own housekeeping request
 /// (as the plugin found, a "you are a context compressor" framing gets
-/// refused by some models). `verbatim_from` describes where the kept part
-/// starts; None means everything above is summarized.
+/// refused by some models). The request holds only the part it replaces,
+/// so everything above it is summarized.
 #[cfg(test)]
-pub fn prompt(verbatim_from: Option<&str>) -> String {
-    prompt_for("", verbatim_from)
+pub fn prompt() -> String {
+    prompt_for("")
 }
 
 /// `prompt` for a conversation on `model`: a model on the user's own
@@ -817,21 +821,14 @@ pub fn is_housekeeping(text: &str) -> bool {
     text.starts_with("This is a housekeeping request from me, not part of the work:")
 }
 
-pub fn prompt_for(model: &str, verbatim_from: Option<&str>) -> String {
+pub fn prompt_for(model: &str) -> String {
     let local = crate::local::serves(model);
-    let scope = match verbatim_from {
-        Some(at) => format!(
-            "Everything from {at} onwards will stay in the conversation verbatim, right after your summary. \
-             So summarize in detail what comes BEFORE that point; the part after it needs no retelling, \
-             though the Active Goal and Current State should still be right for where we are now."
-        ),
-        None => "Summarize the whole conversation above.".to_string(),
-    };
     format!(
         "This is a housekeeping request from me, not part of the work: I'm trimming the older part of our conversation \
-         to keep the context small, and the summary you write now will replace it.\n\n{scope}\n\n\
+         to keep the context small, and the summary you write now will replace it.\n\n\
+         Summarize the whole conversation above.\n\n\
          {memory}\
-         Write it so you can carry on exactly where we left off with nothing but the summary and the verbatim part. \
+         Write it so you can carry on exactly where we left off with nothing but the summary and the newer messages kept after it. \
          Don't use any tools and don't continue the task, just write the summary. Don't mention this request in it, \
          and treat the work in progress as still in progress.\n\n{RULES}\n\n\
          If the conversation starts with an earlier summary, merge it in: keep its details and extend its timeline.\n\n\
@@ -847,49 +844,10 @@ pub fn prompt_for(model: &str, verbatim_from: Option<&str>) -> String {
     )
 }
 
-/// How the prompt points at the first kept message.
-pub fn describe(m: &Value) -> String {
-    let blocks: Vec<&Value> = m["content"].as_array().into_iter().flatten().collect();
-    let quote = |s: &str| {
-        let s = one_line(s);
-        let short: String = s.head(240);
-        if short.len() < s.len() { format!("\"{short}…\"") } else { format!("\"{short}\"") }
-    };
-    if m["role"] == "user" {
-        let text = blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(" ");
-        let images = blocks.iter().filter(|b| b["type"] == "image").count();
-        let s = crate::plural(images);
-        return match (images, text.trim().is_empty()) {
-            (0, _) => format!("my message {}", quote(&text)),
-            (n, true) => format!("my message with {n} image{s}"),
-            (n, false) => format!("my message with {n} image{s} and the text {}", quote(&text)),
-        };
-    }
-    // A tool call's id is unique, where its command or a short reply may
-    // repeat many times in a long session, so the id is what pins the place.
-    let first_call = blocks.iter().find(|b| b["type"] == "tool_call");
-    let id = |call: &Value| call["id"].as_str().filter(|i| !i.is_empty()).map(|i| format!(" (id {i})")).unwrap_or_default();
-    if let Some(t) = blocks.iter().find_map(|b| b["text"].as_str().filter(|t| !t.trim().is_empty())) {
-        return match first_call {
-            Some(call) => format!("your reply {} with the {} call{}", quote(t), call["name"].as_str().unwrap_or("tool"), id(call)),
-            None => format!("your reply {}", quote(t)),
-        };
-    }
-    if let Some(call) = first_call {
-        let name = call["name"].as_str().unwrap_or("tool");
-        let arg = ["command", "path", "objective"].iter().find_map(|k| call["input"][k].as_str()).unwrap_or("");
-        return format!("your {name} call{} {}", id(call), quote(arg));
-    }
-    "the most recent part of the conversation".into()
-}
-
-/// The summary request: `req` (a chat request) with the instruction after
-/// its last message. The last message of a chat request is a user turn, so
-/// the instruction joins it as a text block and the prefix stays identical;
-/// the cache breakpoint stays where the request this one copies had it, so
-/// the summary reads exactly the entry that request wrote (looked up from
-/// the instruction instead, a long wave of tool results can put that entry
-/// out of the lookup's reach). See `wire_anthropic::body`.
+/// The summary request: `req` (a chat request whose messages are the part
+/// to summarize, `agent::summary_messages`) with the instruction after its
+/// last message: it joins a last user turn as a text block, after a cache
+/// breakpoint on what was there. See `wire_anthropic::body`.
 pub fn summary_request(mut req: Request, prompt: &str) -> Request {
     req.instruction = Some(prompt.to_string());
     req.purpose = crate::oak::Purpose::Summary;
@@ -1126,9 +1084,9 @@ mod tests {
     #[test]
     fn local_models_summarize_early_and_short() {
         assert_eq!(config_for("local/qwen"), Config { trigger: 25_000, keep: 6_250 });
-        let p = prompt_for("local/qwen", None);
+        let p = prompt_for("local/qwen");
         assert!(p.contains("under 600 words") && !p.contains("note 12"), "{p}");
-        assert!(!prompt(None).contains("600 words") && prompt(None).contains("note 12"));
+        assert!(!prompt().contains("600 words") && prompt().contains("note 12"));
         assert_eq!(Summarizer::from_id("haiku"), Summarizer::Haiku);
         assert_eq!(Summarizer::from_id("?"), Summarizer::Local);
     }
@@ -1312,8 +1270,8 @@ mod tests {
         assert_eq!(best_trigger(115_000, clear), 140_000);
     }
 
-    /// The summary request is the chat request with the instruction added to
-    /// its last turn, keeping the cache breakpoint where it was.
+    /// The instruction joins the summary request's last user turn, after a
+    /// cache breakpoint on what was there.
     #[test]
     fn summary_request_appends_to_the_last_turn() {
         let req = Request {
@@ -1390,16 +1348,6 @@ mod tests {
         let img = json!({"type": "image", "media_type": "image/png", "data": "A".repeat(2_000_000)});
         let m = json!({"role": "user", "content": [img.clone(), {"type": "text", "text": "look"}]});
         assert!(chars(&m) < 6_000, "{}", chars(&m));
-        assert_eq!(describe(&m), "my message with 1 image and the text \"look\"");
-    }
-
-    /// `describe` names the first kept message, with the call id that pins it.
-    #[test]
-    fn describe_points_at_the_cut() {
-        assert_eq!(describe(&user("fix  the\nbug")), "my message \"fix the bug\"");
-        assert_eq!(describe(&reply("Done.")), "your reply \"Done.\"");
-        let both = json!({"role": "assistant", "content": [{"type": "text", "text": "Running it."}, {"type": "tool_call", "id": "toolu_2", "name": "READ", "input": {"path": "a"}}]});
-        assert_eq!(describe(&both), "your reply \"Running it.\" with the READ call (id toolu_2)");
     }
 
     /// The calls `cleared_calls` names are the ones `view` clears.

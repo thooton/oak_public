@@ -163,3 +163,116 @@ fn an_account_with_fable_room_is_tried_whatever_its_plan() {
     assert_eq!(c.iter().map(|c| c.usable).collect::<Vec<_>>(), [true, false, false, false]);
     assert_eq!(crate::rotation::pick(Provider::Claude, "conv-fable", &c, NOW, false).as_deref(), Some("0"));
 }
+
+/// A verified Ultra's usage report has no 5-hour window (Claude Code shows
+/// no "Current session" bar for it): its weekly window alone is a complete
+/// reading, so a refusal clears early on it, scoped ones as before. Another
+/// plan's reading without the 5-hour window says nothing.
+#[test]
+fn a_verified_ultra_clears_on_its_weekly_window_alone() {
+    let verified = |week: f32, fable: f32| {
+        api::read_limits(&json!({
+            "five_hour": null,
+            "seven_day": {"utilization":week,"resets_at":"2027-01-20T09:00:00Z"},
+            "limits": [
+                {"kind":"weekly_all","percent":week,"scope":null},
+                {"kind":"weekly_scoped","percent":fable,"resets_at":"2027-01-20T09:00:00Z",
+                 "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}
+            ]
+        }))
+    };
+    assert_eq!(verified(40.0, 10.0).iter().map(|l| l.label).collect::<Vec<_>>(), ["Week", "Fable wk"]);
+    let refused = |plan: &str| {
+        let mut a = account(0, 0.0, 100.0, 100.0);
+        a.limits = verified(100.0, 100.0);
+        a.plan = plan.into();
+        a.refuse("claude-opus-5-5", "seven_day", NOW + HOUR, NOW);
+        a.refuse("claude-fable-5-2", "seven_day_overage_included", NOW + HOUR, NOW);
+        a
+    };
+    let mut ultra = refused("Max 20x");
+    assert!(ultra.blocked_for("claude-opus-5-5", NOW) > NOW);
+    assert_eq!(ultra.take_limits(verified(100.0, 100.0), NOW + 1, NOW), (false, false));
+    // Its week reset (Fable's still used up): other models are free again.
+    assert_eq!(ultra.take_limits(verified(0.0, 100.0), NOW + 1, NOW), (true, true));
+    assert_eq!(ultra.blocked_for("claude-opus-5-5", NOW), 0);
+    assert!(ultra.blocked_for("claude-fable-5-2", NOW) > NOW);
+    assert_eq!(ultra.take_limits(verified(0.0, 0.0), NOW + 1, NOW), (true, true));
+    assert_eq!(ultra.blocked_for("claude-fable-5-2", NOW), 0);
+    // A Max (or Pro) reading lacking its 5-hour window is incomplete.
+    let mut max = refused("Max 5x");
+    assert_eq!(max.take_limits(verified(0.0, 0.0), NOW + 1, NOW), (false, false));
+    assert_eq!(max.blocked_for("claude-opus-5-5", NOW), NOW + HOUR);
+    // An Ultra not yet verified has a 5-hour window, and it still counts.
+    let mut unverified = refused("Max 20x");
+    assert_eq!(unverified.take_limits(report(100.0, 0.0, 0.0), NOW + 1, NOW), (false, false));
+    assert_eq!(unverified.take_limits(report(5.0, 0.0, 0.0), NOW + 1, NOW), (true, true));
+}
+
+/// The 5-hour and weekly percents and resets of `limits`, as they hold.
+fn held(limits: &[Limit], now: i64) -> Vec<(&'static str, f32, Option<i64>)> {
+    api::effective_limits(limits, now).iter().map(|l| (l.label, l.percent, l.resets_at)).collect()
+}
+
+/// An account whose week is used up has no 5-hour room either, whatever
+/// that window reads, until the week resets: at 99% of the week the 5-hour
+/// window reads as it is. The readings themselves are left as sent.
+#[test]
+fn a_used_up_week_holds_the_five_hour_window_until_it_resets() {
+    let (five, week) = (Some(1_800_000_000_000 + 2 * HOUR), Some(1_800_000_000_000 + 50 * HOUR));
+    let reading = |five_pct: f32, week_pct: f32, fable: f32| {
+        vec![
+            Limit { label: "5h", percent: five_pct, resets_at: five },
+            Limit { label: "Week", percent: week_pct, resets_at: week },
+            Limit { label: "Fable wk", percent: fable, resets_at: week },
+        ]
+    };
+    // Week at 100% (as johnny's Max read, 0% of its 5 hours): both full,
+    // the 5-hour one until the week's reset.
+    let full = reading(0.0, 100.0, 30.0);
+    assert_eq!(held(&full, NOW), [("5h", 100.0, week), ("Week", 100.0, week), ("Fable wk", 30.0, week)]);
+    assert!(api::five_hour_held_by_week(&full, NOW));
+    assert_eq!(full[0].percent, 0.0);
+    // Past the 5-hour window's own reset it stays full.
+    assert_eq!(held(&full, NOW + 3 * HOUR)[0], ("5h", 100.0, week));
+    // Once the week has reset, the 5-hour window is its own again.
+    assert_eq!(held(&full, NOW + 51 * HOUR)[0], ("5h", 0.0, five));
+    // At 99% of the week, nothing changes.
+    let almost = reading(3.0, 99.0, 30.0);
+    assert_eq!(held(&almost, NOW), [("5h", 3.0, five), ("Week", 99.0, week), ("Fable wk", 30.0, week)]);
+    assert!(!api::five_hour_held_by_week(&almost, NOW));
+    // Fable's own week used up holds Fable alone: the shared 5-hour window
+    // reads as it is.
+    let fable = reading(3.0, 40.0, 100.0);
+    assert_eq!(held(&fable, NOW)[0], ("5h", 3.0, five));
+    assert!(!api::five_hour_held_by_week(&fable, NOW));
+    // A 5-hour window already full past the week's reset holds to its own.
+    let later = vec![Limit { label: "5h", percent: 100.0, resets_at: Some(NOW + 60 * HOUR) }, Limit { label: "Week", percent: 100.0, resets_at: week }];
+    assert_eq!(held(&later, NOW)[0], ("5h", 100.0, Some(NOW + 60 * HOUR)));
+    assert!(!api::five_hour_held_by_week(&later, NOW));
+    // A verified Ultra has no 5-hour window, and isn't given one.
+    let ultra = vec![Limit { label: "Week", percent: 100.0, resets_at: week }];
+    assert_eq!(held(&ultra, NOW), [("Week", 100.0, week)]);
+}
+
+/// Rotation already holds such an account until its week resets: the
+/// 5-hour window's reset frees nothing, Fable's own week holds only Fable.
+#[test]
+fn a_five_hour_reset_does_not_free_a_used_up_week() {
+    let mut a = account(0, 0.0, 100.0, 20.0);
+    let week = a.limits.iter().find(|l| l.label == "Week").and_then(|l| l.resets_at).unwrap();
+    let five = a.limits.iter().find(|l| l.label == "5h").and_then(|l| l.resets_at).unwrap();
+    for m in ["", "claude-opus-5-5", "claude-fable-5-2"] {
+        assert_eq!(a.blocked_for(m, NOW), week);
+        assert_eq!(a.blocked_for(m, five + 1), week);
+        assert_eq!(a.headroom_for(m, NOW), 0.0);
+    }
+    // Refused on the 5-hour claim, then read again with the 5-hour window
+    // empty and the week still used up: still held, until the week.
+    a.refuse("claude-opus-5-5", "five_hour", five, NOW);
+    assert_eq!(a.take_limits(report(0.0, 100.0, 20.0), NOW + 1, NOW), (false, false));
+    assert_eq!(a.blocked_for("claude-opus-5-5", five + 1), week);
+    let fable = account(1, 0.0, 30.0, 100.0);
+    assert_eq!(fable.blocked_for("claude-opus-5-5", NOW), 0);
+    assert!(fable.blocked_for("claude-fable-5-2", NOW) > NOW);
+}

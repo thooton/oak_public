@@ -523,7 +523,7 @@ fn fewer_efforts(name: &str, levels: &[&str]) -> String {
     format!(" {name}: only {}.", and(&have))
 }
 
-/// " ultra: GPT-6 Astra and GPT-6.1 Sol only.": which of `models` have
+/// " ultra: GPT-6.2 Astra and GPT-6.2 Sol only.": which of `models` have
 /// ultra (the others take their highest), when any do.
 fn ultra_note(models: &[crate::api::Model]) -> String {
     let names: Vec<&str> = models.iter().filter(|m| crate::agent::efforts(&m.id).contains(&"ultra")).map(|m| m.name.as_str()).collect();

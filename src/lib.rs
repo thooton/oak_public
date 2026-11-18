@@ -690,7 +690,7 @@ impl App {
         self.conversation_pane(ui, t);
         // A plugin's tab may be a dashboard: no message box.
         if !matches!(&self.screen, Screen::Chat(id) if plugins::tab_kind(id).is_some_and(|k| !k.composer(id))) {
-            egui::Panel::bottom("composer").frame(plain).show(ui, |ui| self.composer(ui, t));
+            composer::dock(ui, "composer", t, |ui| self.composer(ui, t, &plugins::parts().hooks));
         }
         let central = egui::CentralPanel::default().frame(plain).show(ui, |ui| self.screen_view(ui, t));
         find::keyboard_target(ui.ctx(), None);

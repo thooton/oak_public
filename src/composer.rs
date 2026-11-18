@@ -8,8 +8,28 @@ pub(crate) use crate::look::{GAP, chat_column, kv, meter, paint_spinner, transcr
 use crate::widgets::{chevron_v, clip_width, draw_x, enter_pressed, icon_button, paint_pause, sending_edit, switch};
 use crate::theme::mix;
 
+/// Dock a composer to the bottom, including on the frame its content resizes.
+pub(crate) fn dock(ui: &mut Ui, id: &'static str, t: &Theme, contents: impl FnOnce(&mut Ui)) -> Rect {
+    let room = ui.available_rect_before_wrap();
+    let visible_top = room.top().max(ui.clip_rect().top());
+    let mut clip_top = visible_top;
+    let rect = egui::Panel::bottom(id).frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| {
+        clip_top = ui.clip_rect().top();
+        contents(ui);
+    }).response.rect;
+    // A bottom Panel starts at the previous height, but measures the new
+    // height and clips at the old one. Without another pass, shrinking
+    // leaves a gap below the controls and growing cuts them off.
+    let overhang = rect.bottom() - room.bottom();
+    if overhang < -0.5 || (overhang > 0.5 && clip_top > visible_top + 0.5) {
+        ui.ctx().request_discard("Composer height changed");
+        ui.ctx().request_repaint(); // The pass limit can defer the new layout.
+    }
+    rect
+}
+
 impl App {
-    pub(crate) fn composer(&mut self, ui: &mut Ui, t: &Theme) {
+    pub(crate) fn composer(&mut self, ui: &mut Ui, t: &Theme, hooks: &[Arc<plugins::Hooks>]) {
         let area = ui.max_rect();
         let lay = ComposerLayout::new(area.x_range(), matches!(self.screen, Screen::Chat(_)));
         // Notices and attachments above the row, as wide as the message
@@ -40,17 +60,17 @@ impl App {
         // rest, flush with the window's edge. The message box grows with
         // its text, upwards (the panel is pinned to the window's bottom),
         // up to `composer_max_h`; past that it scrolls. The buttons and
-        // boxes stay level with its bottom. (The Settings link and a
-        // plugin's row above it fit in the corner within the row's height,
-        // so the row isn't moved down for them: it would leave the message
-        // box above the boxes beside it.)
+        // boxes stay level with its bottom, plus room for any plugin rows.
         let top = y;
         let (resp, box_rect) = self.message_box(ui, t, lay.chat, top, id);
         if resp.has_focus() { self.side_active = false; }
-        let bottom = box_rect.bottom().max(top + COMPOSER_H);
+        let base_bottom = box_rect.bottom().max(top + COMPOSER_H);
+        let link_end = lay.unslop.map_or(lay.buttons, |u| u.min) - 8.0;
+        let left = area.left() + GAP;
+        let bottom = base_bottom + plugins::composer_corner(ui, self, hooks, Rangef::new(left, link_end), base_bottom - SETTINGS_H);
         let row = |x: Rangef| Rect::from_x_y_ranges(x, bottom - COMPOSER_H..=bottom);
         let pick = self.composer_buttons(ui, t, row(Rangef::new(lay.buttons, lay.buttons + BTN)));
-        self.corner_links(ui, t, area.left(), lay.unslop.map_or(lay.buttons, |u| u.min) - 8.0, bottom);
+        self.corner_links(ui, t, left, link_end, bottom);
         // (A cloud session or a plugin's tab runs elsewhere: none of these are its.)
         let cloudy = self.cloud_screen() || self.plugin_screen();
         if !cloudy {
@@ -157,15 +177,13 @@ impl App {
     /// the buttons, or the Unslop box beside them, begin); and right after a
     /// pause took a session's subagents along, all of them paused: a line
     /// right of the Settings link, its bottom on the ultrapause button's.
-    /// Above the link, the room plugins put their switches in
-    /// (`corner_hook`).
     fn corner_links(&mut self, ui: &mut Ui, t: &Theme, left: f32, link_end: f32, bottom: f32) {
         let flash = match &self.screen {
             Screen::Chat(id) => self.agents_paused_flash(ui.ctx(), id),
             Screen::New => None,
         };
-        let mut links_right = left + GAP;
-        let room = Rect::from_min_max(egui::pos2(left + GAP, bottom - 24.0), egui::pos2(link_end, bottom));
+        let mut links_right = left;
+        let room = Rect::from_min_max(egui::pos2(left, bottom - SETTINGS_H), egui::pos2(link_end, bottom));
         if room.width() >= GEAR_W - 0.5 {
             let (link, clicked) = settings_link(ui, t, room);
             links_right = link.right();
@@ -174,9 +192,6 @@ impl App {
                 self.page = Page::Settings;
             }
         }
-        // Above it: what a plugin keeps there (a switch that works on every
-        // message). It draws in a row of its own, within the row's height.
-        crate::plugins::composer_corner(ui, self, &room);
         let Some(alpha) = flash else { return };
         let font = FontId::proportional(12.0);
         // (It grows left from the buttons, or from the Unslop box beside
@@ -412,6 +427,8 @@ fn chat_session<'a>(screen: &Screen, sessions: &'a HashMap<String, Session>) -> 
 
 /// The composer row's height: the message box at four lines.
 pub(crate) const COMPOSER_H: f32 = 96.0;
+/// The Settings link and its hit area at the bottom of the composer.
+const SETTINGS_H: f32 = 24.0;
 /// The tallest the message box grows (it scrolls past that): 300 points,
 /// or less in a short window, so the transcript keeps most of it.
 pub(crate) fn composer_max_h(ctx: &egui::Context) -> f32 {
@@ -624,7 +641,7 @@ pub(crate) fn settings_link(ui: &mut Ui, t: &Theme, room: Rect) -> (Rect, bool) 
     let full = crate::widgets::text_width(ui, "Settings", &font) + 34.0;
     let label = room.width() >= full;
     let w = if label { full } else { GEAR_W };
-    let rect = Rect::from_min_size(egui::pos2(room.left(), room.bottom() - 24.0), vec2(w, 24.0));
+    let rect = Rect::from_min_size(egui::pos2(room.left(), room.bottom() - SETTINGS_H), vec2(w, SETTINGS_H));
     let resp = ui.interact(rect, Id::unique("settings-link"), Sense::click());
     let color = if resp.hovered() { t.ink } else { t.ink3 };
     let p = ui.painter();
@@ -843,7 +860,11 @@ pub(crate) fn usage_panel(ui: &mut Ui, t: &Theme, a: Option<&api::Account>, stat
             return loading(ui, t, "loading usage…");
         }
         let w = ui.available_width();
-        for l in acc.limits.iter().take(2) {
+        // As they hold: with the week used up, the 5-hour window is full
+        // until the week resets, whatever it reads.
+        let now = api::now_ms();
+        let held = api::five_hour_held_by_week(&acc.limits, now);
+        for l in api::effective_limits(&acc.limits, now).iter().take(2) {
             let reset = l.resets_at.map(until).unwrap_or_default();
             let color = if l.percent >= 90.0 { t.error } else { t.ink };
             let r = ui
@@ -853,7 +874,12 @@ pub(crate) fn usage_panel(ui: &mut Ui, t: &Theme, a: Option<&api::Account>, stat
                     meter(ui, t, w, l.percent / 100.0, if l.percent >= 90.0 { t.error } else { t.accent });
                 })
                 .response;
-            r.on_hover_text(format!("{}% of the {} limit used; it resets in {reset}.", l.percent.floor(), l.label));
+            if held && l.label == "5h" {
+                let own = acc.limits.iter().find(|l| l.label == "5h").map_or(0.0, |l| l.percent.floor());
+                r.on_hover_text(format!("The weekly limit is used up, so the 5-hour one is too until the week resets in {reset} ({own}% of the 5-hour window itself used)."));
+            } else {
+                r.on_hover_text(format!("{}% of the {} limit used; it resets in {reset}.", l.percent.floor(), l.label));
+            }
         }
     })
     .response
@@ -1274,10 +1300,89 @@ fn suggestion_row(ui: &mut Ui, t: &Theme, settings: &mut Settings, s: rolling::C
 }
 
 #[cfg(test)]
-mod recall_tests {
+mod tests {
     use super::*;
-    use crate::app_hover_test::{key, run_frame};
+    use crate::app_hover_test::{key, run_frame, test_ctx};
     use serde_json::json;
+
+    #[test]
+    fn composer_stays_at_bottom_when_draft_height_changes() {
+        let (ctx, t) = test_ctx(true, true);
+        let mut app = App::default();
+        let mut time = 0.0;
+        let size = vec2(1568.0, 828.0);
+        let mut frame = |app: &mut App| {
+            let mut panel = Rect::NOTHING;
+            let out = run_frame(&ctx, size, &mut time, 0.05, vec![], |ui| {
+                panel = dock(ui, "test-composer", &t, |ui| app.composer(ui, &t, &[]));
+            });
+            let edit = ctx.read_response(Id::unique("composer")).unwrap();
+            assert!(edit.interact_rect.is_positive(), "composer is clipped: {edit:?}");
+            assert!((panel.bottom() - size.y).abs() <= 0.5, "panel {panel:?} with {} passes", out.platform_output.num_completed_passes);
+            panel.height()
+        };
+        let empty = frame(&mut app);
+        assert!((frame(&mut app) - empty).abs() <= 0.5);
+        app.input = "line\n".repeat(50);
+        let tall = frame(&mut app);
+        assert!(tall > empty + 100.0);
+        assert!((frame(&mut app) - tall).abs() <= 0.5);
+        app.input.clear();
+        assert!((frame(&mut app) - empty).abs() <= 0.5);
+    }
+
+    #[test]
+    fn empty_plugin_hooks_do_not_move_or_grow_the_composer() {
+        use oak_sdk::abi::{OakBody, OakHooks, OakUi};
+        use std::ffi::c_void;
+
+        fn hook(body: OakBody) -> Arc<plugins::Hooks> {
+            Arc::new(plugins::Hooks::new(&OakHooks {
+                size: size_of::<OakHooks>() as u32, flags: 0, user: std::ptr::null_mut(),
+                started: None, frame: None, providers_top: None, exiting: None,
+                composer_corner: Some(body), home_scene: None, chat_scene: None,
+            }))
+        }
+        unsafe extern "C" fn empty(_: *mut c_void, _: *mut OakUi) {}
+        unsafe extern "C" fn widget(_: *mut c_void, ui: *mut OakUi) {
+            // SAFETY: the host lends this Ui for the callback.
+            unsafe { &mut *ui.cast::<Ui>() }.label("Plugin row");
+        }
+        unsafe extern "C" fn paint(_: *mut c_void, ui: *mut OakUi) {
+            // SAFETY: as above. Some plugins paint without allocating a widget.
+            let ui = unsafe { &mut *ui.cast::<Ui>() };
+            ui.painter().rect_filled(ui.max_rect().shrink(2.0), 0.0, Color32::GREEN);
+        }
+
+        let (ctx, t) = test_ctx(true, true);
+        let mut app = App::default();
+        let mut time = 0.0;
+        let size = vec2(1568.0, 828.0);
+        let mut frame = |hooks: &[Arc<plugins::Hooks>]| {
+            let mut panel = Rect::NOTHING;
+            let out = run_frame(&ctx, size, &mut time, 0.05, vec![], |ui| {
+                panel = dock(ui, "test-composer", &t, |ui| app.composer(ui, &t, hooks));
+            });
+            assert!((panel.bottom() - size.y).abs() <= 0.5, "undocked panel: {panel:?}");
+            (panel, out)
+        };
+        let (base, _) = frame(&[]);
+        let mut hooks = vec![hook(empty); 9];
+        assert_eq!(frame(&hooks).0, base, "nine loaded hooks, none drawing a row");
+        hooks.insert(1, hook(widget));
+        hooks.insert(7, hook(paint));
+        let (panel, out) = frame(&hooks);
+        assert_eq!(panel.height(), base.height() + 56.0, "only the two drawn rows reserve room");
+        let labels = crate::app_hover_test::painted(&out);
+        let row = crate::app_hover_test::rect_of(&labels, "Plugin row");
+        let settings = crate::app_hover_test::rect_of(&labels, "Settings");
+        let paint = out.shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Rect(r) if r.fill == Color32::GREEN => Some(r.rect),
+            _ => None,
+        }).unwrap();
+        assert!(panel.top() < row.top() && row.bottom() < paint.top() && paint.bottom() < settings.top());
+        assert_eq!(frame(&[]).0, base, "removing plugin rows shrinks the panel immediately");
+    }
 
     /// The user's last message, past what Oak added after it (tool
     /// results, notes) and the attachments' file blocks.

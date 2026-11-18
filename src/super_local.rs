@@ -39,6 +39,12 @@ fn activity(conv: &Conversation, live: &Live) -> (bool, String) {
     (true, status.to_string())
 }
 
+/// Whether a super agent is writing to the chat now: its reply streaming
+/// in ends in text (what it says), not thinking or a tool call.
+fn typing(live: &Live) -> bool {
+    live.busy && live.requesting && live.blocks.last().is_some_and(|b| b["type"] == "text")
+}
+
 /// What was said in a super agent's conversation: what the user wrote
 /// (with its images) and what the super agent said, in order; its tool
 /// calls, thinking and subagents' messages stay out of it (their tabs
@@ -134,6 +140,7 @@ fn update(chat: &mut Chat, id: &str, conv: &Conversation, live: &Live) {
         chat.messages.push(Msg { kind: "user".into(), time: 0, text: q.text.clone(), key: q.id, images, ..Default::default() });
     }
     (chat.working, chat.activity) = activity(conv, live);
+    chat.typing = chat.working && typing(live);
     chat.salt = format!("super-chat-{id}");
     chat.intro = format!("Runs its agents on this computer, in {}.", conv.folder.display());
     chat.loaded = true;
@@ -457,6 +464,29 @@ mod tests {
         let sub = Conversation { role: agent::prompt::SUPER_ROLE.into(), parent: Some("k".into()), agent_id: 1, ..Default::default() };
         assert!(!is_super(&sub) && is_super_agent(&sub));
         assert!(!is_super(&Conversation::default()));
+    }
+
+    /// Three dots in a bubble only while the super agent writes what it
+    /// says; thinking and tool calls are work, not a message coming.
+    #[test]
+    fn only_a_reply_streaming_in_is_typing() {
+        let c = Conversation { role: agent::prompt::SUPER_ROLE.into(), ..Default::default() };
+        let mut live = Live::default();
+        (live.busy, live.requesting, live.status) = (true, true, "Thinking".into());
+        live.blocks = vec![json!({"type": "reasoning", "text": "plan"})];
+        let chat = chat_of("k", &c, &live);
+        assert!(chat.working && !chat.typing);
+        assert_eq!(chat.activity, "Thinking");
+        live.blocks.push(json!({"type": "text", "text": "On it"}));
+        live.status = "Writing".into();
+        assert!(chat_of("k", &c, &live).typing);
+        live.blocks.push(json!({"type": "tool_call", "name": "EXECUTE", "input": {}}));
+        live.status = "Writing EXECUTE".into();
+        assert!(!chat_of("k", &c, &live).typing);
+        live.requesting = false;
+        live.status = "Running EXECUTE".into();
+        live.blocks.truncate(2);
+        assert!(!chat_of("k", &c, &live).typing, "the reply is in: its tools run");
     }
 
     #[test]

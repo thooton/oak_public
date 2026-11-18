@@ -73,8 +73,14 @@ const fn m(id: &'static str, name: &'static str, context: u64, listed: bool, eff
 const TO_ULTRA: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 const TO_MAX: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
-/// The Codex models, as pi's catalog has them (October 2026).
+/// The Codex models, as pi's catalog has them (October 2026). GPT-6.2
+/// Astra and Sol (November 2026): their context windows the defaults the
+/// backend's catalog gives them in Codex (developers.openai.com/codex/models:
+/// 272K and 500K, though both take up to 1M through the API), 128K out and
+/// low to ultra, as the Codex CLI lists them.
 pub const MODELS: &[Model] = &[
+    m("gpt-6.2-astra", "GPT-6.2 Astra", 272_000, true, TO_ULTRA),
+    m("gpt-6.2-sol", "GPT-6.2 Sol", 500_000, true, TO_ULTRA),
     m("gpt-6-astra", "GPT-6 Astra", 272_000, true, TO_ULTRA),
     m("gpt-6.1-sol", "GPT-6.1 Sol", 500_000, true, TO_ULTRA),
     m("gpt-6.1-terra", "GPT-6.1 Terra", 500_000, true, TO_ULTRA),
@@ -1342,6 +1348,33 @@ mod tests {
         let r = request_body(&none);
         assert_eq!(r["tool_choice"], "none");
         assert_eq!(r["input"].as_array().unwrap().last().unwrap()["content"][1]["text"], "Summarize.");
+    }
+
+    /// GPT-6.2 Astra and Sol: offered beside the models before them, with
+    /// Codex's context windows, 128K out and low to ultra; their requests
+    /// name them and carry only an effort they take.
+    #[test]
+    fn gpt_6_2_models() {
+        for (id, name, context) in [("gpt-6.2-astra", "GPT-6.2 Astra", 272_000), ("gpt-6.2-sol", "GPT-6.2 Sol", 500_000)] {
+            let m = model(id).unwrap();
+            assert_eq!((m.name, m.context, m.max_output, m.listed), (name, context, 128_000, true), "{id}");
+            assert!(serves(id) && crate::providers::Kind::of(id) == crate::providers::Kind::Codex, "{id}");
+            assert_eq!(crate::api::model_name(id), name);
+            assert_eq!(crate::api::context_window(id), Some(context));
+            assert_eq!(crate::agent::efforts(id), ["low", "medium", "high", "xhigh", "max", "ultra"]);
+            for (asked, sent) in [("low", "low"), ("max", "max"), ("ultra", "ultra"), ("none", "high"), ("minimal", "high"), ("", "high"), ("bogus", "high")] {
+                let effort = crate::agent::effort_for(id, asked);
+                assert_eq!(effort, sent, "{id} {asked}");
+                let r = request_body(&Request { model: id.into(), effort: Some(effort), ..sample() });
+                assert_eq!((r["model"].as_str(), r["reasoning"]["effort"].as_str()), (Some(id), Some(sent)));
+            }
+        }
+        // The models already there stay, and stay listed as they were.
+        let listed: Vec<&str> = MODELS.iter().filter(|m| m.listed).map(|m| m.id).collect();
+        assert_eq!(listed, ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-5.6-sol"]);
+        for id in ["gpt-6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            assert!(model(id).is_some_and(|m| !m.listed), "{id}");
+        }
     }
 
     #[test]

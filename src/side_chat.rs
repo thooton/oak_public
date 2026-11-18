@@ -186,7 +186,7 @@ impl App {
             delete = act;
             if act || close { self.side_deleting = false; }
         }
-        egui::Panel::bottom("side-composer").frame(plain).show(ui, |ui| {
+        composer::dock(ui, "side-composer", t, |ui| {
             if self.side_active { composer::take_drops(ui.ctx(), &mut self.attachments, &mut self.hint); }
             if let Some(hint) = &self.hint { ui.colored_label(t.ink2, hint); }
             if !self.attachments.is_empty() {
@@ -310,7 +310,7 @@ mod tests {
         let mut frame = |app: &mut App, events| run_frame(&ctx, vec2(1400.0, 800.0), &mut time, 0.05, events, |ui| {
             egui::Panel::top("test-tabs").exact_size(TABS_H).show(ui, |ui| app.tab_bar(ui, &t));
             app.conversation_pane(ui, &t);
-            egui::Panel::bottom("test-composer").show(ui, |ui| app.composer(ui, &t));
+            composer::dock(ui, "test-composer", &t, |ui| app.composer(ui, &t, &[]));
             egui::CentralPanel::default().show(ui, |ui| { app.screen_view(ui, &t); });
         });
         for _ in 0..3 { frame(&mut app, vec![]); }

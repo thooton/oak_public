@@ -2474,6 +2474,55 @@ fn request_messages(c: &Conversation, messages: &[Value]) -> Vec<Value> {
     with_context(c.rolling.view(&for_provider(messages, c.provider())), memory_context(c))
 }
 
+/// What a summary of the transcript before `cut` is sent: those messages
+/// exactly as the request that sent the first `n` (`n` > `cut`) gave them to
+/// the model (the summary in use, tool output cleared as it was there, the
+/// context block, the prefix's folds and its system messages up to the cut),
+/// and nothing from the cut on. So the summary sees only what the model saw
+/// of the part it replaces: not the part kept verbatim, not what the
+/// transcript holds that requests leave out.
+fn summary_messages(c: &Conversation, provider: api::Provider, n: usize, cut: usize) -> Vec<Value> {
+    let (n, base) = (n.min(c.messages.len()), c.rolling.base());
+    // The view of all `n`, as the request built it: what it cleared can
+    // depend on what came later (a READ a later one superseded).
+    let mut view = request_messages(c, &c.messages[..n]);
+    let mode = crate::prefix::mode(provider, &c.model);
+    if mode.is_some() {
+        c.prefix.fold(&mut view, base, n);
+    }
+    // Transcript message `k` is at `k - base` after the summary's opening.
+    view.truncate(view.len() - (n - base) + (cut.clamp(base, n) - base));
+    // The prefix's messages before the cut; one at it stands right before
+    // the kept part, which it concerns (and the summary renews the prefix).
+    if let Some(mode) = mode {
+        let mut prefix = c.prefix.clone();
+        prefix.sys.retain(|s| s.at < cut);
+        view = prefix.inject(mode, view, base, cut);
+    }
+    // (In Claude's, one with nothing after it to come before.)
+    while view.last().is_some_and(|m| m["role"] == "system") {
+        view.pop();
+    }
+    view
+}
+
+/// The request that summarizes the transcript before `cut`: `body` (the
+/// chat request that sent the first `n` messages: its system prompt, session
+/// memory, tools and effort, as the model had them) with only the part the
+/// summary replaces (`summary_messages`), then the standard instruction. Its
+/// conversation breakpoint is a five-minute one whatever `body` had: an
+/// entry a chat request wrote at the cut is read either way, and its own is
+/// read only by a retry of it.
+fn summary_request_for(c: &Conversation, body: &oak::Request, n: usize, cut: usize) -> oak::Request {
+    let mut request = body.clone();
+    request.messages = summary_messages(c, body.provider, n, cut);
+    if request.ttl == oak::Ttl::OneHour {
+        request.ttl = oak::Ttl::FiveMinutes;
+    }
+    request.anchor = request.anchor.filter(|&i| i < request.messages.len());
+    rolling::summary_request(request, &rolling::prompt_for(&body.model))
+}
+
 /// What to summarize of the first `n` messages of a request built on the
 /// summary cut `base`, whose prompt came to `total` tokens.
 fn plan_summary(c: &mut Conversation, n: usize, base: usize, total: u64) -> Option<Plan> {
@@ -2561,3 +2610,6 @@ mod request_bench;
 
 #[cfg(test)]
 mod tool_bench;
+
+#[cfg(test)]
+mod rolling_capture;
