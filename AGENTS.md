@@ -342,7 +342,7 @@ can't read.
 
 **The agent** (`src/agent.rs`, `src/agent/`). One worker thread per conversation. Its tools
 (`src/tools/defs.rs`): READ, WRITE, EDIT, EXECUTE, SEARCH, FETCH, SCREENSHOT, DISPLAY, ASK,
-REQUEST_ASK, ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
+ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
 `action` and show as tools of their own (`TASK action=wait` is TASK_WAIT). LOAD loads a kit (AGENT,
 BROWSER, WINDOW, or another protocol by its name): a tool and its instructions, left out of the
 prompt until needed.
@@ -531,7 +531,14 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   only when a summary is made, the one moment what was sent may change. Turning smart context
   off for a conversation stops new summaries; the one in use stays.
 - Goals: the model keeps working until it calls GOAL finish; "pause goal" stops Oak asking it to
-  continue without telling it. While a goal is set, ASK needs the user's yes through REQUEST_ASK.
+  continue without telling it. ASK waits for the user's answers, except while a goal is set (not
+  paused or finished): then it returns at once, telling the model the user was asked
+  asynchronously and to keep working, the questions wait in the card (and with the conversation,
+  `pending_ask`, across a restart), and the answers or the skip reach the model as a message that
+  repeats the questions (`Session::answer_questions`). A new ASK replaces questions still
+  unanswered and lists them in its result, so the model asks again with the full list it wants.
+  (REQUEST_ASK, which gated ASK during a goal, is gone: a conversation that still lists it is told
+  to ASK, and one an older Oak left waiting is told so on start.)
   An endless goal (the Endless box when editing it) refuses GOAL justify and finish, so it lasts
   until the user pauses or clears it; the model is told in the goal's message and its memory block,
   and changing only the mode sends the goal again.

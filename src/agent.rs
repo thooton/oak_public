@@ -52,7 +52,7 @@ pub(crate) use prompt::SCRATCH_ROOT;
 pub use memory::{notes_alert_on, notes_alert_tokens, notes_limit, notes_tokens, set_notes_alert, set_notes_limit, with_commas, DEFAULT_NOTES_LIMIT, NOTES_LIMITS};
 use memory::memory_tool;
 use title::title_for;
-use tool_calls::{Batch, end_ask_request};
+use tool_calls::Batch;
 
 pub const NOTE_TAG: &str = "<task-notification>";
 /// A heartbeat the model started, arriving.
@@ -67,21 +67,23 @@ pub const ENDLESS_GOAL_TAG: &str = "<goal mode=\"endless\">";
 /// the main session or another agent. `<agent-message from="...">`, with
 /// `type="final reply"` for what a subagent said as it ended its turn.
 pub const AGENT_TAG: &str = "<agent-message";
-/// Starts the message telling the model whether the user accepted its
-/// REQUEST_ASK.
+/// Starts the message that brings the model the user's answers to the
+/// questions it asked with ASK while a goal was active (or says they were
+/// skipped), questions and answers together.
+pub const ANSWERS_TAG: &str = "<ask-answers>";
+/// Starts the message an older Oak sent about a REQUEST_ASK (accepted or
+/// declined); conversations keep showing it as they did.
 pub const ASK_TAG: &str = "<ask-request>";
 
-/// The message telling the model the user accepted (or declined) its
-/// REQUEST_ASK about `about`.
-fn ask_reply_message(about: &str, accepted: bool) -> String {
+/// The message telling the model that REQUEST_ASK (about `about`) is
+/// gone, for a conversation an older Oak left with one waiting for the
+/// user: the user was never asked, and ASK asks them now.
+fn request_ask_retired(about: &str) -> String {
     let about = about.trim();
-    if accepted {
-        format!("{ASK_TAG}The user accepted your REQUEST_ASK (about: {about}). You may now call ASK once to ask them.</ask-request>")
-    } else {
-        format!(
-            "{ASK_TAG}The user declined your REQUEST_ASK (about: {about}). Carry on without asking them: decide for yourself, or leave it for your final report.</ask-request>"
-        )
-    }
+    let what = if about.is_empty() { String::new() } else { format!(" (about: {about})") };
+    format!(
+        "{ANSWERS_TAG}Oak was updated: REQUEST_ASK is gone, and your request{what} was never answered. To ask the user, call ASK: while a goal is active it returns at once and their answers come later in a message.</ask-answers>"
+    )
 }
 
 /// How subagents and their messages name the session that started them.
@@ -415,7 +417,7 @@ impl Live {
         if self.tools > 0 {
             return ("tool", self.status.strip_prefix("Running ").unwrap_or(&last_tool()).to_string());
         }
-        if self.waiting > 0 || self.ask.is_some() {
+        if self.waiting > 0 || self.waits_for_answers() {
             return ("waiting", self.status.strip_prefix("Running ").unwrap_or("").to_string());
         }
         if self.compacting && !self.requesting {
@@ -470,11 +472,20 @@ impl Live {
         self.next_queued += 1;
         self.next_queued
     }
+
+    /// Whether the turn waits for the user's answers to ASK (asked without
+    /// an active goal); questions asked during a goal don't hold it.
+    pub fn waits_for_answers(&self) -> bool {
+        self.ask.as_ref().is_some_and(|a| !a.background)
+    }
 }
 
 /// The questions of an ASK call and the user's answers so far. The UI fills
 /// in `picked` and `other` and sets `sent` (or `skipped`); the worker reads
-/// them then.
+/// them then. Asked while a goal is active (`background`), no turn waits
+/// for them: the questions are kept with the conversation
+/// (`Conversation::pending_ask`) and the answers go to the model as a
+/// message (`Session::answer_questions`).
 pub struct Ask {
     pub questions: Vec<Question>,
     /// Per question, per option: picked or not.
@@ -484,6 +495,8 @@ pub struct Ask {
     pub sent: bool,
     /// The user skipped the questions without answering.
     pub skipped: bool,
+    /// Asked while a goal was active: the model carries on meanwhile.
+    pub background: bool,
 }
 
 pub struct Question {
@@ -518,7 +531,28 @@ impl Ask {
             questions,
             sent: false,
             skipped: false,
+            background: false,
         })
+    }
+
+    /// The questions as the model asked them, numbered, one per line.
+    pub fn listed(&self) -> String {
+        self.questions.iter().enumerate().map(|(i, q)| format!("{}. {}\n", i + 1, q.text)).collect()
+    }
+
+    /// Whether these are the questions of ASK input `input`.
+    pub fn same_questions(&self, input: &Value) -> bool {
+        Ask::new(input).is_ok_and(|a| a.questions.iter().map(|q| &q.text).eq(self.questions.iter().map(|q| &q.text)))
+    }
+
+    /// The message that brings the model the user's answers to questions
+    /// asked during a goal (or says they skipped them), with the questions.
+    pub fn answers_message(&self) -> String {
+        if self.sent {
+            format!("{ANSWERS_TAG}The user answered the questions you asked with ASK:\n{}</ask-answers>", self.answers())
+        } else {
+            format!("{ANSWERS_TAG}The user skipped the questions you asked with ASK, without answering them:\n{}</ask-answers>", self.listed())
+        }
     }
 
     /// Whether question `i` has an answer.
@@ -617,6 +651,19 @@ fn hold_queued_pause(conv: &mut Conversation) -> bool {
     queued
 }
 
+/// A REQUEST_ASK an older Oak left waiting for the user: it is gone, and
+/// the model is told so (and to ASK instead) with its next request. (One
+/// the user accepted needs nothing: the model was told it may ASK, and it
+/// can.) True when it changed.
+fn retire_request_ask(conv: &mut Conversation) -> bool {
+    let about = std::mem::take(&mut conv.ask_request);
+    let granted = std::mem::take(&mut conv.ask_granted);
+    if !about.is_empty() {
+        conv.inbox.push(request_ask_retired(&about));
+    }
+    !about.is_empty() || granted
+}
+
 impl Session {
     pub fn start(conv: Conversation, ctx: eframe::egui::Context) -> Session {
         let tasks = Tasks::open(&conv.id);
@@ -633,6 +680,7 @@ impl Session {
         let (mut changed, waits) = answer_lost_calls_but(&mut conv, |call| waits_on_known_task(call, &tasks));
         changed |= carry_waits(&mut conv, &waits, tasks.closed_ms(), api::now_ms());
         changed |= hold_queued_pause(&mut conv);
+        changed |= retire_request_ask(&mut conv);
         // Paused when OAK closed, with the transcript ending in a user turn
         // (tool results or a message the model hasn't answered): the turn
         // carries on once the session is resumed, as it would have without
@@ -643,7 +691,10 @@ impl Session {
         }
         // (A copy of a running session's conversation gets watchers of its own.)
         conv.meters.iter_mut().for_each(|m| m.watched = false);
+        // Questions asked during a goal wait for the user again.
+        let pending = Ask::new(&conv.pending_ask).ok().map(|a| Ask { background: true, ..a });
         let (s, w) = Session::with_worker(conv, ctx, resume, tasks);
+        s.live.lock().unwrap().ask = pending;
         *w.open_waits.lock().unwrap() = waits;
         // Rewrites left unfinished when OAK closed carry on; progress meters
         // run again, each when it is next due.
@@ -708,18 +759,19 @@ impl Session {
         self.wake();
     }
 
-    /// The user accepted or declined the model's REQUEST_ASK. Accepted, the
-    /// model may call ASK once; either way it is told with its next request
-    /// (even in the middle of a turn), and an idle session wakes for it.
-    pub fn answer_ask_request(&self, accept: bool) {
+    /// The user sent (or skipped) the answers to questions the model asked
+    /// during a goal (`Ask::background`, taken out of `Live::ask`): the
+    /// model gets the questions and answers together with its next request
+    /// (even in the middle of a turn), and an idle session wakes for them.
+    /// Questions a newer ASK replaced meanwhile are dropped.
+    pub fn answer_questions(&self, a: Ask) {
         let mut c = self.conv.lock().unwrap();
-        let about = std::mem::take(&mut c.ask_request);
-        if about.is_empty() {
+        if !a.same_questions(&c.pending_ask) {
             return;
         }
-        c.ask_granted = accept;
+        c.pending_ask = Value::Null;
         drop(c);
-        self.deliver(ask_reply_message(&about, accept));
+        self.deliver(a.answers_message());
     }
 
     /// Deletes the session (AGENT_DELETE, or Delete conversation on Home):
@@ -1316,7 +1368,9 @@ impl Worker {
             RevertTo::Block(msg, block, was) => revert_to(&mut c, *msg, *block, was),
             RevertTo::End(n) => revert_to_end(&mut c, *n),
         };
-        if done {
+        // Questions asked during a goal go too (with `Live::ask`).
+        let asked = !std::mem::take(&mut c.pending_ask).is_null();
+        if done || asked {
             c.save();
         }
         drop(c);
@@ -2230,7 +2284,6 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKin
             c.goal_justification.clear();
             c.goal_finished = false;
             c.goal_paused = false;
-            end_ask_request(c);
             ((!cleared).then(|| goal_block(&note)), (MarkKind::Goal, goal))
         }
         Command::Effort(e) => {
@@ -2322,7 +2375,6 @@ fn after_turn(c: &mut Conversation, interrupted: bool, now: i64) -> Option<Value
         c.goal.clear();
         c.goal_endless = false;
         c.goal_finished = false;
-        end_ask_request(c);
         return None;
     }
     if interrupted || c.goal_paused {

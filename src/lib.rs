@@ -135,7 +135,7 @@ use store::{Conversation, Mark, MarkKind, Settings};
 use tabs::TABS_H;
 use theme::{Theme, apply_theme, setup_style};
 use time::{ago, clock, full_time, local_offset_ms, mdy, time_ago, until};
-use transcript::{Item, JUMP_REQUEST, REVERT_REQUEST, REWIND_REQUEST, ask_request_view, ask_view, attachment_view, file_block, items_at, queue_view, size_text, tail_sig, tool_summary, transcript_status, transcript_unit, unit_sig, units, user_messages};
+use transcript::{Item, JUMP_REQUEST, REVERT_REQUEST, REWIND_REQUEST, ask_view, attachment_view, file_block, items_at, queue_view, size_text, tail_sig, tool_summary, transcript_status, transcript_unit, unit_sig, units, user_messages};
 use widgets::{caption, column};
 #[cfg(target_os = "linux")]
 use window::install_desktop_entry;

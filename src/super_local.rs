@@ -179,7 +179,6 @@ impl App {
         chat.messages.truncate(n);
         update(&mut chat, id, &conv, &live);
         let mut ask = live.ask.take();
-        let mut ask_reply = None;
         crate::markdown::set_link_base(ui.ctx(), Some(conv.folder.as_path()));
         super_view::chat(ui, t, &chat, |ui| {
             if let Some(a) = ask.as_mut()
@@ -187,17 +186,15 @@ impl App {
             {
                 a.sent = true;
             }
-            if !conv.ask_request.is_empty() {
-                ask_reply = crate::ask_request_view(ui, t, &conv.ask_request);
-            }
         });
         crate::markdown::set_link_base(ui.ctx(), None);
         CHATS.with(|m| m.borrow_mut().insert(id.to_string(), (rev, n, chat)));
+        let answered = ask.take_if(|a| a.background && (a.sent || a.skipped));
         live.ask = ask;
         drop(live);
         drop(conv);
-        if let Some(accept) = ask_reply {
-            s.answer_ask_request(accept);
+        if let Some(a) = answered {
+            s.answer_questions(a);
         }
     }
 

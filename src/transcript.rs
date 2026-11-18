@@ -1,5 +1,5 @@
 //! The transcript: a conversation's messages, tool rows, marks and notices as
-//! they are drawn, and the cards at its end (ASK, REQUEST_ASK, the queue).
+//! they are drawn, and the cards at its end (ASK, the queue).
 
 use super::*;
 pub(crate) use crate::look::{ROW_H, size_text};
@@ -436,7 +436,8 @@ pub(crate) enum Item<'a> {
     /// A task notification and a heartbeat, as sent to the model.
     Note(&'a str),
     Beat(&'a str),
-    /// The user's answer to a REQUEST_ASK, as sent to the model.
+    /// The user's answers to questions asked during a goal (or an older
+    /// Oak's answer to a REQUEST_ASK), as sent to the model.
     AskReply(&'a str),
     /// A message from another session (a subagent, or for a subagent the
     /// main session or another agent); `last` marks a final reply.
@@ -546,7 +547,7 @@ impl<'a> UserBlock<'a> {
             Some("text") => {
                 let text = self.text.unwrap_or("");
                 self.file
-                    || !(self.hidden() || text.starts_with(NOTE_TAG) || text.starts_with(agent::ALERT_TAG) || text.starts_with(BEAT_TAG) || text.starts_with(agent::AGENT_TAG) || text.starts_with(agent::ASK_TAG))
+                    || !(self.hidden() || text.starts_with(NOTE_TAG) || text.starts_with(agent::ALERT_TAG) || text.starts_with(BEAT_TAG) || text.starts_with(agent::AGENT_TAG) || text.starts_with(agent::ASK_TAG) || text.starts_with(agent::ANSWERS_TAG))
             }
             _ => false,
         }
@@ -680,7 +681,7 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
                         Item::Note(text)
                     } else if text.starts_with(BEAT_TAG) {
                         Item::Beat(text)
-                    } else if text.starts_with(agent::ASK_TAG) {
+                    } else if text.starts_with(agent::ASK_TAG) || text.starts_with(agent::ANSWERS_TAG) {
                         Item::AskReply(text)
                     } else if let Some((from, last, body)) = agent::parse_agent_message(text) {
                         Item::AgentMessage { from, last, body, key: (mi, bi) }
@@ -1885,7 +1886,7 @@ pub(crate) fn unit_sig(run: &[Item], results: &Results) -> u64 {
 pub(crate) fn tail_sig(conv: &Conversation, live: &Live, editing: &Option<Editing>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
-    (conv.paused, live.pause_queued, live.pause_settled(conv.paused), live.busy, &live.status, live.ask.is_some(), &conv.ask_request, live.queued.len()).hash(&mut h);
+    (conv.paused, live.pause_queued, live.pause_settled(conv.paused), live.busy, &live.status, live.ask.as_ref().map(|a| a.background), live.queued.len()).hash(&mut h);
     for q in &live.queued {
         (q.id, q.text.len(), q.images.len()).hash(&mut h);
     }
@@ -1921,8 +1922,18 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
             Item::Note(note) => notice(ui, t, note, "note-open", TASK_NOTE_ICON, (agent::ALERT_TAG, "</usage-alert>"), Some((NOTE_TAG, "</task-notification>"))),
             Item::Beat(beat) => notice(ui, t, beat, "beat-open", HEARTBEAT_ICON, (BEAT_TAG, "</heartbeat>"), None),
             Item::AskReply(text) => {
-                let body = text.strip_prefix(agent::ASK_TAG).unwrap_or(text).trim_end_matches("</ask-request>").trim();
-                let label = if body.starts_with("The user accepted") { "you accepted Oak's request to ask you" } else { "you declined Oak's request to ask you" };
+                let body = match text.strip_prefix(agent::ANSWERS_TAG) {
+                    Some(b) => b.trim_end_matches("</ask-answers>"),
+                    None => text.strip_prefix(agent::ASK_TAG).unwrap_or(text).trim_end_matches("</ask-request>"),
+                }
+                .trim();
+                let label = match body {
+                    b if b.starts_with("The user answered") => "your answers to Oak's questions",
+                    b if b.starts_with("The user skipped") => "you skipped Oak's questions",
+                    b if b.starts_with("The user accepted") => "you accepted Oak's request to ask you",
+                    b if b.starts_with("The user declined") => "you declined Oak's request to ask you",
+                    _ => "Oak's request to ask you is gone: it asks with ASK now",
+                };
                 let id = Id::unique(("ask-reply-open", addr(text), text.len()));
                 notice_row(ui, t, id, label, Some(body), text, |p, r| {
                     p.circle_filled(egui::pos2(r.left() + 8.0, r.center().y), 3.5, tool_color("ASK"));
@@ -2316,7 +2327,8 @@ pub(crate) fn transcript_status(ui: &mut Ui, t: &Theme, conv: &Conversation, liv
 /// when the user sends the answers.
 pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
     let mut send = false;
-    ask_card(ui, t, "Questions", |ui| {
+    let title = if a.background { "Questions (Oak keeps working on the goal meanwhile)" } else { "Questions" };
+    ask_card(ui, t, title, |ui| {
         for i in 0..a.questions.len() {
             if i > 0 {
                 ui.add_space(10.0);
@@ -2360,15 +2372,12 @@ pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
             if ui.add_enabled(ready, Button::new(RichText::new("Send answers").color(if ready { t.accent } else { t.ink3 }))).clicked() {
                 send = true;
             }
-            if ui
-                .button(RichText::new("Skip").color(t.ink2))
-                .on_hover_text("Continue without answers; queued messages are sent.")
-                .clicked()
-            {
+            let skip = if a.background { "Dismiss the questions without answering; Oak is told." } else { "Continue without answers; queued messages are sent." };
+            if ui.button(RichText::new("Skip").color(t.ink2)).on_hover_text(skip).clicked() {
                 a.skipped = true;
             }
             let left = (0..a.questions.len()).filter(|&i| !a.answered(i)).count();
-            let wait = "messages queued until answers are sent or skipped";
+            let wait = if a.background { "the answers go to Oak when sent" } else { "messages queued until answers are sent or skipped" };
             let hint = if left > 0 { format!("{left} unanswered, {wait}") } else { wait.into() };
             caption(ui, &hint, t.ink3);
         });
@@ -2376,8 +2385,8 @@ pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
     send
 }
 
-/// A card the model's questions (or its request to ask some) wait in for
-/// the user: `title` over what `f` adds.
+/// A card the model's questions wait in for the user: `title` over what
+/// `f` adds.
 fn ask_card(ui: &mut Ui, t: &Theme, title: &str, f: impl FnOnce(&mut Ui)) {
     ui.add_space(6.0);
     egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.accent)).inner_margin(Margin::same(14)).show(ui, |ui| {
@@ -2387,30 +2396,6 @@ fn ask_card(ui: &mut Ui, t: &Theme, title: &str, f: impl FnOnce(&mut Ui)) {
         f(ui);
     });
     ui.add_space(6.0);
-}
-
-/// A REQUEST_ASK waiting for the user: what the model wants to ask them
-/// about, to accept or decline. Some(true) when accepted, Some(false)
-/// when declined.
-pub(crate) fn ask_request_view(ui: &mut Ui, t: &Theme, about: &str) -> Option<bool> {
-    let mut reply = None;
-    ask_card(ui, t, "Question request", |ui| {
-        ui.label(RichText::new(about).strong().color(t.ink));
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if ui
-                .button(RichText::new("Accept").color(t.accent))
-                .on_hover_text("Allow one set of questions; pauses for answers.")
-                .clicked()
-            {
-                reply = Some(true);
-            }
-            if ui.button(RichText::new("Decline").color(t.ink2)).on_hover_text("Continue without questions").clicked() {
-                reply = Some(false);
-            }
-        });
-    });
-    reply
 }
 
 /// Queued messages, dimmed, below the transcript. Hovering one shows edit

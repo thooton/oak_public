@@ -450,7 +450,7 @@ fn composer_notices(ui: &mut Ui, t: &Theme, session: Option<&Session>, hint: Opt
     if let Some(s) = session {
         let l = s.live.lock().unwrap();
         let n = l.ready_count();
-        let asking = l.ask.is_some();
+        let asking = l.waits_for_answers();
         if l.busy && n > 0 {
             egui::Frame::new().fill(t.panel2).stroke(Stroke::new(1.0, t.accent)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());

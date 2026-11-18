@@ -430,50 +430,111 @@ fn a_revert_before_a_load_unloads_its_kit() {
     assert_eq!(c.prefix.sys.iter().map(|m| m.at).collect::<Vec<_>>(), [3]);
 }
 
-/// While a goal is active, ASK needs a REQUEST_ASK the user accepted,
-/// and then works once. Without a goal, ASK works as it always did.
+/// ASK without an active goal waits for the answers. During a goal it
+/// returns at once, its questions wait with the conversation, and the
+/// answers come as a message with them. A new ASK replaces questions not
+/// yet answered and says which, so the model can ask the full list again.
 #[test]
-fn request_ask_gates_ask_during_a_goal() {
-    let (w, s) = idle_worker("request-ask", Conversation::default());
-    let question = json!({"questions": [{"question": "Which one?", "options": ["a", "b"]}]});
-    // No goal: REQUEST_ASK isn't needed, and ASK isn't gated.
-    assert!(w.tool("REQUEST_ASK", &json!({"about": "x"})).0.unwrap_err().contains("call ASK directly"));
-    assert_eq!(ask_gate(&mut s.conv.lock().unwrap()), Ok(()));
-
-    apply_command(&mut s.conv.lock().unwrap(), Command::Goal("ship it".into(), false));
-    let refused = w.tool("ASK", &question).0.unwrap_err();
-    assert!(refused.starts_with("ASK isn't available while a goal is active. Call REQUEST_ASK"), "{refused}");
-    w.tool("REQUEST_ASK", &json!({"about": "Which database to use"})).0.unwrap();
-    assert!(w.tool("ASK", &question).0.unwrap_err().contains("is still waiting for the user"));
-
-    // Declined: the model is told, and ASK stays closed.
-    s.answer_ask_request(false);
-    {
-        let mut c = s.conv.lock().unwrap();
-        assert_eq!(c.inbox, vec![ask_reply_message("Which database to use", false)]);
-        assert!(c.inbox[0].starts_with(ASK_TAG) && c.ask_request.is_empty() && !c.ask_granted);
-        c.inbox.clear();
-    }
-    assert!(w.tool("ASK", &question).0.is_err());
-
-    // Accepted: the model is told, and may ASK once (here the user skips).
-    w.tool("REQUEST_ASK", &json!({"about": "Which database to use"})).0.unwrap();
-    s.answer_ask_request(true);
-    assert!(s.conv.lock().unwrap().ask_granted);
+fn ask_waits_without_a_goal_and_asks_asynchronously_during_one() {
+    let (w, s) = idle_worker("ask-goal", Conversation::default());
+    let q = |text: &str| json!({"questions": [{"question": text, "options": ["a", "b"]}]});
+    // No goal: it waits (here the user skips).
     std::thread::scope(|sc| {
-        let asking = sc.spawn(|| w.tool("ASK", &question).0);
-        wait_until("the questions", || s.live.lock().unwrap().ask.is_some());
+        let asking = sc.spawn(|| w.tool("ASK", &q("Which one?")).0);
+        wait_until("the questions", || s.live.lock().unwrap().waits_for_answers());
         s.live.lock().unwrap().ask.as_mut().unwrap().skipped = true;
         let _ = s.wake.send(());
         assert_eq!(asking.join().unwrap(), Ok("The user skipped these questions without answering.".into()));
     });
-    assert!(w.tool("ASK", &question).0.unwrap_err().contains("Call REQUEST_ASK"), "used up");
+    assert!(s.conv.lock().unwrap().pending_ask.is_null());
 
-    // A cleared goal drops a waiting request.
-    w.tool("REQUEST_ASK", &json!({"about": "x"})).0.unwrap();
-    apply_command(&mut s.conv.lock().unwrap(), Command::Goal(String::new(), false));
+    // A goal: it returns at once, the questions kept for the user.
+    apply_command(&mut s.conv.lock().unwrap(), Command::Goal("ship it".into(), false));
+    assert_eq!(w.tool("ASK", &q("Which database?")).0, Ok(ASKED_DURING_GOAL.into()));
+    {
+        let l = s.live.lock().unwrap();
+        assert!(l.ask.as_ref().is_some_and(|a| a.background) && !l.waits_for_answers());
+    }
+    assert_eq!(s.conv.lock().unwrap().pending_ask, q("Which database?"));
+    // Another replaces them, and says which it replaced.
+    let r = w.tool("ASK", &q("Which port?")).0.unwrap();
+    assert!(r.starts_with(ASKED_DURING_GOAL) && r.contains("replaced your earlier one") && r.contains("1. Which database?\n") && r.contains("full list"), "{r}");
+    assert_eq!(s.conv.lock().unwrap().pending_ask, q("Which port?"));
+    // Answers to questions replaced meanwhile go nowhere.
+    let mut stale = Ask { background: true, ..Ask::new(&q("Which database?")).unwrap() };
+    stale.pick(0, Some(0));
+    stale.sent = true;
+    s.answer_questions(stale);
+    assert!(s.conv.lock().unwrap().inbox.is_empty());
+    // The user answers: the questions and answers reach the model together.
+    let mut a = s.live.lock().unwrap().ask.take().unwrap();
+    a.pick(0, Some(1));
+    a.sent = true;
+    s.answer_questions(a);
+    {
+        let mut c = s.conv.lock().unwrap();
+        assert!(c.pending_ask.is_null());
+        assert_eq!(c.inbox, vec![format!("{ANSWERS_TAG}The user answered the questions you asked with ASK:\n1. Which port?\n   Answer: b\n</ask-answers>")]);
+        c.inbox.clear();
+    }
+    // Skipped, the model is told which questions.
+    w.tool("ASK", &q("Which host?")).0.unwrap();
+    let mut a = s.live.lock().unwrap().ask.take().unwrap();
+    a.skipped = true;
+    s.answer_questions(a);
+    assert_eq!(s.conv.lock().unwrap().inbox, vec![format!("{ANSWERS_TAG}The user skipped the questions you asked with ASK, without answering them:\n1. Which host?\n</ask-answers>")]);
+
+    // A paused goal: control goes back to the user, so ASK waits again,
+    // and replaces what was still unanswered from the goal.
+    w.tool("ASK", &q("Which region?")).0.unwrap();
+    s.conv.lock().unwrap().goal_paused = true;
+    std::thread::scope(|sc| {
+        let asking = sc.spawn(|| w.tool("ASK", &q("Which one?")).0);
+        wait_until("the questions", || s.live.lock().unwrap().waits_for_answers());
+        assert!(s.conv.lock().unwrap().pending_ask.is_null());
+        let mut l = s.live.lock().unwrap();
+        let a = l.ask.as_mut().unwrap();
+        a.pick(0, Some(0));
+        a.sent = true;
+        drop(l);
+        let _ = s.wake.send(());
+        let r = asking.join().unwrap().unwrap();
+        assert!(r.starts_with("1. Which one?\n   Answer: a\n") && r.contains("1. Which region?"), "{r}");
+    });
+}
+
+/// Questions asked during a goal outlast a restart, and a REQUEST_ASK an
+/// older Oak left waiting is retired: the model is told to ASK instead,
+/// and a call of it (an older conversation still lists it) says so too.
+#[test]
+fn asked_questions_outlast_a_restart_and_request_ask_is_retired() {
+    let mut old = serde_json::to_value(unit_conv("ask-restart", Conversation { goal: "ship it".into(), ..Default::default() })).unwrap();
+    old["ask_request"] = json!("Which database to use");
+    old["ask_granted"] = json!(false);
+    old["pending_ask"] = json!({"questions": [{"question": "Which port?"}]});
+    let old: Conversation = serde_json::from_value(old).unwrap();
+    let s = Deleting(Session::start(old, eframe::egui::Context::default()));
+    {
+        let l = s.live.lock().unwrap();
+        assert_eq!(l.ask.as_ref().map(|a| (a.background, a.listed())), Some((true, "1. Which port?\n".into())));
+    }
+    {
+        let mut c = s.conv.lock().unwrap();
+        assert_eq!(c.inbox, vec![request_ask_retired("Which database to use")]);
+        assert!(c.inbox[0].starts_with(ANSWERS_TAG) && c.inbox[0].contains("call ASK"));
+        let saved = serde_json::to_value(&*c).unwrap();
+        assert!(saved.get("ask_request").is_none() && saved.get("ask_granted").is_none());
+        assert_eq!(saved["pending_ask"], json!({"questions": [{"question": "Which port?"}]}));
+        assert!(!retire_request_ask(&mut c), "once");
+    }
+
+    let (w, s) = idle_worker("request-ask-gone", Conversation::default());
+    let call = json!({"type": "tool_call", "id": "r1", "name": "REQUEST_ASK", "input": {"about": "x"}});
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [call.clone()]}));
+    w.run_calls(&[call], oak::stop::TOOL_CALLS);
     let c = s.conv.lock().unwrap();
-    assert!(c.ask_request.is_empty() && !c.ask_granted);
+    let r = &c.messages[c.messages.len() - 1]["content"][0];
+    assert_eq!((r["content"].as_str(), r["is_error"].as_bool()), (Some(REQUEST_ASK_GONE), Some(true)));
 }
 
 /// Calls left without a result (OAK closed while they ran) get one, in

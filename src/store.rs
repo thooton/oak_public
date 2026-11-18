@@ -827,13 +827,18 @@ pub struct Conversation {
     /// Only OAK knows; nothing about it is sent.
     #[serde(default)]
     pub goal_paused: bool,
-    /// While a goal is active, what the model asked to ask the user about
-    /// (REQUEST_ASK), waiting for the user to accept or decline; empty
-    /// when nothing waits.
-    #[serde(default)]
+    /// Questions the model asked with ASK while a goal was active, waiting
+    /// for the user's answers (the ASK's input; null when none). The model
+    /// carried on meanwhile; the answers reach it as a message
+    /// (`agent::Session::answer_questions`). A newer ASK replaces them.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub pending_ask: Value,
+    /// An older Oak's REQUEST_ASK waiting for the user (what the model
+    /// wanted to ask about), and whether the user accepted one. Read only,
+    /// to tell the model it is gone (`agent::retire_request_ask`).
+    #[serde(default, skip_serializing)]
     pub ask_request: String,
-    /// The user accepted a REQUEST_ASK: the model may call ASK once.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub ask_granted: bool,
     /// The model's session memory (NOTE_NEW / NOTE_UPDATE / NOTE_DELETE).
     #[serde(default)]

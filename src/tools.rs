@@ -40,8 +40,8 @@ pub const AGENT_WAIT_MAX: u64 = 900;
 /// Tools only a session the user started has: a subagent can't ask the
 /// user, name itself, start (stop, delete) agents of its own or set up
 /// progress meters.
-pub const MAIN_ONLY: [&str; 10] =
-    ["ASK", "REQUEST_ASK", "AGENT_NEW", "AGENT_SET", "AGENT_PAUSE", "AGENT_RESUME", "AGENT_STOP", "AGENT_DELETE", "PROGRESS_SET", "PROGRESS_REMOVE"];
+pub const MAIN_ONLY: [&str; 9] =
+    ["ASK", "AGENT_NEW", "AGENT_SET", "AGENT_PAUSE", "AGENT_RESUME", "AGENT_STOP", "AGENT_DELETE", "PROGRESS_SET", "PROGRESS_REMOVE"];
 
 /// Of MAIN_ONLY, what a sub-orchestrator (a subagent started with
 /// `can_spawn`) has too: managing agents of its own.
@@ -217,8 +217,8 @@ pub fn definitions(agent: bool) -> Value {
 /// What a model on the user's own llama.cpp server gets (`local`): the
 /// basics for simple jobs, as it is small, slow and has a small context.
 /// No notes, heartbeats, progress meters, subagents (it serves one request
-/// at a time), SCREENSHOT or SEARCH's images (it sees no images); GOAL and REQUEST_ASK only
-/// while a goal is set, so that one can be finished.
+/// at a time), SCREENSHOT or SEARCH's images (it sees no images); GOAL only while a goal
+/// is set, so that one can be finished.
 pub const LOCAL_TOOLS: [&str; 13] = [
     "READ", "WRITE", "EDIT", "EXECUTE", "TASK_NEW", "TASK_GET_NEW_OUTPUT", "TASK_WAIT", "TASK_LIST", "TASK_DELETE", "SEARCH", "FETCH", "ASK", "DISPLAY",
 ];
@@ -236,7 +236,7 @@ pub fn chat_allows(name: &str) -> bool {
     CHAT_TOOLS.contains(&name)
 }
 
-const GOAL_TOOLS: [&str; 3] = ["GOAL_JUSTIFICATION", "GOAL_FINISH", "REQUEST_ASK"];
+const GOAL_TOOLS: [&str; 2] = ["GOAL_JUSTIFICATION", "GOAL_FINISH"];
 
 /// The tools the model gets: those OAK runs, with each family's as one
 /// tool. `local`: a model on the user's own llama.cpp server
