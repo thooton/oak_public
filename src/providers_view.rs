@@ -89,12 +89,16 @@ pub(crate) fn weight(a: &api::Account) -> f32 {
 /// weight), 5-hour then weekly, at most two. Only the shared
 /// windows count: a model's own quota (Fable's week) isn't summed, so an
 /// account without a 5-hour window (a verified Ultra) doesn't put its next
-/// limit in that one's place.
+/// limit in that one's place. Each account's limits count as they hold
+/// (`api::effective_limits`): its 5-hour window is full while its week is.
 pub(crate) fn sum_limits<'a>(limits: impl IntoIterator<Item = (&'a [api::Limit], f32)>, now: i64) -> Vec<Summed> {
     // The weighted percents and the weights, beside `out`.
     let mut out: Vec<Summed> = vec![];
     let mut totals: Vec<(f32, f32)> = vec![];
     for (list, w) in limits {
+        // As they hold: an account whose week is used up has no 5-hour room
+        // either, however little of that window it used.
+        let list = api::effective_limits(list, now);
         for l in list.iter().filter(|l| !l.model_scoped()).take(2) {
             // A limit whose reset has passed is unused again.
             let used = if l.resets_at.is_some_and(|r| r <= now) { 0.0 } else { l.percent.clamp(0.0, 100.0) };
@@ -318,6 +322,34 @@ mod tests {
             ["Team Premium", "Team Standard", "Team Premium", "Team Standard"]
         );
         assert_eq!([w(Kind::Codex, "Pro"), w(Kind::Codex, "Prolite"), w(Kind::Codex, "Self_serve_business_prolite"), w(Kind::Codex, "Plus")], [20.0, 5.0, 5.0, 1.0]);
+    }
+
+    /// An account whose week is used up counts as full on the summed 5-hour
+    /// line too (johnny's Max at 0% of 5 hours, 100% of the week, beside a
+    /// Pro at 20%), its reset the week's; at 99% of the week, and with only
+    /// Fable's week used up, its 5-hour window counts as read. A verified
+    /// Ultra with its week used up adds nothing to the 5-hour line.
+    #[test]
+    fn a_used_up_week_fills_the_summed_five_hour_line() {
+        let (now, five, week) = (1_000, Some(2_000), Some(9_000));
+        let max = |w: f32, fable: f32| vec![limit("5h", 0.0, five), limit("Week", w, week), limit("Fable wk", fable, week)];
+        let pro = vec![limit("5h", 20.0, Some(3_000)), limit("Week", 10.0, week)];
+        let s = sum_limits([(max(100.0, 0.0).as_slice(), 5.0), (pro.as_slice(), 1.0)], now);
+        assert_eq!(s[0].label, "5h");
+        assert!((s[0].used - 520.0 / 6.0).abs() < 1e-3);
+        assert_eq!(s[0].next_reset, Some(3_000));
+        assert!((s[1].used - 510.0 / 6.0).abs() < 1e-3);
+        // After the 5-hour reset, before the week's: still full.
+        let s = sum_limits([(max(100.0, 0.0).as_slice(), 5.0)], 2_500);
+        assert_eq!((s[0].used, s[0].next_reset), (100.0, week));
+        for (w, fable) in [(99.0, 0.0), (40.0, 100.0)] {
+            let s = sum_limits([(max(w, fable).as_slice(), 5.0), (pro.as_slice(), 1.0)], now);
+            assert!((s[0].used - 20.0 / 6.0).abs() < 1e-3);
+        }
+        let ultra = vec![limit("Week", 100.0, week)];
+        let s = sum_limits([(ultra.as_slice(), 10.0), (pro.as_slice(), 1.0)], now);
+        assert_eq!(s.iter().map(|s| (s.label.as_str(), s.accounts)).collect::<Vec<_>>(), [("5h", 1), ("Week", 2)]);
+        assert_eq!(s[0].used, 20.0);
     }
 
     /// A verified Ultra account has no 5-hour window: listed first, its

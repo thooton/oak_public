@@ -265,6 +265,14 @@ can't read.
   account's limits count by its plan's usage over Pro (`providers_view::weight`): Max 5x and Ultra
   10x, as Anthropic states them since October 30, 2026 (Max 5x Pro every 5 hours and every week,
   Ultra 10x Pro every week and no 5-hour limit once verified; the old "20x" was per 5 hours).
+- A used-up week holds the 5-hour window too (`api::effective_limits`): while an account's (or
+  a Codex login's) shared weekly limit is at 100%, its 5-hour limit counts as 100% until the week
+  resets, whatever that window reads, on its card and in the composer (its hover says so, with
+  what the window itself reads), in the reset dialog's "used" line and in Home's summed lines,
+  whose 5-hour reset is then the week's. Rotation already holds such an account until the week's
+  reset, so a 5-hour reset frees nothing. A model's own quota (Fable's week) holds only that
+  family and leaves the 5-hour window as read, and a plan without a 5-hour window (a verified
+  Ultra) is given none. The readings themselves (the usage log, `/v1/status`) stay as sent.
 - Usage-limit resets (`src/api/resets.rs`, `src/resets_view.rs`): the resets Anthropic offers a
   Claude account ("Full reset", "Fable reset", "5-hour reset", "Weekly reset", as Claude Code's
   /limit-reset lists them) come in its usage report (`/api/oauth/usage?cedar_ember=1`, read at

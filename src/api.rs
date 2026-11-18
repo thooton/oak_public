@@ -23,6 +23,7 @@ mod vault;
 mod models;
 mod limits;
 pub mod resets;
+pub use limits::{effective_limits, five_hour_held_by_week};
 pub use models::{Model, Provider, claude_efforts, claude_models_error, context_window, fable_offer, known_models, latest_models, max_output, model_name};
 
 const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";

@@ -846,7 +846,11 @@ pub(crate) fn usage_panel(ui: &mut Ui, t: &Theme, a: Option<&api::Account>, stat
             return loading(ui, t, "loading usage…");
         }
         let w = ui.available_width();
-        for l in acc.limits.iter().take(2) {
+        // As they hold: with the week used up, the 5-hour window is full
+        // until the week resets, whatever it reads.
+        let now = api::now_ms();
+        let held = api::five_hour_held_by_week(&acc.limits, now);
+        for l in api::effective_limits(&acc.limits, now).iter().take(2) {
             let reset = l.resets_at.map(until).unwrap_or_default();
             let color = if l.percent >= 90.0 { t.error } else { t.ink };
             let r = ui
@@ -856,7 +860,12 @@ pub(crate) fn usage_panel(ui: &mut Ui, t: &Theme, a: Option<&api::Account>, stat
                     meter(ui, t, w, l.percent / 100.0, if l.percent >= 90.0 { t.error } else { t.accent });
                 })
                 .response;
-            r.on_hover_text(format!("{}% of the {} limit used; it resets in {reset}.", l.percent.floor(), l.label));
+            if held && l.label == "5h" {
+                let own = acc.limits.iter().find(|l| l.label == "5h").map_or(0.0, |l| l.percent.floor());
+                r.on_hover_text(format!("The weekly limit is used up, so the 5-hour one is too until the week resets in {reset} ({own}% of the 5-hour window itself used)."));
+            } else {
+                r.on_hover_text(format!("{}% of the {} limit used; it resets in {reset}.", l.percent.floor(), l.label));
+            }
         }
     })
     .response

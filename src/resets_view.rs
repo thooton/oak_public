@@ -191,6 +191,6 @@ impl ResetDialog {
 /// Account `id`'s limits, used: "5h 100% · Week 85%".
 fn used_now(id: u64) -> Option<String> {
     let a = api::accounts().into_iter().find(|a| a.id == id)?;
-    let parts: Vec<String> = a.limits.iter().map(|l| format!("{} {:.0}%", l.label, l.percent)).collect();
+    let parts: Vec<String> = api::effective_limits(&a.limits, api::now_ms()).iter().map(|l| format!("{} {:.0}%", l.label, l.percent)).collect();
     (!parts.is_empty()).then(|| parts.join(" · "))
 }

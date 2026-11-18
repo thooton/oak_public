@@ -55,6 +55,42 @@ impl Limit {
     }
 }
 
+/// `limits` as they hold at `now`: while the plan's shared weekly limit is
+/// used up nothing goes through, whatever the 5-hour window reads, so that
+/// one counts as used up too, until the week resets (a 5-hour reset before
+/// then frees nothing). What users see per account and summed, Claude's and
+/// Codex's alike; the readings themselves stay as the provider sent them.
+/// A model's own quota (Fable's week) holds only its family and changes
+/// nothing here, and a plan without a 5-hour window (a verified Ultra) is
+/// given none.
+pub fn effective_limits(limits: &[Limit], now: i64) -> Vec<Limit> {
+    let week = limits.iter().find(|l| l.label == "Week" && l.percent >= 100.0 && l.resets_at.is_none_or(|r| r > now));
+    limits
+        .iter()
+        .map(|l| match week {
+            Some(w) if l.label == "5h" => Limit {
+                percent: l.percent.max(100.0),
+                // The later of the two: a 5-hour window used up past the
+                // week's reset holds until its own.
+                resets_at: match (l.resets_at.filter(|&r| r > now && l.percent >= 100.0), w.resets_at) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (_, b) => b,
+                },
+                ..l.clone()
+            },
+            _ => l.clone(),
+        })
+        .collect()
+}
+
+/// Whether the 5-hour limit of `limits` reads used up only because the
+/// weekly one is (`effective_limits`).
+pub fn five_hour_held_by_week(limits: &[Limit], now: i64) -> bool {
+    let raw = limits.iter().find(|l| l.label == "5h").map(|l| l.percent);
+    let held = effective_limits(limits, now).iter().find(|l| l.label == "5h").map(|l| l.percent);
+    raw.is_some_and(|r| r < 100.0) && held.is_some_and(|h| h >= 100.0)
+}
+
 /// Whether a plan (as accounts keep it) can go without a 5-hour limit:
 /// Ultra ("Max 20x") accounts Anthropic has verified have only weekly ones
 /// (claude.com/pricing and the Help Center's "What is the Ultra plan?", since
