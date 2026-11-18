@@ -131,7 +131,16 @@ pub fn any_file(messages: &[Value]) -> bool {
 }
 
 fn inline_block(b: &mut Value) {
-    let Some(name) = b["blob"].as_str().filter(|_| b["type"] == "image") else { return };
+    if b["type"] != "image" || b["data"].is_string() {
+        return;
+    }
+    // Neither data nor a file's name (written by something that stripped
+    // it): sending it would get the whole request refused (HTTP 400), so
+    // it goes as a line too.
+    let Some(name) = b["blob"].as_str() else {
+        *b = json!({"type": "text", "text": GONE});
+        return;
+    };
     match read(name) {
         Some(bytes) => {
             let o = b.as_object_mut().unwrap();
@@ -209,6 +218,14 @@ mod tests {
         let mut gone = vec![json!({"role": "user", "content": [{"type": "image", "media_type": "image/png", "blob": format!("{}.png", "0".repeat(64))}]})];
         inline(&mut gone);
         assert_eq!(gone[0]["content"][0], json!({"type": "text", "text": GONE}));
+        // Nor data nor a file (in a tool result too): a line, never a null.
+        let mut bare = vec![json!({"role": "user", "content": [
+            {"type": "image", "media_type": "image/png"},
+            {"type": "tool_result", "call_id": "c", "content": [{"type": "text", "text": "shot"}, {"type": "image", "media_type": "image/png", "data": null}]},
+        ]})];
+        inline(&mut bare);
+        assert_eq!(bare[0]["content"][0], json!({"type": "text", "text": GONE}));
+        assert_eq!(bare[0]["content"][1]["content"][1], json!({"type": "text", "text": GONE}));
         assert!(path("../x.png").is_none() && path(&format!("{}.exe", "a".repeat(64))).is_none());
     }
 }
