@@ -1843,6 +1843,9 @@ pub struct Settings {
     pub roll_trigger: u64,
     /// ...keeping about this many of the newest verbatim.
     pub roll_keep: u64,
+    /// When a summary is made, tool output in about this many of the
+    /// newest tokens stays; older output is cleared (`rolling::recent`).
+    pub roll_recent: u64,
     /// Who writes a local model's summaries: "local" (the model itself,
     /// thinking off), "deepseek" (through OpenRouter) or "haiku" (a Claude
     /// account); see `rolling::Summarizer`.
@@ -1928,6 +1931,7 @@ impl Default for Settings {
             rolling: true,
             roll_trigger: crate::rolling::DEFAULT.trigger,
             roll_keep: crate::rolling::DEFAULT.keep,
+            roll_recent: crate::rolling::DEFAULT_RECENT,
             local_summarizer: "local".into(),
             cache: "auto".into(),
             threads: false,

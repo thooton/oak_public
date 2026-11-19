@@ -414,6 +414,7 @@ impl App {
         gpu::watch(cc);
         let settings = store::load_settings();
         rolling::set_config(rolling::Config { trigger: settings.roll_trigger, keep: settings.roll_keep });
+        rolling::set_recent(settings.roll_recent);
         rolling::set_summarizer(rolling::Summarizer::from_id(&settings.local_summarizer));
         api::set_cache_mode(&settings.cache);
         api::set_threads(settings.threads);

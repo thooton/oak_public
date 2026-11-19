@@ -522,7 +522,10 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   reasoning or reverted messages; `agent::summary_messages`), then the instruction. The
   transcript only grows: a banner marks where a summary was made and a line where its part ends.
   Old tool output is replaced by a placeholder in requests, and a line marks where that stops:
-  only when a summary is made, the one moment what was sent may change. Turning smart context
+  only when a summary is made, the one moment what was sent may change. Tool output in the newest
+  ~20k tokens stays (the smart context box's "Tool output kept", in thousands of tokens, 0 to 1000;
+  a change applies to summaries made after it). A suggested trigger is never below keep × 4/3, the
+  least that allows the keep, so it is always for the keep in the box. Turning smart context
   off for a conversation stops new summaries; the one in use stays.
 - Goals: the model keeps working until it calls GOAL finish; "pause goal" stops Oak asking it to
   continue without telling it. While a goal is set, ASK needs the user's yes through REQUEST_ASK.

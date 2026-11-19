@@ -229,7 +229,11 @@ fn round5k(n: f64) -> u64 {
 /// 120k, 100k: 210k; on models whose cache reads cost 0.1 of input, 100k
 /// and 180k).
 pub fn best_trigger(keep: u64, r: Rates) -> u64 {
-    round5k(best_trigger_exact(keep as f64, r)).clamp(MIN_TRIGGER, MAX_TRIGGER)
+    // Never below the least trigger that allows `keep` (it is at most three
+    // quarters of the trigger, `capped`): with clearing, the unconstrained
+    // best can be lower, and capping it would change the keep too.
+    let least = (keep * 4).div_ceil(3).div_ceil(5_000) * 5_000;
+    round5k(best_trigger_exact(keep as f64, r)).max(least).clamp(MIN_TRIGGER, MAX_TRIGGER)
 }
 
 /// The keep `trigger` costs least with: the most a summary can leave
@@ -383,7 +387,7 @@ impl State {
     }
 
     /// Clears old tool output in `messages` as an older Oak did at a cold
-    /// moment (all but the newest `RECENT` tokens', and READ output a later
+    /// moment (all but the newest `recent()` tokens', and READ output a later
     /// identical READ superseded), for tests of a state saved with that.
     /// Returns whether anything more is cleared than was.
     #[cfg(test)]
@@ -397,7 +401,7 @@ impl State {
         let mut to = base;
         for k in (base..n).rev() {
             back += chars(&messages[k]);
-            if estimate(back) >= RECENT {
+            if estimate(back) >= recent() {
                 to = k;
                 break;
             }
@@ -455,18 +459,32 @@ fn summary_message(text: &str) -> Value {
 // read and command output) and the least needed once it is old: the model's
 // reasoning and its calls stay, so it knows what it saw and can look again.
 // So when a summary is made, tool results in the verbatim part are cleared
-// too, all but those in its newest `RECENT` tokens. Only then: a summary is
+// too, all but those in its newest `recent()` tokens. Only then: a summary is
 // the one moment what was sent may change (`crate::prefix`). (An older Oak
 // cleared them, with READ output a later identical READ superseded, at
 // cold-cache moments as well: `Clearing`, still sent as it was.)
 //
-// RECENT was checked by replaying OAK's conversations (Nov 2026, 200k/125k,
+// The default was checked by replaying OAK's conversations (Nov 2026, 200k/125k,
 // clearing at cold moments): 10k saves 1.7% but leaves 2 points fewer of the
 // addresses the model went back to still in view; 40k costs 4.4% more for
 // no gain in that measure; 20k is the knee.
 
-/// Tool output in about this many of the newest tokens is never cleared.
-pub const RECENT: u64 = 20_000;
+/// Tool output in about this many of the newest tokens is never cleared,
+/// by default (Settings → Tool output kept changes it: `set_recent`).
+pub const DEFAULT_RECENT: u64 = 20_000;
+/// The most the setting takes (tokens).
+pub const MAX_RECENT: u64 = 1_000_000;
+static RECENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(DEFAULT_RECENT);
+
+/// Tool output in about this many of the newest tokens is never cleared
+/// (when a summary is made; one already made keeps what it cleared).
+pub fn recent() -> u64 {
+    RECENT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_recent(n: u64) {
+    RECENT.store(n.min(MAX_RECENT), std::sync::atomic::Ordering::Relaxed);
+}
 /// The share of a stretch of conversation left once its tool output is
 /// cleared (measured over OAK's own conversations).
 const LEFT: f64 = 0.35;
@@ -606,7 +624,7 @@ fn cleared_set<'a>(messages: &'a [Value], summary: Option<&Summary>, cold: Optio
 /// What `keep` tokens of conversation take in the context once the summary
 /// that keeps them has cleared their old tool output.
 fn in_context(keep: f64, clear: bool) -> f64 {
-    let recent = RECENT as f64;
+    let recent = recent() as f64;
     if clear && keep > recent { recent + (keep - recent) * LEFT } else { keep }
 }
 
@@ -731,7 +749,7 @@ pub struct Plan {
 /// `keep` counts the conversation as it was, before any clearing: messages
 /// `base..cleared` had their old tool output cleared by the summary at `base`.
 /// With `clear`, the new one clears tool output older than the newest
-/// `RECENT` tokens.
+/// `recent()` tokens.
 pub fn plan(messages: &[Value], base: usize, cleared: usize, total: u64, measured: &[Measure], keep: u64, clear: bool) -> Option<Plan> {
     let n = messages.len();
     if n < base + 3 {
@@ -769,8 +787,8 @@ pub fn plan(messages: &[Value], base: usize, cleared: usize, total: u64, measure
     // The start of a turn reads best, if one keeps no more than half again as much.
     let cut = candidates.iter().copied().find(|&k| messages[k]["role"] == "user" && full[k] <= keep * 3 / 2).or(candidates.first().copied())?;
     let before = total - tails[cut];
-    // Tool output in the newest RECENT tokens stays.
-    let clear = if clear { (cut..n).rev().find(|&k| full[k] >= RECENT).unwrap_or(cut) } else { cut };
+    // Tool output in the newest `recent()` tokens stays.
+    let clear = if clear { (cut..n).rev().find(|&k| full[k] >= recent()).unwrap_or(cut) } else { cut };
     let cleared = if clear > cut { gone[cut].saturating_sub(gone[clear]) } else { 0 };
     // Not worth a summary for less than this.
     (before >= 10_000).then_some(Plan { cut, before, clear, cleared })
@@ -1212,7 +1230,7 @@ mod tests {
         assert!(valid(&view(&m, Some(&Summary { cut: p.cut, text: "s".into(), made_at: 0, ..Default::default() }))));
     }
 
-    /// A summary that clears: tool output stays in the newest RECENT tokens
+    /// A summary that clears: tool output stays in the newest `recent()` tokens
     /// and in short results and kept tools; the rest goes, and the next plan
     /// counts what was cleared as still there.
     #[test]
@@ -1230,7 +1248,7 @@ mod tests {
         let total = 5_000 + 40 * 2_000;
         let p = plan(&m, 0, 0, total, &[], 60_000, true).unwrap();
         let tail = |from: usize| m[from..].iter().map(chars).sum::<usize>() as f64 / m.iter().map(chars).sum::<usize>() as f64 * total as f64;
-        assert!(tail(p.cut) >= 60_000.0 && tail(p.clear) >= RECENT as f64 && tail(p.clear + 1) < RECENT as f64 + 2_100.0, "{p:?}");
+        assert!(tail(p.cut) >= 60_000.0 && tail(p.clear) >= recent() as f64 && tail(p.clear + 1) < recent() as f64 + 2_100.0, "{p:?}");
         assert!(p.cleared > 25_000, "{p:?}");
         // The cut is at a call, so no acknowledgement: v[i] is m[i].
         let v = view(&m, Some(&Summary { cut: 1, text: "s".into(), made_at: 0, clear: p.clear }));
@@ -1267,7 +1285,25 @@ mod tests {
         assert_eq!(in_context(10_000.0, true), 10_000.0);
         assert_eq!(in_context(120_000.0, true), 55_000.0);
         assert_eq!(best_trigger(115_000, opus), 230_000);
-        assert_eq!(best_trigger(115_000, clear), 140_000);
+        // 140k unconstrained, but keep 115k needs a trigger of at least 155k.
+        assert_eq!(best_trigger(115_000, clear), 155_000);
+        assert_eq!(best_trigger(40_000, clear), round5k(best_trigger_exact(40_000.0, clear)));
+    }
+
+    /// A suggestion keeps the size it was made for: with trigger 230k and
+    /// keep 150k (clearing on), it offers a trigger for keep 150k, not a
+    /// pair whose keep the cap lowered.
+    #[test]
+    fn suggestion_keeps_the_keep() {
+        let clear = Rates { read: 0.05, write: 1.25, out: 5.0, clear: true };
+        let c = Config { trigger: 230_000, keep: 150_000 };
+        for s in [suggestion(c, Side::Keep, clear), Some(paired(c, Side::Keep, clear))].into_iter().flatten() {
+            assert_eq!(s.keep, 150_000, "{s:?}");
+            assert_eq!(capped(s, max_trigger(Some(1_000_000))), s, "capping changes nothing");
+        }
+        let s = paired(c, Side::Trigger, clear);
+        assert_eq!(s.trigger, 230_000);
+        assert_eq!(capped(s, MAX_TRIGGER), s);
     }
 
     /// The instruction joins the summary request's last user turn, after a

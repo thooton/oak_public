@@ -1072,18 +1072,20 @@ fn loading(ui: &mut Ui, t: &Theme, what: &str) {
 }
 
 /// What is typed into the panel's size boxes while they are being edited,
-/// and which of them was saved last (the hint under them suggests the other).
+/// and which of the sizes was saved last (the suggestion is for the other).
 #[derive(Default)]
 pub(crate) struct SizeInputs {
     trigger: String,
     keep: String,
+    recent: String,
     changed: Option<rolling::Side>,
 }
 
-/// "120", "120k" or "1.5" (thousands of tokens) as a token count.
+/// "120", "120k" or "1.5" (thousands of tokens) as a token count (0 too:
+/// the trigger and keep are then raised to their least).
 pub(crate) fn parse_thousands(s: &str) -> Option<u64> {
     let s = s.trim().trim_end_matches(['k', 'K']).trim();
-    s.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0).map(|v| (v * 1000.0).round() as u64)
+    s.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0).map(|v| (v * 1000.0).round() as u64)
 }
 
 /// `label` and a box for a size in thousands of tokens. While it isn't
@@ -1095,7 +1097,7 @@ fn size_box(ui: &mut Ui, t: &Theme, label: &str, buf: &mut String, current: u64,
     if !ui.memory(|m| m.has_focus(id)) {
         *buf = rolling::fmt_thousands(current);
     }
-    let edit = TextEdit::singleline(buf).id(id).font(egui::TextStyle::Small).desired_width(34.0).margin(Margin::symmetric(3, 1));
+    let edit = TextEdit::singleline(buf).id(id).font(egui::TextStyle::Small).desired_width(34.0).margin(Margin::symmetric(3, 0));
     let resp = crate::text_menu::add(ui, edit).on_hover_text(tip);
     caption(ui, "k", t.ink3);
     let escape = ui.input(|i| i.key_pressed(Key::Escape));
@@ -1130,6 +1132,8 @@ fn save_sizes(settings: &mut Settings, c: rolling::Config, max: u64) {
 
 #[allow(clippy::too_many_arguments)]
 fn rolling_rows(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &mut Settings, inputs: &mut SizeInputs, cfg: rolling::Config, max: u64, rates: rolling::Rates) {
+    // Six rows (with the meter) in the box's height: closer than other boxes'.
+    ui.spacing_mut().item_spacing.y = 0.0;
     let (on, context, compressions, saved, cost, compacting, error) = match session {
         Some(s) => {
             let compacting = s.live.lock().unwrap().compacting;
@@ -1188,13 +1192,14 @@ fn rolling_rows(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &mu
         let frac = context.unwrap_or(0) as f32 / cfg.trigger as f32;
         meter(ui, t, ui.available_width(), frac, if on { t.accent } else { t.ink3 });
     });
-    if suggest.is_none() {
-        kv(ui, t, "Saved", &format!("{saved_text}, {compressions}×"), t.ink).on_hover_text(saved_tip);
+    match suggest {
+        Some(s) => suggestion_row(ui, t, settings, s, cfg, max, rates),
+        None => {
+            kv(ui, t, "Saved", &format!("{saved_text}, {compressions}×"), t.ink).on_hover_text(saved_tip);
+        }
     }
     ui.horizontal(|ui| size_row(ui, t, settings, inputs, cfg, max));
-    if let Some(s) = suggest {
-        suggestion_row(ui, t, settings, s, cfg, max, rates);
-    }
+    ui.horizontal(|ui| recent_row(ui, t, settings, inputs));
 }
 
 /// The last summary failed: a red ! beside the title. Hover for the
@@ -1239,18 +1244,33 @@ fn size_row(ui: &mut Ui, t: &Theme, settings: &mut Settings, inputs: &mut SizeIn
     let tip = format!("Summary threshold (thousands of tokens). Maximum: {}k (90% of context window).", rolling::fmt_thousands(max));
     let trigger = size_box(ui, t, "Trigger", &mut inputs.trigger, cfg.trigger, &tip);
     ui.add_space(2.0);
-    let tip = format!("Recent verbatim context (thousands of tokens), up to 75% of trigger. Tool output beyond the newest {}k tokens is cleared.", rolling::RECENT / 1000);
-    let keep = size_box(ui, t, "Keep", &mut inputs.keep, cfg.keep, &tip);
+    let tip = "Recent verbatim context (thousands of tokens), up to 75% of trigger.";
+    let keep = size_box(ui, t, "Keep", &mut inputs.keep, cfg.keep, tip);
     if trigger.is_some() || keep.is_some() {
         // Both at once can't happen (one box has focus); keep wins.
         inputs.changed = Some(if keep.is_some() { rolling::Side::Keep } else { rolling::Side::Trigger });
         save_sizes(settings, rolling::Config { trigger: trigger.unwrap_or(cfg.trigger), keep: keep.unwrap_or(cfg.keep) }, max);
-        ui.ctx().request_repaint(); // for the suggestion below
+        ui.ctx().request_repaint(); // for the suggestion
+    }
+}
+
+/// The tool output kept, for every conversation (`rolling::recent`):
+/// saved when typed.
+fn recent_row(ui: &mut Ui, t: &Theme, settings: &mut Settings, inputs: &mut SizeInputs) {
+    ui.spacing_mut().item_spacing.x = 4.0;
+    let tip = "When a summary is made, tool output older than this many of the newest tokens (thousands) is cleared \
+               from requests; results under 600 characters stay. 0 clears all but the latest. Applies to summaries made after a change.";
+    if let Some(n) = size_box(ui, t, "Tool output kept", &mut inputs.recent, rolling::recent(), tip) {
+        rolling::set_recent(n);
+        settings.roll_recent = rolling::recent();
+        store::save_settings(settings);
+        ui.ctx().request_repaint(); // the suggestion weighs it
     }
 }
 
 /// When the sizes `cfg` don't suit each other, the size that suits the one
-/// changed last (the keep, until one is) as `s`, under them; a click
+/// changed last (the keep, until one is) as `s`, over them (in the Saved
+/// row's place); a click
 /// applies it.
 fn suggestion_row(ui: &mut Ui, t: &Theme, settings: &mut Settings, s: rolling::Config, cfg: rolling::Config, max: u64, rates: rolling::Rates) {
     let f = |n: u64| format!("{}k", rolling::fmt_thousands(n));

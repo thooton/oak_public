@@ -79,7 +79,7 @@ fn rolling_capture() {
     )
     .unwrap();
     assert!(api::load_auth());
-    // Keeping more than `rolling::RECENT`: a summary clears the older tool
+    // Keeping more than `rolling::recent()`: a summary clears the older tool
     // output of the part it keeps, which the next one then replaces.
     rolling::set_config(rolling::Config { trigger: 60_000, keep: 30_000 });
     let filler = |tag: &str, lines: usize| -> String {
