@@ -277,6 +277,7 @@ impl App {
                         }
                         // And a super agent, that it is one.
                         _ if c.role == crate::agent::prompt::SUPER_ROLE => format!("{folder}, super agent"),
+                        _ if c.code_mode => format!("{folder}, Code Mode"),
                         _ => folder,
                     },
                     at: c.last_message_at,

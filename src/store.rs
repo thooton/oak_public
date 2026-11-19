@@ -774,6 +774,12 @@ pub struct Conversation {
     /// (`tool_calls::run_call`). Unset, a coding conversation.
     #[serde(default, skip_serializing_if = "is_default")]
     pub chat: bool,
+    /// Code Mode (experimental, `crate::code_mode`): a coding conversation
+    /// whose one tool is REPL, JavaScript in a persistent context that
+    /// calls the other tools as functions. Other calls are refused at run
+    /// time (`tool_calls::run_call`); its subagents are ordinary ones.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub code_mode: bool,
     /// The transcript, in the Oak format (`crate::oak`): only ever
     /// appended to.
     pub messages: Messages,
@@ -1526,6 +1532,8 @@ pub fn remove_conversation(id: &str) {
         let _ = std::fs::remove_file(conversations.join(name));
     }
     let _ = std::fs::remove_file(conversations.join(format!("{id}.json")));
+    // Its REPL context, if it was in Code Mode.
+    crate::code_mode::forget(id);
 }
 
 /// What `look` is given of a conversation as it is read: each message's

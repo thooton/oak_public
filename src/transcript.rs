@@ -20,6 +20,8 @@ pub(crate) struct ToolOut<'a> {
     display: &'a [Value],
     /// The model sees it cleared (`rolling::CLEARED` in its place).
     pub(crate) cleared: bool,
+    /// A REPL's: the calls its script made (`agent::repl::CALLS_KEY`).
+    calls: &'a [Value],
 }
 
 /// Bytes that start like an image file (for a dropped file without an image extension).
@@ -113,6 +115,12 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             if summary.trim().is_empty() { s("command") } else { crate::tools::one_line(&summary) }
         }
         "READ" | "WRITE" | "EDIT" | "CD" => s("path"),
+        // A Code Mode script: its first line that isn't blank or a comment's start.
+        "REPL" => {
+            let code = s("code");
+            let line = code.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("//")).or_else(|| code.lines().map(str::trim).find(|l| !l.is_empty())).unwrap_or("");
+            line.trim_start_matches("// ").to_string()
+        }
         // Claude Code's tools, in cloud sessions.
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => if input["file_path"].is_string() { s("file_path") } else { s("notebook_path") },
         "Grep" | "Glob" => s("pattern"),
@@ -516,12 +524,13 @@ struct UserBlock<'a> {
     content: Option<&'a Value>,
     is_error: Option<&'a Value>,
     display: Option<&'a Value>,
+    calls: Option<&'a Value>,
 }
 
 impl<'a> UserBlock<'a> {
     fn of(b: &'a Value) -> Self {
-        let [kind, text, file, goal, context, at, call_id, content, is_error, display] =
-            crate::fields(b, ["type", "text", "_oak_file", "_oak_goal", "_oak_context", "_oak_at", "call_id", "content", "is_error", "_oak_display"]);
+        let [kind, text, file, goal, context, at, call_id, content, is_error, display, calls] =
+            crate::fields(b, ["type", "text", "_oak_file", "_oak_goal", "_oak_context", "_oak_at", "call_id", "content", "is_error", "_oak_display", agent::repl::CALLS_KEY]);
         UserBlock {
             kind: kind.and_then(Value::as_str),
             text: text.and_then(Value::as_str),
@@ -532,6 +541,7 @@ impl<'a> UserBlock<'a> {
             content,
             is_error,
             display,
+            calls,
         }
     }
 
@@ -1151,6 +1161,7 @@ fn tool_out_of<'a>(b: &UserBlock<'a>, cleared: &rolling::Ids) -> ToolOut<'a> {
     let error = b.is_error.is_some_and(|e| e == true);
     let display = b.display.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     let cleared = !cleared.is_empty() && b.call_id.and_then(Value::as_str).is_some_and(|id| cleared.contains(id));
+    let calls = b.calls.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     match b.content.unwrap_or(&Value::Null) {
         Value::Array(blocks) => ToolOut {
             text: match blocks.iter().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>()[..] {
@@ -1162,8 +1173,9 @@ fn tool_out_of<'a>(b: &UserBlock<'a>, cleared: &rolling::Ids) -> ToolOut<'a> {
             error,
             display,
             cleared,
+            calls,
         },
-        c => ToolOut { text: c.as_str().unwrap_or("").into(), images: vec![], error, display, cleared },
+        c => ToolOut { text: c.as_str().unwrap_or("").into(), images: vec![], error, display, cleared, calls },
     }
 }
 
@@ -1410,6 +1422,11 @@ fn tool_input_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
             let parts: Vec<highlight::Part> = [(Some(false), old.as_str()), (Some(true), new.as_str())].into_iter().filter(|(_, s)| !s.is_empty()).collect();
             code_view(ui, t, highlight::for_path(path), &parts, None);
         }
+        // Code Mode's script, as JavaScript.
+        "REPL" => {
+            let code = cut("code");
+            ui.push_id("repl-code", |ui| code_view(ui, t, highlight::for_path("script.js"), &[(None, code.trim_end())], Some(input["code"].as_str().unwrap_or(""))));
+        }
         _ => {}
     }
     let command = is_command(name);
@@ -1448,6 +1465,25 @@ fn tool_output_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value, r: &ToolO
         caption(ui, "model view", t.ink3);
         verbatim_block(ui, t, rolling::CLEARED);
         caption(ui, "actual output", t.ink3);
+    }
+    if !r.calls.is_empty() {
+        // A REPL script's calls, one line each.
+        caption(ui, &format!("{} call{}", r.calls.len(), crate::plural(r.calls.len())), t.ink3);
+        let lines: Vec<String> = r
+            .calls
+            .iter()
+            .take(200)
+            .map(|c| {
+                let name = c["name"].as_str().unwrap_or("");
+                let what = if name == "$" { c["input"]["command"].as_str().unwrap_or("").to_string() } else { tool_summary(name, &c["input"]) };
+                let failed = if c["error"] == true { "  (failed)" } else { "" };
+                format!("{} {}{failed}", crate::tools::shown_name(name), crate::tools::one_line(&what).head(160))
+            })
+            .collect();
+        let more = r.calls.len().saturating_sub(200);
+        let text = if more > 0 { format!("{}\n… and {more} more", lines.join("\n")) } else { lines.join("\n") };
+        ui.push_id("repl-calls", |ui| code_block(ui, t, &text, t.ink2));
+        caption(ui, "output", t.ink3);
     }
     let (out, more) = cut_output(&r.text);
     let hits = (!r.error && name == "SEARCH").then(|| crate::tools::search_results(&r.text)).flatten();
@@ -1765,7 +1801,7 @@ pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize
 pub(crate) fn tool_block(ui: &mut Ui, t: &Theme, thinking: Option<(&Value, (usize, usize), bool)>, calls: &[Value], results: &HashMap<String, (String, bool)>) {
     let results: Results = results
         .iter()
-        .map(|(id, (text, error))| (id.as_str(), ToolOut { text: text.as_str().into(), images: vec![], error: *error, display: &[], cleared: false }))
+        .map(|(id, (text, error))| (id.as_str(), ToolOut { text: text.as_str().into(), images: vec![], error: *error, display: &[], calls: &[], cleared: false }))
         .collect();
     let mut items: Vec<Item> = vec![];
     if let Some((b, key, streaming)) = thinking {

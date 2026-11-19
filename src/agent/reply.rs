@@ -290,7 +290,19 @@ impl Worker {
         // LOAD) is in them.
         let loads = if c.chat { vec![] } else { crate::prefix::loads_of(&c.messages) };
         let shown = |k: &String| loads.iter().find(|l| &l.kit == k).filter(|l| l.call >= cut);
-        let defs = |kits: &[String]| if c.chat { tools::chat_definitions() } else { tools::definitions_with_kits(agent.is_some(), c.spawner, local, kits) };
+        // Code Mode's one tool is REPL; the others are functions in it.
+        let (code_mode, spawner) = (c.code_mode && !c.chat, c.spawner);
+        let inner = |kits: &[String]| tools::definitions_with_kits(agent.is_some(), spawner, local, kits);
+        let is_chat = c.chat;
+        let defs = |kits: &[String]| {
+            if is_chat {
+                tools::chat_definitions()
+            } else if code_mode {
+                vec![crate::code_mode::tool_definition()]
+            } else {
+                inner(kits)
+            }
+        };
         let held: Vec<String> = kits.iter().filter(|k| shown(k).is_none()).cloned().collect();
         let held_tools = defs(&held);
         let mut joins = vec![];
@@ -304,7 +316,8 @@ impl Worker {
         let model = c.model.clone();
         let tools = defs(&kits);
         // (A session with no NOTE tool, a local model's, has no notes limit to tell.)
-        let notes_limit = if tools.iter().any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("NOTE"))) { super::notes_limit() } else { 0 };
+        let has_notes = |tools: &[Value]| tools.iter().any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("NOTE")));
+        let notes_limit = if has_notes(&tools) || (code_mode && has_notes(&inner(&kits))) { super::notes_limit() } else { 0 };
         let built = crate::prefix::Pin {
             day: crate::time::today_utc(),
             kits: kits.clone(),
@@ -327,6 +340,9 @@ impl Worker {
             let model = if pin.model.is_empty() { &model_now } else { &pin.model };
             if chat {
                 super::prompt::chat_prompt(&pin.day, model, pin.notes_limit)
+            } else if code_mode {
+                let base = system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role, pin.notes_limit);
+                format!("{}\n\n{}", base.trim_end(), crate::code_mode::prompt(&inner(&pin.kits)))
             } else {
                 system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role, pin.notes_limit)
             }
@@ -434,7 +450,7 @@ impl Worker {
         // the folder's snapshot): no chat goes there.
         if let Some(why) = {
             let c = self.conv.lock().unwrap();
-            chat_refuses_provider(c.chat, c.provider())
+            chat_refuses_provider(c.chat, c.provider()).or_else(|| code_mode_refuses_provider(c.code_mode, c.provider()))
         } {
             return Reply::Failed(why);
         }

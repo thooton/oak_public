@@ -148,7 +148,7 @@ read any file), else from the file. A conversation's messages are read when firs
 request sends them (from the summary's cut on). Messages on disk as they are are let go again
 when nothing needs them (`agent::forget_messages`: all of a conversation not shown for ten
 minutes, else those well above its view; never while it works). A save writes only the
-messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
+messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `code-mode/` (each Code Mode conversation's saved REPL context), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
@@ -588,6 +588,33 @@ commands are dropped and Freebuff (whose agent works on a project) is neither of
 chat (`agent::chat_refuses_provider`). It is saved with `"chat": true` (coding conversations, the
 default, don't write it); its tab has a speech-bubble icon, its Home row says Chat, and its side
 chat is a chat too. `oak_sdk`'s `go_new` takes `chat` to pick it.
+
+**Code Mode** (`Conversation::code_mode`, experimental; `src/code_mode.rs`, `src/agent/repl.rs`).
+The New screen's Code Mode starts a conversation in a folder whose one tool is REPL: the model
+writes JavaScript, and every other tool it would have is an async function there (`await
+READ({path})`, families by `action`), with helpers for the shell and files (`$` tagged templates,
+`file`, `edit`, `write`, `log`, `searchTools`, `describeTool`), as Claude Code's Code Mode has
+them; the declarations and the tool list join the system prompt from `src/code_mode/prompt.md`.
+It runs in the user's own Node.js (18 or later: `OAK_NODE`, else PATH and the usual install
+folders); without it the choice is greyed out with why, and a REPL call says Node.js is missing.
+Each conversation gets one host process (`src/code_mode/host.js`, written to the temp folder and
+run by node; JSON lines on stdin and stdout), started at its first REPL call: Node's REPL module
+evaluating in a sealed `vm` context (no `require`, `process` or `import`), so declarations, top-level
+await and the REPL's error wording are Node's own. A script's calls come back to Oak, which runs each
+as the model's call would be run (`Worker::run_call`, so a subagent's limits, the command guard
+and the transcript's file tracking apply; `$` goes through EXECUTE's checks and its output
+streams under the REPL row), and the result lists them (`_oak_calls`). A call made directly rather
+than from a script is refused (`tool_calls::code_mode_refuses`). A script stops after 10 minutes
+not counting ASK waits; an interrupt or ultrapause stops it, and one that won't stop (a loop that
+never awaits) has its host restarted. After each script the host saves the context's variables
+(values, cycles, Map/Set/Date/RegExp/BigInt/typed arrays, functions and classes by their source,
+instances of the script's classes, let/const kept as such) to `code-mode/<id>.json` in the data
+folder. A host no script has used for 15 minutes is stopped; a new host (after that, after Oak
+restarts, or when the host died) restores the snapshot before its first
+script, and that script's result names what couldn't be kept (promises, symbols, closures'
+hidden state). Freebuff isn't offered (it sends its own tools); subagents are ordinary; a side
+chat starts from a copy of the snapshot; deleting the conversation deletes it. Saved as
+`"code_mode": true`; its Home row says "folder, Code Mode".
 
 **Super agents** (`agent::prompt::SUPER_ROLE`). The New screen's Super agent, beside Chat, starts a
 conversation that coordinates: a name (its title, kept), a folder, model and effort, then Create or

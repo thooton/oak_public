@@ -43,6 +43,7 @@ mod memory;
 pub(crate) mod pulse;
 pub(crate) mod prompt;
 mod reply;
+pub(crate) mod repl;
 mod rewrite;
 mod subagents;
 pub(crate) mod title;
@@ -1563,7 +1564,7 @@ impl Worker {
             // A chat has no goals and no Freebuff (whatever sent them).
             let refused = match &cmd {
                 Command::Goal(..) => c.chat,
-                Command::Model(p, _) => chat_refuses_provider(c.chat, *p).is_some(),
+                Command::Model(p, _) => chat_refuses_provider(c.chat, *p).or_else(|| code_mode_refuses_provider(c.code_mode, *p)).is_some(),
                 Command::Effort(_) => false,
             };
             if refused {
@@ -2257,6 +2258,12 @@ pub(crate) fn chat_refuses_provider(chat: bool, provider: api::Provider) -> Opti
     (chat && provider == api::Provider::Freebuff).then(|| "Freebuff can't serve a chat: its agent works on a project. Switch to another model.".to_string())
 }
 
+/// Why a Code Mode conversation can't be served by `provider`: Freebuff
+/// sends its own agent's tools, not REPL.
+pub(crate) fn code_mode_refuses_provider(code_mode: bool, provider: api::Provider) -> Option<String> {
+    (code_mode && provider == api::Provider::Freebuff).then(|| "Freebuff can't serve Code Mode: its agent has its own tools. Switch to another model.".to_string())
+}
+
 fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKind, String)) {
     match cmd {
         Command::Goal(goal, endless) => {
@@ -2463,7 +2470,8 @@ fn start_marks(c: &mut Conversation, from: usize, p: &api::Preamble, context: &s
         format!("instructions loaded: Freebuff system prompt{listed} ({instructions})")
     } else {
         let name = if c.chat { "Chat" } else { prompt::role(&c.role).name };
-        format!("instructions loaded: {name} system prompt{listed} ({instructions})")
+        let code = if c.code_mode && !c.chat { " with Code Mode" } else { "" };
+        format!("instructions loaded: {name} system prompt{code}{listed} ({instructions})")
     };
     c.marks.push(mark(MarkKind::Instructions, label, store::sent_parts(&parts)));
     let tool_chars = p.tools.iter().map(|t| t.to_string().len()).sum();

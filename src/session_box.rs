@@ -46,6 +46,8 @@ pub(crate) struct SessionInfo {
     pub(crate) note_separate_system: bool,
     /// A chat (`Conversation::chat`): no folder, no goal, no Freebuff.
     pub(crate) chat: bool,
+    /// In Code Mode (`Conversation::code_mode`): no Freebuff.
+    pub(crate) code_mode: bool,
 }
 
 /// What a subagent in the session box is doing.
@@ -97,6 +99,7 @@ impl SessionInfo {
             parent: None,
             note_separate_system: false,
             chat: false,
+            code_mode: false,
         };
         let Some(s) = session else {
             let folder = settings.folder.trim();
@@ -131,8 +134,12 @@ impl SessionInfo {
             parent: c.parent.clone().map(|p| (c.agent_id, p, String::new())),
             note_separate_system: crate::cloud::is_key(&c.id),
             chat,
+            code_mode: c.code_mode,
             ..with(title, folder, provider, model, &effort)
         };
+        if info.code_mode {
+            info.models.retain(|m| agent::code_mode_refuses_provider(true, m.provider).is_none());
+        }
         if chat {
             // It switches to none of what it can't use.
             info.folder_path = None;
@@ -540,6 +547,7 @@ pub(crate) fn session_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, editing: 
         (info.provider == api::Provider::Freebuff || info.note_separate_system).then_some("Uses its own agent and system prompt"),
         // A model on the user's own server gets the basics only (`local`).
         (info.provider == api::Provider::Local && !info.chat).then_some("Limited tools; no notes, heartbeats, progress meters, subagents, or screenshots."),
+        info.code_mode.then_some("Code Mode (experimental): the model runs JavaScript in a Node.js REPL, with Oak's tools as functions"),
     ];
     for note in notes.into_iter().flatten() {
         ui.add_space(3.0);

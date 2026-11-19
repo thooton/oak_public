@@ -27,6 +27,7 @@ mod browser;
 mod cdp;
 mod changes;
 mod cloud;
+mod code_mode;
 mod codex;
 mod freebuff;
 mod freebuff_tools;

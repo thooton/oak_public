@@ -1893,3 +1893,138 @@ fn a_summary_request_carries_only_what_it_replaces() {
         assert!(r.instruction.as_deref().is_some_and(crate::rolling::is_housekeeping), "{what}");
     }
 }
+
+/// The result text of call `id` among `c`'s messages.
+fn result_of(c: &Conversation, id: &str) -> (String, bool) {
+    let r = c
+        .messages
+        .iter()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .find(|b| b["type"] == "tool_result" && b["call_id"] == id)
+        .unwrap_or_else(|| panic!("no result for {id}"));
+    let text = match &r["content"] {
+        Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    (text, r["is_error"] == true)
+}
+
+/// Code Mode: REPL is the one tool; its script calls the others through
+/// their usual checks (the command guard too), and its variables outlast
+/// the host (as across a restart of Oak). Skipped without Node.js.
+#[test]
+fn code_mode_runs_tools_from_a_persistent_repl() {
+    if crate::code_mode::node().is_err() {
+        eprintln!("skipped: no Node.js");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("oak-code-mode-test-{}", api::now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "hello world\n").unwrap();
+    let (w, s) = idle_worker("code-mode", Conversation { code_mode: true, folder: dir.clone(), model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
+    let id = s.conv.lock().unwrap().id.clone();
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    let (r, ..) = w.request_body();
+    let names: Vec<&str> = r.tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(names, ["REPL"]);
+    assert!(r.system.contains("This conversation is in Code Mode") && r.system.contains("- READ: ") && r.system.contains("Working folder"));
+    let call = |cid: &str, name: &str, input: Value| json!({"type": "tool_call", "id": cid, "name": name, "input": input});
+    let repl = |cid: &str, code: &str| call(cid, "REPL", json!({"code": code}));
+    let run = |calls: Vec<Value>| {
+        s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+        w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    };
+    run(vec![
+        repl("a", "const t = await file('a.txt').text(); let n = t.length; const out = await $`echo hi`;\nawait edit('a.txt', 'world', 'there');\nconst m = new Map([['k', [1, 2n]]]);\nlog('logged'); [n, out.stdout.trim()]"),
+        call("b", "EXECUTE", json!({"command": "touch made.txt", "timeout": 5, "summary": "x"})),
+        repl("c", "await $`rm -rf /`"),
+        repl("d", "const r = await READ({path: 'a.txt'}); r.includes('hello there')"),
+        repl("e", "const x = 1; const x = 2"),
+    ]);
+    {
+        let c = s.conv.lock().unwrap();
+        let (a, err) = result_of(&c, "a");
+        assert!(!err && a.contains("<repl-output eval=\"1\">") && a.contains("logged") && a.contains("12") && a.contains("hi"), "{a}");
+        let (b, err) = result_of(&c, "b");
+        assert!(err && b.contains("your one tool is REPL"), "{b}");
+        let (cc, err) = result_of(&c, "c");
+        assert!(err && cc.contains("<error>"), "{cc}");
+        let (d, err) = result_of(&c, "d");
+        assert!(!err && d.contains("true"), "{d}");
+        let (e, err) = result_of(&c, "e");
+        assert!(err && e.contains("already been declared"), "{e}");
+        // The script's calls are listed with its result.
+        let a = c.messages.iter().filter_map(|m| m["content"].as_array()).flatten().find(|b| b["call_id"] == "a").unwrap();
+        let calls: Vec<&str> = a[repl::CALLS_KEY].as_array().unwrap().iter().filter_map(|x| x["name"].as_str()).collect();
+        assert_eq!(calls, ["READ", "$", "EDIT"]);
+    }
+    assert!(!dir.join("made.txt").exists());
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello there\n");
+    // The host goes (idle, or as when Oak closes): the next one has the variables.
+    assert!(crate::code_mode::snapshot_path(&id).exists());
+    crate::code_mode::stop_idle(Duration::ZERO);
+    run(vec![repl("f", "[n, t.trim(), m.get('k')[1] + 1n, typeof $]")]);
+    {
+        let c = s.conv.lock().unwrap();
+        let (f, err) = result_of(&c, "f");
+        assert!(!err && f.contains("12") && f.contains("hello world") && f.contains("3n") && f.contains("function"), "{f}");
+    }
+    // Deleted: its snapshot goes.
+    drop(w);
+    drop(s);
+    assert!(!crate::code_mode::snapshot_path(&id).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Without Node.js, Code Mode is unavailable and says why.
+#[test]
+fn code_mode_needs_node() {
+    let (w, s) = idle_worker("code-mode-no-node", Conversation { code_mode: true, model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
+    let calls = vec![json!({"type": "tool_call", "id": "a", "name": "REPL", "input": {"code": "1"}})];
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+    let id = s.conv.lock().unwrap().id.clone();
+    crate::code_mode::without_node(&id, || w.run_calls(&calls, oak::stop::TOOL_CALLS));
+    let (text, err) = result_of(&s.conv.lock().unwrap(), "a");
+    assert!(err && text.contains("Code Mode needs Node.js"), "{text}");
+    // REPL outside Code Mode, and Freebuff in it, are refused.
+    s.conv.lock().unwrap().code_mode = false;
+    let calls = vec![json!({"type": "tool_call", "id": "b", "name": "REPL", "input": {"code": "1"}})];
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+    w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    let (text, err) = result_of(&s.conv.lock().unwrap(), "b");
+    assert!(err && text.contains("isn't in Code Mode"), "{text}");
+    assert!(code_mode_refuses_provider(true, api::Provider::Freebuff).is_some() && code_mode_refuses_provider(false, api::Provider::Freebuff).is_none());
+}
+
+/// Each Code Mode conversation has a REPL context of its own: one's
+/// variables (live or restored) are never another's. Skipped without Node.js.
+#[test]
+fn code_mode_conversations_keep_their_own_variables() {
+    if crate::code_mode::node().is_err() {
+        eprintln!("skipped: no Node.js");
+        return;
+    }
+    let conv = || Conversation { code_mode: true, folder: std::env::temp_dir(), model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() };
+    let (wa, sa) = idle_worker("code-mode-a", conv());
+    let (wb, sb) = idle_worker("code-mode-b", conv());
+    let run = |w: &Worker, s: &Deleting, cid: &str, code: &str| {
+        let calls = vec![json!({"type": "tool_call", "id": cid, "name": "REPL", "input": {"code": code}})];
+        s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+        w.run_calls(&calls, oak::stop::TOOL_CALLS);
+        result_of(&s.conv.lock().unwrap(), cid)
+    };
+    for s in [&sa, &sb] {
+        s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    }
+    assert!(!run(&wa, &sa, "a1", "const secret = 'from a'; var shared = 1; secret").1);
+    let (b, err) = run(&wb, &sb, "b1", "[typeof secret, typeof shared, typeof globalThis.shared]");
+    assert!(!err && b.contains("'undefined', 'undefined', 'undefined'"), "{b}");
+    assert!(!run(&wb, &sb, "b2", "const secret = 'from b'; secret").1);
+    // Restarted from their snapshots, each has its own again.
+    crate::code_mode::stop_idle(Duration::ZERO);
+    let (a, _) = run(&wa, &sa, "a2", "[secret, shared]");
+    let (b, _) = run(&wb, &sb, "b3", "[secret, typeof shared]");
+    assert!(a.contains("'from a', 1") && b.contains("'from b', 'undefined'"), "{a}\n{b}");
+}

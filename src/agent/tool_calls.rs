@@ -278,7 +278,7 @@ impl Worker {
     }
 
     /// Remembers a file the model just read, wrote or edited, as it is now.
-    fn track(&self, name: &str, input: &Value) {
+    pub(super) fn track(&self, name: &str, input: &Value) {
         if let ("READ" | "WRITE" | "EDIT", Some(p)) = (name, input["path"].as_str()) {
             let folder = self.conv.lock().unwrap().folder.clone();
             self.files.lock().unwrap().record(&tools::resolve(&folder, p));
@@ -296,9 +296,19 @@ impl Worker {
         })
     }
 
+    /// Why a Code Mode conversation (`Conversation::code_mode`) won't run a
+    /// call made directly, not from a REPL script (`repl::FROM_SCRIPT`).
+    fn code_mode_refuses(&self, call: &Value) -> Option<String> {
+        let code_mode = self.conv.lock().unwrap().code_mode;
+        (code_mode && call.get(super::repl::FROM_SCRIPT).is_none()).then(|| {
+            let name = call["name"].as_str().unwrap_or("");
+            format!("In Code Mode your one tool is REPL: call {name} from a script there, as `await {name}({{...}})`.")
+        })
+    }
+
     /// Runs one tool call and returns its tool_result block, and whether
     /// the user sent a message.
-    fn run_call(&self, call: &Value, stop: &str) -> (Value, bool) {
+    pub(super) fn run_call(&self, call: &Value, stop: &str) -> (Value, bool) {
         // A family's call (`TASK` with an action) runs as its action's tool.
         let canon = tools::canonical(call["name"].as_str().unwrap_or(""), &call["input"]);
         let (name, input) = match &canon {
@@ -311,6 +321,11 @@ impl Worker {
             (json!({"INVALID_JSON": raw}).to_string(), true, false)
         } else if let Some(e) = self.chat_refuses(name) {
             // First: a chat runs nothing else, whatever the call is.
+            (e, true, false)
+        } else if call["name"] == "REPL" {
+            return self.repl_call(call, stop);
+        } else if let Some(e) = self.code_mode_refuses(call) {
+            // Code Mode runs the rest from a script only.
             (e, true, false)
         } else if name == "LOAD" {
             return self.load(call, input, stop);
@@ -907,35 +922,25 @@ impl Worker {
             Ok(started) => started,
             Err(e) => return (Err(e), false),
         };
-        // The output shows under the call's row as it comes in.
-        let _streaming = tasks::Streaming::new(call_id, &p);
-        let mut shown_lines = 0;
-        let t = Instant::now();
-        loop {
-            if let Some(code) = p.exit() {
-                let (out, _) = p.take_new(usize::MAX);
+        let summary = input["summary"].as_str().unwrap_or("");
+        match self.run_command(call_id, &p, timeout, summary) {
+            Ran::Exited { out, code } => {
                 // How long it ran, when that is worth knowing.
                 let ran = p.elapsed();
                 let ran = if ran >= Duration::from_secs(1) { format!(", ran {}", tasks::fmt_took(ran)) } else { String::new() };
                 // Not clipped: a long output is saved whole (see run_call).
-                return (Ok(format!("{}\n[exit code {code}{ran}]", out.trim_end())), false);
+                (Ok(format!("{}\n[exit code {code}{ran}]", out.trim_end())), false)
             }
-            if self.ultra() {
-                // Ultrapause: killed, not moved to the background.
-                p.kill();
-                let (out, _) = p.take_new(MAX_OUTPUT);
+            Ran::Killed { out, took } => {
                 let msg = format!(
                     "Output so far:\n{}\n\nThe user stopped everything (ultrapause), so the command was killed after {}.",
                     if out.trim().is_empty() { "(none)" } else { out.trim_end() },
-                    tasks::fmt_took(t.elapsed())
+                    tasks::fmt_took(took)
                 );
-                return (Err(msg), true);
+                (Err(msg), true)
             }
-            let interrupted = self.interrupted();
-            if interrupted || t.elapsed() > timeout {
-                let (out, more) = p.take_new(MAX_OUTPUT);
-                let id = self.adopt(&p, input["summary"].as_str().unwrap_or(""));
-                let took = tasks::fmt_took(t.elapsed());
+            Ran::Moved { out, more, id, took, interrupted } => {
+                let took = tasks::fmt_took(took);
                 let why = if interrupted {
                     format!("The user sent a message after the command had run for {took}, so it was moved to the background")
                 } else {
@@ -946,7 +951,35 @@ impl Worker {
                     "Output so far:\n{}\n\n{why}: it is now task {id} and still running.{more} Use TASK action=output with id {id} to read new output; you will be notified when it finishes.",
                     if out.is_empty() { "(none)" } else { out.trim_end() }
                 );
-                return (Ok(msg), interrupted);
+                (Ok(msg), interrupted)
+            }
+        }
+    }
+
+    /// Waits for a command started for call `call_id` (its output shows
+    /// under the call's row meanwhile, unless the id is empty) to exit:
+    /// ultrapause kills it; an interrupt or `timeout` moves it to the
+    /// background, as a task (`summary` says what it is).
+    pub(super) fn run_command(&self, call_id: &str, p: &Arc<Proc>, timeout: Duration, summary: &str) -> Ran {
+        let _streaming = tasks::Streaming::new(call_id, p);
+        let mut shown_lines = 0;
+        let t = Instant::now();
+        loop {
+            if let Some(code) = p.exit() {
+                let (out, _) = p.take_new(usize::MAX);
+                return Ran::Exited { out, code };
+            }
+            if self.ultra() {
+                // Ultrapause: killed, not moved to the background.
+                p.kill();
+                let (out, _) = p.take_new(MAX_OUTPUT);
+                return Ran::Killed { out, took: t.elapsed() };
+            }
+            let interrupted = self.interrupted();
+            if interrupted || t.elapsed() > timeout {
+                let (out, more) = p.take_new(MAX_OUTPUT);
+                let id = self.adopt(p, summary);
+                return Ran::Moved { out, more, id, took: t.elapsed(), interrupted };
             }
             // New output: a frame for the row, unless the transcript isn't
             // being drawn (it catches up when it is).
@@ -964,6 +997,17 @@ impl Worker {
             p.wait_exit(EXECUTE_TICK.min(left));
         }
     }
+}
+
+/// How a command `Worker::run_command` waited for ended.
+pub(super) enum Ran {
+    /// With its exit code and all its output.
+    Exited { out: String, code: i32 },
+    /// Ultrapause killed it: its output so far.
+    Killed { out: String, took: Duration },
+    /// It became task `id`, after an interrupt or its timeout: its output
+    /// so far (`more` waiting).
+    Moved { out: String, more: bool, id: u64, took: Duration, interrupted: bool },
 }
 
 /// How often a running EXECUTE looks at what isn't its command's exit (an
@@ -1211,7 +1255,7 @@ fn early_ok(call: &Value) -> bool {
 }
 
 /// For each of a reply's tool calls, the calls before it that it waits
-/// for; the rest run at the same time. ASK and CD wait for all before
+/// for; the rest run at the same time. ASK, CD and REPL wait for all before
 /// them, and all after them wait for them (they run on their own); a call on a file waits
 /// for the calls before it on that file when one of them writes it
 /// (WRITE, EDIT, a SCREENSHOT saved there). Calls on one file thus run in
@@ -1235,7 +1279,8 @@ pub(crate) fn waits_for(calls: &[Value], folder: &Path) -> Vec<Vec<usize>> {
                 paths.push("\0browser".into());
             }
             // CD changes what every later call's paths and commands mean.
-            (paths, browser || matches!(name, "WRITE" | "EDIT" | "SCREENSHOT"), matches!(name, "ASK" | "CD"))
+            // REPL scripts share one context: one at a time, in order.
+            (paths, browser || matches!(name, "WRITE" | "EDIT" | "SCREENSHOT"), matches!(name, "ASK" | "CD" | "REPL"))
         })
         .collect();
     (0..calls.len())

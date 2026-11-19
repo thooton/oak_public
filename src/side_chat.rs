@@ -32,6 +32,7 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation 
         effort: source.effort.clone(),
         role: source.role.clone(),
         chat: source.chat,
+        code_mode: source.code_mode,
         messages: source.messages.clone(),
         format: source.format,
         rolling: source.rolling.clone(),
@@ -62,6 +63,10 @@ impl App {
             let now = api::now_ms();
             let id = format!("side-{now}-{:016x}", rand::random::<u64>());
             let c = fork(&self.sessions[source].conv.lock().unwrap(), id.clone(), now);
+            if c.code_mode {
+                // Its REPL starts with the source's variables.
+                crate::code_mode::copy_snapshot(source, &id);
+            }
             c.save();
             self.sessions.insert(id.clone(), Session::start(c, ctx.clone()));
             id
