@@ -1,5 +1,5 @@
 //! The New screen: where a conversation starts (its folder, model, effort
-//! and system prompt), or a chat (model and effort only), or a super agent
+//! and system prompt, in Code Mode too), or a chat (model and effort only), or a super agent
 //! (a name, its folder, model and effort), or a cloud session, or what a
 //! plugin adds (a plugin's `NewKind`).
 
@@ -12,6 +12,9 @@ pub(crate) const CHAT_KIND: &str = "chat";
 /// The New screen's choice for a super agent, as `oak_sdk` hosts name it.
 pub(crate) const SUPER_KIND: &str = "super";
 
+/// What the Code Mode choice is.
+const CODE_TIP: &str = "Experimental. The model works in a folder by running JavaScript in a persistent Node.js REPL, with Oak's tools as functions; its variables last across restarts";
+
 /// What the New screen starts on this machine (`App::new_here`).
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub(crate) enum Here {
@@ -23,6 +26,9 @@ pub(crate) enum Here {
     /// A super agent: a conversation in a folder, by the name given, in
     /// the super agent's role (`agent::prompt::SUPER_ROLE`).
     Super,
+    /// A conversation in a folder in Code Mode (`Conversation::code_mode`,
+    /// experimental): only with Node.js installed.
+    Code,
 }
 
 impl App {
@@ -116,8 +122,15 @@ impl App {
                 (Here::Folder, "Local folder".to_string(), "Runs on this machine"),
                 (Here::Chat, "Chat".to_string(), "Web search and fetch only; no access to files, commands or the browser"),
                 (Here::Super, format!("{} Super agent", agent::prompt::role(agent::prompt::SUPER_ROLE).icon), "Runs subagents in a folder on this machine"),
+                (Here::Code, "Code Mode".to_string(), CODE_TIP),
             ];
+            let node = crate::code_mode::available(ui.ctx());
             for (h, label, tip) in choices {
+                if h == Here::Code && !node {
+                    let missing = format!("Experimental. Needs Node.js {} or later, and none was found on this computer", crate::code_mode::NODE_MIN);
+                    ui.add_enabled(false, egui::Button::selectable(false, label)).on_disabled_hover_text(missing);
+                    continue;
+                }
                 if ui.selectable_label(here && self.new_here == h, label).on_hover_text(tip).clicked() {
                     self.new_cloud = false;
                     self.new_kind = None;
@@ -194,9 +207,11 @@ impl App {
             }
             Some(Ok(list)) => list,
         };
-        let chat = self.new_here == Here::Chat;
-        let providers: Vec<api::Provider> =
-            api::Provider::ALL.into_iter().filter(|p| list.iter().any(|m| m.provider == *p) && agent::chat_refuses_provider(chat, *p).is_none()).collect();
+        let (chat, code) = (self.new_here == Here::Chat, self.new_here == Here::Code);
+        let providers: Vec<api::Provider> = api::Provider::ALL
+            .into_iter()
+            .filter(|p| list.iter().any(|m| m.provider == *p) && agent::chat_refuses_provider(chat, *p).is_none() && agent::code_mode_refuses_provider(code, *p).is_none())
+            .collect();
         let mut provider = self.settings.provider.unwrap_or_else(|| api::Provider::of(&self.settings.model));
         if !providers.contains(&provider)
             && let Some(&p) = providers.first()
@@ -315,6 +330,7 @@ impl App {
         // A chat has no folder, no goal and no role (a plugin's start is
         // never one).
         let chat = self.new_here == Here::Chat && named.is_none();
+        let code_mode = self.new_here == Here::Code && named.is_none();
         let provider = self.settings.provider.unwrap_or_else(|| api::Provider::of(&self.settings.model));
         let folder = if chat {
             std::path::PathBuf::new()
@@ -335,8 +351,12 @@ impl App {
             self.hint = Some("Model required".into());
             return None;
         }
-        if let Some(why) = agent::chat_refuses_provider(chat, provider) {
+        if let Some(why) = agent::chat_refuses_provider(chat, provider).or_else(|| agent::code_mode_refuses_provider(code_mode, provider)) {
             self.hint = Some(why);
+            return None;
+        }
+        if code_mode && let Err(e) = crate::code_mode::node() {
+            self.hint = Some(crate::code_mode::missing(&e));
             return None;
         }
         let cmd = cmd.filter(|_| !chat);
@@ -351,6 +371,7 @@ impl App {
             effort: agent::effort_for(&self.settings.model, &self.settings.effort),
             role: if chat { String::new() } else { agent::prompt::role(named.as_ref().map_or(self.settings.role.as_str(), |(role, _)| role.as_str())).id.to_string() },
             chat,
+            code_mode,
             messages: Default::default(),
             last_message_at: now,
             next_task_id: 0,

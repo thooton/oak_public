@@ -1,10 +1,11 @@
 //! The Settings page: theme, font (and a plugin font's download), Home's wallpaper, the
 //! interface's zoom (kept in settings.json, see `sync_zoom`), image zoom, touchpad scroll, prompt cache, account rotation, server threads,
-//! the connections, and what plugins add (Home has the plugins themselves); and the boxes that add a Codex
-//! account, the OpenRouter or NodeClub key, or a local server.
+//! the connections; a plugin's own settings page (its sections, opened from its row on Home's
+//! Plugins tab, never on Settings); and the boxes that add a Codex account, the OpenRouter or
+//! NodeClub key, or a local server.
 
 use super::*;
-use crate::widgets::{add_field, page_card, sign_in_heading};
+use crate::widgets::{add_field, clip_width, page_card, sign_in_heading};
 
 use crate::theme::hex;
 use crate::composer::{GEAR_ICON, side_box};
@@ -26,6 +27,56 @@ impl App {
             ScrollArea::vertical().id_salt("settings-scroll").auto_shrink([false, false]).show(ui, |ui| {
                 egui::Frame::new().inner_margin(Margin::symmetric(16, 16)).show(ui, |ui| {
                     egui::Grid::new("settings-grid").num_columns(2).spacing(vec2(28.0, 14.0)).min_col_width(70.0).show(ui, |ui| self.settings_rows(ui, t));
+                });
+            });
+        });
+    }
+
+    /// Opens the settings page of the plugin `id` (what it registered as
+    /// `SettingsSection`s); its X comes back to what was shown.
+    pub(crate) fn open_plugin_settings(&mut self, id: &str) {
+        if self.page != Page::PluginSettings {
+            self.plugin_settings_from = Some(self.page);
+        }
+        self.plugin_settings = id.to_string();
+        self.page = Page::PluginSettings;
+    }
+
+    /// A plugin's settings page: Settings' box, under a heading with its
+    /// name and an X (or Escape) back to where it was opened (Home's
+    /// Plugins tab), its sections down the box (each under its title when
+    /// it has several, or one named other than the plugin).
+    pub(crate) fn plugin_settings_page(&mut self, ui: &mut Ui, t: &Theme) {
+        let id = self.plugin_settings.clone();
+        let sections = crate::plugins::parts().settings_of(&id);
+        let name = crate::plugins::found().iter().filter_map(|f| f.info.as_ref()).find(|i| i.id == id).map(crate::plugins::name_of);
+        let (card, head, closed) = page_card(ui, t, 640.0, None, "plugin-settings-close");
+        // (Its plugin stopped, or never had any.)
+        if closed || sections.is_empty() {
+            self.page = self.plugin_settings_from.take().filter(|p| *p != Page::PluginSettings).unwrap_or(Page::Home);
+            return;
+        }
+        let name = name.unwrap_or_else(|| id.clone());
+        let p = ui.painter();
+        p.text(egui::pos2(head.left() + 14.0, head.center().y), Align2::LEFT_CENTER, crate::plugins_view::ICON, markdown::icon_font(13.0), t.ink3);
+        let title = clip_width(ui, &name, &FontId::proportional(13.0), head.width() - 80.0);
+        p.text(egui::pos2(head.left() + 34.0, head.center().y), Align2::LEFT_CENTER, title, FontId::proportional(13.0), t.ink);
+        let body = Rect::from_min_max(egui::pos2(card.left() + 1.0, head.bottom() + 1.0), card.max - vec2(1.0, 1.0));
+        let titled = sections.len() > 1 || sections[0].title() != name;
+        ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+            ScrollArea::vertical().id_salt(("plugin-settings-scroll", &id)).auto_shrink([false, false]).show(ui, |ui| {
+                egui::Frame::new().inner_margin(Margin::symmetric(16, 16)).show(ui, |ui| {
+                    ui.set_max_width(560.0);
+                    for (i, section) in sections.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(18.0);
+                        }
+                        if titled {
+                            caption(ui, &section.title(), t.ink3);
+                            ui.add_space(6.0);
+                        }
+                        ui.vertical(|ui| section.show(ui, self));
+                    }
                 });
             });
         });
@@ -72,20 +123,6 @@ impl App {
             store::save_settings(&self.settings);
         }
 
-        self.unslop_prompt_row(ui, t);
-
-        // What plugins add to this page, each a row.
-        let mut sections: Vec<_> = crate::plugins::parts().settings.iter().collect();
-        sections.sort_by_key(|s| s.order());
-        for section in sections {
-            caption(ui, &section.title(), t.ink3);
-            ui.vertical(|ui| {
-                ui.set_max_width(520.0);
-                section.show(ui, self);
-            });
-            ui.end_row();
-        }
-
         // Each connection's state; they are added and removed on Home.
         caption(ui, "Connections", t.ink3);
         // Two lines: the providers outgrow one line of the dialog.
@@ -127,36 +164,6 @@ impl App {
             }
             ui.end_row();
         }
-    }
-
-    /// The Unslop prompt row: the prompt in an editable box. Save puts it in
-    /// use for later rewrites, for this run only (memory, not disk); Reset
-    /// brings back the built-in one, in the box and in use.
-    fn unslop_prompt_row(&mut self, ui: &mut Ui, t: &Theme) {
-        let current = crate::unslop::prompt();
-        let draft = self.unslop_prompt.get_or_insert_with(|| current.clone());
-        caption(ui, "Unslop prompt", t.ink3);
-        ui.vertical(|ui| {
-            ui.set_max_width(520.0);
-            ui.add(TextEdit::multiline(draft).id(Id::new("unslop-prompt")).desired_width(520.0).desired_rows(8));
-            ui.horizontal(|ui| {
-                let save = ui.add_enabled(*draft != current, egui::Button::new("Save"));
-                if save.on_hover_text("Uses this prompt for later rewrites until Oak restarts.").clicked() {
-                    crate::unslop::set_prompt(Some(draft.clone()));
-                }
-                let reset = ui.add_enabled(*draft != crate::unslop::PROMPT || current != crate::unslop::PROMPT, egui::Button::new("Reset"));
-                if reset.on_hover_text("Restores the built-in prompt.").clicked() {
-                    *draft = crate::unslop::PROMPT.to_string();
-                    crate::unslop::set_prompt(None);
-                }
-                if current != crate::unslop::PROMPT {
-                    caption(ui, "Custom prompt in use until restart.", t.ink3);
-                } else if *draft != current {
-                    caption(ui, "Unsaved changes.", t.ink3);
-                }
-            });
-        });
-        ui.end_row();
     }
 
     /// An Off/On row for the switch `field`, which `apply` puts in force

@@ -1,5 +1,5 @@
 //! The transcript: a conversation's messages, tool rows, marks and notices as
-//! they are drawn, and the cards at its end (ASK, REQUEST_ASK, the queue).
+//! they are drawn, and the cards at its end (ASK, the queue).
 
 use super::*;
 pub(crate) use crate::look::{ROW_H, size_text};
@@ -20,6 +20,8 @@ pub(crate) struct ToolOut<'a> {
     display: &'a [Value],
     /// The model sees it cleared (`rolling::CLEARED` in its place).
     pub(crate) cleared: bool,
+    /// A REPL's: the calls its script made (`agent::repl::CALLS_KEY`).
+    calls: &'a [Value],
 }
 
 /// Bytes that start like an image file (for a dropped file without an image extension).
@@ -113,6 +115,12 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             if summary.trim().is_empty() { s("command") } else { crate::tools::one_line(&summary) }
         }
         "READ" | "WRITE" | "EDIT" | "CD" => s("path"),
+        // A Code Mode script: its first line that isn't blank or a comment's start.
+        "REPL" => {
+            let code = s("code");
+            let line = code.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("//")).or_else(|| code.lines().map(str::trim).find(|l| !l.is_empty())).unwrap_or("");
+            line.trim_start_matches("// ").to_string()
+        }
         // Claude Code's tools, in cloud sessions.
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => if input["file_path"].is_string() { s("file_path") } else { s("notebook_path") },
         "Grep" | "Glob" => s("pattern"),
@@ -436,7 +444,8 @@ pub(crate) enum Item<'a> {
     /// A task notification and a heartbeat, as sent to the model.
     Note(&'a str),
     Beat(&'a str),
-    /// The user's answer to a REQUEST_ASK, as sent to the model.
+    /// The user's answers to questions asked during a goal (or an older
+    /// Oak's answer to a REQUEST_ASK), as sent to the model.
     AskReply(&'a str),
     /// A message from another session (a subagent, or for a subagent the
     /// main session or another agent); `last` marks a final reply.
@@ -455,10 +464,10 @@ pub(crate) enum Item<'a> {
     /// second (when the provider reported its output token count); true
     /// with Unslop, how its rewrite stands; true when it ends the model's
     /// turn.
-    Text(&'a str, (usize, usize), Option<i64>, Option<f64>, Option<unslop::State<'a>>, bool),
+    Text(&'a str, (usize, usize), Option<i64>, Option<f64>, Option<rewrites::State<'a>>, bool),
     /// A thinking block; true while it is still streaming; with Rewrite
     /// thinking, how its rewrite stands.
-    Thinking(&'a Value, (usize, usize), bool, Option<unslop::Thoughts>),
+    Thinking(&'a Value, (usize, usize), bool, Option<rewrites::Thoughts>),
     /// A tool call, and its message and block.
     Tool(&'a Value, (usize, usize)),
     /// A DISPLAY call: the files it shows, in the chat itself.
@@ -477,21 +486,21 @@ pub(crate) struct RevertAt<'a> {
 /// `draft`: the reply streaming in will be rewritten (Unslop): its text
 /// once done, its thinking (with Rewrite thinking) as it comes.
 fn push_assistant<'a>(out: &mut Vec<Item<'a>>, b: &'a Value, key: (usize, usize), live: bool, draft: bool) {
-    let [kind, text, name, at, tps, ms, rewrite] = crate::fields(b, ["type", "text", "name", "_oak_at", "_oak_tps", "_oak_ms", unslop::KEY]);
+    let [kind, text, name, at, tps, ms, rewrite] = crate::fields(b, ["type", "text", "name", "_oak_at", "_oak_tps", "_oak_ms", rewrites::key()]);
     let text = text.and_then(Value::as_str);
     match kind.and_then(Value::as_str).unwrap_or("") {
         "text" => {
             if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                let rewrite = rewrite.map(unslop::state_of).or(if draft { Some(unslop::State::Drafting) } else { None });
+                let rewrite = rewrite.map(rewrites::state_of).or(if draft { Some(rewrites::State::Drafting) } else { None });
                 out.push(Item::Text(text, key, at.and_then(Value::as_i64), tps.and_then(Value::as_f64), rewrite, false));
             }
         }
         "reasoning" => {
             // Thinking streaming in that will be rewritten shows none of
             // itself until its rewrite does.
-            let rewrite = rewrite.and_then(|_| unslop::thoughts(b, live)).or_else(|| {
-                (draft && unslop::thinking() && text.is_some_and(|t| !t.trim().is_empty()))
-                    .then(|| unslop::Thoughts { pending: true, ..Default::default() })
+            let rewrite = rewrite.and_then(|_| rewrites::thoughts(b, live)).or_else(|| {
+                (draft && rewrites::thinking() && text.is_some_and(|t| !t.trim().is_empty()))
+                    .then(|| rewrites::Thoughts { pending: true, ..Default::default() })
             });
             out.push(Item::Thinking(b, key, live && ms.is_none(), rewrite))
         }
@@ -515,12 +524,13 @@ struct UserBlock<'a> {
     content: Option<&'a Value>,
     is_error: Option<&'a Value>,
     display: Option<&'a Value>,
+    calls: Option<&'a Value>,
 }
 
 impl<'a> UserBlock<'a> {
     fn of(b: &'a Value) -> Self {
-        let [kind, text, file, goal, context, at, call_id, content, is_error, display] =
-            crate::fields(b, ["type", "text", "_oak_file", "_oak_goal", "_oak_context", "_oak_at", "call_id", "content", "is_error", "_oak_display"]);
+        let [kind, text, file, goal, context, at, call_id, content, is_error, display, calls] =
+            crate::fields(b, ["type", "text", "_oak_file", "_oak_goal", "_oak_context", "_oak_at", "call_id", "content", "is_error", "_oak_display", agent::repl::CALLS_KEY]);
         UserBlock {
             kind: kind.and_then(Value::as_str),
             text: text.and_then(Value::as_str),
@@ -531,6 +541,7 @@ impl<'a> UserBlock<'a> {
             content,
             is_error,
             display,
+            calls,
         }
     }
 
@@ -546,7 +557,7 @@ impl<'a> UserBlock<'a> {
             Some("text") => {
                 let text = self.text.unwrap_or("");
                 self.file
-                    || !(self.hidden() || text.starts_with(NOTE_TAG) || text.starts_with(agent::ALERT_TAG) || text.starts_with(BEAT_TAG) || text.starts_with(agent::AGENT_TAG) || text.starts_with(agent::ASK_TAG))
+                    || !(self.hidden() || text.starts_with(NOTE_TAG) || text.starts_with(agent::ALERT_TAG) || text.starts_with(BEAT_TAG) || text.starts_with(agent::AGENT_TAG) || text.starts_with(agent::ASK_TAG) || text.starts_with(agent::ANSWERS_TAG))
             }
             _ => false,
         }
@@ -680,7 +691,7 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
                         Item::Note(text)
                     } else if text.starts_with(BEAT_TAG) {
                         Item::Beat(text)
-                    } else if text.starts_with(agent::ASK_TAG) {
+                    } else if text.starts_with(agent::ASK_TAG) || text.starts_with(agent::ANSWERS_TAG) {
                         Item::AskReply(text)
                     } else if let Some((from, last, body)) = agent::parse_agent_message(text) {
                         Item::AgentMessage { from, last, body, key: (mi, bi) }
@@ -712,7 +723,7 @@ pub(crate) fn cleared_split(conv: &Conversation, items: &[Item], msgs: &[usize],
 /// The reply streaming in (`live`), added to the items and messages
 /// `conv_items` gave.
 pub(crate) fn push_live<'a>(out: &mut Vec<Item<'a>>, msgs: &mut Vec<usize>, conv: &Conversation, live: &'a Live) {
-    let draft = unslop::applies(conv);
+    let draft = rewrites::applies(conv);
     for (bi, b) in live.blocks.iter().enumerate() {
         push_assistant(out, b, (usize::MAX, bi), true, draft);
     }
@@ -735,10 +746,10 @@ pub(crate) fn refresh<'a>(x: &mut Item<'a>, conv: &'a Conversation) {
     match x {
         Item::Text(_, (mi, bi), .., rewrite, _) => {
             if let Some(b) = conv.messages.get(*mi).and_then(|m| m["content"].get(*bi)) {
-                *rewrite = b.get(unslop::KEY).map(unslop::state_of);
+                *rewrite = b.get(rewrites::key()).map(rewrites::state_of);
             }
         }
-        Item::Thinking(b, _, _, rewrite) => *rewrite = unslop::thoughts(b, false),
+        Item::Thinking(b, _, _, rewrite) => *rewrite = rewrites::thoughts(b, false),
         _ => {}
     }
 }
@@ -1150,6 +1161,7 @@ fn tool_out_of<'a>(b: &UserBlock<'a>, cleared: &rolling::Ids) -> ToolOut<'a> {
     let error = b.is_error.is_some_and(|e| e == true);
     let display = b.display.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     let cleared = !cleared.is_empty() && b.call_id.and_then(Value::as_str).is_some_and(|id| cleared.contains(id));
+    let calls = b.calls.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     match b.content.unwrap_or(&Value::Null) {
         Value::Array(blocks) => ToolOut {
             text: match blocks.iter().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>()[..] {
@@ -1161,8 +1173,9 @@ fn tool_out_of<'a>(b: &UserBlock<'a>, cleared: &rolling::Ids) -> ToolOut<'a> {
             error,
             display,
             cleared,
+            calls,
         },
-        c => ToolOut { text: c.as_str().unwrap_or("").into(), images: vec![], error, display, cleared },
+        c => ToolOut { text: c.as_str().unwrap_or("").into(), images: vec![], error, display, cleared, calls },
     }
 }
 
@@ -1409,6 +1422,11 @@ fn tool_input_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
             let parts: Vec<highlight::Part> = [(Some(false), old.as_str()), (Some(true), new.as_str())].into_iter().filter(|(_, s)| !s.is_empty()).collect();
             code_view(ui, t, highlight::for_path(path), &parts, None);
         }
+        // Code Mode's script, as JavaScript.
+        "REPL" => {
+            let code = cut("code");
+            ui.push_id("repl-code", |ui| code_view(ui, t, highlight::for_path("script.js"), &[(None, code.trim_end())], Some(input["code"].as_str().unwrap_or(""))));
+        }
         _ => {}
     }
     let command = is_command(name);
@@ -1447,6 +1465,25 @@ fn tool_output_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value, r: &ToolO
         caption(ui, "model view", t.ink3);
         verbatim_block(ui, t, rolling::CLEARED);
         caption(ui, "actual output", t.ink3);
+    }
+    if !r.calls.is_empty() {
+        // A REPL script's calls, one line each.
+        caption(ui, &format!("{} call{}", r.calls.len(), crate::plural(r.calls.len())), t.ink3);
+        let lines: Vec<String> = r
+            .calls
+            .iter()
+            .take(200)
+            .map(|c| {
+                let name = c["name"].as_str().unwrap_or("");
+                let what = if name == "$" { c["input"]["command"].as_str().unwrap_or("").to_string() } else { tool_summary(name, &c["input"]) };
+                let failed = if c["error"] == true { "  (failed)" } else { "" };
+                format!("{} {}{failed}", crate::tools::shown_name(name), crate::tools::one_line(&what).head(160))
+            })
+            .collect();
+        let more = r.calls.len().saturating_sub(200);
+        let text = if more > 0 { format!("{}\n… and {more} more", lines.join("\n")) } else { lines.join("\n") };
+        ui.push_id("repl-calls", |ui| code_block(ui, t, &text, t.ink2));
+        caption(ui, "output", t.ink3);
     }
     let (out, more) = cut_output(&r.text);
     let hits = (!r.error && name == "SEARCH").then(|| crate::tools::search_results(&r.text)).flatten();
@@ -1721,7 +1758,7 @@ fn partial_object(it: &mut Chars, out: &mut serde_json::Map<String, Value>) -> b
 /// API gave no count, "Thought for Ns"); clicking shows the (summarized)
 /// thinking when there is any, or with Rewrite thinking its rewrite
 /// (sections streaming in, "Rewriting…" while more is to come).
-pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize), streaming: bool, rewrite: Option<&unslop::Thoughts>, in_block: bool) {
+pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize), streaming: bool, rewrite: Option<&rewrites::Thoughts>, in_block: bool) {
     let label = if streaming {
         "Thinking…".to_string()
     } else if let Some(n) = b["_oak_tokens"].as_u64().filter(|&n| n > 0) {
@@ -1764,7 +1801,7 @@ pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize
 pub(crate) fn tool_block(ui: &mut Ui, t: &Theme, thinking: Option<(&Value, (usize, usize), bool)>, calls: &[Value], results: &HashMap<String, (String, bool)>) {
     let results: Results = results
         .iter()
-        .map(|(id, (text, error))| (id.as_str(), ToolOut { text: text.as_str().into(), images: vec![], error: *error, display: &[], cleared: false }))
+        .map(|(id, (text, error))| (id.as_str(), ToolOut { text: text.as_str().into(), images: vec![], error: *error, display: &[], calls: &[], cleared: false }))
         .collect();
     let mut items: Vec<Item> = vec![];
     if let Some((b, key, streaming)) = thinking {
@@ -1852,11 +1889,11 @@ pub(crate) fn unit_sig(run: &[Item], results: &Results) -> u64 {
             Item::Image(b, r) | Item::File(b, r) => (*b as *const Value as usize, r.map(|r| (r.msg, r.block))).hash(&mut h),
             Item::Text(s, key, _, tps, rewrite, end) => {
                 (s.len(), key, tps.map(f64::to_bits), end).hash(&mut h);
-                rewrite.as_ref().map(|r| (unslop::no_drafts(), match r {
-                    unslop::State::Drafting => (0, 0),
-                    unslop::State::Streaming(t) => (1, t.len()),
-                    unslop::State::Done(t) => (2, t.len()),
-                    unslop::State::Failed(e) => (3, e.len()),
+                rewrite.as_ref().map(|r| (rewrites::no_drafts(), match r {
+                    rewrites::State::Drafting => (0, 0),
+                    rewrites::State::Streaming(t) => (1, t.len()),
+                    rewrites::State::Done(t) => (2, t.len()),
+                    rewrites::State::Failed(e) => (3, e.len()),
                 })).hash(&mut h);
             }
             Item::Thinking(b, key, streaming, rewrite) => {
@@ -1885,7 +1922,7 @@ pub(crate) fn unit_sig(run: &[Item], results: &Results) -> u64 {
 pub(crate) fn tail_sig(conv: &Conversation, live: &Live, editing: &Option<Editing>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
-    (conv.paused, live.pause_queued, live.pause_settled(conv.paused), live.busy, &live.status, live.ask.is_some(), &conv.ask_request, live.queued.len()).hash(&mut h);
+    (conv.paused, live.pause_queued, live.pause_settled(conv.paused), live.busy, &live.status, live.ask.as_ref().map(|a| a.background), live.queued.len()).hash(&mut h);
     for q in &live.queued {
         (q.id, q.text.len(), q.images.len()).hash(&mut h);
     }
@@ -1921,8 +1958,18 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
             Item::Note(note) => notice(ui, t, note, "note-open", TASK_NOTE_ICON, (agent::ALERT_TAG, "</usage-alert>"), Some((NOTE_TAG, "</task-notification>"))),
             Item::Beat(beat) => notice(ui, t, beat, "beat-open", HEARTBEAT_ICON, (BEAT_TAG, "</heartbeat>"), None),
             Item::AskReply(text) => {
-                let body = text.strip_prefix(agent::ASK_TAG).unwrap_or(text).trim_end_matches("</ask-request>").trim();
-                let label = if body.starts_with("The user accepted") { "you accepted Oak's request to ask you" } else { "you declined Oak's request to ask you" };
+                let body = match text.strip_prefix(agent::ANSWERS_TAG) {
+                    Some(b) => b.trim_end_matches("</ask-answers>"),
+                    None => text.strip_prefix(agent::ASK_TAG).unwrap_or(text).trim_end_matches("</ask-request>"),
+                }
+                .trim();
+                let label = match body {
+                    b if b.starts_with("The user answered") => "your answers to Oak's questions",
+                    b if b.starts_with("The user skipped") => "you skipped Oak's questions",
+                    b if b.starts_with("The user accepted") => "you accepted Oak's request to ask you",
+                    b if b.starts_with("The user declined") => "you declined Oak's request to ask you",
+                    _ => "Oak's request to ask you is gone: it asks with ASK now",
+                };
                 let id = Id::unique(("ask-reply-open", addr(text), text.len()));
                 notice_row(ui, t, id, label, Some(body), text, |p, r| {
                     p.circle_filled(egui::pos2(r.left() + 8.0, r.center().y), 3.5, tool_color("ASK"));
@@ -2003,12 +2050,12 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
 
 /// What a text block shows with Unslop: the rewrite once there is one,
 /// the model's own text if it failed (empty while either is coming).
-pub(crate) fn shown_text<'a>(text: &'a str, r: &'a unslop::State) -> &'a str {
+pub(crate) fn shown_text<'a>(text: &'a str, r: &'a rewrites::State) -> &'a str {
     match r {
-        unslop::State::Drafting => "",
-        unslop::State::Streaming(s) => s,
-        unslop::State::Done(s) => s,
-        unslop::State::Failed(_) => text,
+        rewrites::State::Drafting => "",
+        rewrites::State::Streaming(s) => s,
+        rewrites::State::Done(s) => s,
+        rewrites::State::Failed(_) => text,
     }
 }
 
@@ -2017,10 +2064,10 @@ pub(crate) fn shown_text<'a>(text: &'a str, r: &'a unslop::State) -> &'a str {
 /// comes). With No drafts, just the rewrite, after "Writing…" while the
 /// model drafts and the rewrite starts. Returns the reply's rect, for its
 /// message bar.
-fn unslop_view(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize), r: &unslop::State) -> Rect {
-    let no_drafts = unslop::no_drafts();
+fn unslop_view(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize), r: &rewrites::State) -> Rect {
+    let no_drafts = rewrites::no_drafts();
     if !no_drafts {
-        let drafting = matches!(r, unslop::State::Drafting);
+        let drafting = matches!(r, rewrites::State::Drafting);
         let (rect, open, hovered) = row(ui, t, key_id("unslop-open", key), true, false);
         let color = if hovered { t.ink2 } else { t.ink3 };
         let p = ui.painter();
@@ -2039,10 +2086,10 @@ fn unslop_view(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize), r: &unsl
         }
     }
     match r {
-        unslop::State::Drafting | unslop::State::Streaming(_) if shown_text(text, r).is_empty() => {
+        rewrites::State::Drafting | rewrites::State::Streaming(_) if shown_text(text, r).is_empty() => {
             ui.label(RichText::new(if no_drafts { "Writing…" } else { "Rewriting…" }).color(t.ink3)).rect
         }
-        unslop::State::Failed(e) => {
+        rewrites::State::Failed(e) => {
             let r = ui.scope(|ui| markdown(ui, t, text, key)).response.rect;
             caption(ui, &format!("Rewrite failed: {e}"), t.error);
             r
@@ -2316,7 +2363,8 @@ pub(crate) fn transcript_status(ui: &mut Ui, t: &Theme, conv: &Conversation, liv
 /// when the user sends the answers.
 pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
     let mut send = false;
-    ask_card(ui, t, "Questions", |ui| {
+    let title = if a.background { "Questions (Oak keeps working on the goal meanwhile)" } else { "Questions" };
+    ask_card(ui, t, title, |ui| {
         for i in 0..a.questions.len() {
             if i > 0 {
                 ui.add_space(10.0);
@@ -2360,15 +2408,12 @@ pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
             if ui.add_enabled(ready, Button::new(RichText::new("Send answers").color(if ready { t.accent } else { t.ink3 }))).clicked() {
                 send = true;
             }
-            if ui
-                .button(RichText::new("Skip").color(t.ink2))
-                .on_hover_text("Continue without answers; queued messages are sent.")
-                .clicked()
-            {
+            let skip = if a.background { "Dismiss the questions without answering; Oak is told." } else { "Continue without answers; queued messages are sent." };
+            if ui.button(RichText::new("Skip").color(t.ink2)).on_hover_text(skip).clicked() {
                 a.skipped = true;
             }
             let left = (0..a.questions.len()).filter(|&i| !a.answered(i)).count();
-            let wait = "messages queued until answers are sent or skipped";
+            let wait = if a.background { "the answers go to Oak when sent" } else { "messages queued until answers are sent or skipped" };
             let hint = if left > 0 { format!("{left} unanswered, {wait}") } else { wait.into() };
             caption(ui, &hint, t.ink3);
         });
@@ -2376,8 +2421,8 @@ pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
     send
 }
 
-/// A card the model's questions (or its request to ask some) wait in for
-/// the user: `title` over what `f` adds.
+/// A card the model's questions wait in for the user: `title` over what
+/// `f` adds.
 fn ask_card(ui: &mut Ui, t: &Theme, title: &str, f: impl FnOnce(&mut Ui)) {
     ui.add_space(6.0);
     egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.accent)).inner_margin(Margin::same(14)).show(ui, |ui| {
@@ -2387,30 +2432,6 @@ fn ask_card(ui: &mut Ui, t: &Theme, title: &str, f: impl FnOnce(&mut Ui)) {
         f(ui);
     });
     ui.add_space(6.0);
-}
-
-/// A REQUEST_ASK waiting for the user: what the model wants to ask them
-/// about, to accept or decline. Some(true) when accepted, Some(false)
-/// when declined.
-pub(crate) fn ask_request_view(ui: &mut Ui, t: &Theme, about: &str) -> Option<bool> {
-    let mut reply = None;
-    ask_card(ui, t, "Question request", |ui| {
-        ui.label(RichText::new(about).strong().color(t.ink));
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if ui
-                .button(RichText::new("Accept").color(t.accent))
-                .on_hover_text("Allow one set of questions; pauses for answers.")
-                .clicked()
-            {
-                reply = Some(true);
-            }
-            if ui.button(RichText::new("Decline").color(t.ink2)).on_hover_text("Continue without questions").clicked() {
-                reply = Some(false);
-            }
-        });
-    });
-    reply
 }
 
 /// Queued messages, dimmed, below the transcript. Hovering one shows edit

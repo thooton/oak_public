@@ -27,6 +27,7 @@ mod browser;
 mod cdp;
 mod changes;
 mod cloud;
+mod code_mode;
 mod codex;
 mod freebuff;
 mod freebuff_tools;
@@ -59,7 +60,7 @@ mod time;
 mod token_rate;
 mod tools;
 mod toolbin;
-mod unslop;
+mod rewrites;
 mod update;
 mod usage;
 mod web;
@@ -135,7 +136,7 @@ use store::{Conversation, Mark, MarkKind, Settings};
 use tabs::TABS_H;
 use theme::{Theme, apply_theme, setup_style};
 use time::{ago, clock, full_time, local_offset_ms, mdy, time_ago, until};
-use transcript::{Item, JUMP_REQUEST, REVERT_REQUEST, REWIND_REQUEST, ask_request_view, ask_view, attachment_view, file_block, items_at, queue_view, size_text, tail_sig, tool_summary, transcript_status, transcript_unit, unit_sig, units, user_messages};
+use transcript::{Item, JUMP_REQUEST, REVERT_REQUEST, REWIND_REQUEST, ask_view, attachment_view, file_block, items_at, queue_view, size_text, tail_sig, tool_summary, transcript_status, transcript_unit, unit_sig, units, user_messages};
 use widgets::{caption, column};
 #[cfg(target_os = "linux")]
 use window::install_desktop_entry;
@@ -194,6 +195,9 @@ enum Page {
     /// A plugin's page (`App::plugin_page`): a link at the right end of
     /// Home's tabs' row opens it (`oak_sdk::HomeTab::page`).
     Plugin,
+    /// A plugin's settings page (`App::plugin_settings_page`), opened from
+    /// its row on Home's Plugins tab.
+    PluginSettings,
 }
 
 /// A quick hasher (FxHash's step) for what is hashed every frame: the
@@ -286,9 +290,6 @@ struct App {
     codex_login: Option<codex::Login>,
     codex_paste: String,
     codex_error: Option<String>,
-    /// The Unslop prompt as edited in Settings (filled from the one in use
-    /// when first shown).
-    unslop_prompt: Option<String>,
     sessions: HashMap<String, Session>,
     /// When the sessions' messages were last swept (`agent::forget_messages`).
     messages_swept: Option<std::time::Instant>,
@@ -304,6 +305,10 @@ struct App {
     page: Page,
     /// The page Settings was opened from: its X goes back there.
     settings_from: Option<Page>,
+    /// The plugin whose settings page is shown, and the page it was opened
+    /// from.
+    plugin_settings: String,
+    plugin_settings_from: Option<Page>,
     /// The message being written, and its attachments: the open tab's
     /// draft (each conversation, and the new one, keeps its own).
     input: String,
@@ -425,7 +430,6 @@ impl App {
         agent::set_notes_limit(settings.notes_limit);
         openrouter::set_title_model(&settings.title_model);
         openrouter::set_routing(&settings.or_routing);
-        unslop::set_all(&settings);
         scratch::set_auto(settings.scratch_clear);
         // The user's browser's extension finds Oak here (browser/bridge.rs).
         browser::bridge::start();
@@ -659,6 +663,7 @@ impl eframe::App for App {
         match self.page {
             Page::Home => { central(&mut |ui| self.home(ui, &t)); }
             Page::Settings => { central(&mut |ui| self.settings_page(ui, &t)); }
+            Page::PluginSettings => { central(&mut |ui| self.plugin_settings_page(ui, &t)); }
             Page::Usage => {
                 let mut back = false;
                 central(&mut |ui| back = usage_view::page(ui, &t, &mut self.usage));
@@ -975,7 +980,7 @@ fn read_conversations() -> Preloaded {
     // loading threads first, as that reads them all.
     let conversations = store::load_conversations_then(&|c, raw| {
         agent::look_for_lost_calls(c, raw);
-        unslop::look(c, raw);
+        rewrites::look(c, raw);
     });
     let read = t.elapsed();
     // Their tasks' records (reading each task's output) on every core.

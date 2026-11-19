@@ -22,12 +22,14 @@ A plugin can add:
 | A font | `FontDef` | `OakFontDef` | Four faces, offered on Settings; it can download them when first picked. |
 | A system prompt | `Role` | `OakRole` | Offered on the New screen (or only given by the plugin's own `NewKind`). |
 | A vault | `Vault` | `OakVault` | Somewhere else logins and keys are kept and renewed, for several machines. One at most. |
-| Rows on Settings | `SettingsSection` | `OakSettings` | |
+| Its settings page | `SettingsSection` | `OakSettings` | Rows on a page of the plugin's own, which the gear on its row on Home's Plugins tab opens (and Settings in the row's right-click menu), in the window as Settings is; its X or Esc goes back. Never on Settings itself. |
 | A screen before everything | `Gate` | `OakGate` | Shown instead of the app while it says it is shut (a sign-in). |
 | Hooks | `Hooks` | `OakHooks` | At startup, every frame, at the top of Home's Providers, in a message box's bottom left corner, on Home's wallpaper (`home_scene`, under the menu; interface version 7), over a local conversation's transcript (`chat_scene`, clipped to it; version 7), at exit. |
+| Rewrites | `Rewriter` | `OakRewriter` | What a conversation's transcript shows in place of the model's own words (interface version 9): its replies' text, its thinking (in the sections the plugin picks) and its notes, rewritten as they come; the model is sent its own text still. Oak keeps each rewrite in its block under the rewriter's `_oak_` key, shows it streaming in ("Drafted a message" opens on the model's own text, unless No drafts) and starts again what was left unfinished; the plugin says what is rewritten and does the rewriting (often with `model_stream`). The user's own conversations only, not subagents'. The first registered. |
+| A box beside the message box | `ComposerBox` | `OakComposerBox` | Framed like smart context's and as tall, left of the message box's buttons (version 9): switches for what the plugin does to every conversation. The row makes room for it only while there is one, and drops it before smart context when the window is narrow. The first registered. |
 
 Two examples to copy: `plugins/hello` (Rust: a Home tab built from Oak's components, with state
-kept between runs and work on a thread; a theme, a Settings row, a system prompt) and
+kept between runs and work on a thread; a theme, a settings page, a system prompt) and
 `plugins/hello-c/hello.c` (C, one file: the same kind of Home tab, through `oak_view.h`).
 
 ## Using plugins
@@ -245,6 +247,10 @@ true zero. How the interface reads (`hello.c` shows each):
   `app_`, `oak_`, `window`, `texture_`, work on the UI thread, inside a callback Oak made. The
   rest (HTTP, files, `repaint`, `share`, usage, cloud, `toast`, `spawn`, `prefs_get`,
   `prefs_set`) work from any thread.
+- **Models** (version 9): `model_stream` asks a model for a reply through one of Oak's providers,
+  with the user's logins and keys, and waits for it, handing over each event (`{"text"}`,
+  `{"thinking"}`, `{"cost"}`, `{"retry"}`) as it streams in. It names its usage log (`usage`,
+  "plugin" when not given), so its cost shows on the Usage page apart. Not on the UI thread.
 
 ## Changing how components look
 
@@ -322,7 +328,7 @@ cargo test --lib reloading_picks_up -- --ignored                             # R
 ```
 
 The first also compiles `plugins/hello-c/hello.c` (with `OAK_TEST_CC`, else `CC`, else `gcc` on Windows and `cc` elsewhere). `every_plugin_draws`
-loads whatever `OAK_PLUGINS` holds and draws every Home tab and plugin page in every theme, Settings, Home's Plugins tab, every
+loads whatever `OAK_PLUGINS` holds and draws every Home tab and plugin page in every theme, Settings, each plugin's settings page, Home's Plugins tab, every
 choice on the New screen, and the tabs `OAK_PLUGIN_TABS` names (keys separated by commas),
 failing if a plugin doesn't load or stops. It runs in a scratch Oak folder, never the user's:
 `OAK_PLUGIN_SEED` names a folder whose files are copied there first (a saved connection to a
@@ -348,7 +354,7 @@ A Rust plugin can also be tested in Oak's own test process, without building a l
 - `src/plugins.rs`: finding, loading and reloading libraries. `src/plugins/api.rs`: Oak's side of the
   table, every function of it. `src/plugins/parts.rs`: a plugin's parts as Oak calls them.
   `src/plugin_app.rs`: what the window does for plugins.
-- `src/plugins_view.rs`: Home's Plugins tab, the manager.
+- `src/plugins_view.rs`: Home's Plugins tab, the manager (and the gear to each plugin's settings page).
 - Where parts are used: `home.rs` (tabs, Providers), `tabs.rs`, `composer.rs`, `session_box.rs`,
   `new_screen.rs`, `cloud.rs` (backends and kits), `api/vault.rs`, `theme.rs`, `markdown.rs`
-  (fonts), `settings.rs`, `agent/prompt.rs` (roles).
+  (fonts), `settings.rs` (Settings, and each plugin's settings page), `agent/prompt.rs` (roles).

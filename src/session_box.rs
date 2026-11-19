@@ -46,6 +46,8 @@ pub(crate) struct SessionInfo {
     pub(crate) note_separate_system: bool,
     /// A chat (`Conversation::chat`): no folder, no goal, no Freebuff.
     pub(crate) chat: bool,
+    /// In Code Mode (`Conversation::code_mode`): no Freebuff.
+    pub(crate) code_mode: bool,
 }
 
 /// What a subagent in the session box is doing.
@@ -97,6 +99,7 @@ impl SessionInfo {
             parent: None,
             note_separate_system: false,
             chat: false,
+            code_mode: false,
         };
         let Some(s) = session else {
             let folder = settings.folder.trim();
@@ -131,8 +134,12 @@ impl SessionInfo {
             parent: c.parent.clone().map(|p| (c.agent_id, p, String::new())),
             note_separate_system: crate::cloud::is_key(&c.id),
             chat,
+            code_mode: c.code_mode,
             ..with(title, folder, provider, model, &effort)
         };
+        if info.code_mode {
+            info.models.retain(|m| agent::code_mode_refuses_provider(true, m.provider).is_none());
+        }
         if chat {
             // It switches to none of what it can't use.
             info.folder_path = None;
@@ -251,7 +258,7 @@ impl App {
         };
         if let Some(s) = self.sessions.get(&key) {
             // Rewrite notes (Unslop): new and changed notes go to be rewritten.
-            unslop::start_notes(&s.conv, ctx);
+            rewrites::start_notes(&s.conv, ctx);
         }
         let mut info = SessionInfo::new(self.sessions.get(&key), &self.settings, models, |m| self.model_name(m));
         for a in &mut info.agents {
@@ -540,6 +547,7 @@ pub(crate) fn session_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, editing: 
         (info.provider == api::Provider::Freebuff || info.note_separate_system).then_some("Uses its own agent and system prompt"),
         // A model on the user's own server gets the basics only (`local`).
         (info.provider == api::Provider::Local && !info.chat).then_some("Limited tools; no notes, heartbeats, progress meters, subagents, or screenshots."),
+        info.code_mode.then_some("Code Mode (experimental): the model runs JavaScript in a Node.js REPL, with Oak's tools as functions"),
     ];
     for note in notes.into_iter().flatten() {
         ui.add_space(3.0);
@@ -874,12 +882,12 @@ pub(crate) fn notes_box(ui: &mut Ui, t: &Theme, w: f32, notes: &[store::Note], o
             let font = egui::TextStyle::Small.resolve(ui.style());
             for n in notes {
                 let ink = |color| egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
-                let state = unslop::note_state(n, own);
+                let state = rewrites::note_state(n, own);
                 let (text, color, failed) = match &state {
                     None => (n.text.trim(), t.ink2, None),
-                    Some(unslop::State::Done(s)) => (s.trim(), t.ink2, None),
-                    Some(unslop::State::Streaming(s)) if !s.trim().is_empty() => (s.trim(), t.ink2, None),
-                    Some(unslop::State::Failed(e)) => (n.text.trim(), t.ink2, Some(e)),
+                    Some(rewrites::State::Done(s)) => (s.trim(), t.ink2, None),
+                    Some(rewrites::State::Streaming(s)) if !s.trim().is_empty() => (s.trim(), t.ink2, None),
+                    Some(rewrites::State::Failed(e)) => (n.text.trim(), t.ink2, Some(e)),
                     Some(_) => ("Rewriting…", t.ink3, None),
                 };
                 let mut job = egui::text::LayoutJob::default();

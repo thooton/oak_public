@@ -1,4 +1,4 @@
-//! The example plugin: a tab on Home, a theme, a row on Settings and a
+//! The example plugin: a tab on Home, a theme, a settings page and a
 //! system prompt. Build it with `cargo build -p oak-hello` and run Oak with
 //! `OAK_PLUGINS=target/debug` (or copy the library into the `plugins`
 //! folder of Oak's folder); `docs/PLUGINS.md` explains the rest.
@@ -199,7 +199,7 @@ impl ThemeDef for Moss {
     }
 }
 
-/// A row on the Settings page.
+/// A row on its settings page (the gear on its row on Home's Plugins tab).
 struct HelloSettings;
 
 impl SettingsSection for HelloSettings {

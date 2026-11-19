@@ -148,7 +148,7 @@ read any file), else from the file. A conversation's messages are read when firs
 request sends them (from the summary's cut on). Messages on disk as they are are let go again
 when nothing needs them (`agent::forget_messages`: all of a conversation not shown for ten
 minutes, else those well above its view; never while it works). A save writes only the
-messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
+messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `code-mode/` (each Code Mode conversation's saved REPL context), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
 owner-only on Linux), `window.json` (the window's
@@ -202,19 +202,26 @@ the previous one (round the ends), Ctrl+1 to Ctrl+8 pick one, Ctrl+9 the last, a
 the tab menu) reopens the tabs closed since Oak started, newest first, in their places. Closing a tab
 never closes its conversation, its draft or its work. A conversation shows its
 transcript with a minimap, the session box (title, folder, provider, model, effort, goal, notes,
-agents, progress meters) and the message box with the smart context, Unslop and account boxes.
+agents, progress meters) and the message box with the smart context and account boxes (and a
+plugin's box left of its buttons: Unslop's).
 The message box stays docked to the bottom as drafts, attachments and notices change its height,
 including in a side chat.
 A click on the session box's folder opens it in the system's file manager; its right-click menu
 has Open folder and Copy path (a folder that no longer exists can only be copied).
 Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme and Font rows show once a plugin adds a
-choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings.
+choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings, and so are their
+settings: Settings holds none of a plugin's controls.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
 plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
 is clipped to the corner so it cannot move or cover the rest of the composer.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
+A running plugin that has settings (`SettingsSection`s) has a gear on its row, left of the switch,
+and Settings in the row's right-click menu: either opens the plugin's own settings page
+(`App::plugin_settings_page`, `src/settings.rs`), drawn in the window as Settings is, under the
+plugin's name with its sections down the box (each titled when it has several); its X or Esc goes
+back to the Plugins tab. What a plugin saves stays where it always kept it.
 Home's Protocols tab (`src/mcp_view.rs`) lists the protocols conversations can load (see Protocols
 below): Oak's own (Browser, Window, Blender) first, then those of the files in `protocols/`, each
 with its title, a switch (a click on the row flips it; off ends its connection, and switches Browser
@@ -336,7 +343,7 @@ can't read.
 
 **The agent** (`src/agent.rs`, `src/agent/`). One worker thread per conversation. Its tools
 (`src/tools/defs.rs`): READ, WRITE, EDIT, EXECUTE, SEARCH, FETCH, SCREENSHOT, DISPLAY, ASK,
-REQUEST_ASK, ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
+ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
 `action` and show as tools of their own (`TASK action=wait` is TASK_WAIT). LOAD loads a kit (AGENT,
 BROWSER, WINDOW, or another protocol by its name): a tool and its instructions, left out of the
 prompt until needed.
@@ -528,7 +535,14 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   least that allows the keep, so it is always for the keep in the box. Turning smart context
   off for a conversation stops new summaries; the one in use stays.
 - Goals: the model keeps working until it calls GOAL finish; "pause goal" stops Oak asking it to
-  continue without telling it. While a goal is set, ASK needs the user's yes through REQUEST_ASK.
+  continue without telling it. ASK waits for the user's answers, except while a goal is set (not
+  paused or finished): then it returns at once, telling the model the user was asked
+  asynchronously and to keep working, the questions wait in the card (and with the conversation,
+  `pending_ask`, across a restart), and the answers or the skip reach the model as a message that
+  repeats the questions (`Session::answer_questions`). A new ASK replaces questions still
+  unanswered and lists them in its result, so the model asks again with the full list it wants.
+  (REQUEST_ASK, which gated ASK during a goal, is gone: a conversation that still lists it is told
+  to ASK, and one an older Oak left waiting is told so on start.)
   An endless goal (the Endless box when editing it) refuses GOAL justify and finish, so it lasts
   until the user pauses or clears it; the model is told in the goal's message and its memory block,
   and changing only the mode sends the goal again.
@@ -555,10 +569,12 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   right-click menu, or double-click its title in the session box; `src/rename.rs`) replaces the
   title, a title still being made included; the id, history and file stay (the file takes the
   new name). Subagents keep theirs, since sessions address them by it.
-- Unslop (`src/unslop.rs`): replies, and optionally thinking and notes, are rewritten for the
-  user by Gemma 4 31B through OpenRouter; the model's context keeps its own text. Turning
-  Rewrite notes (or Unslop) off clears the note rewrites (a new `unslop_notes_epoch`), so
-  they are made again once it is back on.
+- Rewrites (`src/rewrites.rs`): a plugin's rewriter (`Rewriter`; Unslop, a private plugin)
+  has replies, and optionally thinking and notes, rewritten for the user; the model's context
+  keeps its own text. Oak keeps the rewrites in their blocks (under the rewriter's key, which
+  starts with `_oak_` and so is never sent), shows them and starts the unfinished ones again;
+  the plugin says what is rewritten, picks thinking's sections and does the rewriting. A new
+  epoch from the rewriter drops the notes' rewrites, so they are made again.
 - Losing the GPU device ultrapauses the conversations at work and restarts Oak (`src/gpu.rs`).
   On Windows Oak sets up Direct3D 12 alone (the other backends cost a quarter of a second at
   every start); should that fail it starts again with every backend (`OAK_GPU_ALL_BACKENDS`).
@@ -575,6 +591,33 @@ commands are dropped and Freebuff (whose agent works on a project) is neither of
 chat (`agent::chat_refuses_provider`). It is saved with `"chat": true` (coding conversations, the
 default, don't write it); its tab has a speech-bubble icon, its Home row says Chat, and its side
 chat is a chat too. `oak_sdk`'s `go_new` takes `chat` to pick it.
+
+**Code Mode** (`Conversation::code_mode`, experimental; `src/code_mode.rs`, `src/agent/repl.rs`).
+The New screen's Code Mode starts a conversation in a folder whose one tool is REPL: the model
+writes JavaScript, and every other tool it would have is an async function there (`await
+READ({path})`, families by `action`), with helpers for the shell and files (`$` tagged templates,
+`file`, `edit`, `write`, `log`, `searchTools`, `describeTool`), as Claude Code's Code Mode has
+them; the declarations and the tool list join the system prompt from `src/code_mode/prompt.md`.
+It runs in the user's own Node.js (18 or later: `OAK_NODE`, else PATH and the usual install
+folders); without it the choice is greyed out with why, and a REPL call says Node.js is missing.
+Each conversation gets one host process (`src/code_mode/host.js`, written to the temp folder and
+run by node; JSON lines on stdin and stdout), started at its first REPL call: Node's REPL module
+evaluating in a sealed `vm` context (no `require`, `process` or `import`), so declarations, top-level
+await and the REPL's error wording are Node's own. A script's calls come back to Oak, which runs each
+as the model's call would be run (`Worker::run_call`, so a subagent's limits, the command guard
+and the transcript's file tracking apply; `$` goes through EXECUTE's checks and its output
+streams under the REPL row), and the result lists them (`_oak_calls`). A call made directly rather
+than from a script is refused (`tool_calls::code_mode_refuses`). A script stops after 10 minutes
+not counting ASK waits; an interrupt or ultrapause stops it, and one that won't stop (a loop that
+never awaits) has its host restarted. After each script the host saves the context's variables
+(values, cycles, Map/Set/Date/RegExp/BigInt/typed arrays, functions and classes by their source,
+instances of the script's classes, let/const kept as such) to `code-mode/<id>.json` in the data
+folder. A host no script has used for 15 minutes is stopped; a new host (after that, after Oak
+restarts, or when the host died) restores the snapshot before its first
+script, and that script's result names what couldn't be kept (promises, symbols, closures'
+hidden state). Freebuff isn't offered (it sends its own tools); subagents are ordinary; a side
+chat starts from a copy of the snapshot; deleting the conversation deletes it. Saved as
+`"code_mode": true`; its Home row says "folder, Code Mode".
 
 **Super agents** (`agent::prompt::SUPER_ROLE`). The New screen's Super agent, beside Chat, starts a
 conversation that coordinates: a name (its title, kept), a folder, model and effort, then Create or

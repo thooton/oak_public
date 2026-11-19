@@ -4,7 +4,9 @@
 //! load, and the switches apply; lit while there is something to apply,
 //! with a row's "Changed on disk"), and Restart to apply once a switch
 //! differs from what runs. A click on a row flips its switch; switching
-//! one on switches on the plugins it needs.
+//! one on switches on the plugins it needs. A running plugin with settings
+//! (`SettingsSection`s) has a gear on its row, and Settings in its menu,
+//! that open its own settings page (`App::plugin_settings_page`).
 
 use crate::look::{BAR_ROOM, list_rows, row_title_color};
 use crate::plugins::{self, Found};
@@ -22,6 +24,8 @@ pub(crate) const ICON: &str = "\u{f12e}";
 
 const HEAD_H: f32 = 28.0;
 const SWITCH: egui::Vec2 = vec2(34.0, 18.0);
+/// A row's settings gear, square.
+const GEAR: f32 = 26.0;
 
 /// The id a row's switch acts on: a plugin's, when the library is one.
 fn id_of(f: &Found) -> Option<&str> {
@@ -62,8 +66,9 @@ fn outcome(c: &plugins::Changes) -> String {
     }
 }
 
-/// The manager, in `area` (the left cell of Home).
-pub(crate) fn show(ui: &mut Ui, t: &Theme, area: Rect) {
+/// The manager, in `area` (the left cell of Home). Gives the id of the
+/// plugin whose settings page was asked for.
+pub(crate) fn show(ui: &mut Ui, t: &Theme, area: Rect) -> Option<String> {
     // (Changes on disk show without the pointer moving.)
     if !plugins::none_loaded() {
         ui.ctx().request_repaint_after(plugins::DISK_EVERY);
@@ -72,6 +77,7 @@ pub(crate) fn show(ui: &mut Ui, t: &Theme, area: Rect) {
     let head = Rect::from_min_max(egui::pos2(area.left() + 12.0, area.top() + 8.0), egui::pos2(area.right() - BAR_ROOM - 8.0, area.top() + 8.0 + HEAD_H));
     let list = Rect::from_min_max(egui::pos2(area.left(), head.bottom() + 6.0), area.max);
     head_row(ui, t, head, &found);
+    let mut configure = None;
     ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
         if found.is_empty() {
             let note = if plugins::none_loaded() { "Started without plugins" } else { "No plugins found" };
@@ -81,8 +87,13 @@ pub(crate) fn show(ui: &mut Ui, t: &Theme, area: Rect) {
             return;
         }
         let changed = plugins::on_disk().changed;
-        list_rows(ui, t, "home-plugins", found.len(), "", |ui, i, rect, resp| row(ui, t, &found[i], changed.contains(&found[i].path), rect, resp));
+        list_rows(ui, t, "home-plugins", found.len(), "", |ui, i, rect, resp| {
+            if row(ui, t, &found[i], changed.contains(&found[i].path), rect, resp) {
+                configure = id_of(&found[i]).map(str::to_string);
+            }
+        });
     });
+    configure
 }
 
 /// The heading: how many run (or for a while what the last Reload did),
@@ -147,9 +158,10 @@ fn head_row(ui: &mut Ui, t: &Theme, head: Rect, found: &[Found]) {
 }
 
 /// One library's row: its name and version, what it is (or why it isn't
-/// running), and its switch with what a reload will change (`changed`:
-/// its file changed since it was loaded).
-fn row(ui: &mut Ui, t: &Theme, f: &Found, changed: bool, rect: Rect, resp: egui::Response) {
+/// running), its switch with what a reload will change (`changed`: its
+/// file changed since it was loaded), and its settings' gear when it has
+/// any. True when its settings page was asked for.
+fn row(ui: &mut Ui, t: &Theme, f: &Found, changed: bool, rect: Rect, resp: egui::Response) -> bool {
     let p = ui.painter().clone();
     let y = rect.center().y;
     let (x, right) = (rect.left() + 12.0, rect.right() - 12.0);
@@ -175,6 +187,15 @@ fn row(ui: &mut Ui, t: &Theme, f: &Found, changed: bool, rect: Rect, resp: egui:
             let r = p.text(egui::pos2(text_right, y), Align2::RIGHT_CENTER, note, font, t.accent);
             text_right = r.left() - 12.0;
         }
+    }
+
+    // Its settings, while it runs and has some.
+    let has_settings = running(f) && id.as_deref().is_some_and(|id| !plugins::parts().settings_of(id).is_empty());
+    let mut configure = false;
+    if has_settings {
+        let gear = Rect::from_center_size(egui::pos2(text_right - GEAR / 2.0, y), vec2(GEAR, GEAR));
+        configure = gear_button(ui, t, gear, id.as_deref().unwrap_or_default());
+        text_right = gear.left() - 8.0;
     }
 
     // Name and version.
@@ -221,6 +242,10 @@ fn row(ui: &mut Ui, t: &Theme, f: &Found, changed: bool, rect: Rect, resp: egui:
     }
     let resp = resp.on_hover_text(tip.join("\n"));
     resp.context_menu(|ui| {
+        if has_settings && ui.button("Settings").clicked() {
+            configure = true;
+            ui.close();
+        }
         if ui.button("Open folder").clicked() {
             if let Some(dir) = f.path.parent() {
                 let _ = open::that_detached(dir);
@@ -237,4 +262,18 @@ fn row(ui: &mut Ui, t: &Theme, f: &Found, changed: bool, rect: Rect, resp: egui:
     {
         plugins::set_enabled(&[id], !on);
     }
+    configure
+}
+
+/// A row's settings gear in `rect`, lit under the pointer. True when
+/// clicked.
+fn gear_button(ui: &mut Ui, t: &Theme, rect: Rect, id: &str) -> bool {
+    let resp = ui.interact(rect, egui::Id::unique(("plugin-settings-gear", id)), egui::Sense::click());
+    let lit = resp.hovered();
+    if lit {
+        ui.painter().rect_filled(rect, 4.0, t.panel2);
+    }
+    let color = if lit { t.ink } else { t.ink3 };
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, crate::composer::GEAR_ICON, crate::markdown::icon_font(14.0), color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Settings").clicked()
 }

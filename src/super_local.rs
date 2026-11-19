@@ -179,7 +179,6 @@ impl App {
         chat.messages.truncate(n);
         update(&mut chat, id, &conv, &live);
         let mut ask = live.ask.take();
-        let mut ask_reply = None;
         crate::markdown::set_link_base(ui.ctx(), Some(conv.folder.as_path()));
         super_view::chat(ui, t, &chat, |ui| {
             if let Some(a) = ask.as_mut()
@@ -187,17 +186,15 @@ impl App {
             {
                 a.sent = true;
             }
-            if !conv.ask_request.is_empty() {
-                ask_reply = crate::ask_request_view(ui, t, &conv.ask_request);
-            }
         });
         crate::markdown::set_link_base(ui.ctx(), None);
         CHATS.with(|m| m.borrow_mut().insert(id.to_string(), (rev, n, chat)));
+        let answered = ask.take_if(|a| a.background && (a.sent || a.skipped));
         live.ask = ask;
         drop(live);
         drop(conv);
-        if let Some(accept) = ask_reply {
-            s.answer_ask_request(accept);
+        if let Some(a) = answered {
+            s.answer_questions(a);
         }
     }
 
@@ -264,7 +261,7 @@ impl App {
         rows.sort_by_key(|(r, _)| (!r.working, std::cmp::Reverse(r.n)));
         let convs: Vec<(i64, String)> = rows.iter().map(|(r, c)| (r.n, c.clone())).collect();
         b.agents = rows.into_iter().map(|(r, _)| r).collect();
-        crate::unslop::start_notes(&s.conv, ctx);
+        crate::rewrites::start_notes(&s.conv, ctx);
         let mut info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
         for a in &mut info.agents {
             a.3 = self.sessions.get(&a.2).map_or(AgentState::Idle, AgentState::of);
@@ -365,7 +362,7 @@ impl App {
             // Its "for 2m" and "40s ago" count on.
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
-        crate::unslop::start_notes(&s.conv, ctx);
+        crate::rewrites::start_notes(&s.conv, ctx);
         let mut info = crate::session_box::SessionInfo::new(Some(s), &self.settings, models, |m| self.model_name(m));
         for a in &mut info.agents {
             a.3 = self.sessions.get(&a.2).map_or(AgentState::Idle, AgentState::of);

@@ -308,7 +308,7 @@ pub struct Messages {
     norm_from: usize,
     /// Looked at in the file (`load_conversations_then`): the first message
     /// with a call left without a result (`agent::answer_lost_calls`), and
-    /// the first with a rewrite marker (`unslop::start`). `Some(0)` when not
+    /// the first with a rewrite marker (`rewrites::start`). `Some(0)` when not
     /// looked at.
     pub(crate) lost_from: Option<usize>,
     pub(crate) rewrites_from: Option<usize>,
@@ -455,8 +455,8 @@ impl Messages {
     pub fn forget_before(&mut self, k: usize) -> bool {
         let Some(k) = self.forgettable(k) else { return false };
         let w = self.win.get_mut().unwrap();
-        // A rewrite still to do in what goes is found again (`unslop::start`).
-        if let Some(i) = (w.base..k).find(|&i| crate::unslop::has_marker(&w.list[i])) {
+        // A rewrite still to do in what goes is found again (`rewrites::start`).
+        if let Some(i) = (w.base..k).find(|&i| crate::rewrites::has_marker(&w.list[i])) {
             self.rewrites_from = Some(self.rewrites_from.map_or(i, |r| r.min(i)));
         }
         for m in &mut w.list[w.base..k] {
@@ -479,7 +479,7 @@ impl Messages {
         }
         let n = self.len();
         let w = self.win.take().unwrap();
-        if let Some(i) = (w.base..n).find(|&i| crate::unslop::has_marker(&w.list[i])) {
+        if let Some(i) = (w.base..n).find(|&i| crate::rewrites::has_marker(&w.list[i])) {
             self.rewrites_from = Some(self.rewrites_from.map_or(i, |r| r.min(i)));
         }
         self.stored = n;
@@ -774,6 +774,12 @@ pub struct Conversation {
     /// (`tool_calls::run_call`). Unset, a coding conversation.
     #[serde(default, skip_serializing_if = "is_default")]
     pub chat: bool,
+    /// Code Mode (experimental, `crate::code_mode`): a coding conversation
+    /// whose one tool is REPL, JavaScript in a persistent context that
+    /// calls the other tools as functions. Other calls are refused at run
+    /// time (`tool_calls::run_call`); its subagents are ordinary ones.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub code_mode: bool,
     /// The transcript, in the Oak format (`crate::oak`): only ever
     /// appended to.
     pub messages: Messages,
@@ -827,13 +833,18 @@ pub struct Conversation {
     /// Only OAK knows; nothing about it is sent.
     #[serde(default)]
     pub goal_paused: bool,
-    /// While a goal is active, what the model asked to ask the user about
-    /// (REQUEST_ASK), waiting for the user to accept or decline; empty
-    /// when nothing waits.
-    #[serde(default)]
+    /// Questions the model asked with ASK while a goal was active, waiting
+    /// for the user's answers (the ASK's input; null when none). The model
+    /// carried on meanwhile; the answers reach it as a message
+    /// (`agent::Session::answer_questions`). A newer ASK replaces them.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub pending_ask: Value,
+    /// An older Oak's REQUEST_ASK waiting for the user (what the model
+    /// wanted to ask about), and whether the user accepted one. Read only,
+    /// to tell the model it is gone (`agent::retire_request_ask`).
+    #[serde(default, skip_serializing)]
     pub ask_request: String,
-    /// The user accepted a REQUEST_ASK: the model may call ASK once.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub ask_granted: bool,
     /// The model's session memory (NOTE_NEW / NOTE_UPDATE / NOTE_DELETE).
     #[serde(default)]
@@ -1045,7 +1056,7 @@ pub struct AgentRef {
 pub struct Note {
     pub id: u64,
     pub text: String,
-    /// Rewrite notes: the note rewritten for the notes box (`crate::unslop`),
+    /// Rewrite notes: the note rewritten for the notes box (`crate::rewrites`),
     /// dropped when it changes. Never sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewrite: Option<Rewrite>,
@@ -1059,8 +1070,8 @@ pub struct Rewrite {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// `Settings::unslop_notes_epoch` when it was made: one from an earlier
-    /// epoch is dropped and made again (`unslop::start_notes`).
+    /// The rewriter's epoch when it was made (`Rewriter::epoch`): one from
+    /// an earlier epoch is dropped and made again (`rewrites::start_notes`).
     #[serde(default, skip_serializing_if = "is_default")]
     pub epoch: u32,
 }
@@ -1521,6 +1532,8 @@ pub fn remove_conversation(id: &str) {
         let _ = std::fs::remove_file(conversations.join(name));
     }
     let _ = std::fs::remove_file(conversations.join(format!("{id}.json")));
+    // Its REPL context, if it was in Code Mode.
+    crate::code_mode::forget(id);
 }
 
 /// What `look` is given of a conversation as it is read: each message's
@@ -1876,20 +1889,6 @@ pub struct Settings {
     pub touchpad_speed: f32,
     /// The conversations open as tabs, in order.
     pub tabs: Vec<String>,
-    /// Unslop: the transcript shows the model's messages rewritten
-    /// (`crate::unslop`); what the model is sent is unchanged.
-    pub unslop: bool,
-    /// With Unslop, the transcript leaves out the model's drafts: only the
-    /// rewrites show.
-    pub unslop_no_drafts: bool,
-    /// With Unslop, thinking is rewritten too, as it streams in.
-    pub unslop_thinking: bool,
-    /// With Unslop, the notes box shows the notes rewritten.
-    pub unslop_notes: bool,
-    /// Counts the times rewritten notes stopped showing (Unslop or Rewrite
-    /// notes turned off): the rewrites made before are dropped, and made
-    /// again once both are on.
-    pub unslop_notes_epoch: u32,
     /// The model is told to tidy up its notes once they pass
     /// `agent::notes_alert_tokens`.
     pub notes_alert: bool,
@@ -1942,11 +1941,6 @@ impl Default for Settings {
             click_zoom: false,
             touchpad_speed: 3.0,
             tabs: vec![],
-            unslop: false,
-            unslop_no_drafts: false,
-            unslop_thinking: false,
-            unslop_notes: false,
-            unslop_notes_epoch: 0,
             notes_alert: true,
             notes_limit: crate::agent::DEFAULT_NOTES_LIMIT,
             title_model: crate::openrouter::TITLE_CHOICES[0].0.into(),

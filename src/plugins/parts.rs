@@ -541,7 +541,7 @@ impl Vault {
     }
 }
 
-/// Rows on the Settings page.
+/// Rows on a plugin's settings page (`App::plugin_settings_page`).
 pub(crate) struct SettingsSection {
     title: String,
     order: i32,
@@ -656,6 +656,86 @@ impl Hooks {
     }
 }
 
+/// What transcripts show in place of the model's words (`crate::rewrites`).
+pub(crate) struct Rewriter {
+    key: &'static str,
+    rewrites: Option<OakBits>,
+    rewrite: Option<OakRewrite>,
+    calls: Calls,
+    user: User,
+}
+
+impl Rewriter {
+    /// # Safety
+    /// As `HomeTab::new`.
+    pub(crate) unsafe fn new(d: &OakRewriter) -> Rewriter {
+        // (Kept for good, as the parts are: `parts()` lends them for good.)
+        let key: &'static str = Box::leak(unsafe { text(d.key) }.into_boxed_str());
+        Rewriter { key, rewrites: d.rewrites, rewrite: d.rewrite, calls: Calls { call: d.call, user: User(d.user) }, user: User(d.user) }
+    }
+}
+
+impl crate::rewrites::Rewriting for Rewriter {
+    fn key(&self) -> &'static str {
+        self.key
+    }
+
+    fn bits(&self) -> u32 {
+        // SAFETY: the plugin gave this function and pointer for this.
+        self.rewrites.map_or(0, |f| unsafe { f(self.user.0) })
+    }
+
+    fn epoch(&self) -> u32 {
+        match self.calls.ask("epoch", Value::Null) {
+            Answer::Ok(n, _) => n as u32,
+            _ => 0,
+        }
+    }
+
+    fn sections(&self, text: &str, done: bool) -> Option<Vec<(usize, usize)>> {
+        match self.calls.ask_with("sections", json!({"done": done}), text.as_bytes()) {
+            Answer::Ok(_, out) => {
+                let list: Vec<(usize, usize)> = serde_json::from_slice(&out).ok()?;
+                // (Ranges that don't fit the text go: what the plugin got wrong.)
+                Some(list.into_iter().filter(|&(a, b)| a < b && text.get(a..b).is_some()).collect())
+            }
+            _ => None,
+        }
+    }
+
+    fn rewrite(&self, text: &str, progress: &mut dyn FnMut(&str)) -> (Result<String, String>, f64) {
+        let Some(f) = self.rewrite else { return (Err("The rewriter can't rewrite.".into()), 0.0) };
+        unsafe extern "C" fn take(user: *mut c_void, text: OakStr) {
+            // SAFETY: `user` is the `progress` below, for this call.
+            let progress = unsafe { &mut *(user as *mut &mut dyn FnMut(&str)) };
+            progress(unsafe { oak_sdk::rt::str_of(text) });
+        }
+        let mut progress = progress;
+        let p = &mut progress as *mut &mut dyn FnMut(&str) as *mut c_void;
+        let mut cost = 0.0f64;
+        // SAFETY: as above; `cost` and the sink live through the call.
+        let (ok, out) = bytes_from(|out, user| unsafe { f(self.user.0, s(text), take, p, out, user, &mut cost) });
+        let said = String::from_utf8_lossy(&out).into_owned();
+        (if ok { Ok(said) } else { Err(said) }, if cost.is_finite() { cost } else { 0.0 })
+    }
+}
+
+/// A box beside the message box.
+pub(crate) struct ComposerBox {
+    show: Option<OakBody>,
+    user: User,
+}
+
+impl ComposerBox {
+    pub(crate) fn new(d: &OakComposerBox) -> ComposerBox {
+        ComposerBox { show: d.show, user: User(d.user) }
+    }
+
+    pub(crate) fn show(&self, ui: &mut Ui, app: &mut App) {
+        api::draw(self.show, self.user, ui, app);
+    }
+}
+
 /// Everything plugins registered (or one of them did: `plugins::Running`).
 #[derive(Clone, Default)]
 pub(crate) struct Parts {
@@ -669,9 +749,12 @@ pub(crate) struct Parts {
     pub(crate) fonts: Vec<Arc<FontDef>>,
     pub(crate) roles: Vec<Role>,
     pub(crate) vault: Option<Arc<Vault>>,
-    pub(crate) settings: Vec<Arc<SettingsSection>>,
+    /// By the id of the plugin that registered each (its settings page).
+    pub(crate) settings: Vec<(String, Arc<SettingsSection>)>,
     pub(crate) gates: Vec<Arc<Gate>>,
     pub(crate) hooks: Vec<Arc<Hooks>>,
+    pub(crate) rewriters: Vec<Arc<Rewriter>>,
+    pub(crate) composer_boxes: Vec<Arc<ComposerBox>>,
 }
 
 impl Parts {
@@ -689,5 +772,14 @@ impl Parts {
         self.settings.extend(more.settings);
         self.gates.extend(more.gates);
         self.hooks.extend(more.hooks);
+        self.rewriters.extend(more.rewriters);
+        self.composer_boxes.extend(more.composer_boxes);
+    }
+
+    /// The settings sections of the plugin `id`, in their order.
+    pub(crate) fn settings_of(&self, id: &str) -> Vec<Arc<SettingsSection>> {
+        let mut of: Vec<_> = self.settings.iter().filter(|(p, _)| p == id).map(|(_, s)| s.clone()).collect();
+        of.sort_by_key(|s| s.order());
+        of
     }
 }

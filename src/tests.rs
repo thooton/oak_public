@@ -102,10 +102,10 @@ fn chat_list_delete_menu() {
     }
 }
 
-/// Unslop in the transcript: "Drafted a message" over the rewrite (the
-/// model's own text only once the row is opened), the original with an
-/// error when the rewrite failed, "Drafting a message…" while the reply
-/// streams in, and the switch beside Settings.
+/// Rewrites (Unslop's) in the transcript: "Drafted a message" over the
+/// rewrite (the model's own text only once the row is opened), the
+/// original with an error when the rewrite failed, and "Drafting a
+/// message…" while the reply streams in.
 #[test]
 fn unslop_renders() {
     let (ctx, t) = test_ctx(true, true);
@@ -122,7 +122,7 @@ fn unslop_renders() {
         ].into(),
         ..Default::default()
     };
-    unslop::set(true);
+    rewrites::set_test(oak_sdk::abi::OAK_REWRITE_REPLIES, 0);
     let mut live = Live::default();
     live.busy = true;
     live.blocks = vec![serde_json::json!({"type": "text", "text": "Half a reply"})];
@@ -141,7 +141,7 @@ fn unslop_renders() {
         }
         texts = t2;
     }
-    unslop::set(false);
+    rewrites::set_test(0, 0);
     assert!(texts.iter().any(|x| x.contains("Looking now.")), "opened, the row shows the model's own text: {texts:?}");
 }
 

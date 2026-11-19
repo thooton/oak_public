@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 8;
+pub const OAK_API_VERSION: u32 = 9;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -218,6 +218,16 @@ c_callbacks! {
     /// Draws the cell at `row` and `column` into `ui` (`oak_table`,
     /// `oak_columns`).
     pub type OakCell = fn(user: *mut c_void, ui: *mut OakUi, row: usize, column: usize);
+    /// Takes one piece of text (what a rewrite wrote so far, an event of
+    /// a model's reply), borrowed for the call.
+    pub type OakTake = fn(user: *mut c_void, text: OakStr);
+    /// A number of `OAK_*` flags, asked now.
+    pub type OakBits = fn(user: *mut c_void) -> u32;
+    /// Rewrites `text`, waiting for the rewrite (on a thread of Oak's):
+    /// `progress` gets the rewrite so far whenever it grows; at the end
+    /// `out` gets the rewrite (true) or why it failed (false), and `cost`
+    /// what it cost, in dollars (0 when free).
+    pub type OakRewrite = fn(user: *mut c_void, text: OakStr, progress: OakTake, progress_user: *mut c_void, out: OakSink, out_user: *mut c_void, cost: *mut f64) -> bool;
 }
 
 /// What `OakCall` answers for a method it doesn't have.
@@ -667,13 +677,16 @@ c_structs! {
         pub call: Option<OakCall>,
     }
 
-    /// Rows on the Settings page, under a heading.
+    /// Rows on the plugin's own settings page, which its row on Home's
+    /// Plugins tab opens (a gear); under `title` when the plugin has
+    /// several, or one titled other than the plugin. (Earlier Oaks showed
+    /// them on Settings.)
     pub struct OakSettings {
         pub size: u32,
         pub flags: u32,
         pub user: *mut c_void,
         pub title: OakStr,
-        /// Lower first, after Oak's own rows.
+        /// Lower first.
         pub order: i32,
         pub show: Option<OakBody>,
     }
@@ -948,6 +961,57 @@ c_structs! {
         /// All its texts' sizes times this (in a scope: every component's,
         /// and egui's).
         pub text_scale: f32,
+    }
+
+    /// What a conversation's transcript shows in place of the model's own
+    /// words (`add_rewriter`): its replies' text, its thinking and its
+    /// notes, rewritten for the user as they come. What the model is sent
+    /// never changes. Oak keeps the work's state in the conversation, in
+    /// the blocks' `key` (saved with it, never sent), shows each rewrite
+    /// as it streams in (the model's own text a click away) and starts
+    /// the rewrites left unfinished again. Only the user's own
+    /// conversations are rewritten, not subagents'. One rewriter at a
+    /// time: the first registered.
+    pub struct OakRewriter {
+        pub size: u32,
+        pub flags: u32,
+        pub user: *mut c_void,
+        /// The key a block's rewrite is kept under: it starts with
+        /// `_oak_` (which no request carries). Keep it the same from one
+        /// version to the next, or saved rewrites stop showing.
+        pub key: OakStr,
+        /// What gets rewritten now: `OAK_REWRITE_*`. Asked often and from
+        /// any thread: answer quickly. Blocks marked already keep their
+        /// rewrites whatever it answers.
+        pub rewrites: Option<OakBits>,
+        /// Rewrites one piece: a reply's text block, a section of
+        /// thinking, a note. Several run at once, each on a thread of its
+        /// own.
+        pub rewrite: Option<OakRewrite>,
+        /// Its other calls. `sections` (`{"done"}`, the thinking not yet
+        /// marked as `data`): the complete sections of it to rewrite now,
+        /// as JSON `[[start, end], ...]` (byte offsets into `data`); with
+        /// `done` the thinking has ended and all of it goes. Without it,
+        /// a thinking block is rewritten whole once it ends. `epoch`: a
+        /// number the notes' rewrites are made under, answered as the
+        /// call's value; a note's rewrite made under another is made
+        /// again (without it, 0: they are kept).
+        pub call: Option<OakCall>,
+    }
+
+    /// A box in a conversation's message box row, left of its buttons
+    /// (`add_composer_box`), framed and as tall as the row's other boxes:
+    /// where switches for what a plugin does to every conversation go.
+    /// The row makes room for it only while one is registered, and drops
+    /// it before smart context when the window is narrow. Only the first
+    /// registered shows.
+    pub struct OakComposerBox {
+        pub size: u32,
+        pub flags: u32,
+        pub user: *mut c_void,
+        /// Draws inside the frame: `ui` lays out top to bottom, as wide as
+        /// the box less its margins.
+        pub show: Option<OakBody>,
     }
 }
 
@@ -1368,6 +1432,16 @@ c_consts! {
     /// `OakTable`: rows lit under the pointer and clicked; no heading row.
     pub const OAK_TABLE_CLICK = 1 << 0;
     pub const OAK_TABLE_NO_HEAD = 1 << 1;
+
+    /// `OakRewriter.rewrites`: the replies' text, as each reply ends; the
+    /// thinking, as it streams in, and the notes, for the notes box (both
+    /// only with the replies'); and the
+    /// model's drafts left out of the transcript (only the rewrites show,
+    /// not the "Drafted a message" rows that open on the model's text).
+    pub const OAK_REWRITE_REPLIES = 1 << 0;
+    pub const OAK_REWRITE_THINKING = 1 << 1;
+    pub const OAK_REWRITE_NOTES = 1 << 2;
+    pub const OAK_REWRITE_NO_DRAFTS = 1 << 3;
 }
 
 /// A width that takes all there is (`OakTextEdit.width`).
@@ -1874,6 +1948,29 @@ c_api! {
     /// outlines, text scale and code font apply to every component in it
     /// (and egui's widgets take its colors); scopes in scopes add to it.
     fn oak_look_scope(ui: *mut OakUi, look: *const OakLook, body: OakBody, user: *mut c_void);
+
+    // Version 9: parts (only inside `init`).
+
+    /// What transcripts show in place of the model's words.
+    fn add_rewriter(part: *const OakRewriter);
+    /// A box beside the message box.
+    fn add_composer_box(part: *const OakComposerBox);
+
+    // Version 9: any thread but the UI's.
+
+    /// Asks a model for a reply through one of Oak's providers, with the
+    /// user's logins and keys, and waits for it to end. `request` is JSON:
+    /// `{"model", "provider"?, "messages", "system"?, "max_tokens"?,
+    /// "thinking"?, "effort"?, "usage"?}`; `messages` in Oak's format
+    /// (`{"role", "content": [{"type": "text", "text"}]}`), `provider` an
+    /// id ("openrouter", "claude", ...; by default whoever serves
+    /// `model`), `usage` the name the usage log gives the request (by
+    /// default "plugin"). No prompt cache is written. Each event of the
+    /// reply goes to `event` as it streams in, as JSON: `{"text"}` (more of
+    /// the reply), `{"thinking"}`, `{"cost"}` (dollars, where the provider
+    /// charges), `{"retry"}` (why it is tried again). True: the reply
+    /// ended; false: `error` got why it failed.
+    fn model_stream(request: OakStr, event: OakTake, user: *mut c_void, error: OakSink, error_user: *mut c_void) -> bool;
 }
 
 /// The C header: everything declared above, in C.

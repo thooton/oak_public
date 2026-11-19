@@ -484,6 +484,11 @@ impl Proc {
         self.state.lock().unwrap().exit
     }
 
+    /// The file its output goes to (both streams).
+    pub fn log_path(&self) -> &Path {
+        &self.files.log
+    }
+
     pub fn elapsed(&self) -> Duration {
         let end = self.state.lock().unwrap().ended_ms.unwrap_or_else(now_ms);
         Duration::from_millis((end - self.started_ms).max(0) as u64)

@@ -549,7 +549,10 @@ fn apply(first: bool) -> Changes {
         if first {
             crate::startup::step(format!("plugin {} started", info.id));
         }
-        let parts = REGISTERING.lock().unwrap().take().unwrap_or_default();
+        let mut parts = REGISTERING.lock().unwrap().take().unwrap_or_default();
+        for (of, _) in &mut parts.settings {
+            of.clone_from(&info.id);
+        }
         let mut found = FOUND.lock().unwrap();
         let name = name_of(info);
         let again = slots.iter().any(|(id, _, _)| *id == info.id);
@@ -696,7 +699,7 @@ pub fn report() -> i32 {
     }
     let p = parts();
     println!(
-        "Registered: {} Home tab{}, {} tab kind{}, {} New kind{}, {} cloud backend{}, {} session kit{}, {} theme{}, {} font{}, {} role{}, {} settings section{}, {} gate{}, {} hook set{}, {}.",
+        "Registered: {} Home tab{}, {} tab kind{}, {} New kind{}, {} cloud backend{}, {} session kit{}, {} theme{}, {} font{}, {} role{}, {} settings section{}, {} gate{}, {} hook set{}, {} rewriter{}, {} composer box{}, {}.",
         p.home_tabs.len(), oak_sdk::plural(p.home_tabs.len()),
         p.tab_kinds.len(), oak_sdk::plural(p.tab_kinds.len()),
         p.new_kinds.len(), oak_sdk::plural(p.new_kinds.len()),
@@ -708,6 +711,8 @@ pub fn report() -> i32 {
         p.settings.len(), oak_sdk::plural(p.settings.len()),
         p.gates.len(), oak_sdk::plural(p.gates.len()),
         p.hooks.len(), oak_sdk::plural(p.hooks.len()),
+        p.rewriters.len(), oak_sdk::plural(p.rewriters.len()),
+        p.composer_boxes.len(), oak_sdk::plural(p.composer_boxes.len()),
         if p.vault.is_some() { "a vault" } else { "no vault" },
     );
     found.iter().any(|f| f.trouble.is_some()) as i32
@@ -1008,8 +1013,9 @@ mod tests {
     }
 
     /// The example plugins, loaded into the whole app, headless: the Rust
-    /// one's tab on Home draws and takes clicks, its theme and its row are
-    /// on Settings, its role on the New screen; the C one (built here from
+    /// one's tab on Home draws and takes clicks, its theme is on Settings,
+    /// its row on its own settings page (from its gear on Home's Plugins
+    /// tab), its role on the New screen; the C one (built here from
     /// the header alone) draws its tab, counts clicks and takes typing;
     /// Home's Plugins tab lists both and switches one off and on.
     /// Needs the Rust plugin built, and no other test in the process
@@ -1057,20 +1063,39 @@ mod tests {
         assert!(matches!(app.screen, Screen::New) && app.page == Page::Chats);
         assert!(texts(&shown).contains("Haiku"), "its role is offered: {}", texts(&shown));
 
-        // Settings: its theme and its row.
+        // Settings: its theme, and not its row (that is on its own page).
         app.page = Page::Settings;
         let shown = frames(&mut app, vec![]);
         let all = texts(&shown);
-        for want in ["Moss", "A row the example plugin adds."] {
-            assert!(all.contains(want), "{want} isn't on Settings: {all}");
-        }
+        assert!(all.contains("Moss"), "Moss isn't on Settings: {all}");
+        assert!(!all.contains("A row the example plugin adds."), "a plugin's row is on Settings: {all}");
         let before = ctx.global_style().visuals.panel_fill;
         frames(&mut app, click(rect_of(&shown, "Moss").center(), Primary));
         assert_eq!(app.settings.theme, "moss");
         let after = ctx.global_style().visuals.panel_fill;
         assert_ne!(before, after, "the theme is applied");
+
+        // Its settings page: the gear on its row on Home's Plugins tab
+        // opens it, under its name; Esc goes back to the tab.
+        let gear_of = |shown: &[(String, eframe::egui::Rect)], name: &str| {
+            let row = shown.iter().filter(|(x, _)| x == name).map(|(_, r)| *r).next_back().unwrap_or_else(|| panic!("no {name} row: {}", texts(shown)));
+            shown.iter().find(|(x, r)| x == crate::composer::GEAR_ICON && (r.center().y - row.center().y - 9.0).abs() < 14.0).map(|(_, r)| *r)
+        };
+        app.page = Page::Home;
+        app.home_menu = true;
+        app.home_list = crate::plugins_view::TAB.to_string();
+        let shown = frames(&mut app, vec![]);
+        let gear = gear_of(&shown, "Hello").unwrap_or_else(|| panic!("Hello's row has no gear: {}", texts(&shown)));
+        assert!(gear_of(&shown, "Hello C").is_none(), "a plugin without settings has a gear");
+        let shown = frames(&mut app, click(gear.center(), Primary));
+        assert!(app.page == Page::PluginSettings && app.plugin_settings == "hello");
+        assert!(enabled("hello"), "the gear's click doesn't flip the switch");
+        let all = texts(&shown);
+        assert!(all.contains("Hello") && all.contains("A row the example plugin adds."), "{all}");
+        frames(&mut app, vec![crate::app_hover_test::key(eframe::egui::Key::Escape, eframe::egui::Modifiers::NONE)]);
+        assert!(app.page == Page::Home && app.home_list == crate::plugins_view::TAB);
         // Its row's button goes to its tab.
-        app.home_list = String::new();
+        app.open_plugin_settings("hello");
         let shown = frames(&mut app, vec![]);
         frames(&mut app, click(rect_of(&shown, "Open its tab").center(), Primary));
         assert!(app.page == Page::Home && app.home_list == "hello");
@@ -1116,7 +1141,7 @@ mod tests {
 
     /// Whatever plugins `OAK_PLUGINS` holds, loaded into the whole app,
     /// headless: each loads, and each part that draws does so without
-    /// panicking (every Home tab, every theme, Settings, Home's Plugins tab, every choice on
+    /// panicking (every Home tab, every theme, Settings, each plugin's settings page, Home's Plugins tab, every choice on
     /// the New screen, and the tabs `OAK_PLUGIN_TABS` names, separated by
     /// commas), in a scratch Oak folder (`scratch_folder`). For a plugin's
     /// own repository to run against its build:
@@ -1173,6 +1198,11 @@ mod tests {
         }
         app.page = Page::Settings;
         frames(&mut app, "Settings");
+        let configured: Vec<String> = p.settings.iter().map(|(id, _)| id.clone()).collect();
+        for id in configured {
+            app.open_plugin_settings(&id);
+            frames(&mut app, &format!("the settings of {id}"));
+        }
         app.page = Page::Home;
         app.home_list = crate::plugins_view::TAB.to_string();
         frames(&mut app, "Home's Plugins tab");

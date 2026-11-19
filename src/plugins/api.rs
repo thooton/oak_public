@@ -480,7 +480,7 @@ impl HostApi for Oak {
     }
 
     unsafe extern "C" fn add_settings(part: *const OakSettings) {
-        registering(|p| p.settings.push(Arc::new(parts::SettingsSection::new(&read(part)))));
+        registering(|p| p.settings.push((String::new(), Arc::new(parts::SettingsSection::new(&read(part))))));
     }
 
     unsafe extern "C" fn add_gate(part: *const OakGate) {
@@ -489,6 +489,19 @@ impl HostApi for Oak {
 
     unsafe extern "C" fn add_hooks(part: *const OakHooks) {
         registering(|p| p.hooks.push(Arc::new(parts::Hooks::new(&read(part)))));
+    }
+
+    unsafe extern "C" fn add_rewriter(part: *const OakRewriter) {
+        let d = read(part);
+        if !text(d.key).starts_with("_oak_") {
+            crate::log_crash("a plugin's rewriter keeps its rewrites under a key that doesn't start with _oak_ (it would reach the model): left out");
+            return;
+        }
+        registering(|p| p.rewriters.push(Arc::new(parts::Rewriter::new(&d))));
+    }
+
+    unsafe extern "C" fn add_composer_box(part: *const OakComposerBox) {
+        registering(|p| p.composer_boxes.push(Arc::new(parts::ComposerBox::new(&read(part)))));
     }
 
     // ---- services
@@ -2016,6 +2029,72 @@ impl HostApi for Oak {
             crate::log_crash(&format!("plugin {plugin}: prefs_set {key}: {e}"));
         }
     }
+
+    unsafe extern "C" fn model_stream(request: OakStr, event: OakTake, user: *mut c_void, error: OakSink, error_user: *mut c_void) -> bool {
+        use crate::api::Sse;
+        use crate::oak::Event;
+        let fail = |e: &str| {
+            give_text(error, error_user, e);
+            false
+        };
+        let req = match serde_json::from_str::<Value>(str_of(request)).map_err(|e| e.to_string()).and_then(|r| plugin_request(&r)) {
+            Ok(r) => r,
+            Err(e) => return fail(&e),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || crate::api::stream_messages(req, tx));
+        let tell = |v: Value| {
+            let json = v.to_string();
+            event(user, oak_sdk::rt::s(&json));
+        };
+        for m in rx {
+            match m {
+                Sse::Event(Event::Text { text, .. }) => tell(json!({"text": text})),
+                Sse::Event(Event::Reasoning { text, .. }) => tell(json!({"thinking": text})),
+                Sse::Event(Event::Cost(c)) => tell(json!({"cost": c})),
+                Sse::Event(Event::Retry { reason, .. }) => tell(json!({"retry": reason})),
+                Sse::Done => return true,
+                Sse::Err(e) => return fail(&e),
+                Sse::Limit(_) => return fail("Every account is at its usage limit."),
+                _ => {}
+            }
+        }
+        fail("The reply ended early.")
+    }
+}
+
+/// A plugin's request (`model_stream`) as Oak asks for one.
+fn plugin_request(r: &Value) -> Result<crate::oak::Request, String> {
+    let model = r["model"].as_str().filter(|m| !m.is_empty()).ok_or("The request names no model.")?.to_string();
+    let provider = match r["provider"].as_str().filter(|p| !p.is_empty()) {
+        Some(id) => crate::providers::Kind::from_id(id).ok_or_else(|| format!("Oak has no provider \"{id}\"."))?,
+        None => crate::providers::Kind::of(&model),
+    };
+    let messages = r["messages"].as_array().filter(|m| !m.is_empty()).ok_or("The request has no messages.")?.clone();
+    Ok(crate::oak::Request {
+        provider,
+        model,
+        max_tokens: r["max_tokens"].as_u64().unwrap_or(16000),
+        system: r["system"].as_str().unwrap_or("").to_string(),
+        messages,
+        thinking: r["thinking"].as_bool().unwrap_or(false),
+        effort: r["effort"].as_str().map(str::to_string),
+        purpose: crate::oak::Purpose::Plugin(usage_name(r["usage"].as_str().unwrap_or("plugin"))),
+        ttl: crate::oak::Ttl::Off,
+        ..Default::default()
+    })
+}
+
+/// A usage log name, kept for good (each name once).
+fn usage_name(name: &str) -> &'static str {
+    static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap();
+    if let Some(n) = names.iter().find(|n| **n == name) {
+        return n;
+    }
+    let n: &'static str = Box::leak(name.to_string().into_boxed_str());
+    names.push(n);
+    n
 }
 
 /// `flags` with `flag` set when `on`.
@@ -2111,6 +2190,23 @@ mod tests {
     use eframe::egui::PointerButton::Primary;
     use oak_sdk::egui as sdk;
     use std::sync::Mutex;
+
+    /// A plugin's model request becomes Oak's: the provider it names (else
+    /// the model's), its usage log by name, no cache; and a bad one says why.
+    #[test]
+    fn plugin_requests() {
+        let msgs = json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}]);
+        let r = plugin_request(&json!({"provider": "openrouter", "model": "google/gemma-4-31b-it", "usage": "unslop", "messages": msgs})).unwrap();
+        assert_eq!(r.provider, crate::providers::Kind::OpenRouter);
+        assert_eq!((r.max_tokens, r.thinking, r.ttl), (16000, false, crate::oak::Ttl::Off));
+        assert_eq!(r.purpose, crate::oak::Purpose::Plugin("unslop"));
+        assert_eq!(r.purpose.id(), "unslop");
+        let r = plugin_request(&json!({"model": "claude-opus-4-5", "max_tokens": 10, "messages": msgs})).unwrap();
+        assert_eq!((r.provider, r.max_tokens, r.purpose.id()), (crate::providers::Kind::Claude, 10, "plugin"));
+        assert!(plugin_request(&json!({"provider": "nowhere", "model": "m", "messages": msgs})).unwrap_err().contains("nowhere"));
+        assert!(plugin_request(&json!({"model": "m", "messages": []})).is_err());
+        assert!(plugin_request(&json!({"messages": msgs})).is_err());
+    }
 
     /// Draws a frame of `page` through the SDK's wrappers, which call
     /// Oak's table in this process as a loaded plugin's do; what it painted.

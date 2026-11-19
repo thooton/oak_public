@@ -126,19 +126,40 @@ impl Worker {
         }
     }
 
-    /// ASK: shows the questions and waits for the answers, or for the user
-    /// to skip them. Messages written meanwhile stay queued until then.
+    /// ASK: shows the questions. While a goal is active it returns at once
+    /// and the model carries on: the questions wait with the conversation
+    /// (`Conversation::pending_ask`) and the answers come as a message
+    /// (`Session::answer_questions`). Otherwise it waits for the answers,
+    /// or for the user to skip them, and messages written meanwhile stay
+    /// queued until then. Either way it replaces questions of an earlier
+    /// ASK still unanswered, and says so.
     fn ask_user(&self, input: &Value) -> (Result<String, String>, bool) {
-        let ask = Ask::new(input).and_then(|ask| {
-            let mut c = self.conv.lock().unwrap();
-            let gate = ask_gate(&mut c);
-            c.save();
-            gate.map(|()| ask)
-        });
-        let ask = match ask {
+        let ask = match Ask::new(input) {
             Ok(ask) => ask,
             Err(e) => return (Err(e), false),
         };
+        let (goal, replaced) = {
+            let mut c = self.conv.lock().unwrap();
+            let goal = goal_active(&c);
+            let replaced = std::mem::take(&mut c.pending_ask);
+            if goal {
+                c.pending_ask = json!({"questions": input["questions"]});
+            }
+            if goal || !replaced.is_null() {
+                c.save();
+            }
+            (goal, Ask::new(&replaced).ok())
+        };
+        let replaced = replaced.map_or(String::new(), |r| {
+            format!(
+                "\n\nThis ASK replaced your earlier one, which the user hadn't answered (they no longer see it):\n{}If you still want those answered too, call ASK again with the full list of questions you want answered: each ASK replaces the one before.",
+                r.listed()
+            )
+        });
+        if goal {
+            self.set(|l| l.ask = Some(Ask { background: true, ..ask }));
+            return (Ok(format!("{ASKED_DURING_GOAL}{replaced}")), false);
+        }
         self.set(|l| {
             l.ask = Some(ask);
             l.status = "Waiting for your answer".into();
@@ -155,7 +176,7 @@ impl Worker {
                     let answers = l.ask.take().unwrap().answers();
                     drop(l);
                     self.ctx.request_repaint();
-                    return (Ok(answers), false);
+                    return (Ok(format!("{answers}{replaced}")), false);
                 }
                 // Messages written meanwhile wait in the queue: only
                 // answering or skipping ends the wait.
@@ -168,7 +189,7 @@ impl Worker {
                     };
                     drop(l);
                     self.ctx.request_repaint();
-                    return (Ok(text.into()), false);
+                    return (Ok(format!("{text}{replaced}")), false);
                 }
             }
             if !self.nap(Duration::from_millis(100)) {
@@ -257,7 +278,7 @@ impl Worker {
     }
 
     /// Remembers a file the model just read, wrote or edited, as it is now.
-    fn track(&self, name: &str, input: &Value) {
+    pub(super) fn track(&self, name: &str, input: &Value) {
         if let ("READ" | "WRITE" | "EDIT", Some(p)) = (name, input["path"].as_str()) {
             let folder = self.conv.lock().unwrap().folder.clone();
             self.files.lock().unwrap().record(&tools::resolve(&folder, p));
@@ -275,9 +296,19 @@ impl Worker {
         })
     }
 
+    /// Why a Code Mode conversation (`Conversation::code_mode`) won't run a
+    /// call made directly, not from a REPL script (`repl::FROM_SCRIPT`).
+    fn code_mode_refuses(&self, call: &Value) -> Option<String> {
+        let code_mode = self.conv.lock().unwrap().code_mode;
+        (code_mode && call.get(super::repl::FROM_SCRIPT).is_none()).then(|| {
+            let name = call["name"].as_str().unwrap_or("");
+            format!("In Code Mode your one tool is REPL: call {name} from a script there, as `await {name}({{...}})`.")
+        })
+    }
+
     /// Runs one tool call and returns its tool_result block, and whether
     /// the user sent a message.
-    fn run_call(&self, call: &Value, stop: &str) -> (Value, bool) {
+    pub(super) fn run_call(&self, call: &Value, stop: &str) -> (Value, bool) {
         // A family's call (`TASK` with an action) runs as its action's tool.
         let canon = tools::canonical(call["name"].as_str().unwrap_or(""), &call["input"]);
         let (name, input) = match &canon {
@@ -291,6 +322,11 @@ impl Worker {
         } else if let Some(e) = self.chat_refuses(name) {
             // First: a chat runs nothing else, whatever the call is.
             (e, true, false)
+        } else if call["name"] == "REPL" {
+            return self.repl_call(call, stop);
+        } else if let Some(e) = self.code_mode_refuses(call) {
+            // Code Mode runs the rest from a script only.
+            (e, true, false)
         } else if name == "LOAD" {
             return self.load(call, input, stop);
         } else if let Some(e) = self.unloaded(name) {
@@ -301,6 +337,8 @@ impl Worker {
             return self.browser_call(call, canon.as_ref().ok().map(|(n, i)| (n.as_str(), i)));
         } else if cfg!(windows) && (call["name"] == "WINDOW" || name.starts_with("WINDOW_")) && canon.is_ok() {
             return self.window_call(call, name, input);
+        } else if name == "REQUEST_ASK" {
+            (REQUEST_ASK_GONE.to_string(), true, false)
         } else if let Err(e) = &canon {
             (format!("Invalid input: {e}"), true, false)
         } else if let Err(e) = tools::validate(name, input) {
@@ -699,7 +737,6 @@ impl Worker {
                 return self.abandonable("Fetch", move || crate::web::fetch(&input));
             }
             "ASK" => return self.ask_user(input),
-            "REQUEST_ASK" => self.edit(|c| request_ask(c, input)),
             "CD" => self.edit(|c| change_folder(c, input, &instructions::home())),
             "NOTE_NEW" | "NOTE_UPDATE" | "NOTE_DELETE" | "HEARTBEAT_START" | "HEARTBEAT_STOP" | "GOAL_JUSTIFICATION" | "GOAL_FINISH" => {
                 self.edit(|c| memory_tool(c, name, input, api::now_ms()))
@@ -885,35 +922,25 @@ impl Worker {
             Ok(started) => started,
             Err(e) => return (Err(e), false),
         };
-        // The output shows under the call's row as it comes in.
-        let _streaming = tasks::Streaming::new(call_id, &p);
-        let mut shown_lines = 0;
-        let t = Instant::now();
-        loop {
-            if let Some(code) = p.exit() {
-                let (out, _) = p.take_new(usize::MAX);
+        let summary = input["summary"].as_str().unwrap_or("");
+        match self.run_command(call_id, &p, timeout, summary) {
+            Ran::Exited { out, code } => {
                 // How long it ran, when that is worth knowing.
                 let ran = p.elapsed();
                 let ran = if ran >= Duration::from_secs(1) { format!(", ran {}", tasks::fmt_took(ran)) } else { String::new() };
                 // Not clipped: a long output is saved whole (see run_call).
-                return (Ok(format!("{}\n[exit code {code}{ran}]", out.trim_end())), false);
+                (Ok(format!("{}\n[exit code {code}{ran}]", out.trim_end())), false)
             }
-            if self.ultra() {
-                // Ultrapause: killed, not moved to the background.
-                p.kill();
-                let (out, _) = p.take_new(MAX_OUTPUT);
+            Ran::Killed { out, took } => {
                 let msg = format!(
                     "Output so far:\n{}\n\nThe user stopped everything (ultrapause), so the command was killed after {}.",
                     if out.trim().is_empty() { "(none)" } else { out.trim_end() },
-                    tasks::fmt_took(t.elapsed())
+                    tasks::fmt_took(took)
                 );
-                return (Err(msg), true);
+                (Err(msg), true)
             }
-            let interrupted = self.interrupted();
-            if interrupted || t.elapsed() > timeout {
-                let (out, more) = p.take_new(MAX_OUTPUT);
-                let id = self.adopt(&p, input["summary"].as_str().unwrap_or(""));
-                let took = tasks::fmt_took(t.elapsed());
+            Ran::Moved { out, more, id, took, interrupted } => {
+                let took = tasks::fmt_took(took);
                 let why = if interrupted {
                     format!("The user sent a message after the command had run for {took}, so it was moved to the background")
                 } else {
@@ -924,7 +951,35 @@ impl Worker {
                     "Output so far:\n{}\n\n{why}: it is now task {id} and still running.{more} Use TASK action=output with id {id} to read new output; you will be notified when it finishes.",
                     if out.is_empty() { "(none)" } else { out.trim_end() }
                 );
-                return (Ok(msg), interrupted);
+                (Ok(msg), interrupted)
+            }
+        }
+    }
+
+    /// Waits for a command started for call `call_id` (its output shows
+    /// under the call's row meanwhile, unless the id is empty) to exit:
+    /// ultrapause kills it; an interrupt or `timeout` moves it to the
+    /// background, as a task (`summary` says what it is).
+    pub(super) fn run_command(&self, call_id: &str, p: &Arc<Proc>, timeout: Duration, summary: &str) -> Ran {
+        let _streaming = tasks::Streaming::new(call_id, p);
+        let mut shown_lines = 0;
+        let t = Instant::now();
+        loop {
+            if let Some(code) = p.exit() {
+                let (out, _) = p.take_new(usize::MAX);
+                return Ran::Exited { out, code };
+            }
+            if self.ultra() {
+                // Ultrapause: killed, not moved to the background.
+                p.kill();
+                let (out, _) = p.take_new(MAX_OUTPUT);
+                return Ran::Killed { out, took: t.elapsed() };
+            }
+            let interrupted = self.interrupted();
+            if interrupted || t.elapsed() > timeout {
+                let (out, more) = p.take_new(MAX_OUTPUT);
+                let id = self.adopt(p, summary);
+                return Ran::Moved { out, more, id, took: t.elapsed(), interrupted };
             }
             // New output: a frame for the row, unless the transcript isn't
             // being drawn (it catches up when it is).
@@ -944,6 +999,17 @@ impl Worker {
     }
 }
 
+/// How a command `Worker::run_command` waited for ended.
+pub(super) enum Ran {
+    /// With its exit code and all its output.
+    Exited { out: String, code: i32 },
+    /// Ultrapause killed it: its output so far.
+    Killed { out: String, took: Duration },
+    /// It became task `id`, after an interrupt or its timeout: its output
+    /// so far (`more` waiting).
+    Moved { out: String, more: bool, id: u64, took: Duration, interrupted: bool },
+}
+
 /// How often a running EXECUTE looks at what isn't its command's exit (an
 /// interrupt, ultrapause, the timeout, new output to show); the exit itself
 /// ends the wait at once.
@@ -960,39 +1026,19 @@ pub(crate) fn execute_timeout(input: &Value) -> Result<Duration, String> {
     }
 }
 
-/// While a goal is active, ASK needs the user's leave: a REQUEST_ASK they
-/// accepted, which this ASK uses up. Without a goal, ASK always works.
-pub(crate) fn ask_gate(c: &mut Conversation) -> Result<(), String> {
-    if c.goal.is_empty() || std::mem::take(&mut c.ask_granted) {
-        return Ok(());
-    }
-    let waiting = if c.ask_request.is_empty() {
-        "Call REQUEST_ASK with what you want to ask the user about, and keep working on the goal".to_string()
-    } else {
-        format!("Your REQUEST_ASK (about: {}) is still waiting for the user, so keep working on the goal", c.ask_request)
-    };
-    Err(format!("ASK isn't available while a goal is active. {waiting}: if the user accepts, a message tells you so, and you may then call ASK once."))
-}
+/// What ASK returns while a goal is active (its questions wait for the
+/// user, and the turn goes on).
+pub(crate) const ASKED_DURING_GOAL: &str = "The questions are shown to the user, who is asked asynchronously since a goal is active: this doesn't wait for their answers, so keep working on the goal meanwhile, on what doesn't depend on them. When the user answers (or skips the questions), a message brings you the questions and their answers together.";
 
-/// REQUEST_ASK: shows the user what the model wants to ask them about,
-/// for them to accept or decline (`Session::answer_ask_request`). It
-/// returns at once.
-fn request_ask(c: &mut Conversation, input: &Value) -> Result<String, String> {
-    let about = input["about"].as_str().unwrap_or("").trim();
-    if about.is_empty() {
-        return Err("`about` is empty: say what you want to ask the user about.".into());
-    }
-    if c.goal.is_empty() {
-        return Err("No goal is active, so you don't need REQUEST_ASK: call ASK directly.".into());
-    }
-    if c.ask_granted {
-        return Err("The user already accepted a request: you may call ASK once now.".into());
-    }
-    if !c.ask_request.is_empty() {
-        return Err(format!("A request is already waiting for the user (about: {}). You'll get a message when they answer it.", c.ask_request));
-    }
-    c.ask_request = about.to_string();
-    Ok("The request is shown to the user. Keep working on the goal meanwhile: if they accept, a message tells you so (with your next request), and you may then call ASK once. If they decline, a message tells you that instead.".into())
+/// What a call of REQUEST_ASK gets (a conversation an older Oak started
+/// still has it in its tool list).
+pub(crate) const REQUEST_ASK_GONE: &str = "REQUEST_ASK is gone: call ASK with your questions instead. While a goal is active it doesn't wait: the user is asked asynchronously, you keep working, and their answers come later in a message.";
+
+/// Whether ASK asks asynchronously: a goal is set, not paused and not
+/// finished (then ending the turn hands control back to the user, who can
+/// answer at once).
+pub(crate) fn goal_active(c: &Conversation) -> bool {
+    !c.goal.is_empty() && !c.goal_paused && !c.goal_finished
 }
 
 /// CD: the conversation's working folder becomes `path` (`tools::folder_path`,
@@ -1208,14 +1254,8 @@ fn early_ok(call: &Value) -> bool {
     call["name"] != "ASK" && call.get("_oak_raw").is_none()
 }
 
-/// The goal changed or ended: a REQUEST_ASK waiting for the user, or one
-/// they accepted, goes with it.
-pub(crate) fn end_ask_request(c: &mut Conversation) {
-    c.ask_request.clear();
-    c.ask_granted = false;
-}
 /// For each of a reply's tool calls, the calls before it that it waits
-/// for; the rest run at the same time. ASK and CD wait for all before
+/// for; the rest run at the same time. ASK, CD and REPL wait for all before
 /// them, and all after them wait for them (they run on their own); a call on a file waits
 /// for the calls before it on that file when one of them writes it
 /// (WRITE, EDIT, a SCREENSHOT saved there). Calls on one file thus run in
@@ -1239,7 +1279,8 @@ pub(crate) fn waits_for(calls: &[Value], folder: &Path) -> Vec<Vec<usize>> {
                 paths.push("\0browser".into());
             }
             // CD changes what every later call's paths and commands mean.
-            (paths, browser || matches!(name, "WRITE" | "EDIT" | "SCREENSHOT"), matches!(name, "ASK" | "CD"))
+            // REPL scripts share one context: one at a time, in order.
+            (paths, browser || matches!(name, "WRITE" | "EDIT" | "SCREENSHOT"), matches!(name, "ASK" | "CD" | "REPL"))
         })
         .collect();
     (0..calls.len())

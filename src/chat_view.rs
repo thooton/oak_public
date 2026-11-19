@@ -171,8 +171,6 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
     // (Out while the items borrow the rest; back before the lock goes.)
     let mut ask = live.ask.take();
     let mut action = None;
-    // The user's answer to a REQUEST_ASK, applied once the locks are let go.
-    let mut ask_reply = None;
     // The conversation's items, kept from an earlier frame while it is
     // unchanged (`Built`), unless calls ran while their reply still
     // streams in: their results are the reply's.
@@ -194,7 +192,8 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         };
         let mut tail = tail_sig(&conv, &live, editing) ^ agents_pausing as u64;
         if let Some(a) = &ask {
-            tail ^= a.questions.len() as u64 + 1;
+            // (Another ASK can replace them, as many questions or not.)
+            tail ^= a.questions.iter().fold(a.background as u64 + 1, |h, q| h.wrapping_mul(31).wrapping_add(q.text.len() as u64 + q.options.len() as u64));
         }
         if crate::approval::waiting(id) {
             tail ^= 0x9e37_79b9;
@@ -229,9 +228,6 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
             {
                 a.sent = true;
             }
-            if !conv.ask_request.is_empty() {
-                ask_reply = ask_request_view(ui, t, &conv.ask_request).or(ask_reply);
-            }
             crate::approval::view(ui, t, id);
             action = queue_view(ui, t, id, &live.queued, editing);
         };
@@ -254,12 +250,15 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
     if let Some(b) = built {
         b.put_back(id, ui.ctx().cumulative_pass_nr());
     }
+    // Answers to questions asked during a goal go to the model as a
+    // message, once the locks are let go.
+    let answered = ask.take_if(|a| a.background && (a.sent || a.skipped));
     live.ask = ask;
     live.shown = Some((std::time::Instant::now(), shown_from));
     drop(live);
     drop(conv);
-    if let Some(accept) = ask_reply {
-        s.answer_ask_request(accept);
+    if let Some(a) = answered {
+        s.answer_questions(a);
     }
     action
 }
@@ -597,9 +596,9 @@ mod tests {
                 // The reply's rewrite streams in, a few words a frame.
                 0 => {
                     let mut c = shared.lock().unwrap();
-                    c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Earlier.", unslop::KEY: {"id": "kept-early"}}]}));
+                    c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Earlier.", rewrites::key(): {"id": "kept-early"}}]}));
                     c.messages.push(serde_json::json!({"role": "user", "content": [{"type": "text", "text": "Go on"}]}));
-                    c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Latest.", unslop::KEY: {"id": "kept-latest"}}]}));
+                    c.messages.push(serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Latest.", rewrites::key(): {"id": "kept-latest"}}]}));
                 }
                 // A reply ending in text (whether it ends the turn depends
                 // on what streams in after it), then a call and its result
@@ -642,8 +641,8 @@ mod tests {
             }
             let before = builds();
             for (i, live) in lives.iter().enumerate() {
-                unslop::set_job_text("kept-early", &"early ".repeat(i));
-                unslop::set_job_text("kept-latest", &"latest ".repeat(i));
+                rewrites::set_job_text("kept-early", &"early ".repeat(i));
+                rewrites::set_job_text("kept-latest", &"latest ".repeat(i));
                 let conv = shared.lock().unwrap();
                 let (units, sigs, msgs, split) = fresh(&conv, live);
                 let mut b = Built::take(id, &conv);

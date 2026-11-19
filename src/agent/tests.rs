@@ -430,50 +430,111 @@ fn a_revert_before_a_load_unloads_its_kit() {
     assert_eq!(c.prefix.sys.iter().map(|m| m.at).collect::<Vec<_>>(), [3]);
 }
 
-/// While a goal is active, ASK needs a REQUEST_ASK the user accepted,
-/// and then works once. Without a goal, ASK works as it always did.
+/// ASK without an active goal waits for the answers. During a goal it
+/// returns at once, its questions wait with the conversation, and the
+/// answers come as a message with them. A new ASK replaces questions not
+/// yet answered and says which, so the model can ask the full list again.
 #[test]
-fn request_ask_gates_ask_during_a_goal() {
-    let (w, s) = idle_worker("request-ask", Conversation::default());
-    let question = json!({"questions": [{"question": "Which one?", "options": ["a", "b"]}]});
-    // No goal: REQUEST_ASK isn't needed, and ASK isn't gated.
-    assert!(w.tool("REQUEST_ASK", &json!({"about": "x"})).0.unwrap_err().contains("call ASK directly"));
-    assert_eq!(ask_gate(&mut s.conv.lock().unwrap()), Ok(()));
-
-    apply_command(&mut s.conv.lock().unwrap(), Command::Goal("ship it".into(), false));
-    let refused = w.tool("ASK", &question).0.unwrap_err();
-    assert!(refused.starts_with("ASK isn't available while a goal is active. Call REQUEST_ASK"), "{refused}");
-    w.tool("REQUEST_ASK", &json!({"about": "Which database to use"})).0.unwrap();
-    assert!(w.tool("ASK", &question).0.unwrap_err().contains("is still waiting for the user"));
-
-    // Declined: the model is told, and ASK stays closed.
-    s.answer_ask_request(false);
-    {
-        let mut c = s.conv.lock().unwrap();
-        assert_eq!(c.inbox, vec![ask_reply_message("Which database to use", false)]);
-        assert!(c.inbox[0].starts_with(ASK_TAG) && c.ask_request.is_empty() && !c.ask_granted);
-        c.inbox.clear();
-    }
-    assert!(w.tool("ASK", &question).0.is_err());
-
-    // Accepted: the model is told, and may ASK once (here the user skips).
-    w.tool("REQUEST_ASK", &json!({"about": "Which database to use"})).0.unwrap();
-    s.answer_ask_request(true);
-    assert!(s.conv.lock().unwrap().ask_granted);
+fn ask_waits_without_a_goal_and_asks_asynchronously_during_one() {
+    let (w, s) = idle_worker("ask-goal", Conversation::default());
+    let q = |text: &str| json!({"questions": [{"question": text, "options": ["a", "b"]}]});
+    // No goal: it waits (here the user skips).
     std::thread::scope(|sc| {
-        let asking = sc.spawn(|| w.tool("ASK", &question).0);
-        wait_until("the questions", || s.live.lock().unwrap().ask.is_some());
+        let asking = sc.spawn(|| w.tool("ASK", &q("Which one?")).0);
+        wait_until("the questions", || s.live.lock().unwrap().waits_for_answers());
         s.live.lock().unwrap().ask.as_mut().unwrap().skipped = true;
         let _ = s.wake.send(());
         assert_eq!(asking.join().unwrap(), Ok("The user skipped these questions without answering.".into()));
     });
-    assert!(w.tool("ASK", &question).0.unwrap_err().contains("Call REQUEST_ASK"), "used up");
+    assert!(s.conv.lock().unwrap().pending_ask.is_null());
 
-    // A cleared goal drops a waiting request.
-    w.tool("REQUEST_ASK", &json!({"about": "x"})).0.unwrap();
-    apply_command(&mut s.conv.lock().unwrap(), Command::Goal(String::new(), false));
+    // A goal: it returns at once, the questions kept for the user.
+    apply_command(&mut s.conv.lock().unwrap(), Command::Goal("ship it".into(), false));
+    assert_eq!(w.tool("ASK", &q("Which database?")).0, Ok(ASKED_DURING_GOAL.into()));
+    {
+        let l = s.live.lock().unwrap();
+        assert!(l.ask.as_ref().is_some_and(|a| a.background) && !l.waits_for_answers());
+    }
+    assert_eq!(s.conv.lock().unwrap().pending_ask, q("Which database?"));
+    // Another replaces them, and says which it replaced.
+    let r = w.tool("ASK", &q("Which port?")).0.unwrap();
+    assert!(r.starts_with(ASKED_DURING_GOAL) && r.contains("replaced your earlier one") && r.contains("1. Which database?\n") && r.contains("full list"), "{r}");
+    assert_eq!(s.conv.lock().unwrap().pending_ask, q("Which port?"));
+    // Answers to questions replaced meanwhile go nowhere.
+    let mut stale = Ask { background: true, ..Ask::new(&q("Which database?")).unwrap() };
+    stale.pick(0, Some(0));
+    stale.sent = true;
+    s.answer_questions(stale);
+    assert!(s.conv.lock().unwrap().inbox.is_empty());
+    // The user answers: the questions and answers reach the model together.
+    let mut a = s.live.lock().unwrap().ask.take().unwrap();
+    a.pick(0, Some(1));
+    a.sent = true;
+    s.answer_questions(a);
+    {
+        let mut c = s.conv.lock().unwrap();
+        assert!(c.pending_ask.is_null());
+        assert_eq!(c.inbox, vec![format!("{ANSWERS_TAG}The user answered the questions you asked with ASK:\n1. Which port?\n   Answer: b\n</ask-answers>")]);
+        c.inbox.clear();
+    }
+    // Skipped, the model is told which questions.
+    w.tool("ASK", &q("Which host?")).0.unwrap();
+    let mut a = s.live.lock().unwrap().ask.take().unwrap();
+    a.skipped = true;
+    s.answer_questions(a);
+    assert_eq!(s.conv.lock().unwrap().inbox, vec![format!("{ANSWERS_TAG}The user skipped the questions you asked with ASK, without answering them:\n1. Which host?\n</ask-answers>")]);
+
+    // A paused goal: control goes back to the user, so ASK waits again,
+    // and replaces what was still unanswered from the goal.
+    w.tool("ASK", &q("Which region?")).0.unwrap();
+    s.conv.lock().unwrap().goal_paused = true;
+    std::thread::scope(|sc| {
+        let asking = sc.spawn(|| w.tool("ASK", &q("Which one?")).0);
+        wait_until("the questions", || s.live.lock().unwrap().waits_for_answers());
+        assert!(s.conv.lock().unwrap().pending_ask.is_null());
+        let mut l = s.live.lock().unwrap();
+        let a = l.ask.as_mut().unwrap();
+        a.pick(0, Some(0));
+        a.sent = true;
+        drop(l);
+        let _ = s.wake.send(());
+        let r = asking.join().unwrap().unwrap();
+        assert!(r.starts_with("1. Which one?\n   Answer: a\n") && r.contains("1. Which region?"), "{r}");
+    });
+}
+
+/// Questions asked during a goal outlast a restart, and a REQUEST_ASK an
+/// older Oak left waiting is retired: the model is told to ASK instead,
+/// and a call of it (an older conversation still lists it) says so too.
+#[test]
+fn asked_questions_outlast_a_restart_and_request_ask_is_retired() {
+    let mut old = serde_json::to_value(unit_conv("ask-restart", Conversation { goal: "ship it".into(), ..Default::default() })).unwrap();
+    old["ask_request"] = json!("Which database to use");
+    old["ask_granted"] = json!(false);
+    old["pending_ask"] = json!({"questions": [{"question": "Which port?"}]});
+    let old: Conversation = serde_json::from_value(old).unwrap();
+    let s = Deleting(Session::start(old, eframe::egui::Context::default()));
+    {
+        let l = s.live.lock().unwrap();
+        assert_eq!(l.ask.as_ref().map(|a| (a.background, a.listed())), Some((true, "1. Which port?\n".into())));
+    }
+    {
+        let mut c = s.conv.lock().unwrap();
+        assert_eq!(c.inbox, vec![request_ask_retired("Which database to use")]);
+        assert!(c.inbox[0].starts_with(ANSWERS_TAG) && c.inbox[0].contains("call ASK"));
+        let saved = serde_json::to_value(&*c).unwrap();
+        assert!(saved.get("ask_request").is_none() && saved.get("ask_granted").is_none());
+        assert_eq!(saved["pending_ask"], json!({"questions": [{"question": "Which port?"}]}));
+        assert!(!retire_request_ask(&mut c), "once");
+    }
+
+    let (w, s) = idle_worker("request-ask-gone", Conversation::default());
+    let call = json!({"type": "tool_call", "id": "r1", "name": "REQUEST_ASK", "input": {"about": "x"}});
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [call.clone()]}));
+    w.run_calls(&[call], oak::stop::TOOL_CALLS);
     let c = s.conv.lock().unwrap();
-    assert!(c.ask_request.is_empty() && !c.ask_granted);
+    let r = &c.messages[c.messages.len() - 1]["content"][0];
+    assert_eq!((r["content"].as_str(), r["is_error"].as_bool()), (Some(REQUEST_ASK_GONE), Some(true)));
 }
 
 /// Calls left without a result (OAK closed while they ran) get one, in
@@ -1831,4 +1892,139 @@ fn a_summary_request_carries_only_what_it_replaces() {
         assert_eq!(r.messages, sent, "{what}");
         assert!(r.instruction.as_deref().is_some_and(crate::rolling::is_housekeeping), "{what}");
     }
+}
+
+/// The result text of call `id` among `c`'s messages.
+fn result_of(c: &Conversation, id: &str) -> (String, bool) {
+    let r = c
+        .messages
+        .iter()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .find(|b| b["type"] == "tool_result" && b["call_id"] == id)
+        .unwrap_or_else(|| panic!("no result for {id}"));
+    let text = match &r["content"] {
+        Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    (text, r["is_error"] == true)
+}
+
+/// Code Mode: REPL is the one tool; its script calls the others through
+/// their usual checks (the command guard too), and its variables outlast
+/// the host (as across a restart of Oak). Skipped without Node.js.
+#[test]
+fn code_mode_runs_tools_from_a_persistent_repl() {
+    if crate::code_mode::node().is_err() {
+        eprintln!("skipped: no Node.js");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("oak-code-mode-test-{}", api::now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "hello world\n").unwrap();
+    let (w, s) = idle_worker("code-mode", Conversation { code_mode: true, folder: dir.clone(), model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
+    let id = s.conv.lock().unwrap().id.clone();
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    let (r, ..) = w.request_body();
+    let names: Vec<&str> = r.tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(names, ["REPL"]);
+    assert!(r.system.contains("This conversation is in Code Mode") && r.system.contains("- READ: ") && r.system.contains("Working folder"));
+    let call = |cid: &str, name: &str, input: Value| json!({"type": "tool_call", "id": cid, "name": name, "input": input});
+    let repl = |cid: &str, code: &str| call(cid, "REPL", json!({"code": code}));
+    let run = |calls: Vec<Value>| {
+        s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+        w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    };
+    run(vec![
+        repl("a", "const t = await file('a.txt').text(); let n = t.length; const out = await $`echo hi`;\nawait edit('a.txt', 'world', 'there');\nconst m = new Map([['k', [1, 2n]]]);\nlog('logged'); [n, out.stdout.trim()]"),
+        call("b", "EXECUTE", json!({"command": "touch made.txt", "timeout": 5, "summary": "x"})),
+        repl("c", "await $`rm -rf /`"),
+        repl("d", "const r = await READ({path: 'a.txt'}); r.includes('hello there')"),
+        repl("e", "const x = 1; const x = 2"),
+    ]);
+    {
+        let c = s.conv.lock().unwrap();
+        let (a, err) = result_of(&c, "a");
+        assert!(!err && a.contains("<repl-output eval=\"1\">") && a.contains("logged") && a.contains("12") && a.contains("hi"), "{a}");
+        let (b, err) = result_of(&c, "b");
+        assert!(err && b.contains("your one tool is REPL"), "{b}");
+        let (cc, err) = result_of(&c, "c");
+        assert!(err && cc.contains("<error>"), "{cc}");
+        let (d, err) = result_of(&c, "d");
+        assert!(!err && d.contains("true"), "{d}");
+        let (e, err) = result_of(&c, "e");
+        assert!(err && e.contains("already been declared"), "{e}");
+        // The script's calls are listed with its result.
+        let a = c.messages.iter().filter_map(|m| m["content"].as_array()).flatten().find(|b| b["call_id"] == "a").unwrap();
+        let calls: Vec<&str> = a[repl::CALLS_KEY].as_array().unwrap().iter().filter_map(|x| x["name"].as_str()).collect();
+        assert_eq!(calls, ["READ", "$", "EDIT"]);
+    }
+    assert!(!dir.join("made.txt").exists());
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello there\n");
+    // The host goes (idle, or as when Oak closes): the next one has the variables.
+    assert!(crate::code_mode::snapshot_path(&id).exists());
+    crate::code_mode::stop_idle(Duration::ZERO);
+    run(vec![repl("f", "[n, t.trim(), m.get('k')[1] + 1n, typeof $]")]);
+    {
+        let c = s.conv.lock().unwrap();
+        let (f, err) = result_of(&c, "f");
+        assert!(!err && f.contains("12") && f.contains("hello world") && f.contains("3n") && f.contains("function"), "{f}");
+    }
+    // Deleted: its snapshot goes.
+    drop(w);
+    drop(s);
+    assert!(!crate::code_mode::snapshot_path(&id).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Without Node.js, Code Mode is unavailable and says why.
+#[test]
+fn code_mode_needs_node() {
+    let (w, s) = idle_worker("code-mode-no-node", Conversation { code_mode: true, model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
+    let calls = vec![json!({"type": "tool_call", "id": "a", "name": "REPL", "input": {"code": "1"}})];
+    s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+    let id = s.conv.lock().unwrap().id.clone();
+    crate::code_mode::without_node(&id, || w.run_calls(&calls, oak::stop::TOOL_CALLS));
+    let (text, err) = result_of(&s.conv.lock().unwrap(), "a");
+    assert!(err && text.contains("Code Mode needs Node.js"), "{text}");
+    // REPL outside Code Mode, and Freebuff in it, are refused.
+    s.conv.lock().unwrap().code_mode = false;
+    let calls = vec![json!({"type": "tool_call", "id": "b", "name": "REPL", "input": {"code": "1"}})];
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+    w.run_calls(&calls, oak::stop::TOOL_CALLS);
+    let (text, err) = result_of(&s.conv.lock().unwrap(), "b");
+    assert!(err && text.contains("isn't in Code Mode"), "{text}");
+    assert!(code_mode_refuses_provider(true, api::Provider::Freebuff).is_some() && code_mode_refuses_provider(false, api::Provider::Freebuff).is_none());
+}
+
+/// Each Code Mode conversation has a REPL context of its own: one's
+/// variables (live or restored) are never another's. Skipped without Node.js.
+#[test]
+fn code_mode_conversations_keep_their_own_variables() {
+    if crate::code_mode::node().is_err() {
+        eprintln!("skipped: no Node.js");
+        return;
+    }
+    let conv = || Conversation { code_mode: true, folder: std::env::temp_dir(), model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() };
+    let (wa, sa) = idle_worker("code-mode-a", conv());
+    let (wb, sb) = idle_worker("code-mode-b", conv());
+    let run = |w: &Worker, s: &Deleting, cid: &str, code: &str| {
+        let calls = vec![json!({"type": "tool_call", "id": cid, "name": "REPL", "input": {"code": code}})];
+        s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": calls}));
+        w.run_calls(&calls, oak::stop::TOOL_CALLS);
+        result_of(&s.conv.lock().unwrap(), cid)
+    };
+    for s in [&sa, &sb] {
+        s.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    }
+    assert!(!run(&wa, &sa, "a1", "const secret = 'from a'; var shared = 1; secret").1);
+    let (b, err) = run(&wb, &sb, "b1", "[typeof secret, typeof shared, typeof globalThis.shared]");
+    assert!(!err && b.contains("'undefined', 'undefined', 'undefined'"), "{b}");
+    assert!(!run(&wb, &sb, "b2", "const secret = 'from b'; secret").1);
+    // Restarted from their snapshots, each has its own again.
+    crate::code_mode::stop_idle(Duration::ZERO);
+    let (a, _) = run(&wa, &sa, "a2", "[secret, shared]");
+    let (b, _) = run(&wb, &sb, "b3", "[secret, typeof shared]");
+    assert!(a.contains("'from a', 1") && b.contains("'from b', 'undefined'"), "{a}\n{b}");
 }

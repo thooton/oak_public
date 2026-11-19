@@ -124,7 +124,7 @@ impl Streaming {
                 if let Some(b) = l.blocks.get_mut(index) {
                     append(b, "text", &text);
                     if self.rewrite_thinking {
-                        self.rewrites.extend(crate::unslop::mark_thinking(b, false));
+                        self.rewrites.extend(crate::rewrites::mark_thinking(b, false));
                     }
                 }
             }
@@ -158,7 +158,7 @@ impl Streaming {
                 {
                     b["_oak_ms"] = json!(t.elapsed().as_millis() as u64);
                     if self.rewrite_thinking {
-                        self.rewrites.extend(crate::unslop::mark_thinking(b, true));
+                        self.rewrites.extend(crate::rewrites::mark_thinking(b, true));
                     }
                 }
                 if oak::is_call(b) {
@@ -290,7 +290,19 @@ impl Worker {
         // LOAD) is in them.
         let loads = if c.chat { vec![] } else { crate::prefix::loads_of(&c.messages) };
         let shown = |k: &String| loads.iter().find(|l| &l.kit == k).filter(|l| l.call >= cut);
-        let defs = |kits: &[String]| if c.chat { tools::chat_definitions() } else { tools::definitions_with_kits(agent.is_some(), c.spawner, local, kits) };
+        // Code Mode's one tool is REPL; the others are functions in it.
+        let (code_mode, spawner) = (c.code_mode && !c.chat, c.spawner);
+        let inner = |kits: &[String]| tools::definitions_with_kits(agent.is_some(), spawner, local, kits);
+        let is_chat = c.chat;
+        let defs = |kits: &[String]| {
+            if is_chat {
+                tools::chat_definitions()
+            } else if code_mode {
+                vec![crate::code_mode::tool_definition()]
+            } else {
+                inner(kits)
+            }
+        };
         let held: Vec<String> = kits.iter().filter(|k| shown(k).is_none()).cloned().collect();
         let held_tools = defs(&held);
         let mut joins = vec![];
@@ -304,7 +316,8 @@ impl Worker {
         let model = c.model.clone();
         let tools = defs(&kits);
         // (A session with no NOTE tool, a local model's, has no notes limit to tell.)
-        let notes_limit = if tools.iter().any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("NOTE"))) { super::notes_limit() } else { 0 };
+        let has_notes = |tools: &[Value]| tools.iter().any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("NOTE")));
+        let notes_limit = if has_notes(&tools) || (code_mode && has_notes(&inner(&kits))) { super::notes_limit() } else { 0 };
         let built = crate::prefix::Pin {
             day: crate::time::today_utc(),
             kits: kits.clone(),
@@ -327,6 +340,9 @@ impl Worker {
             let model = if pin.model.is_empty() { &model_now } else { &pin.model };
             if chat {
                 super::prompt::chat_prompt(&pin.day, model, pin.notes_limit)
+            } else if code_mode {
+                let base = system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role, pin.notes_limit);
+                format!("{}\n\n{}", base.trim_end(), crate::code_mode::prompt(&inner(&pin.kits)))
             } else {
                 system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role, pin.notes_limit)
             }
@@ -434,7 +450,7 @@ impl Worker {
         // the folder's snapshot): no chat goes there.
         if let Some(why) = {
             let c = self.conv.lock().unwrap();
-            chat_refuses_provider(c.chat, c.provider())
+            chat_refuses_provider(c.chat, c.provider()).or_else(|| code_mode_refuses_provider(c.code_mode, c.provider()))
         } {
             return Reply::Failed(why);
         }
@@ -447,7 +463,7 @@ impl Worker {
             thread,
             // Rewrite thinking (Unslop): sections go to be rewritten as they
             // come in, the rest when their block ends.
-            rewrite_thinking: crate::unslop::applies(&self.conv.lock().unwrap()) && crate::unslop::thinking(),
+            rewrite_thinking: crate::rewrites::applies(&self.conv.lock().unwrap()) && crate::rewrites::thinking(),
             ..Default::default()
         };
         // Output speed, from the provider's output token count only.
@@ -499,7 +515,7 @@ impl Worker {
                 (l.drawn, l.drawn_viewport.unwrap_or(eframe::egui::ViewportId::ROOT))
             };
             if !s.rewrites.is_empty() {
-                crate::unslop::start_parts(std::mem::take(&mut s.rewrites), &self.conv, &self.ctx);
+                crate::rewrites::start_parts(std::mem::take(&mut s.rewrites), &self.conv, &self.ctx);
             }
             // A delta only changes the transcript; any other event may
             // change what Home and the tabs show (the account's limits).
