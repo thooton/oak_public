@@ -1316,7 +1316,15 @@ mod tests {
 
         // The network log.
         eval("fetch('/api', {method: 'POST', body: 'payload'}).then(r => r.text())");
-        let r = call("BROWSER_NETWORK", json!({"filter": "/api"})).unwrap();
+        // (Listed at once, its status once its response came.)
+        let start = std::time::Instant::now();
+        let r = loop {
+            let r = call("BROWSER_NETWORK", json!({"filter": "/api"})).unwrap();
+            if r.contains("POST 200 fetch") || start.elapsed() > Duration::from_secs(5) {
+                break r;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
         let line = r.lines().find(|l| l.contains("POST 200 fetch")).unwrap_or_else(|| panic!("{r}"));
         let id: u64 = line.trim_start_matches('#').split(' ').next().unwrap().parse().unwrap();
         let r = call("BROWSER_NETWORK", json!({"id": id})).unwrap();
