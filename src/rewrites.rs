@@ -483,8 +483,12 @@ pub fn settle(conv: &Arc<crate::store::Shared>) {
 /// file (`raw`, its messages' JSON): only messages with a marker are parsed.
 /// (Inside a JSON string a quote is escaped: only a key, or a string of
 /// just the key, matches.)
+/// With no rewriter there is nothing to look for (and `start` then reads
+/// nothing): the index keeps what was found under the rewriter's key
+/// (`store::INDEX`), so files are looked at again when it changes.
 pub fn look(c: &mut crate::store::Conversation, raw: &[&[u8]]) {
     if key().is_empty() {
+        c.messages.rewrites_from = None;
         return;
     }
     let key = format!("\"{}\"", key());
