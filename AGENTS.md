@@ -32,6 +32,10 @@ This file is the description of how Oak behaves that QA checks the app against: 
 with every change, and put here the decisions the code alone doesn't explain. How a part works
 belongs in its file's opening comment.
 
+## Keep changes in sync with the remote
+
+Unless the user explicitly asks to keep changes local, verify your changes, commit just the work for the task, and push it to the branch's upstream before reporting completion. The default branch here is `origin/master`. If the remote has advanced, rebase your commits on it, resolve any conflicts, and rerun affected checks before pushing. Never force-push or include unrelated edits. Confirm the push succeeded; if blocked, report what remains local and why.
+
 ## Build, run and test
 
 You need a recent stable Rust (edition 2024). Oak runs on Windows 10/11 with
