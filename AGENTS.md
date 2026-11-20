@@ -673,7 +673,11 @@ conversation's transcript and session box are drawn, plugins draw over it (`Hook
 session box's boxes, which `look::panel_boxes` collects, and the units on screen with their rows
 of text, which `List::scene` reads from what they painted); Ctrl+F finds text
 in it (`src/find.rs`); Ctrl+A after clicking or selecting text in a message selects the whole message, copied as it reads (`src/select.rs`); replies are markdown, with links
-to files opening them. Right-clicking a chat's text (a transcript, a plugin's chat) offers
+to files opening them. Resting the pointer on a chat's item that has a recorded time (`_oak_at`:
+a message, a reply, an image or file, a tool's or thinking's row, a line Oak added; in a super
+agent's chat each bubble, error row, time under a stretch and day line) shows its full date and
+time (`transcript::time_tip`); an item from before Oak kept the time shows none, never a made-up
+one. Its own controls' tooltips win over it. Right-clicking a chat's text (a transcript, a plugin's chat) offers
 Copy for the selection, which the right-click leaves in place, Copy message, Copy link address over
 a link, and Revert to before this where it applies (`src/copy_menu.rs`). Middle-clicking a
 transcript or a plugin's chat scrolls it as browsers do (`src/autoscroll.rs`): the further the pointer goes above or

@@ -231,7 +231,10 @@ fn bubble(ui: &mut Ui, t: &Theme, icon: Icon, m: &Msg, name: Option<&str>, first
             let when = if m.time > 0 { clock12(m.time, local_offset_ms()) } else { "Sending…".to_string() };
             ui.horizontal(|ui| {
                 ui.add_space(indent + 6.0);
-                ui.label(RichText::new(when).size(11.0).color(t.ink4));
+                let shown = ui.label(RichText::new(when).size(11.0).color(t.ink4));
+                if m.time > 0 {
+                    shown.on_hover_text(full_time(m.time, local_offset_ms()));
+                }
             });
         }
     });
@@ -291,7 +294,7 @@ pub(crate) fn chat(ui: &mut Ui, t: &Theme, c: &Chat, tail: impl FnOnce(&mut Ui))
             let broke = time_break(prev, m, off);
             if broke {
                 ui.add_space(if i == 0 { 4.0 } else { 14.0 });
-                ui.vertical_centered(|ui| ui.label(RichText::new(day_clock(m.time, now, off)).size(11.5).color(t.ink3)));
+                ui.vertical_centered(|ui| ui.label(RichText::new(day_clock(m.time, now, off)).size(11.5).color(t.ink3)).on_hover_text(full_time(m.time, off)));
                 ui.add_space(10.0);
             }
             let first = broke || prev.is_none_or(|p| !same_stretch(p, m));
@@ -302,10 +305,14 @@ pub(crate) fn chat(ui: &mut Ui, t: &Theme, c: &Chat, tail: impl FnOnce(&mut Ui))
                 ui.add_space(12.0);
             }
             if m.kind != "user" && m.kind != "oak" {
-                ui.horizontal(|ui| {
-                    ui.add_space(AVATAR + 14.0);
-                    ui.vertical(|ui| error_note(ui, t, &m.text));
-                });
+                let r = ui
+                    .horizontal(|ui| {
+                        ui.add_space(AVATAR + 14.0);
+                        ui.vertical(|ui| error_note(ui, t, &m.text));
+                    })
+                    .response
+                    .rect;
+                crate::transcript::time_tip(ui, r, Id::unique(("super-msg-time", m.key, m.time, &m.text)), Some(m.time));
                 continue;
             }
             let name = (m.kind == "user" && first && m.from != c.me && !m.from.is_empty()).then_some(m.from.as_str());
@@ -655,6 +662,40 @@ mod tests {
         let (shown, circles) = frame(true);
         assert!(shown.iter().any(|s| s == "Writing"), "{shown:?}");
         assert!(circles >= 4, "the avatar and three dots: {circles}");
+    }
+
+    /// Resting the pointer on a message or an error row shows its full date
+    /// and time; one from before Oak kept the time shows none.
+    #[test]
+    fn messages_show_their_time_on_hover() {
+        use crate::app_hover_test::{painted, run_frame, test_ctx};
+        let (ctx, t) = test_ctx(true, true);
+        let (sent, failed) = (1_793_200_000_000_i64, 1_793_286_400_000_i64);
+        let msg = |kind: &str, time: i64, text: &str, key: u64| Msg { kind: kind.into(), from: "me".into(), time, text: text.into(), key, images: vec![] };
+        let c = Chat {
+            loaded: true,
+            me: "me".into(),
+            messages: vec![msg("user", -1, "an old request", 1), msg("user", sent, "a new request", 2), msg("error", failed, "The turn failed", 3)],
+            ..Default::default()
+        };
+        let mut time = 0.0;
+        let mut frame = |events| painted(&run_frame(&ctx, egui::vec2(900.0, 600.0), &mut time, 0.25, events, |ui| chat(ui, &t, &c, |_| {})));
+        let off = local_offset_ms();
+        let all = [sent, failed].map(|ms| full_time(ms, off));
+        let mut hover = |target: &str| {
+            let shapes = frame(vec![]);
+            let p = shapes.iter().find(|(x, _)| x.contains(target)).map(|(_, r)| r.center()).unwrap_or_else(|| panic!("no {target:?} in {shapes:?}"));
+            frame(vec![egui::Event::PointerMoved(p)]);
+            let mut shown = vec![];
+            for _ in 0..4 {
+                shown = frame(vec![]);
+            }
+            frame(vec![egui::Event::PointerGone]);
+            all.iter().filter(|s| shown.iter().any(|(x, _)| x == *s)).cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(hover("a new request"), vec![full_time(sent, off)]);
+        assert_eq!(hover("The turn failed"), vec![full_time(failed, off)]);
+        assert_eq!(hover("an old request"), Vec::<String>::new());
     }
 
     #[test]
