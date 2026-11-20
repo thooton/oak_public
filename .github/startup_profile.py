@@ -7,6 +7,16 @@ output), signed in with a key that is never used for anything.
 import json, os, random, sys
 
 folder, count, turns_max = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+
+
+def clean(s):
+    """Text fit for a file name, as store.rs's `clean_name` makes it."""
+    s = "".join(" " if ord(c) < 32 or c in '<>:"/\\|?*' else c for c in s)
+    return " ".join(s.split()).strip(". ")
+
+
+# (The folder's name starts each file's name.)
+prefix = clean(os.path.basename(folder.rstrip("/\\")))
 conversations = os.path.join(folder, "conversations")
 os.makedirs(conversations, exist_ok=True)
 with open(os.path.join(folder, "auth.json"), "w") as f:
@@ -29,6 +39,8 @@ for n in range(count):
     text = json.dumps({"id": id, "title": f"Conversation {id}", "folder": folder, "model": "m", "effort": "low",
                        "messages": messages, "marks": [], "last_message_at": 0, "next_task_id": 0, "format": 2})
     total += len(text)
-    with open(os.path.join(conversations, f"x - Conversation {id} - {id}.json"), "w") as f:
+    # Named as Oak names it (store.rs's `file_name`), so the first start
+    # doesn't rename every file and the second times the indexed start.
+    with open(os.path.join(conversations, f"{prefix} - Conversation {id} - {id}.json"), "w") as f:
         f.write(text)
 print(f"{count} conversations, {total / 1e6:.1f} MB")
