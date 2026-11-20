@@ -1188,6 +1188,7 @@ mod tests {
             crate::theme::apply_theme(&ctx, &crate::theme::theme(&theme));
             for tab in p.home_tabs.iter().filter(|tab| !tab.link()) {
                 app.page = Page::Home;
+                app.home_menu = true;
                 app.home_list = tab.id();
                 frames(&mut app, &format!("Home's {} tab in the {theme} theme", tab.id()));
             }
