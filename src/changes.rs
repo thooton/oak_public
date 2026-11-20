@@ -131,6 +131,26 @@ pub fn diff(old: &str, new: &str) -> String {
     out
 }
 
+/// `p` with `.` and `..` resolved lexically, as notices show it.
+fn flat(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else if !out.has_root() {
+                    out.push("..");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The message to the model about changed files.
 pub fn message(changes: &[Change]) -> String {
     let mut s = String::from("<system-reminder>\n");
@@ -140,17 +160,17 @@ pub fn message(changes: &[Change]) -> String {
                 "Note: {} was modified, either by the user or by a linter. This change was intentional, so make sure to take it \
                  into account as you proceed (ie. don't revert it unless the user asks you to). Don't tell the user this, since \
                  they are already aware. Here are the relevant changes (shown with line numbers):\n{d}\n",
-                p.display()
+                flat(p).display()
             ),
             Change::Modified(p, None) => s += &format!(
                 "Note: {} was modified, either by the user or by a linter, since you last read or wrote it. This change was \
                  intentional, so don't revert it unless the user asks you to. READ it again before you rely on its contents or edit it.\n\n",
-                p.display()
+                flat(p).display()
             ),
             Change::Deleted(p) => s += &format!(
                 "Note: {} was deleted, either by the user or by another program, since you last read or wrote it. Don't recreate \
                  it unless the user asks you to.\n\n",
-                p.display()
+                flat(p).display()
             ),
         }
     }
@@ -160,6 +180,12 @@ pub fn message(changes: &[Change]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notices_flatten_paths() {
+        let m = message(&[Change::Deleted("/home/sam/wave/../oak/./README.md".into())]);
+        assert!(m.contains("Note: /home/sam/oak/README.md was deleted"), "{m}");
+    }
 
     #[test]
     fn diffs_show_the_changed_lines() {
