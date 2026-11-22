@@ -82,12 +82,15 @@ pub fn tool_schema(name: &str) -> Value {
 /// one is registered again rather than a new one each start.
 pub fn id() -> String {
     let saved = login::saved_outpost();
-    if !saved.is_empty() && saved != DEFAULT_OUTPOST_ID {
+    if !saved.is_empty() {
         return saved;
     }
-    let new = format!("oak-{}", &hex_uuid().replace('-', "")[..20]);
-    login::set_outpost(&new);
-    new
+    // The machine's own outpost: Quick's desktop app registers one per
+    // machine, and it is the one Quick reports ONLINE for this device, so
+    // Oak answers as that outpost rather than registering a second name that
+    // nothing routes to.
+    login::set_outpost(DEFAULT_OUTPOST_ID);
+    DEFAULT_OUTPOST_ID.to_string()
 }
 
 /// The name Quick shows for this outpost.
@@ -199,38 +202,65 @@ pub fn register_folder(token: &str, host: &str, folder: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// Tells Quick this outpost's device state (`graph/status`): the app calls it
-/// with its outpost id and Quick then answers with the folders this machine
-/// has, `initialized: true`, which is what its agent reads before it decides
-/// whether a local tool can run. Without it the outpost stays a name with no
-/// device behind it.
-pub fn put_status(token: &str, host: &str) -> Result<String, String> {
+/// Tells Quick this outpost's device state (`putDeviceState`), trying the
+/// field names the API might use for "this machine is here" and reporting
+/// which one the server kept. The validator names only fields it requires
+/// (`hasUsedDesktop`), never the one that carries the state, so the shape is
+/// found by trying them.
+pub fn put_device_state_report(token: &str, host: &str) -> Vec<(String, bool, String)> {
     let outpost = id();
-    let envelope = json!({
-        "eventType": "invokeAgent",
-        "eventBody": {"invokeAgent": {
-            "path": "graph/status",
-            "queryParams": {"_method": "GET", "device_id": outpost},
-            "body": json!({"device_id": outpost}).to_string(),
-            "outpostId": id(),
-        }}
-    });
+    let mut out = vec![];
+    for field in [
+        "online", "isOnline", "status", "state", "availability", "presence", "connected", "isConnected", "deviceStatus", "connectionState", "outpostStatus",
+        "lastSeenAt", "lastSeen", "heartbeatAt", "isAvailable", "available", "isActive", "active", "live", "isLive", "registered", "isRegistered", "reconnectGraceMs",
+    ] {
+        let value = match field {
+            "online" | "isOnline" | "connected" | "isConnected" | "isAvailable" | "available" | "isActive" | "active" | "live" | "isLive" | "registered" | "isRegistered" => json!(true),
+            "lastSeenAt" | "lastSeen" | "heartbeatAt" => json!(crate::api::now_ms()),
+            "reconnectGraceMs" => json!(0),
+            _ => json!("ONLINE"),
+        };
+        let body = json!({"hasUsedDesktop": true, "deviceId": outpost, "outpostId": outpost, field: value});
+        let envelope = json!({"eventType": "putDeviceState", "eventBody": {"putDeviceState": body}});
+        let resp = api::http()
+            .post(format!("https://{host}/integration/quick-work/qbs-event"))
+            .bearer_auth(token)
+            .header("Content-Type", "application/json")
+            .header("X-QuickDsk-mdid", "outpost")
+            .header("x-amzn-quick-atype", "sbg")
+            .json(&envelope)
+            .timeout(Duration::from_secs(20))
+            .send();
+        let (ok, note) = match resp {
+            Ok(r) => {
+                let t = r.text().unwrap_or_default();
+                (t.contains("putDeviceStateResponse\":{"), t.chars().take(160).collect::<String>())
+            }
+            Err(e) => (false, format!("{e}")),
+        };
+        out.push((field.to_string(), ok, note));
+    }
+    out
+}
+
+/// Whether Quick lists this machine's outpost as ONLINE.
+pub fn is_online(token: &str, host: &str) -> Result<bool, String> {
+    let body = json!({"eventType": "listOutposts", "eventBody": {"listOutposts": {"scope": "USER", "surface": "QUICK_WORK"}}});
     let resp = api::http()
         .post(format!("https://{host}/integration/quick-work/qbs-event"))
         .bearer_auth(token)
         .header("Content-Type", "application/json")
-        .header("X-QuickDsk-mdid", "user-conversation")
-        .header("x-amzn-quick-atype", "ufg")
-        .json(&envelope)
-        .timeout(Duration::from_secs(30))
+        .header("X-QuickDsk-mdid", "outpost")
+        .header("x-amzn-quick-atype", "sbg")
+        .json(&body)
+        .timeout(Duration::from_secs(20))
         .send()
         .map_err(api::network_error)?;
-    let status = resp.status().as_u16();
     let text = resp.text().unwrap_or_default();
-    if !(200..300).contains(&status) {
-        return Err(format!("Quick refused the device status ({status}): {}", text.chars().take(200).collect::<String>()));
-    }
-    Ok(text)
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let items = v["eventResponse"]["listOutpostsResponse"]["items"].as_array().cloned().unwrap_or_default();
+    let mine = id();
+    Ok(items.iter().any(|o| o["id"].as_str() == Some(mine.as_str()) && o["status"].as_str() == Some("ONLINE")))
 }
 
 /// What a tool does, as Quick's agent reads it.

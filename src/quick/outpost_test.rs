@@ -55,9 +55,15 @@ fn quick_outpost_status() {
     }
 
     // What graph/status says for Oak's own outpost once it is told.
-    if let Ok(t) = crate::quick::outpost::put_status(&token, &host) {
-        let k = t.find("invokeAgentResponse").unwrap_or(0);
-        println!("\nput_status answer: {}", &t[k..(k + 500).min(t.len())].replace("\\\"", "\""));
+    println!("\nexpected {}, online now: {:?}", crate::quick::outpost::id(), crate::quick::outpost::is_online(&token, &host));
+    println!("brute-forcing the device-state field:");
+    for (field, accepted, note) in crate::quick::outpost::put_device_state_report(&token, &host) {
+        let now = crate::quick::outpost::is_online(&token, &host).unwrap_or(false);
+        println!("  {field:18} accepted={accepted:5} online={now}{}", if accepted { "" } else { "  <- rejected" });
+        if now {
+            println!("\n*** {field} brings the outpost ONLINE ***");
+            break;
+        }
     }
 
     println!("\n{} outposts on this account:", items.len());
