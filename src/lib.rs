@@ -43,6 +43,7 @@ mod oak;
 mod openrouter;
 mod prefix;
 mod progress;
+mod provided;
 mod provider;
 mod providers;
 mod providers_view;
@@ -83,6 +84,7 @@ mod composer;
 mod conversations;
 mod copy_menu;
 mod find;
+mod fork;
 mod geometry;
 mod gpu;
 mod highlight;
@@ -372,6 +374,8 @@ struct App {
     /// playing in its tile.
     wallpaper_picker: bool,
     wallpaper_hover: Option<wallpaper::Player>,
+    /// Settings' OpenRouter model picker is open, with its search.
+    or_picker: Option<String>,
     /// The New screen starts a cloud session.
     new_cloud: bool,
     /// What the New screen starts on this machine, when it starts neither
@@ -430,6 +434,7 @@ impl App {
         agent::set_notes_limit(settings.notes_limit);
         openrouter::set_title_model(&settings.title_model);
         openrouter::set_routing(&settings.or_routing);
+        openrouter::set_added(&settings.or_models);
         scratch::set_auto(settings.scratch_clear);
         // The user's browser's extension finds Oak here (browser/bridge.rs).
         browser::bridge::start();
@@ -558,6 +563,9 @@ impl App {
         ];
         if local::serves(id) {
             return local::model_name(id);
+        }
+        if let Some(m) = provided::model(id) {
+            return m.name;
         }
         if let Some(name) = served.into_iter().flatten().next() {
             return name.to_string();
@@ -744,11 +752,16 @@ impl App {
         let revert = ctx.data_mut(|d| d.remove_temp::<(usize, usize, Value)>(Id::unique(REVERT_REQUEST)));
         // Back to before one of the model's items, mid-turn too.
         let rewind = ctx.data_mut(|d| d.remove_temp::<Option<agent::RevertTo>>(Id::unique(REWIND_REQUEST))).flatten();
+        // A fork from before one of the items (`crate::fork`).
+        let fork = ctx.data_mut(|d| d.remove_temp::<Option<agent::RevertTo>>(Id::unique(transcript::FORK_REQUEST))).flatten();
         if let Some(a) = action {
             self.apply_queue_action(id, a);
         }
         if let Some((msg, block, first)) = revert {
             self.revert(ctx, id, msg, block, first);
+        }
+        if let Some(to) = fork {
+            self.fork_conversation(id, Some(to), ctx);
         }
         if let (Some(to), Some(s)) = (rewind, self.sessions.get(id)) {
             s.rewind(to);

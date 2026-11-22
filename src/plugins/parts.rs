@@ -736,6 +736,58 @@ impl ComposerBox {
     }
 }
 
+/// Models a plugin serves conversations with (`crate::provided`).
+pub(crate) struct Provider {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    stream: Option<OakProvide>,
+    calls: Calls,
+    user: User,
+}
+
+impl Provider {
+    /// # Safety
+    /// As `HomeTab::new`.
+    pub(crate) unsafe fn new(d: &OakProvider) -> Provider {
+        Provider { id: unsafe { text(d.id) }, name: unsafe { text(d.name) }, stream: d.stream, calls: Calls { call: d.call, user: User(d.user) }, user: User(d.user) }
+    }
+
+    /// Its models now, as it lists them (JSON objects; none when it
+    /// answers nothing that reads).
+    pub(crate) fn models(&self) -> Vec<Value> {
+        match self.calls.ask("models", Value::Null) {
+            Answer::Ok(_, out) => serde_json::from_slice::<Vec<Value>>(&out).unwrap_or_default(),
+            _ => vec![],
+        }
+    }
+
+    /// Its logo, a PNG, if it has one.
+    pub(crate) fn logo(&self) -> Option<Vec<u8>> {
+        match self.calls.ask("logo", Value::Null) {
+            Answer::Ok(_, out) if !out.is_empty() => Some(out),
+            _ => None,
+        }
+    }
+
+    /// Streams the reply to `request` (JSON), each event to `event` (false
+    /// from it: stop). Err: why it failed.
+    pub(crate) fn stream(&self, request: &Value, event: &mut dyn FnMut(&str) -> bool) -> Result<(), String> {
+        let Some(f) = self.stream else { return Err(format!("{} can't answer.", self.name)) };
+        unsafe extern "C" fn emit(user: *mut c_void, text: OakStr) -> bool {
+            // SAFETY: `user` is the `event` below, for this call.
+            let event = unsafe { &mut *(user as *mut &mut dyn FnMut(&str) -> bool) };
+            event(unsafe { oak_sdk::rt::str_of(text) })
+        }
+        let mut event = event;
+        let e = &mut event as *mut &mut dyn FnMut(&str) -> bool as *mut c_void;
+        let json = request.to_string();
+        // SAFETY: the plugin's function and pointer; the sink and `event`
+        // live through the call.
+        let (ok, out) = bytes_from(|out, user| unsafe { f(self.user.0, s(&json), emit, e, out, user) });
+        if ok { Ok(()) } else { Err(String::from_utf8_lossy(&out).into_owned()) }
+    }
+}
+
 /// Everything plugins registered (or one of them did: `plugins::Running`).
 #[derive(Clone, Default)]
 pub(crate) struct Parts {
@@ -755,6 +807,7 @@ pub(crate) struct Parts {
     pub(crate) hooks: Vec<Arc<Hooks>>,
     pub(crate) rewriters: Vec<Arc<Rewriter>>,
     pub(crate) composer_boxes: Vec<Arc<ComposerBox>>,
+    pub(crate) providers: Vec<Arc<Provider>>,
 }
 
 impl Parts {
@@ -774,6 +827,12 @@ impl Parts {
         self.hooks.extend(more.hooks);
         self.rewriters.extend(more.rewriters);
         self.composer_boxes.extend(more.composer_boxes);
+        // (One provider per id: the first.)
+        for p in more.providers {
+            if !self.providers.iter().any(|q| q.id == p.id) {
+                self.providers.push(p);
+            }
+        }
     }
 
     /// The settings sections of the plugin `id`, in their order.

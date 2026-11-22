@@ -33,6 +33,10 @@ pub enum Kind {
     /// paid per token.
     #[serde(alias = "MuseCode")]
     MuseCode,
+    /// Models a plugin serves (`crate::provided`): named for the plugin's
+    /// provider ("Duck.ai") wherever providers are shown.
+    #[serde(alias = "Plugin")]
+    Plugin,
 }
 
 /// What a provider's box measures.
@@ -50,7 +54,7 @@ pub enum Metered {
 
 impl Kind {
     /// Every provider, in the order pickers and Home list them.
-    pub const ALL: [Kind; 8] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::MuseCode, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Local];
+    pub const ALL: [Kind; 9] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::MuseCode, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Local, Kind::Plugin];
 
     /// Signed in to it: a login or key (for Claude, an account here or a
     /// vault, which has them).
@@ -64,6 +68,7 @@ impl Kind {
             Kind::NodeClub => crate::nodeclub::on(),
             Kind::Refuseless => crate::refuseless::on(),
             Kind::MuseCode => crate::musecode::on(),
+            Kind::Plugin => crate::provided::on(),
         }
     }
 
@@ -78,6 +83,7 @@ impl Kind {
             Kind::NodeClub => "nodeclub",
             Kind::Refuseless => "refuseless",
             Kind::MuseCode => "musecode",
+            Kind::Plugin => "plugin",
         }
     }
 
@@ -97,6 +103,7 @@ impl Kind {
             Kind::NodeClub => "NodeClub",
             Kind::Refuseless => "Refuseless",
             Kind::MuseCode => "Muse Code",
+            Kind::Plugin => crate::provided::name(),
         }
     }
 
@@ -105,7 +112,7 @@ impl Kind {
             Kind::Claude | Kind::Codex => Metered::Limits,
             Kind::OpenRouter | Kind::Refuseless => Metered::Credits,
             Kind::MuseCode => Metered::Spent,
-            Kind::NodeClub | Kind::Freebuff | Kind::Local => Metered::Free,
+            Kind::NodeClub | Kind::Freebuff | Kind::Local | Kind::Plugin => Metered::Free,
         }
     }
 
@@ -114,7 +121,9 @@ impl Kind {
     /// OpenRouter first, as it also serves the session-title models, which
     /// no other provider lists; Claude when none claims it.
     pub fn of(model: &str) -> Kind {
-        if crate::openrouter::routed(model) {
+        if crate::provided::serves(model) {
+            Kind::Plugin
+        } else if crate::openrouter::routed(model) {
             Kind::OpenRouter
         } else if crate::codex::serves(model) {
             Kind::Codex

@@ -882,7 +882,7 @@ pub fn preamble(model: &str, system: &str, tools: &Value) -> Preamble {
     let oak_tools = || tools.as_array().cloned().unwrap_or_default();
     match Provider::of(model) {
         // OpenRouter is asked first: it also serves the session-title models.
-        Provider::OpenRouter | Provider::Local | Provider::MuseCode => plain(system.into(), oak_tools()),
+        Provider::OpenRouter | Provider::Local | Provider::MuseCode | Provider::Plugin => plain(system.into(), oak_tools()),
         Provider::Codex => plain(crate::codex::instructions(system), crate::codex::wire_tools(&oak_tools())),
         Provider::Freebuff => {
             let (system, tools) = crate::freebuff::preamble(model);
@@ -1515,6 +1515,7 @@ fn stream(mut req: crate::oak::Request, cont: Option<(String, usize)>, thread: b
         Provider::Refuseless => return crate::refuseless::stream(req, tx),
         Provider::MuseCode => return crate::musecode::stream(req, tx),
         Provider::Local => return crate::local::stream(req, tx),
+        Provider::Plugin => return crate::provided::stream(req, tx),
         Provider::Claude => {}
     }
     let kind = req.purpose.id().to_string();

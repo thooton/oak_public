@@ -504,6 +504,16 @@ impl HostApi for Oak {
         registering(|p| p.composer_boxes.push(Arc::new(parts::ComposerBox::new(&read(part)))));
     }
 
+    unsafe extern "C" fn add_provider(part: *const OakProvider) {
+        let d = read(part);
+        let id = text(d.id);
+        if id.is_empty() || id.contains(['/', ' ', ':']) {
+            crate::log_crash(&format!("a plugin's provider has an id models can't carry ({id:?}): left out"));
+            return;
+        }
+        registering(|p| p.providers.push(Arc::new(parts::Provider::new(&d))));
+    }
+
     // ---- services
 
     unsafe extern "C" fn version(out: OakSink, out_user: *mut c_void) {

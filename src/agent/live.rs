@@ -110,6 +110,110 @@ fn live_agents() {
     let _ = std::fs::remove_dir_all(&folder);
 }
 
+/// Against OpenRouter (`cargo test live_openrouter -- --ignored
+/// --nocapture`, with `OAK_DIR` a scratch folder holding a copy of
+/// openrouter.json): real sessions on each model (`OAK_TEST_MODELS`,
+/// comma-separated; the built-in ones but DeepSeek by default), the models
+/// side by side, `OAK_TEST_RUNS` times each (default 3). Each run is a task
+/// of several tool calls whose result is checked; every retry and error
+/// the session showed is printed, and the last request body of each model
+/// goes to `OAK_TEST_DUMP` (when set) for replaying.
+#[test]
+#[ignore]
+fn live_openrouter() {
+    assert!(std::env::var_os("OAK_DIR").is_some(), "set OAK_DIR to a scratch folder");
+    assert!(crate::openrouter::KEYS.load(), "no OpenRouter key in OAK_DIR");
+    let models: Vec<String> = std::env::var("OAK_TEST_MODELS")
+        .map(|m| m.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_else(|_| crate::openrouter::MODELS[1..].iter().map(|m| m.id.to_string()).collect());
+    let runs: usize = std::env::var("OAK_TEST_RUNS").ok().and_then(|r| r.parse().ok()).unwrap_or(3);
+    let threads: Vec<_> = models
+        .iter()
+        .cloned()
+        .map(|model| {
+            std::thread::spawn(move || {
+                let mut lines = vec![];
+                let mut ok = 0;
+                for run in 0..runs {
+                    let id = format!("live-or-{}-{run}-{}", model.replace(['/', ':', '.'], "-"), api::now_ms());
+                    let folder = std::env::temp_dir().join(&id);
+                    std::fs::create_dir_all(&folder).unwrap();
+                    let nums: Vec<u64> = (0..12).map(|i| (i * 37 + run as u64 * 11) % 97 + 3).collect();
+                    let sum: u64 = nums.iter().sum();
+                    std::fs::write(folder.join("numbers.txt"), nums.iter().map(|n| format!("{n}\n")).collect::<String>()).unwrap();
+                    let conv = Conversation { id: id.clone(), folder: folder.clone(), model: model.clone(), effort: "high".into(), ..Default::default() };
+                    let s = Session::start(conv, eframe::egui::Context::default());
+                    s.send(
+                        "Test of your tools. 1) Use EXECUTE to run `wc -l numbers.txt`. 2) READ numbers.txt. 3) WRITE sum.txt holding only \
+                         the sum of the numbers in numbers.txt. 4) READ sum.txt back to check it. Then reply with one line: DONE and the sum."
+                            .into(),
+                        vec![],
+                    );
+                    let t = Instant::now();
+                    let (mut seen, mut last): (Vec<String>, String) = (vec![], String::new());
+                    let error = loop {
+                        std::thread::sleep(Duration::from_millis(100));
+                        let l = s.live.lock().unwrap();
+                        let status = l.status.clone();
+                        let (idle, error) = (!l.busy && l.queued.is_empty(), l.error.clone());
+                        drop(l);
+                        let low = status.to_lowercase();
+                        if (low.contains("retry") || low.contains("error") || low.contains("rate")) && status != last {
+                            seen.push(format!("{:>5.1}s {status}", t.elapsed().as_secs_f32()));
+                        }
+                        last = status;
+                        if idle || error.is_some() {
+                            break error;
+                        }
+                        if t.elapsed() > Duration::from_secs(900) {
+                            break Some("timed out (15 min)".into());
+                        }
+                    };
+                    let c = s.conv.lock().unwrap().clone();
+                    let calls: Vec<String> = c.messages.iter().flat_map(|m| m["content"].as_array().cloned().unwrap_or_default()).filter(|b| b["type"] == "tool_call").map(|b| b["name"].as_str().unwrap_or("").to_string()).collect();
+                    let written = std::fs::read_to_string(folder.join("sum.txt")).unwrap_or_default();
+                    let right = written.trim() == sum.to_string();
+                    let last = c.messages.last().map(|m| m["content"].to_string()).unwrap_or_default();
+                    let said = last.contains(&sum.to_string());
+                    let good = error.is_none() && right;
+                    ok += good as usize;
+                    lines.push(format!(
+                        "  run {run}: {} in {:.0}s, {} calls [{}], sum.txt {}, reply {}, served by {:?}{}",
+                        if good { "OK" } else { "FAILED" },
+                        t.elapsed().as_secs_f32(),
+                        calls.len(),
+                        calls.join(" "),
+                        if right { "right" } else { "wrong" },
+                        if said { "names the sum" } else { "doesn't name the sum" },
+                        c.served_by,
+                        error.map(|e| format!("\n    ERROR: {}", e.replace('\n', " | "))).unwrap_or_default(),
+                    ));
+                    lines.extend(seen.iter().map(|s| format!("    {s}")));
+                    println!("{model}\n{}", lines[lines.len() - 1 - seen.len()..].join("\n"));
+                    s.interrupt();
+                    crate::store::remove_conversation(&id);
+                    let _ = std::fs::remove_dir_all(&folder);
+                }
+                (model, ok, lines)
+            })
+        })
+        .collect();
+    let mut all_ok = true;
+    for t in threads {
+        let (model, ok, lines) = t.join().unwrap();
+        all_ok &= ok == runs;
+        println!("{model}: {ok}/{runs}\n{}", lines.join("\n"));
+    }
+    if let Ok(dir) = std::env::var("OAK_TEST_DUMP") {
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, b) in crate::openrouter::SENT.lock().unwrap().iter().enumerate() {
+            let name = b["model"].as_str().unwrap_or("x").replace(['/', ':'], "_");
+            std::fs::write(format!("{dir}/{i:03}-{name}.json"), serde_json::to_string(b).unwrap()).unwrap();
+        }
+    }
+    assert!(all_ok, "some runs failed");
+}
+
 /// Against the real service (run with `cargo test live_freebuff --
 /// --ignored --nocapture`): one turn through the Freebuff sidecar.
 #[test]

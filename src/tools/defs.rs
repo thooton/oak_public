@@ -479,7 +479,8 @@ fn window_definitions() -> Value {
 fn agent_new_properties() -> Value {
     // The user's own llama.cpp server isn't offered: it serves one request
     // at a time, so an agent there would wait on the session that started it.
-    let models: Vec<crate::api::Model> = crate::api::known_models().into_iter().filter(|m| m.provider != crate::api::Provider::Local).collect();
+    // Nor a plugin's models: they serve normal conversations only.
+    let models: Vec<crate::api::Model> = crate::api::known_models().into_iter().filter(|m| !matches!(m.provider, crate::api::Provider::Local | crate::api::Provider::Plugin)).collect();
     let mut effort = "How hard the agent thinks; leave it out for your own. Lower is faster and cheaper.".to_string();
     for m in models.iter().filter_map(|m| crate::openrouter::model(&m.id)) {
         effort += &fewer_efforts(m.name, m.efforts);
@@ -518,6 +519,9 @@ fn fewer_efforts(name: &str, levels: &[&str]) -> String {
     if crate::agent::STANDARD_EFFORTS.iter().all(|e| levels.contains(e)) {
         return String::new();
     }
+    if have.is_empty() {
+        return format!(" {name}: no levels (ignored).");
+    }
     format!(" {name}: only {}.", and(&have))
 }
 
@@ -552,13 +556,14 @@ fn model_list(models: &[crate::api::Model]) -> String {
         .iter()
         .map(|(p, items)| {
             let head = match p {
-                Provider::OpenRouter => "Via OpenRouter, paid per token, far cheaper, for bulk or simple work",
+                Provider::OpenRouter => "Via OpenRouter, paid per token (:free ones free but rate-limited), far cheaper, for bulk or simple work",
                 Provider::Codex => "OpenAI, on the user's ChatGPT plan",
                 Provider::Freebuff => "Freebuff, billed in hours, a pipe with its own agent that can't start subagents",
                 Provider::Local => "The user's own server",
                 Provider::NodeClub => "NodeClub, an OpenAI-compatible API",
                 Provider::Refuseless => "Refuseless, abliterated (refusal-removed) open models, paid per token",
                 Provider::MuseCode => "Meta's Muse models (Muse Code's), paid per token",
+                Provider::Plugin => "A plugin's",
                 Provider::Claude => "Claude",
             };
             format!("{head}: {}.", items.join(", "))

@@ -183,6 +183,46 @@ fn revert_menu_on_the_models_items() {
     assert_eq!(pick("Finished here."), Some(agent::RevertTo::Block(3, 0, conv.messages[3]["content"][0].clone())));
 }
 
+/// Right-clicking one of the model's items offers Fork from here too,
+/// which asks the app to fork the conversation from before it, and leaves
+/// the conversation itself alone.
+#[test]
+fn fork_menu_on_the_models_items() {
+    let (ctx, t) = test_ctx(true, true);
+    let call = serde_json::json!({"type": "tool_call", "id": "alpha", "name": "READ", "input": {"path": "alpha.txt"}});
+    let conv = Conversation {
+        id: "fork-menu".into(),
+        messages: vec![
+            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "look"}]}),
+            serde_json::json!({"role": "assistant", "content": [call]}),
+            serde_json::json!({"role": "user", "content": [{"type": "tool_result", "call_id": "alpha", "content": "ok"}]}),
+            serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Finished here."}]}),
+        ].into(),
+        ..Default::default()
+    };
+    let before = conv.messages.clone();
+    let live = Live::default();
+    let mut time = 0.0;
+    let mut frame = |events| painted(&run_frame(&ctx, vec2(1000.0, 900.0), &mut time, 1.0 / 60.0, events, |ui| transcript_view(ui, &t, &conv, &live)));
+    let at = |shapes: &[(String, Rect)], s: &str| shapes.iter().find(|(x, _)| x.contains(s)).map(|(_, r)| r.center()).unwrap_or_else(|| panic!("no {s:?} in {shapes:?}"));
+    let shapes = frame(vec![]);
+    assert!(!shapes.iter().any(|(x, _)| x == "Fork from here"), "no menu before a right-click");
+    let p = at(&shapes, "Finished here.");
+    frame(vec![egui::Event::PointerMoved(p)]);
+    frame(click(p, Secondary));
+    frame(vec![]);
+    let shapes = frame(vec![]);
+    assert!(shapes.iter().any(|(x, _)| x == "Revert to before this"), "both go back to the same place");
+    let item = at(&shapes, "Fork from here");
+    frame(vec![egui::Event::PointerMoved(item)]);
+    frame(click(item, Primary));
+    frame(vec![egui::Event::PointerGone]);
+    let to = ctx.data_mut(|d| d.remove_temp::<Option<agent::RevertTo>>(Id::unique(crate::transcript::FORK_REQUEST))).flatten();
+    assert_eq!(to, Some(agent::RevertTo::Block(3, 0, conv.messages[3]["content"][0].clone())));
+    assert!(ctx.data_mut(|d| d.remove_temp::<Option<agent::RevertTo>>(Id::unique(REWIND_REQUEST))).flatten().is_none(), "Fork is not Revert");
+    assert_eq!(conv.messages, before, "the conversation is untouched");
+}
+
 /// Right-clicking a reply's selected text keeps the selection and offers
 /// Copy (it), Copy message, Copy link address over a link, and Revert to
 /// before this; the user's message has the copies too.

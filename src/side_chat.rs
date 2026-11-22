@@ -202,7 +202,7 @@ impl App {
             let input_id = Id::unique(("side-composer", id));
             self.recall(ui, input_id);
             let enter = widgets::enter_pressed(ui, input_id);
-            let (response, box_rect) = self.message_box(ui, t, Rangef::new(rect.left() + composer::GAP + composer::BTN + 8.0, rect.right() - composer::GAP), top, input_id);
+            let (response, box_rect) = self.message_box(ui, t, Rangef::new(rect.left() + composer::GAP + composer::BTN + 8.0, rect.right() - composer::GAP), top, composer::COMPOSER_H, input_id);
             if std::mem::take(&mut self.side_focus) { response.request_focus(); }
             if response.has_focus() { self.side_active = true; }
             let bottom = box_rect.bottom();

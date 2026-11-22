@@ -236,7 +236,7 @@ fn goal_runs_until_finished() {
 /// Kits and notes (Claude): LOAD adds AGENT's tool in a system message,
 /// the prompt and tools as they were. A cold cache changes nothing; only a
 /// summary that covers the LOAD brings the kit into the prefix (and the
-/// note into the session memory, its call's text folded).
+/// note into the session memory, its call's text kept as written).
 #[test]
 fn kits_and_notes_wait_for_a_summary() {
     let (w, s) = idle_worker("kits", Conversation { model: "claude-opus-5-5".into(), effort: "high".into(), ..Default::default() });
@@ -287,7 +287,7 @@ fn kits_and_notes_wait_for_a_summary() {
     assert_eq!((&r4.system, &r4.tools, r4.effort.as_deref()), (&r1.system, &r1.tools, Some("high")));
     assert_eq!(&r4.messages[..r3.messages.len()], &r3.messages[..]);
     let flat = serde_json::to_string(&r4.messages).unwrap();
-    assert!(flat.contains("the db is postgres") && !flat.contains(crate::prefix::NOTE_FOLDED) && flat.contains(&"x".repeat(200_000)));
+    assert!(flat.contains("the db is postgres") && !flat.contains("Your session memory has the notes") && flat.contains(&"x".repeat(200_000)));
     // A summary covers the LOAD: the kit joins the prefix, and no message
     // adds its tool any more.
     {
@@ -1212,7 +1212,7 @@ fn a_chat_runs_no_file_command_or_agent_tool() {
         let c = s.conv.lock().unwrap();
         assert!(c.goal.is_empty() && c.provider() != api::Provider::Freebuff && c.effort == "low");
     }
-    assert!(chat_refuses_provider(true, api::Provider::Freebuff).is_some());
+    assert!(chat_refuses_provider(true, api::Provider::Freebuff).is_some() && chat_refuses_provider(true, api::Provider::Plugin).is_some());
     assert!(chat_refuses_provider(false, api::Provider::Freebuff).is_none() && chat_refuses_provider(true, api::Provider::Claude).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1996,6 +1996,7 @@ fn code_mode_needs_node() {
     let (text, err) = result_of(&s.conv.lock().unwrap(), "b");
     assert!(err && text.contains("isn't in Code Mode"), "{text}");
     assert!(code_mode_refuses_provider(true, api::Provider::Freebuff).is_some() && code_mode_refuses_provider(false, api::Provider::Freebuff).is_none());
+    assert!(code_mode_refuses_provider(true, api::Provider::Plugin).is_some() && code_mode_refuses_provider(false, api::Provider::Plugin).is_none());
 }
 
 /// Each Code Mode conversation has a REPL context of its own: one's

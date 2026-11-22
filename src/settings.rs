@@ -19,7 +19,12 @@ impl App {
         let p = ui.painter();
         p.text(egui::pos2(head.left() + 14.0, head.center().y), Align2::LEFT_CENTER, GEAR_ICON, markdown::icon_font(13.0), t.ink3);
         p.text(egui::pos2(head.left() + 34.0, head.center().y), Align2::LEFT_CENTER, "Settings", FontId::proportional(13.0), t.ink);
-        if closed {
+        // Esc with a picker open closes only the picker.
+        if closed && (self.wallpaper_picker || self.or_picker.is_some()) {
+            self.wallpaper_picker = false;
+            self.wallpaper_hover = None;
+            self.or_picker = None;
+        } else if closed {
             self.page = self.settings_from.take().filter(|p| *p != Page::Settings).unwrap_or(Page::Chats);
         }
         let body = Rect::from_min_max(egui::pos2(card.left() + 1.0, head.bottom() + 1.0), card.max - vec2(1.0, 1.0));
@@ -107,13 +112,14 @@ impl App {
         }
 
         if option_row(ui, t, "OpenRouter routing", &mut self.settings.or_routing, openrouter::Routing::ALL.map(|r| (r.id().to_string(), r.label())), Some(
-            "Which provider serves DeepSeek on OpenRouter. Balanced: cost times the square root of time. \
+            "Which provider serves an OpenRouter model. Balanced: cost times the square root of time. \
              Cheapest: cost per request, counting cache reads (most of an agent's input). Fastest: first token plus reply time. \
              OpenRouter: its own routing within OAK's price ceiling. A conversation stays with its provider while it is within 1.3× of the best, to keep its cache.",
         )) {
             openrouter::set_routing(&self.settings.or_routing);
             store::save_settings(&self.settings);
         }
+        self.or_models_row(ui, t);
 
         if option_row(ui, t, "Local summaries", &mut self.settings.local_summarizer, rolling::Summarizer::ALL.map(|s| (s.id().to_string(), s.label())), Some(
             "Local summaries stay on your server and pause the session. DeepSeek sends context to OpenRouter; \
@@ -317,6 +323,134 @@ impl App {
         if close || modal.should_close() {
             self.wallpaper_picker = false;
             self.wallpaper_hover = None;
+        }
+    }
+
+    /// The OpenRouter models row: how many are built in (named on hover),
+    /// the ones added (a click removes one), and Add, which opens the
+    /// picker of OpenRouter's list.
+    fn or_models_row(&mut self, ui: &mut Ui, t: &Theme) {
+        caption(ui, "OpenRouter models", t.ink3);
+        let mut remove = None;
+        ui.horizontal_wrapped(|ui| {
+            let built: Vec<&str> = openrouter::MODELS.iter().map(|m| m.name).collect();
+            ui.label(RichText::new(format!("{} built in", built.len())).color(t.ink2)).on_hover_text(built.join("\n"));
+            for (i, a) in self.settings.or_models.iter().enumerate() {
+                let name = if a.name.is_empty() { &a.id } else { &a.name };
+                if ui.button(format!("{name}  ×")).on_hover_text(format!("{}\nClick to remove", a.id)).clicked() {
+                    remove = Some(i);
+                }
+            }
+            if ui.button("Add…").on_hover_text("Pick from OpenRouter's models that call tools. Added ones show in the model picker with an OpenRouter key.").clicked() {
+                self.or_picker = Some(String::new());
+            }
+        });
+        ui.end_row();
+        if let Some(i) = remove {
+            self.settings.or_models.remove(i);
+            self.or_models_changed();
+        }
+        if self.or_picker.is_some() {
+            self.or_model_picker(ui.ctx(), t);
+        }
+    }
+
+    fn or_models_changed(&mut self) {
+        openrouter::set_added(&self.settings.or_models);
+        store::save_settings(&self.settings);
+    }
+
+    /// OpenRouter's models that call tools, searchable by name or id: a
+    /// click adds one to the picker, or removes one added. Built-in ones
+    /// show as such. Closed by Esc, the X or a click outside.
+    fn or_model_picker(&mut self, ctx: &egui::Context, t: &Theme) {
+        const ROW: f32 = 40.0;
+        let Some(mut query) = self.or_picker.take() else { return };
+        let cat = openrouter::catalog(ctx);
+        let words: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
+        let shown: Vec<&openrouter::Listed> = cat
+            .list
+            .iter()
+            .filter(|l| {
+                let hay = format!("{} {}", l.added.name, l.added.id).to_lowercase();
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+            .collect();
+        let mut close = false;
+        let mut toggle = None;
+        let modal = crate::widgets::dialog("or-model-picker", t).show(ctx, |ui| {
+            ui.set_width(600.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("OpenRouter models").size(16.0).color(t.ink));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    let (x, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+                    crate::widgets::draw_x(ui.painter(), x.shrink(7.0), if resp.hovered() { t.ink } else { t.ink3 });
+                    close |= resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                    if cat.loading {
+                        ui.add(egui::Spinner::new().size(12.0).color(t.ink3));
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            let edit = TextEdit::singleline(&mut query).id(Id::unique("or-model-search")).hint_text("Search").desired_width(f32::INFINITY);
+            let field = crate::text_menu::add(ui, edit);
+            if !field.has_focus() && ui.memory(|m| m.focused().is_none()) {
+                field.request_focus();
+            }
+            ui.add_space(6.0);
+            if let Some(e) = &cat.error {
+                crate::widgets::error_note(ui, t, &format!("Couldn't load OpenRouter's models: {e}"));
+            } else if cat.list.is_empty() {
+                caption(ui, "Loading…", t.ink3);
+            } else if shown.is_empty() {
+                caption(ui, "No matches", t.ink3);
+            }
+            let max_h = (ctx.content_rect().height() * 0.7 - 90.0).max(ROW * 4.0);
+            let full = shown.len() as f32 * ROW;
+            ScrollArea::vertical().id_salt("or-model-list").max_height(max_h).min_scrolled_height(full.min(max_h)).auto_shrink([false, true]).show_rows(ui, ROW, shown.len(), |ui, range| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for l in &shown[range] {
+                    let a = &l.added;
+                    let built = openrouter::MODELS.iter().any(|m| m.id == a.id);
+                    let added = self.settings.or_models.iter().any(|m| m.id == a.id);
+                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), if built { Sense::hover() } else { Sense::click() });
+                    let hover = resp.hovered() && !built;
+                    let p = ui.painter();
+                    if hover {
+                        p.rect_filled(rect, 3.0, t.tool_hover);
+                    }
+                    let right = rect.right() - 10.0;
+                    let (status, color) = match (built, added) {
+                        (true, _) => ("Built in", t.ink3),
+                        (_, true) => ("Added", t.accent),
+                        _ => ("", t.ink3),
+                    };
+                    p.text(egui::pos2(right, rect.center().y), Align2::RIGHT_CENTER, status, FontId::proportional(12.0), color);
+                    let price = if a.free { "free".to_string() } else { format!("${} / ${} per M", per_m(l.price.0), per_m(l.price.1)) };
+                    let facts = format!("{price}, {}k context{}", a.context / 1000, if a.reasoning { "" } else { ", no thinking" });
+                    let facts_x = right - 70.0;
+                    p.text(egui::pos2(facts_x, rect.center().y), Align2::RIGHT_CENTER, facts, FontId::proportional(11.5), t.ink3);
+                    let w = (facts_x - rect.left() - 190.0).max(120.0);
+                    let name = clip_width(ui, &a.name, &FontId::proportional(13.0), w);
+                    let id = clip_width(ui, &a.id, &FontId::proportional(11.0), w);
+                    let p = ui.painter();
+                    p.text(egui::pos2(rect.left() + 8.0, rect.top() + 13.0), Align2::LEFT_CENTER, name, FontId::proportional(13.0), if added || hover { t.ink } else { t.ink2 });
+                    p.text(egui::pos2(rect.left() + 8.0, rect.top() + 29.0), Align2::LEFT_CENTER, id, FontId::proportional(11.0), t.ink3);
+                    if !built && resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if added { "Remove" } else { "Add" }).clicked() {
+                        toggle = Some(a.clone());
+                    }
+                }
+            });
+        });
+        if let Some(a) = toggle {
+            match self.settings.or_models.iter().position(|m| m.id == a.id) {
+                Some(i) => drop(self.settings.or_models.remove(i)),
+                None => self.settings.or_models.push(a),
+            }
+            self.or_models_changed();
+        }
+        if !close && !modal.should_close() {
+            self.or_picker = Some(query);
         }
     }
 
@@ -727,6 +861,12 @@ fn option_row<T: PartialEq + Clone>(ui: &mut Ui, t: &Theme, label: &str, value: 
     }
     ui.end_row();
     before != *value
+}
+
+/// Dollars per million tokens, as short as it reads: "0.1", "0.035", "15".
+fn per_m(v: f64) -> String {
+    let s = format!("{v:.3}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// A switch's choices.

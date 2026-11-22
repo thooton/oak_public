@@ -100,7 +100,12 @@ impl Streaming {
     fn apply(&mut self, l: &mut Live, batch: &mut Batch, ev: Event) {
         match ev {
             Event::Retry { attempt, wait, reason } => {
-                l.status = format!("Retry {attempt}/{} in {wait}s after: {reason}", api::RETRIES);
+                // (Past RETRIES: OpenRouter waiting out a rate limit.)
+                l.status = if attempt <= api::RETRIES {
+                    format!("Retry {attempt}/{} in {wait}s after: {reason}", api::RETRIES)
+                } else {
+                    format!("Retry {attempt} in {wait}s after: {reason}")
+                };
             }
             Event::Block { index: i, block: b } => {
                 l.status = match b["type"].as_str() {
@@ -272,9 +277,9 @@ impl Worker {
         let scratch = if c.chat { PathBuf::new() } else { scratchpad(&mut c) };
         let context = memory_context(&c).to_string();
         let agent = c.parent.is_some().then(|| agent_label(c.agent_id, &c.title));
-        // A model on the user's own server gets the basics only, and the
-        // goal's tools while there is one.
-        let local = crate::local::serves(&c.model);
+        // A model on the user's own server (or a plugin's) gets the basics
+        // only, and the goal's tools while there is one.
+        let local = crate::local::basic(&c.model);
         let mut kits = c.prefix.kits.clone();
         if local && !c.goal.is_empty() {
             kits.push("GOAL".into());
@@ -637,11 +642,13 @@ impl Worker {
         if base != self.last_request.lock().unwrap().as_ref().map_or(base, |r| r.2) {
             return Ok(()); // a summary just landed: try with it
         }
-        // "prompt is too long: 213456 tokens > 200000 maximum"
-        let total = error
-            .split(|ch: char| !ch.is_ascii_digit())
-            .find_map(|d| d.parse::<u64>().ok().filter(|&t| t > 1000))
-            .unwrap_or(c.rolling.context);
+        // "prompt is too long: 213456 tokens > 200000 maximum"; without a
+        // size, the last measured request and what came since.
+        let total = error.split(|ch: char| !ch.is_ascii_digit()).find_map(|d| d.parse::<u64>().ok().filter(|&t| t > 1000)).unwrap_or_else(|| {
+            c.messages.load_from(base);
+            let context = c.rolling.context;
+            rolling::size_of(&c.messages[..n.min(c.messages.len())], base, &c.rolling.measured, context)
+        });
         let plan = plan_summary(&mut c, n, base, total).ok_or("nothing old enough to summarize")?;
         let request = summary_request_for(&c, &body, n, plan.cut);
         drop(c);

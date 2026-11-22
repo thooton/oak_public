@@ -353,8 +353,8 @@ pub(crate) fn render_memory(c: &Conversation) -> String {
 /// the session starts and after each summary: never because the cache
 /// expired, another model or account, or a restart. In between, changes
 /// are visible to the model as the tool calls and goal notes that made
-/// them: a new note isn't added twice. (Once the block has it, the call's
-/// text is folded: `prefix::State::fold`.) The instruction files and memory
+/// them: a new note isn't added twice. (The call keeps its text after the
+/// block has it.) The instruction files and memory
 /// index (the context block) are read at those moments too. The transcript
 /// gets a line when the files loaded change.
 pub(crate) fn memory_for_request(c: &mut Conversation, now: i64) -> String {

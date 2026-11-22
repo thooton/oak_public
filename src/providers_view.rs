@@ -21,8 +21,12 @@ pub(crate) fn logo(ctx: &egui::Context, p: Kind) -> egui::TextureHandle {
         Kind::Refuseless => include_bytes!("../assets/logo-refuseless.png"),
         Kind::MuseCode => include_bytes!("../assets/logo-musecode.png"),
         Kind::Local => include_bytes!("../assets/logo-local.png"),
+        Kind::Plugin => &[],
     };
-    let img = image::load_from_memory(bytes).expect("built-in logo decodes").to_rgba8();
+    // A plugin's provider gives its own (Oak's when it has none, or one
+    // that doesn't decode).
+    let own = (p == Kind::Plugin).then(crate::provided::logo).flatten().and_then(|b| image::load_from_memory(&b).ok());
+    let img = own.unwrap_or_else(|| image::load_from_memory(if bytes.is_empty() { include_bytes!("../assets/oak-icon.png") } else { bytes }).expect("built-in logo decodes")).to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     let tex = ctx.load_texture(format!("logo-{}", p.id()), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR);
     ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
@@ -268,6 +272,8 @@ pub(crate) fn account_count(p: Kind) -> usize {
         Kind::Refuseless => crate::refuseless::accounts().len(),
         Kind::MuseCode => crate::musecode::accounts().len(),
         Kind::Local => local::on() as usize,
+        // (No accounts: its plugin has a page of its own.)
+        Kind::Plugin => 0,
     }
 }
 

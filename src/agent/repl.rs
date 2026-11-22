@@ -138,7 +138,7 @@ impl Worker {
     fn run_script(&self, conv: &str, host: &Arc<code_mode::Host>, call_id: &str, code: &str, note: Option<String>, script: &Script) -> (Result<Value, String>, bool) {
         let (agent, spawner, local, mut kits) = {
             let c = self.conv.lock().unwrap();
-            (c.parent.is_some(), c.spawner, crate::local::serves(&c.model), c.prefix.kits.clone())
+            (c.parent.is_some(), c.spawner, crate::local::basic(&c.model), c.prefix.kits.clone())
         };
         if local && !self.conv.lock().unwrap().goal.is_empty() {
             kits.push("GOAL".into());

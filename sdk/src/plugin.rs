@@ -19,7 +19,8 @@
 //! - `Hooks`: at startup, every frame, at the top of Home's Providers, in a
 //!   message box's corner, at exit;
 //! - `Rewriter`: what transcripts show in place of the model's own words;
-//! - `ComposerBox`: a box beside the message box.
+//! - `ComposerBox`: a box beside the message box;
+//! - `ModelProvider`: models for conversations, served by the plugin.
 //!
 //! Parts are `Send + Sync` and take `&self`: a plugin keeps what changes
 //! behind its own locks (or in statics; the library is never unloaded,
@@ -438,6 +439,31 @@ pub trait ComposerBox: Send + Sync {
     fn show(&self, ui: &mut Ui, app: &mut dyn App);
 }
 
+/// Models for conversations, served by the plugin (Oak 10). Oak lists
+/// them in its pickers under `name`, and sends every request of a
+/// conversation on one to `stream`, whole: the system prompt, the messages
+/// in Oak's format and the tools. Oak runs the tools the replies call, as
+/// for any provider; its conversations get the basic tools (a local
+/// model's: files, commands, tasks, the web, ASK and DISPLAY).
+pub trait ModelProvider: Send + Sync {
+    /// Lower case, no spaces or slashes; kept from one version to the next
+    /// (conversations name their model by it).
+    fn id(&self) -> String;
+    /// As the pickers show it.
+    fn name(&self) -> String;
+    /// Its models now. Asked often and from any thread: answer quickly.
+    fn models(&self) -> Vec<crate::provider::ModelInfo>;
+    /// A PNG of its logo, for the pickers (None: Oak's own).
+    fn logo(&self) -> Option<Vec<u8>> {
+        None
+    }
+    /// Streams the reply to `request`, on a thread of Oak's: each event
+    /// (`provider::event`) goes to `event`, which answers false once Oak
+    /// no longer wants the reply (stop then). Err: why it failed (starting
+    /// with `provider::TOO_LONG` to have Oak summarize and ask again).
+    fn stream(&self, request: crate::provider::Request, event: &mut dyn FnMut(Value) -> bool) -> Result<(), String>;
+}
+
 
 /// What one of a part's named calls answers (`abi::OakCall`).
 enum Reply {
@@ -564,6 +590,7 @@ type Door = Box<dyn Gate>;
 type Life = Box<dyn Hooks>;
 type Words = Box<dyn Rewriter>;
 type Switches = Box<dyn ComposerBox>;
+type Models = Box<dyn ModelProvider>;
 
 unsafe extern "C" fn home_shown(user: *mut c_void) -> bool {
     outer(|| false, || unsafe { part::<Home>(user) }.shown())
@@ -775,6 +802,37 @@ unsafe extern "C" fn composer_box_show(user: *mut c_void, ui: *mut OakUi) {
     outer(|| (), || unsafe { part::<Switches>(user) }.show(&mut Ui::raw(ui), &mut Window::default()))
 }
 
+unsafe extern "C" fn provider_stream(user: *mut c_void, request: OakStr, event: OakEmit, event_user: *mut c_void, error: OakSink, error_user: *mut c_void) -> bool {
+    let result = outer(
+        || Err(STOPPED.to_string()),
+        || {
+            let req: crate::provider::Request = serde_json::from_str(unsafe { str_of(request) }).map_err(|e| format!("Oak's request didn't read: {e}"))?;
+            let mut tell = |v: Value| {
+                let json = v.to_string();
+                unsafe { event(event_user, s(&json)) }
+            };
+            unsafe { part::<Models>(user) }.stream(req, &mut tell)
+        },
+    );
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            unsafe { give(error, error_user, e.as_bytes()) };
+            false
+        }
+    }
+}
+
+unsafe extern "C" fn provider_call(user: *mut c_void, method: OakStr, args: OakStr, data: OakBytes, out: OakSink, out_user: *mut c_void) -> i64 {
+    unsafe {
+        called::<Models>(user, method, args, data, out, out_user, |p, method, _, _| match method {
+            "models" => serde_json::to_value(p.models()).unwrap_or_default().into(),
+            "logo" => p.logo().map_or(Reply::Unknown, |png| Reply::Parts(vec![png])),
+            _ => Reply::Unknown,
+        })
+    }
+}
+
 fn size_of<T>() -> u32 {
     std::mem::size_of::<T>() as u32
 }
@@ -950,5 +1008,12 @@ impl Registrar {
     pub fn composer_box(&mut self, b: impl ComposerBox + 'static) {
         let d = OakComposerBox { size: size_of::<OakComposerBox>(), flags: 0, user: keep::<Switches>(Box::new(b)), show: Some(composer_box_show) };
         unsafe { (api().add_composer_box)(&d) };
+    }
+
+    /// Models for conversations (Oak 10).
+    pub fn provider(&mut self, p: impl ModelProvider + 'static) {
+        let (id, name) = (p.id(), p.name());
+        let d = OakProvider { size: size_of::<OakProvider>(), flags: 0, user: keep::<Models>(Box::new(p)), id: s(&id), name: s(&name), stream: Some(provider_stream), call: Some(provider_call) };
+        unsafe { (api().add_provider)(&d) };
     }
 }

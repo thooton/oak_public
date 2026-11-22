@@ -4,8 +4,8 @@ A coding agent for Windows and Linux, written in Rust with [egui](https://github
 Each conversation works in a folder you choose, with a model from one of Oak's providers: Claude
 (a subscription login or an API key), the GPT models a ChatGPT plan includes for Codex,
 OpenRouter, Muse Code (Meta's Muse models through a Meta Model API key, `src/musecode.rs`), NodeClub,
-Freebuff, Refuseless (abliterated GLM 5.3 Flash and DeepSeek V4.1 Flash), or a llama.cpp server of
-your own. Cloud sessions run Claude Code in Anthropic's cloud on your Claude accounts.
+Freebuff, Refuseless (abliterated GLM 5.3 Flash and DeepSeek V4.1 Flash), a llama.cpp server of
+your own, or models a plugin serves (Duck.ai's, through the private duck plugin). Cloud sessions run Claude Code in Anthropic's cloud on your Claude accounts.
 
 Oak is one executable. It loads plugins when it starts: dynamic libraries that add tabs, cloud
 backends, themes, fonts, system prompts and more, through a stable C interface
@@ -67,7 +67,8 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
   `bench/tools/` in the private repository, beside Claude Code's and the command center's; set
   `OAK_API_BASE` and a scratch `OAK_DIR`). Build them with `--release`.
 - Against the real services, signed in (a small cost): `live_rolling`, `live_images`,
-  `live_agents`, `live_freebuff` (`OAK_TEST_PROMPT`, `OAK_TEST_FOLDER`) and `live_cloud_list`
+  `live_agents`, `live_openrouter` (`OAK_DIR` a scratch folder with a copy of openrouter.json;
+  `OAK_TEST_MODELS`, `OAK_TEST_RUNS`, `OAK_TEST_DUMP` for the request bodies), `live_freebuff` (`OAK_TEST_PROMPT`, `OAK_TEST_FOLDER`) and `live_cloud_list`
   (read only), `live_rewrite`, `live_search` and `live_images_search` (`OAK_TEST_QUERY`). `live_hidden_desktop` (Windows, after `cargo build`)
   opens Oak on a hidden desktop. `closes_tk_apps_and_cmd_wrappers` (Windows, after `cargo build`,
   Python with Tk required; `OAK_TEST_PYTHON` overrides its path) checks literal argument passing,
@@ -213,7 +214,9 @@ choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home,
 settings: Settings holds none of a plugin's controls.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
 plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
-is clipped to the corner so it cannot move or cover the rest of the composer.
+is clipped to the corner so it cannot move or cover the rest of the composer. The rows sit in the
+composer row's height, right above the gear; when there are more than fit, the message box grows
+taller with them, so its bottom always stays level with the buttons, the gear and the boxes beside it.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.
@@ -340,6 +343,17 @@ can't read.
   messages still only grow. No other provider or event gets this.
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
   the prompt, and is never offered to subagents (it serves one request at a time).
+- Plugins' models (`src/provided.rs`, `oak_sdk::ModelProvider`, interface version 10) are one
+  provider, `Kind::Plugin`, named after the plugins' providers ("Duck.ai") in the pickers and
+  shown with the plugin's logo. Their ids are `plugin:<provider>/<model>`; each request goes to the
+  plugin whole (system prompt, Oak's messages, tools) and its events come back as Oak's, so their
+  tool calls show and run as any model's. They are free (no accounts; the composer's box names the
+  provider) and get what a local model gets (`local::basic`): the basic tools, the `{{#local}}`
+  prompt, short summaries, no MCP servers. Normal conversations only: chats and Code Mode refuse
+  them (`agent::chat_refuses_provider`, `code_mode_refuses_provider`) and subagents can't use them
+  (left out of AGENT new's list, refused by `agent_new`). A model whose plugin isn't running fails
+  its request with a message saying so. A failure starting "prompt is too long" summarizes the
+  conversation and asks again, as for any provider.
 
 **The agent** (`src/agent.rs`, `src/agent/`). One worker thread per conversation. Its tools
 (`src/tools/defs.rs`): READ, WRITE, EDIT, EXECUTE, SEARCH, FETCH, SCREENSHOT, DISPLAY, ASK,
@@ -534,6 +548,12 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   a change applies to summaries made after it). A suggested trigger is never below keep × 4/3, the
   least that allows the keep, so it is always for the keep in the box. Turning smart context
   off for a conversation stops new summaries; the one in use stays.
+  The trigger is at most 90% of the model's window, and never past it: a window too short for the
+  least trigger (20k; a plugin's model, Duck.ai's 19k) gets 90% of it (`rolling::max_trigger`). A
+  summary takes out at least 10k tokens, or for a basic model (local or a plugin's) a quarter of
+  its trigger when that is less (`rolling::least_for`). A refusal as too long that gives no size
+  counts as the last measured request plus an estimate of what came after it (`rolling::size_of`),
+  not as the last request alone, or the cut would land a turn too early.
 - Goals: the model keeps working until it calls GOAL finish; "pause goal" stops Oak asking it to
   continue without telling it. ASK waits for the user's answers, except while a goal is set (not
   paused or finished): then it returns at once, telling the model the user was asked
@@ -564,11 +584,32 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   still waiting for its request when Oak closed. Reverting
   (a message's icon, or right-click inside a reply) takes the conversation back, not the files.
 - A safety classifier's refusal is retried as failed requests are, then every minute and a half;
-  there is no fallback to another model. Titles come from OpenRouter's title model when there is
+  there is no fallback to another model. OpenRouter's built-in models (`openrouter::MODELS`) are
+  DeepSeek V4.1 Flash 1017, Gemma 4 31B, and the free Gemma 4 31B, Particle-1 and Nemotron 3.5
+  Super VL (capped at $0, so they never fall through to a paid provider). Settings' "OpenRouter
+  models" row adds more: Add… opens OpenRouter's list (`/models`, fetched without a key; only models
+  that call tools), searchable, where a click adds or removes one; the row's buttons remove one.
+  Added ones are kept as `or_models` in settings.json, as the list described them, and go to any
+  provider that calls tools (no price ceiling unless free; no thinking or effort when the model has
+  none). Free models share their provider's free quota with every OpenRouter user, so OpenRouter
+  turns away a share of requests ("rate-limited upstream", HTTP 429) all day; such a rate limit,
+  a paid provider's too, is retried every few seconds for up to five minutes (the status line names
+  the model and provider) rather than with the usual four quick retries, and fails after that.
+  `live_openrouter` (ignored) runs real sessions on each model. Titles come from OpenRouter's title model when there is
   a key, else from Haiku or the conversation's model. Rename (a conversation's tab or Home row
   right-click menu, or double-click its title in the session box; `src/rename.rs`) replaces the
   title, a title still being made included; the id, history and file stay (the file takes the
-  new name). Subagents keep theirs, since sessions address them by it.
+  new name). Subagents keep theirs, since sessions address them by it. Fork (a conversation's tab
+  or Home row right-click menu; `src/fork.rs`) starts a new conversation with the transcript,
+  summary, notes, marks, loaded kits and session memory of the one it came from, but none of its
+  running work: no tasks, subagents, goal, heartbeats, meters, inbox, seat or usage totals. The
+  fork gets its own title ("Fork: …"), id, scratchpad and tab, and waits for the user; the source
+  carries on as it is. Its prefix's pin is let go, so its first request renders the system prompt
+  for it rather than sending the source's (which named the source's scratchpad). Right-clicking a
+  message or one of the model's items also offers Fork from here, which copies the conversation up
+  to just before it, as Revert to before this goes back to, and leaves the source as it is. Files
+  in the working folder are shared, as a side chat's; nothing links a fork to its source, so
+  deleting either leaves the other.
 - Rewrites (`src/rewrites.rs`): a plugin's rewriter (`Rewriter`; Unslop, a private plugin)
   has replies, and optionally thinking and notes, rewritten for the user; the model's context
   keeps its own text. Oak keeps the rewrites in their blocks (under the rewriter's key, which

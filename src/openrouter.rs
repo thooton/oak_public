@@ -30,31 +30,243 @@ pub struct Model {
     /// The most a provider may charge (dollars per million input and
     /// output tokens): well under the model maker's own price, so requests
     /// go to the cheap full-precision providers only...
-    pub max_price: (f64, f64),
+    pub max_price: Option<(f64, f64)>,
     /// ...unless none of those can take a request: then it goes again with
-    /// the maker's own price as the ceiling.
-    pub list_price: (f64, f64),
+    /// the maker's own price as the ceiling. None for both: no ceiling (a
+    /// model added in Settings, whose prices OAK doesn't know).
+    pub list_price: Option<(f64, f64)>,
     /// The effort levels it tells apart (`agent::efforts`).
     pub efforts: &'static [&'static str],
+    /// It thinks (OpenRouter's `reasoning` parameter). When not, requests
+    /// go without thinking or effort, and providers needn't take them.
+    pub reasoning: bool,
 }
 
-/// The OpenRouter models in the model picker. DeepSeek V4.1 Flash 1017
-/// writes up to 393k tokens, but several of the cheapest full-precision
-/// providers stop at 131k; no reply needs more. Its ceiling of $0.15/$0.60
-/// lets in Morph, DeepInfra and InferenceNet (fp8, $0.04–0.15 in,
-/// $0.24–0.55 out, October 2026), and keeps out those at or near list price
-/// (BaseTen at $0.30/$1.20, DigitalOcean, Cohere, Particle AI).
-pub const MODELS: &[Model] = &[Model {
-    id: "deepseek/deepseek-v4.1-flash-1017",
-    name: "DeepSeek V4.1 Flash 1017",
-    max_output: 131_072,
-    context: 1_048_576,
-    max_price: (0.15, 0.60),
-    list_price: (0.30, 1.20),
-    // Its reasoning budget out of 100: low 50, high 75 (its default), max
-    // 100 (the model card's encoding notes).
-    efforts: &["low", "high", "max"],
-}];
+/// The OpenRouter models in the model picker, before those added in
+/// Settings (`set_added`); DeepSeek first (the summarizer's, `rolling`).
+/// DeepSeek V4.1 Flash 1017 writes up to 393k tokens, but several of the
+/// cheapest full-precision providers stop at 131k; no reply needs more.
+/// Its ceiling of $0.15/$0.60 lets in Morph, DeepInfra and InferenceNet
+/// (fp8, $0.04–0.15 in, $0.24–0.55 out, October 2026), and keeps out those
+/// at or near list price (BaseTen at $0.30/$1.20, DigitalOcean, Cohere,
+/// Particle AI). Gemma 4 31B's providers stop at 8k to 262k: 32k keeps
+/// most of them; its ceiling of $0.15/$0.40 lets in all but the dearest
+/// (Modal, SambaNova, ModelRun, SiliconFlow; November 2026). The free ones
+/// have one provider each (Google AI Studio, Particle AI, NVIDIA), capped
+/// at $0 so a request never falls through to a paid one.
+pub const MODELS: &[Model] = &[
+    Model {
+        id: "deepseek/deepseek-v4.1-flash-1017",
+        name: "DeepSeek V4.1 Flash 1017",
+        max_output: 131_072,
+        context: 1_048_576,
+        max_price: Some((0.15, 0.60)),
+        list_price: Some((0.30, 1.20)),
+        // Its reasoning budget out of 100: low 50, high 75 (its default), max
+        // 100 (the model card's encoding notes).
+        efforts: &["low", "high", "max"],
+        reasoning: true,
+    },
+    Model {
+        id: "google/gemma-4-31b-it",
+        name: "Gemma 4 31B",
+        max_output: 32_768,
+        context: 262_144,
+        max_price: Some((0.15, 0.40)),
+        list_price: Some((0.20, 0.60)),
+        // Thinking on or off, no levels.
+        efforts: &[],
+        reasoning: true,
+    },
+    Model {
+        id: "google/gemma-4-31b-it:free",
+        name: "Gemma 4 31B (free)",
+        max_output: 32_768,
+        context: 262_144,
+        max_price: Some((0.0, 0.0)),
+        list_price: Some((0.0, 0.0)),
+        efforts: &[],
+        reasoning: true,
+    },
+    Model {
+        id: "particle-ai/particle-1:free",
+        name: "Particle-1 (free)",
+        max_output: 131_072,
+        context: 1_048_576,
+        max_price: Some((0.0, 0.0)),
+        list_price: Some((0.0, 0.0)),
+        efforts: &["low", "medium", "high"],
+        reasoning: true,
+    },
+    Model {
+        id: "nvidia/nemotron-3.5-super-vl:free",
+        name: "Nemotron 3.5 Super VL (free)",
+        max_output: 131_072,
+        context: 1_000_000,
+        max_price: Some((0.0, 0.0)),
+        list_price: Some((0.0, 0.0)),
+        efforts: &[],
+        reasoning: true,
+    },
+];
+
+/// A model added to the picker in Settings (kept in settings.json as
+/// `or_models`), as OpenRouter's list described it when it was added.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Added {
+    pub id: String,
+    pub name: String,
+    pub context: u64,
+    pub max_output: u64,
+    /// Free (a `:free` id, or $0 in and out): capped at $0.
+    pub free: bool,
+    pub reasoning: bool,
+    /// It takes `reasoning_effort`: low, medium and high.
+    pub effort: bool,
+}
+
+/// The added models in force, after MODELS.
+static ADDED: std::sync::RwLock<Vec<&'static Model>> = std::sync::RwLock::new(Vec::new());
+
+/// Every `Added` made a `Model` this run, so adding one back (or saving the
+/// list again) reuses it: they live as long as OAK, as MODELS do.
+static MADE: Mutex<Vec<(Added, &'static Model)>> = Mutex::new(Vec::new());
+
+fn made(a: &Added) -> &'static Model {
+    let mut all = MADE.lock().unwrap();
+    if let Some((_, m)) = all.iter().find(|(x, _)| x == a) {
+        return m;
+    }
+    let leak = |s: &str| -> &'static str { Box::leak(s.to_string().into_boxed_str()) };
+    let price = a.free.then_some((0.0, 0.0));
+    let m: &'static Model = Box::leak(Box::new(Model {
+        id: leak(&a.id),
+        name: leak(if a.name.is_empty() { &a.id } else { &a.name }),
+        max_output: a.max_output.max(1024),
+        context: a.context.max(a.max_output).max(8192),
+        max_price: price,
+        list_price: price,
+        efforts: if a.effort && a.reasoning { &["low", "medium", "high"] } else { &[] },
+        reasoning: a.reasoning,
+    }));
+    all.push((a.clone(), m));
+    m
+}
+
+/// Puts the models added in Settings in the picker (those MODELS has
+/// already, or listed twice, once).
+pub fn set_added(list: &[Added]) {
+    let mut out: Vec<&'static Model> = vec![];
+    for a in list {
+        if !a.id.is_empty() && MODELS.iter().all(|m| m.id != a.id) && out.iter().all(|m| m.id != a.id) {
+            out.push(made(a));
+        }
+    }
+    *ADDED.write().unwrap() = out;
+}
+
+/// The models in the picker: MODELS, then those added in Settings.
+pub fn models() -> Vec<&'static Model> {
+    MODELS.iter().chain(ADDED.read().unwrap().iter().copied()).collect()
+}
+
+/// A model of OpenRouter's list, for Settings' picker.
+#[derive(Clone, Debug)]
+pub struct Listed {
+    pub added: Added,
+    /// Dollars per million tokens in and out (its cheapest provider's).
+    pub price: (f64, f64),
+}
+
+/// OpenRouter's list of models, as fetched for Settings' picker.
+#[derive(Clone, Default)]
+pub struct Catalog {
+    pub list: Vec<Listed>,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// When it was fetched, or last tried.
+    at: i64,
+}
+
+static CATALOG: Mutex<Option<Catalog>> = Mutex::new(None);
+
+/// The models OAK can use from OpenRouter's list (`/models`, which needs no
+/// key): those that call tools and write text, by name.
+fn catalog_from(v: &Value) -> Vec<Listed> {
+    let num = |x: &Value| x.as_f64().or_else(|| x.as_str()?.parse().ok());
+    let mut out: Vec<Listed> = v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let id = m["id"].as_str()?;
+            let params: Vec<&str> = m["supported_parameters"].as_array()?.iter().filter_map(|p| p.as_str()).collect();
+            let text = m["architecture"]["output_modalities"].as_array().is_none_or(|o| o.iter().any(|x| x == "text"));
+            if !params.contains(&"tools") || !text {
+                return None;
+            }
+            let price = (num(&m["pricing"]["prompt"])? * 1e6, num(&m["pricing"]["completion"])? * 1e6);
+            if price.0 < 0.0 || price.1 < 0.0 {
+                // OpenRouter's auto-router: priced per request it routes.
+                return None;
+            }
+            let context = m["context_length"].as_u64().unwrap_or(0);
+            let most = m["top_provider"]["max_completion_tokens"].as_u64().unwrap_or(context.min(32_768));
+            // "Google: Gemma 4 26B A4B " as the built-in ones are named.
+            let name = m["name"].as_str().unwrap_or(id);
+            let name = name.split_once(": ").map_or(name, |n| n.1).split_whitespace().collect::<Vec<_>>().join(" ");
+            Some(Listed {
+                added: Added {
+                    id: id.to_string(),
+                    name,
+                    context,
+                    max_output: most.min(131_072).min(context.max(1024)),
+                    free: id.ends_with(":free") || price == (0.0, 0.0),
+                    reasoning: params.contains(&"reasoning"),
+                    effort: params.contains(&"reasoning_effort"),
+                },
+                price,
+            })
+        })
+        .collect();
+    out.sort_by_key(|l| l.added.name.to_lowercase());
+    out
+}
+
+/// OpenRouter's list for Settings' picker: fetched in the background the
+/// first time it is asked for (again after an hour, or half a minute after
+/// failing), `ctx` repainted when it comes.
+pub fn catalog(ctx: &eframe::egui::Context) -> Catalog {
+    let mut c = CATALOG.lock().unwrap();
+    let c = c.get_or_insert_with(Catalog::default);
+    let now = api::now_ms();
+    let wait = if c.error.is_some() { 30_000 } else { 3_600_000 };
+    if !c.loading && (c.at == 0 || now - c.at > wait) {
+        c.loading = true;
+        c.at = now;
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let r = api::http()
+                .get(format!("{BASE}/models"))
+                .timeout(Duration::from_secs(30))
+                .send()
+                .map_err(api::network_error)
+                .and_then(api::json_of)
+                .map(|v| catalog_from(&v));
+            let mut c = CATALOG.lock().unwrap();
+            let c = c.get_or_insert_with(Catalog::default);
+            c.loading = false;
+            match r {
+                Ok(list) if !list.is_empty() => (c.list, c.error) = (list, None),
+                Ok(_) => c.error = Some("OpenRouter listed no models".into()),
+                Err(e) => c.error = Some(e),
+            }
+            ctx.request_repaint();
+        });
+    }
+    c.clone()
+}
 
 /// Which providers OpenRouter may pick from for `model` when OAK has no
 /// figures to rank them by (`provider_for`). Within these its own routing
@@ -63,11 +275,11 @@ pub const MODELS: &[Model] = &[Model {
 /// is warm. Left out: providers dearer than `max_price`, and any that
 /// ignore a parameter OAK sends (tools, thinking).
 pub fn routing(model: &Model) -> Value {
-    json!({
-        "quantizations": QUANTS,
-        "max_price": {"prompt": model.max_price.0, "completion": model.max_price.1},
-        "require_parameters": true,
-    })
+    let mut p = json!({"quantizations": QUANTS, "require_parameters": true});
+    if let Some((input, output)) = model.max_price {
+        p["max_price"] = json!({"prompt": input, "completion": output});
+    }
+    p
 }
 
 /// `body` with its price ceiling raised to the model maker's own price,
@@ -75,7 +287,8 @@ pub fn routing(model: &Model) -> Value {
 /// lower ceiling to raise.
 fn with_list_price(body: &Value) -> Option<Value> {
     let m = model(body["model"].as_str()?)?;
-    let ceiling = json!({"prompt": m.list_price.0, "completion": m.list_price.1});
+    let (input, output) = m.list_price?;
+    let ceiling = json!({"prompt": input, "completion": output});
     if body["provider"]["max_price"].is_null() || body["provider"]["max_price"] == ceiling {
         return None;
     }
@@ -150,9 +363,9 @@ fn endpoints_from(v: &Value, m: &Model) -> Vec<Endpoint> {
             let ok = QUANTS.contains(&e["quantization"].as_str().unwrap_or("unknown"))
                 && e["status"].as_i64().unwrap_or(0) >= 0
                 && e["service_tier"].is_null()
-                && ["tools", "reasoning"].iter().all(|x| params.contains(x))
-                && input * 1e6 <= m.list_price.0 + 1e-9
-                && output * 1e6 <= m.list_price.1 + 1e-9;
+                && params.contains(&"tools")
+                && (!m.reasoning || params.contains(&"reasoning"))
+                && m.list_price.is_none_or(|l| input * 1e6 <= l.0 + 1e-9 && output * 1e6 <= l.1 + 1e-9);
             if !ok {
                 return None;
             }
@@ -333,17 +546,20 @@ fn ranked(m: &Model, order: &[String]) -> Value {
     if order.is_empty() {
         return routing(m);
     }
-    json!({
+    let mut p = json!({
         "order": order,
         "allow_fallbacks": true,
         "quantizations": QUANTS,
-        "max_price": {"prompt": m.list_price.0, "completion": m.list_price.1},
         "require_parameters": true,
-    })
+    });
+    if let Some((input, output)) = m.list_price {
+        p["max_price"] = json!({"prompt": input, "completion": output});
+    }
+    p
 }
 
 pub fn model(id: &str) -> Option<&'static Model> {
-    MODELS.iter().find(|m| m.id == id)
+    MODELS.iter().find(|m| m.id == id).or_else(|| ADDED.read().unwrap().iter().copied().find(|m| m.id == id))
 }
 
 /// A model in the picker served through OpenRouter.
@@ -572,6 +788,12 @@ pub fn dollars(v: f64) -> String {
 fn body_for(req: &Request) -> Value {
     let mut body = crate::wire_anthropic::body(req, "openrouter", false);
     if let Some(m) = model(&req.model) {
+        if !m.reasoning
+            && let Some(b) = body.as_object_mut()
+        {
+            b.remove("thinking");
+            b.remove("output_config");
+        }
         body["provider"] = provider_for(m, &body, req.route.as_deref().unwrap_or(""));
     }
     if !req.fallbacks.is_empty() {
@@ -662,6 +884,10 @@ fn split_sail(mut body: Value) -> (Option<Value>, Value) {
     (sail, body)
 }
 
+/// Every request body `stream` sent (the live tests replay them).
+#[cfg(test)]
+pub(crate) static SENT: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+
 /// Which provider OpenRouter sent a reply to: on its `message_start` event.
 fn provider_of(ev: &Value) -> Option<&str> {
     if ev["type"] != "message_start" {
@@ -677,6 +903,8 @@ pub fn stream(req: Request, tx: Sender<Sse>) {
     let kind = req.purpose.id().to_string();
     let model_id = req.model.clone();
     let (sail, body) = split_sail(body_for(&req));
+    #[cfg(test)]
+    SENT.lock().unwrap().push(body.clone());
     let conv = req.seat_conv();
     // Sail once, without retries: if it can't take the request, the others
     // can at once.
@@ -749,7 +977,8 @@ fn open(body: &Value, conv: &str, tx: &Sender<Sse>, tries: u32) -> Result<(reqwe
                 .header("X-Title", "OAK")
                 .json(body)
         };
-        let result = provider::send_retrying(tx, &mut tries, build, |r| format!("OpenRouter {}", api::error_text(r))).map_err(|()| None)?;
+        let model = body["model"].as_str().unwrap_or("");
+        let result = send(tx, &mut tries, build, model).map_err(|()| None)?;
         return match result {
             Ok(r) if r.status().is_success() => {
                 if !provider::say_headers(tx, r.status().as_u16()) {
@@ -783,9 +1012,121 @@ fn open(body: &Value, conv: &str, tx: &Sender<Sse>, tries: u32) -> Result<(reqwe
                     format!("OpenRouter rejected key {label} ({why}): remove it on Home, or add one that works.")
                 })))
             }
-            Ok(r) => Err(Some(Sse::Err(format!("OpenRouter {}", api::error_text(r))))),
+            Ok(r) => {
+                let status = r.status().as_u16();
+                Err(Some(Sse::Err(format!("OpenRouter {}", error_of(status, &r.text().unwrap_or_default(), model).0))))
+            }
             Err(e) => Err(Some(Sse::Err(e))),
         };
+    }
+}
+
+// Rate limits. A free model is served from its provider's free quota,
+// which every OpenRouter user shares: OpenRouter answers 429 "temporarily
+// rate-limited upstream" (with retry-after: 1) to a share of requests all
+// day, as it does when a paid provider is busy. Measured on November 21,
+// 2026, one request every 5 s for 75 s: Gemma 4 31B (free) got through 2
+// times in 15, Particle-1 (free) 6 in 15, Nemotron 3.5 Super VL (free)
+// every time. The refusals come and go request by request, not in long
+// spells, so OAK keeps trying every few seconds (`patient_wait`) for up to
+// PATIENCE instead of its usual four quick retries, which a one-second
+// retry-after used up within five seconds.
+
+/// How long a request rate-limited upstream keeps being retried.
+const PATIENCE_MS: i64 = 5 * 60_000;
+
+/// Seconds before patient retry number `n` (from 1): 3, 4, 5... up to 15,
+/// or longer when the server asks (`after`).
+fn patient_wait(n: u32, after: Option<u64>) -> u64 {
+    (2 + n as u64).min(15).max(after.unwrap_or(0).min(60))
+}
+
+/// Seconds until OpenRouter's own rate limit lets requests through again
+/// (`x-ratelimit-reset`, milliseconds since the epoch), from `now`.
+fn reset_in(h: &reqwest::header::HeaderMap, now: i64) -> Option<u64> {
+    let at: i64 = h.get("x-ratelimit-reset")?.to_str().ok()?.trim().parse().ok()?;
+    Some(((at - now).max(0) as u64).div_ceil(1000))
+}
+
+/// What an error reply from OpenRouter says, for `model`: its message,
+/// with the provider and what that answered (its `metadata`); and whether
+/// it is a rate limit worth waiting out: a provider's ("rate-limited
+/// upstream") or OpenRouter's own per-minute one for free models (not the
+/// daily one, which lasts until the next day).
+fn error_of(status: u16, body: &str, model: &str) -> (String, bool) {
+    let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let e = &v["error"];
+    let msg = e["message"].as_str().map(str::to_string).unwrap_or_else(|| body.chars().take(500).collect());
+    // (The Messages endpoint keeps it beside `error`; the chat one in it.)
+    let meta = if v["metadata"].is_object() { &v["metadata"] } else { &e["metadata"] };
+    let who = meta["provider_name"].as_str().unwrap_or("");
+    let raw = match &meta["raw"] {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    let upstream = status == 429 && raw.contains("rate-limited upstream");
+    let per_minute = status == 429 && msg.contains("per-min");
+    let text = if upstream {
+        let at = if who.is_empty() { String::new() } else { format!(" at {who}") };
+        let shared = if model.ends_with(":free") { " (a free quota all OpenRouter users share)" } else { "" };
+        format!("HTTP 429: {model} is rate-limited upstream{at}{shared}")
+    } else {
+        let raw: String = raw.chars().take(300).collect();
+        match (who, raw.as_str()) {
+            ("", "") => format!("HTTP {status}: {msg}"),
+            (who, "") => format!("HTTP {status}: {msg} ({who})"),
+            ("", raw) => format!("HTTP {status}: {msg} ({raw})"),
+            (who, raw) => format!("HTTP {status}: {msg} ({who}: {raw})"),
+        }
+    };
+    (text, upstream || per_minute)
+}
+
+/// Sends what `build` makes until the answer is worth no retry: network
+/// failures and server errors go again within `api::RETRIES` (counted in
+/// `tries`), and rate limits worth waiting out (`error_of`) every few
+/// seconds for up to PATIENCE_MS besides, unless `tries` starts used up
+/// (Sail's single try). The receiver is told why before each wait. An
+/// error reply read for that comes back as Err; Err(()) when the receiver
+/// is gone.
+fn send(tx: &Sender<Sse>, tries: &mut u32, build: impl Fn() -> reqwest::blocking::RequestBuilder, model: &str) -> Result<Result<reqwest::blocking::Response, String>, ()> {
+    let patient = *tries < api::RETRIES;
+    let start = api::now_ms();
+    let (mut attempt, mut waited) = (0, 0);
+    loop {
+        let result = api::send_fresh(&build);
+        attempt += 1;
+        let r = match result {
+            Ok(r) if provider::retryable(Some(r.status().as_u16())) => r,
+            Err(e) if *tries < api::RETRIES => {
+                *tries += 1;
+                if !provider::wait_between(tx, attempt, api::retry_wait(*tries), Some(e)) {
+                    return Err(());
+                }
+                continue;
+            }
+            other => return Ok(other),
+        };
+        let status = r.status().as_u16();
+        let after = api::retry_after(r.headers()).or_else(|| reset_in(r.headers(), api::now_ms()));
+        let (text, limited) = error_of(status, &r.text().unwrap_or_default(), model);
+        let text = format!("OpenRouter {text}");
+        let wait = if limited && patient {
+            if api::now_ms() - start >= PATIENCE_MS {
+                return Ok(Err(format!("{text}; still after {} minutes of retries", PATIENCE_MS / 60_000)));
+            }
+            waited += 1;
+            patient_wait(waited, after)
+        } else if *tries < api::RETRIES {
+            *tries += 1;
+            provider::retry_in(after, *tries)
+        } else {
+            return Ok(Err(text));
+        };
+        if !provider::wait_between(tx, attempt, wait, Some(text)) {
+            return Err(());
+        }
     }
 }
 
@@ -832,6 +1173,108 @@ mod tests {
         let start = json!({"type": "message_start", "message": {"provider": "InferenceNet"}});
         assert_eq!(provider_of(&start), Some("InferenceNet"));
         assert_eq!(provider_of(&json!({"type": "message_delta"})), None);
+    }
+
+    /// OpenRouter's error replies as OAK reads them: an upstream rate limit
+    /// (as OpenRouter sent it, November 2026) is waited out and named
+    /// plainly; others keep the provider's own words.
+    #[test]
+    fn errors_read() {
+        // The Messages endpoint's (what OAK gets), and the chat endpoint's.
+        let upstream = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error","error_type":"rate_limit_exceeded"},"request_id":"gen-1","metadata":{"raw":"google/gemma-4-31b-it:free is temporarily rate-limited upstream. Please retry shortly, or add your own provider key to use your own limits: https://openrouter.ai/workspaces/default/byok","provider_name":"Google AI Studio","is_byok":false}}"#;
+        let chat = r#"{"error":{"message":"Provider returned error","code":429,"metadata":{"raw":"google/gemma-4-31b-it:free is temporarily rate-limited upstream. Please retry shortly.","provider_name":"Google AI Studio","is_byok":false}},"user_id":"u"}"#;
+        for body in [upstream, chat] {
+            let (text, wait) = error_of(429, body, "google/gemma-4-31b-it:free");
+            assert!(wait);
+            assert_eq!(text, "HTTP 429: google/gemma-4-31b-it:free is rate-limited upstream at Google AI Studio (a free quota all OpenRouter users share)");
+        }
+        let (text, wait) = error_of(429, &upstream.replace(":free", ""), "google/gemma-4-31b-it");
+        assert!(wait && text.ends_with("upstream at Google AI Studio"), "{text}");
+        let daily = r#"{"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day","code":429}}"#;
+        assert_eq!(error_of(429, daily, "x:free"), ("HTTP 429: Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day".into(), false));
+        assert!(error_of(429, r#"{"error":{"message":"Rate limit exceeded: free-models-per-min."}}"#, "x:free").1);
+        let bad = r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":{"error":"bad schema"},"provider_name":"Chutes"}}}"#;
+        assert_eq!(error_of(400, bad, "m"), (r#"HTTP 400: Provider returned error (Chutes: {"error":"bad schema"})"#.into(), false));
+        assert_eq!(error_of(502, "<html>bad gateway</html>", "m").0, "HTTP 502: <html>bad gateway</html>");
+        let mut h = reqwest::header::HeaderMap::new();
+        assert_eq!(reset_in(&h, 1_000), None);
+        h.insert("x-ratelimit-reset", "1795275060000".parse().unwrap());
+        assert_eq!(reset_in(&h, 1_795_275_017_500), Some(43));
+        assert_eq!(reset_in(&h, 1_795_275_090_000), Some(0));
+        let waits: Vec<u64> = (1..=15).map(|n| patient_wait(n, Some(1))).collect();
+        assert_eq!(waits[..4], [3, 4, 5, 6]);
+        assert_eq!(waits[14], 15);
+        assert_eq!(patient_wait(1, Some(40)), 40);
+        assert!(waits.iter().sum::<u64>() < (PATIENCE_MS / 1000) as u64, "a dozen and more tries within the patience");
+    }
+
+    /// The built-in models: DeepSeek first, the free ones capped at $0
+    /// (no dearer retry), Gemma's effort-less thinking.
+    #[test]
+    fn built_in_models() {
+        let ids: Vec<&str> = MODELS.iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["deepseek/deepseek-v4.1-flash-1017", "google/gemma-4-31b-it", "google/gemma-4-31b-it:free", "particle-ai/particle-1:free", "nvidia/nemotron-3.5-super-vl:free"]);
+        for id in &ids[2..] {
+            let req = Request { model: id.to_string(), thinking: true, ..Default::default() };
+            let body = body_for(&req);
+            assert_eq!(body["provider"]["max_price"], json!({"prompt": 0.0, "completion": 0.0}), "{id}");
+            assert!(with_list_price(&body).is_none(), "{id}");
+            assert_eq!(body["thinking"]["type"], "adaptive");
+        }
+        assert!(crate::agent::efforts("google/gemma-4-31b-it").is_empty());
+        assert_eq!(crate::agent::effort_for("google/gemma-4-31b-it", "high"), "");
+        assert_eq!(crate::agent::effort_for("particle-ai/particle-1:free", "max"), "high");
+        assert_eq!(crate::providers::Kind::of("nvidia/nemotron-3.5-super-vl:free"), crate::providers::Kind::OpenRouter);
+    }
+
+    /// Settings' picker: OpenRouter's list read for models that call tools;
+    /// an added one serves like a built-in, without a price ceiling unless
+    /// free, and without thinking when it has none.
+    #[test]
+    fn added_models() {
+        let list = json!({"data": [
+            {"id": "acme/tooly", "name": "Acme: Tooly", "context_length": 200_000, "top_provider": {"max_completion_tokens": 400_000},
+             "pricing": {"prompt": "0.0000002", "completion": "0.000001"}, "supported_parameters": ["tools", "max_tokens"],
+             "architecture": {"output_modalities": ["text"]}},
+            {"id": "acme/thinker:free", "name": "Acme: Thinker (free)", "context_length": 100_000, "top_provider": {"max_completion_tokens": null},
+             "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["tools", "reasoning", "reasoning_effort"]},
+            {"id": "acme/no-tools", "name": "Acme: No Tools", "context_length": 100_000, "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["reasoning"]},
+            {"id": "acme/painter", "name": "Acme: Painter", "context_length": 100_000, "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["tools"],
+             "architecture": {"output_modalities": ["image"]}},
+            {"id": "openrouter/auto", "name": "Auto Router", "context_length": 100_000, "pricing": {"prompt": "-1", "completion": "-1"}, "supported_parameters": ["tools"]}
+        ]});
+        let cat = catalog_from(&list);
+        let ids: Vec<&str> = cat.iter().map(|l| l.added.id.as_str()).collect();
+        assert_eq!(ids, ["acme/thinker:free", "acme/tooly"]);
+        let (thinker, tooly) = (&cat[0], &cat[1]);
+        assert_eq!((tooly.added.name.as_str(), thinker.added.name.as_str()), ("Tooly", "Thinker (free)"));
+        assert!(thinker.added.free && thinker.added.reasoning && thinker.added.effort && thinker.added.max_output == 32_768);
+        assert!(!tooly.added.free && !tooly.added.reasoning && tooly.added.max_output == 131_072);
+        assert!((tooly.price.0 - 0.2).abs() < 1e-9 && (tooly.price.1 - 1.0).abs() < 1e-9);
+
+        assert!(!serves("acme/tooly"));
+        set_added(&[tooly.added.clone(), thinker.added.clone(), tooly.added.clone(), Added { id: MODELS[0].id.into(), ..Default::default() }]);
+        let all: Vec<&str> = models().iter().map(|m| m.id).collect();
+        assert_eq!(all[MODELS.len()..], ["acme/tooly", "acme/thinker:free"], "no doubles, built-ins once");
+        assert!(std::ptr::eq(model("acme/tooly").unwrap(), made(&tooly.added)), "made once");
+        assert_eq!(crate::agent::efforts("acme/thinker:free"), ["low", "medium", "high"]);
+        assert!(crate::agent::efforts("acme/tooly").is_empty());
+        let body = body_for(&Request { model: "acme/tooly".into(), thinking: true, effort: Some("high".into()), ..Default::default() });
+        assert!(body.get("thinking").is_none() && body.get("output_config").is_none());
+        assert!(body["provider"].get("max_price").is_none() && with_list_price(&body).is_none());
+        let body = body_for(&Request { model: "acme/thinker:free".into(), thinking: true, ..Default::default() });
+        assert_eq!(body["provider"]["max_price"], json!({"prompt": 0.0, "completion": 0.0}));
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        // Endpoints: no price filter without a ceiling; reasoning only
+        // asked of a model that thinks.
+        let mut fx = fixture();
+        fx["data"]["endpoints"][0]["supported_parameters"] = json!(["tools"]);
+        let tooly_m = model("acme/tooly").unwrap();
+        let tags: Vec<String> = endpoints_from(&fx, tooly_m).into_iter().map(|e| e.tag).collect();
+        assert!(tags.contains(&"wafer/us".to_string()) && tags.contains(&"alibaba".to_string()), "{tags:?}");
+        assert!(!endpoints_from(&fx, &MODELS[0]).iter().any(|e| e.tag == "wafer/us"));
+        set_added(&[]);
+        assert!(!serves("acme/tooly") && models().len() == MODELS.len());
     }
 
     /// A request ranked to Sail Research goes to Sail alone with schemas

@@ -28,6 +28,9 @@ impl Worker {
         }
         let (model, effort) = model_and_effort(input)?;
         let model = model.unwrap_or_else(|| self.conv.lock().unwrap().model.clone());
+        if crate::provided::serves(&model) {
+            return Err("A plugin's model can't run an agent: it serves normal conversations only. Pick another model.".into());
+        }
         // A Freebuff agent gets its prompt as a plain message, reworded by
         // Gemma first when it has a trigger word in it (`rewrite.rs`); if
         // the rewrite fails, the prompt goes as it is.

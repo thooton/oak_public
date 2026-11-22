@@ -21,8 +21,8 @@
 //! leaves it as it was), the tools, the date and the effort. The cache
 //! expiring, another account or model, the settings, a restart: none of
 //! them renews it. Only a summary does (`State::cut`): then everything is
-//! brought up to date at once, and the text of each NOTE call is folded too
-//! (`fold`: the session memory has the notes).
+//! brought up to date at once. NOTE calls keep their text as the model
+//! wrote it: the session memory shows the notes as they are now.
 //!
 //! A loaded kit stays where its LOAD put it, so the history the model sees
 //! never shows it loading what it had from the start: its instructions are
@@ -197,9 +197,6 @@ fn hash(v: &Value) -> String {
 fn in_view(at: usize, cut: usize) -> bool {
     cut == 0 || at > cut
 }
-
-/// What a folded NOTE call's text becomes.
-pub const NOTE_FOLDED: &str = "(Saved. Your session memory has the notes as they are now.)";
 
 /// What a request is built with, and how.
 pub struct Setup {
@@ -545,11 +542,6 @@ impl State {
             for b in content {
                 match b["type"].as_str() {
                     Some("tool_call") => {
-                        let action = b["input"]["action"].as_str().unwrap_or("");
-                        let note = matches!(b["name"].as_str(), Some("NOTE_NEW" | "NOTE_UPDATE")) || (b["name"] == "NOTE" && matches!(action, "new" | "update"));
-                        if note && b["input"]["text"].is_string() {
-                            b["input"]["text"] = json!(NOTE_FOLDED);
-                        }
                         if let Some(kit) = loads_kit(b).filter(|k| held.contains(k)) {
                             loads.push((b["id"].clone(), kit));
                         }
@@ -875,9 +867,10 @@ mod tests {
         assert_eq!(out[0]["content"][1]["text"], "<system-reminder>\nd1\ne1\n</system-reminder>");
     }
 
-    /// Before the renewal, NOTE texts are folded, and the LOAD results of
-    /// kits the pin holds (a pin an older Oak renewed): a kit the pin
-    /// doesn't hold keeps its LOAD's result, its instructions.
+    /// Before the renewal, the LOAD results of kits the pin holds are
+    /// folded (a pin an older Oak renewed): a kit the pin doesn't hold
+    /// keeps its LOAD's result, its instructions. NOTE calls keep their
+    /// text.
     #[test]
     fn fold_before_the_renewal() {
         let call = |id: &str, name: &str, input: Value| json!({"role": "assistant", "content": [{"type": "tool_call", "id": id, "name": name, "input": input}]});
@@ -895,7 +888,7 @@ mod tests {
         let s = State { folded: 5, ..Default::default() };
         s.fold(&mut view, 0, 7);
         assert_eq!(view[2]["content"][0]["content"], "long instructions", "not in the prefix");
-        assert_eq!(view[3]["content"][0]["input"]["text"], NOTE_FOLDED);
+        assert_eq!(view[3]["content"][0]["input"]["text"], "fact");
         let mut view = before;
         let s = State { folded: 5, pin: Some(Pin { kits: vec!["BROWSER".into(), "AGENT".into()], ..Default::default() }), ..Default::default() };
         s.fold(&mut view, 0, 7);

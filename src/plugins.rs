@@ -699,7 +699,7 @@ pub fn report() -> i32 {
     }
     let p = parts();
     println!(
-        "Registered: {} Home tab{}, {} tab kind{}, {} New kind{}, {} cloud backend{}, {} session kit{}, {} theme{}, {} font{}, {} role{}, {} settings section{}, {} gate{}, {} hook set{}, {} rewriter{}, {} composer box{}, {}.",
+        "Registered: {} Home tab{}, {} tab kind{}, {} New kind{}, {} cloud backend{}, {} session kit{}, {} theme{}, {} font{}, {} role{}, {} settings section{}, {} gate{}, {} hook set{}, {} rewriter{}, {} composer box{}, {} provider{}, {}.",
         p.home_tabs.len(), oak_sdk::plural(p.home_tabs.len()),
         p.tab_kinds.len(), oak_sdk::plural(p.tab_kinds.len()),
         p.new_kinds.len(), oak_sdk::plural(p.new_kinds.len()),
@@ -713,6 +713,7 @@ pub fn report() -> i32 {
         p.hooks.len(), oak_sdk::plural(p.hooks.len()),
         p.rewriters.len(), oak_sdk::plural(p.rewriters.len()),
         p.composer_boxes.len(), oak_sdk::plural(p.composer_boxes.len()),
+        p.providers.len(), oak_sdk::plural(p.providers.len()),
         if p.vault.is_some() { "a vault" } else { "no vault" },
     );
     found.iter().any(|f| f.trouble.is_some()) as i32
@@ -769,8 +770,9 @@ pub(crate) fn exiting() {
     }
 }
 
-/// Lay out the plugin rows above Settings, starting at `top`. Returns the
-/// vertical space taken, including the gap before the Settings link.
+/// Lay out the plugin rows above Settings, down from `top` (the composer
+/// puts them so the last ends a gap above the Settings link). Returns the
+/// vertical space taken, including that gap.
 pub(crate) fn composer_corner(ui: &mut eframe::egui::Ui, app: &mut App, hooks: &[Arc<Hooks>], x: eframe::egui::Rangef, top: f32) -> f32 {
     use eframe::egui::{Align, Layout, Rect, Shape, UiBuilder};
     const ROW_H: f32 = 22.0;

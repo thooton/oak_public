@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 9
+#define OAK_API_VERSION 10
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -77,6 +77,7 @@ typedef struct OakTable OakTable;
 typedef struct OakLook OakLook;
 typedef struct OakRewriter OakRewriter;
 typedef struct OakComposerBox OakComposerBox;
+typedef struct OakProvider OakProvider;
 
 /* Text, borrowed for the call: UTF-8, `len` bytes, no terminator needed. */
 struct OakStr {
@@ -155,6 +156,18 @@ typedef uint32_t (*OakBits)(void *user);
  * what it cost, in dollars (0 when free).
  */
 typedef bool (*OakRewrite)(void *user, OakStr text, OakTake progress, void *progress_user, OakSink out, void *out_user, double *cost);
+
+/* Takes one event of a reply a plugin's provider streams (JSON,
+ * borrowed for the call). False: Oak no longer wants the reply (the
+ * user stopped it, or the conversation is gone): stop and return.
+ */
+typedef bool (*OakEmit)(void *user, OakStr event);
+
+/* Streams the reply to `request` (JSON), on a thread of Oak's: each
+ * event goes to `event` as it comes, and at the end it returns true,
+ * or false with why it failed given to `error`.
+ */
+typedef bool (*OakProvide)(void *user, OakStr request, OakEmit event, void *event_user, OakSink error, void *error_user);
 
 /* A rectangle in the window, in points: its top left and bottom right. */
 struct OakRect {
@@ -962,6 +975,51 @@ struct OakComposerBox {
      * the box less its margins.
      */
     OakBody show;
+};
+
+/* Models a plugin serves conversations with (`add_provider`). Oak
+ * lists them in its pickers under the provider's name, names them
+ * `plugin:<id>/<model>` in conversations, and sends their requests
+ * to `stream`: the system prompt, the conversation in Oak's format
+ * and the tools, whole each time. Oak runs the tools the replies
+ * call, as it does for every provider. Their conversations get the
+ * basic tools (a local model's).
+ */
+struct OakProvider {
+    uint32_t size;
+    uint32_t flags;
+    void *user;
+    /* Lower case, no spaces or slashes: what its models' ids start
+     * with. Keep it from one version to the next, or conversations on
+     * its models lose them.
+     */
+    OakStr id;
+    /* As the pickers show it ("Duck.ai"). */
+    OakStr name;
+    /* Streams a reply. The request is `{"model", "system",
+     * "messages", "tools", "effort"?, "thinking", "max_tokens",
+     * "purpose", "conv"?, "folder"?}`: `model` the provider's own id
+     * for it, `messages` in Oak's format (tool calls and results
+     * included, pictures as data), `tools` `{name, description,
+     * input_schema}`, `purpose` "main", "summary", "title" or a
+     * plugin's name, `conv` the conversation it is for. Events, as
+     * JSON: `{"text"}` (more of the reply), `{"thinking"}`,
+     * `{"tool_call": {"id", "name", "input"}}` (a whole call),
+     * `{"retry", "wait"?}` (it is tried again: why, and in how many
+     * seconds), `{"usage": {"input", "output"}}`, `{"stop"}` ("end",
+     * "tool_calls", "max_tokens"; by default "tool_calls" when it
+     * called any, else "end"). A failure that starts with "prompt is
+     * too long" makes Oak summarize the conversation and ask again.
+     */
+    OakProvide stream;
+    /* Its other calls. `models`: its models now, as JSON `[{"id",
+     * "name", "context", "max_output", "efforts", "images"}]`
+     * (`efforts` Oak's levels it tells apart, "low" to "max";
+     * `images` whether it sees pictures); asked often and from any
+     * thread, so answer quickly. `logo`: a PNG of its logo, for the
+     * pickers (without it, Oak's own).
+     */
+    OakCall call;
 };
 
 /* A response's flags. */
@@ -2075,6 +2133,9 @@ struct OakApi {
      * ended; false: `error` got why it failed.
      */
     bool (*model_stream)(OakStr request, OakTake event, void *user, OakSink error, void *error_user);
+
+    /* Models for conversations, served by the plugin. */
+    void (*add_provider)(const OakProvider *part);
 };
 
 /* Text from a C string, and from a literal. */

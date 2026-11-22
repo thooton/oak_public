@@ -90,7 +90,7 @@ fn with_notes_limit(text: String, notes_limit: u64) -> String {
 /// tool instructions in it, both bundled into the binary (changing them
 /// takes a rebuild). `agent` names a subagent; `model` is the conversation's
 /// model id, which the prompt names. A model on the user's own server
-/// (`local::serves`) gets only the `{{#local}}` blocks (the tools it has),
+/// (`local::basic`, or a plugin's) gets only the `{{#local}}` blocks (the tools it has),
 /// and `{{#goal}}` only with a goal. Every kit loaded.
 #[cfg(test)]
 pub(crate) fn system_prompt(folder: &Path, scratch: &Path, model: &str, agent: Option<&str>, goal: bool, role: &str) -> String {
@@ -117,7 +117,7 @@ pub(crate) fn system_prompt_on(
     notes_limit: u64,
 ) -> String {
     let has = |k: &str| kits.iter().any(|x| x == k);
-    let local = crate::local::serves(model);
+    let local = crate::local::basic(model);
     let text = with_tools(self::role(role).text, TOOLS);
     let text = keep_blocks(&text, &[("full", !local), ("local", local), ("goal", !local || has("GOAL")), ("window", has("WINDOW")), ("agents", has("AGENT"))]);
     let out = with_notes_limit(fill_prompt(&text, folder, scratch, day, &crate::api::model_name(model), agent), notes_limit);

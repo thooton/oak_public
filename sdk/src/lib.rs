@@ -41,6 +41,7 @@ pub mod cloud;
 pub mod egui;
 pub mod host;
 pub mod plugin;
+pub mod provider;
 pub mod rt;
 pub mod text_menu;
 pub mod theme;

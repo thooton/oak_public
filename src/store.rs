@@ -1900,6 +1900,9 @@ pub struct Settings {
     /// How OpenRouter requests pick a provider (an id of
     /// `crate::openrouter::Routing`).
     pub or_routing: String,
+    /// OpenRouter models added to the picker, after
+    /// `crate::openrouter::MODELS` (`crate::openrouter::set_added`).
+    pub or_models: Vec<crate::openrouter::Added>,
     /// The conversations paused (or ultrapaused) by closing Oak while they
     /// worked: the next start offers to resume them, once.
     pub paused_on_close: Vec<String>,
@@ -1945,6 +1948,7 @@ impl Default for Settings {
             notes_limit: crate::agent::DEFAULT_NOTES_LIMIT,
             title_model: crate::openrouter::TITLE_CHOICES[0].0.into(),
             or_routing: "balanced".into(),
+            or_models: vec![],
             paused_on_close: vec![],
             scratch_clear: 0,
             chat_sort: String::new(),

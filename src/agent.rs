@@ -276,6 +276,9 @@ pub fn efforts(model: &str) -> Vec<&'static str> {
     if crate::local::serves(model) {
         return crate::local::EFFORTS.to_vec();
     }
+    if crate::provided::serves(model) {
+        return crate::provided::model(model).map(|m| m.efforts).unwrap_or_default();
+    }
     match api::claude_efforts(model) {
         Some(levels) => EFFORTS.iter().copied().filter(|e| levels.iter().any(|l| l == e)).collect(),
         None => STANDARD_EFFORTS.to_vec(),
@@ -1971,7 +1974,8 @@ fn result_block(call: &Value, content: Value, is_error: bool) -> Value {
 /// the end of a reply goes with what it led to); a call among them keeps
 /// its result, and the results of the calls cut go with them. The
 /// conversation then ends where it can take a new message from the user.
-fn revert_to(c: &mut Conversation, msg: usize, block: usize, was: &Value) -> bool {
+/// (A fork goes back this far too: `crate::fork`.)
+pub(crate) fn revert_to(c: &mut Conversation, msg: usize, block: usize, was: &Value) -> bool {
     let Some(m) = c.messages.get_mut(msg) else { return false };
     let user = m["role"] == "user";
     let Some(content) = m["content"].as_array_mut() else { return false };
@@ -2011,7 +2015,7 @@ fn revert_to(c: &mut Conversation, msg: usize, block: usize, was: &Value) -> boo
 
 /// Reverts the conversation to its first `n` messages (before a reply that
 /// was streaming in): what came after them goes. False if it has fewer.
-fn revert_to_end(c: &mut Conversation, n: usize) -> bool {
+pub(crate) fn revert_to_end(c: &mut Conversation, n: usize) -> bool {
     if c.messages.len() < n {
         return false;
     }
@@ -2252,16 +2256,28 @@ fn carry_waits(c: &mut Conversation, waits: &[Value], closed_ms: Option<i64>, no
 /// (for a goal) and the line for the transcript.
 /// Why a chat (`chat`) can't be served by `provider`: Freebuff's own
 /// agent works on a project (its prompt and tools, a snapshot of the
-/// folder). None for every other provider, and for every conversation that
-/// isn't a chat.
+/// folder), and a plugin's models (`crate::provided`) serve normal
+/// conversations only. None for every other provider, and for every
+/// conversation that isn't a chat.
 pub(crate) fn chat_refuses_provider(chat: bool, provider: api::Provider) -> Option<String> {
-    (chat && provider == api::Provider::Freebuff).then(|| "Freebuff can't serve a chat: its agent works on a project. Switch to another model.".to_string())
+    match provider {
+        _ if !chat => None,
+        api::Provider::Freebuff => Some("Freebuff can't serve a chat: its agent works on a project. Switch to another model.".to_string()),
+        api::Provider::Plugin => Some(format!("{} serves normal conversations only, not chats. Switch to another model.", crate::provided::name())),
+        _ => None,
+    }
 }
 
 /// Why a Code Mode conversation can't be served by `provider`: Freebuff
-/// sends its own agent's tools, not REPL.
+/// sends its own agent's tools, not REPL, and a plugin's models serve
+/// normal conversations only.
 pub(crate) fn code_mode_refuses_provider(code_mode: bool, provider: api::Provider) -> Option<String> {
-    (code_mode && provider == api::Provider::Freebuff).then(|| "Freebuff can't serve Code Mode: its agent has its own tools. Switch to another model.".to_string())
+    match provider {
+        _ if !code_mode => None,
+        api::Provider::Freebuff => Some("Freebuff can't serve Code Mode: its agent has its own tools. Switch to another model.".to_string()),
+        api::Provider::Plugin => Some(format!("{} serves normal conversations only, not Code Mode. Switch to another model.", crate::provided::name())),
+        _ => None,
+    }
 }
 
 fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKind, String)) {
@@ -2283,7 +2299,7 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKin
             // (it can't reach a tool missing from its list): they come and
             // go at once, so its prefix is renewed. Every other model always
             // has them, so a goal changes nothing before the conversation.
-            if crate::local::serves(&c.model) && c.goal.is_empty() != cleared {
+            if crate::local::basic(&c.model) && c.goal.is_empty() != cleared {
                 c.cache.cold();
             }
             c.goal = goal.clone();
@@ -2589,7 +2605,7 @@ fn plan_summary(c: &mut Conversation, n: usize, base: usize, total: u64) -> Opti
     c.messages.load_from(base);
     let cleared = c.rolling.cleared_to();
     let keep = rolling::config_for(&c.model).keep;
-    rolling::plan(&c.messages[..n.min(c.messages.len())], base, cleared, total, &c.rolling.measured, keep, true)
+    rolling::plan(&c.messages[..n.min(c.messages.len())], base, cleared, total, &c.rolling.measured, keep, rolling::least_for(&c.model), true)
 }
 
 /// Writes a summary (`rolling::summarize`), with its benchmark events.

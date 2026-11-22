@@ -159,6 +159,14 @@ pub fn serves(model: &str) -> bool {
     model.starts_with(PREFIX)
 }
 
+/// Whether `model` gets the basic tools only, and a short window's ways
+/// (summaries kept short, no MCP servers): a local model's or a plugin's
+/// (`crate::provided`), which both read tools from their prompt or take
+/// them less well than the big APIs' models.
+pub fn basic(model: &str) -> bool {
+    serves(model) || crate::provided::serves(model)
+}
+
 /// "qwen3.8-27b (local)".
 pub fn model_name(model: &str) -> String {
     format!("{} (local)", model.strip_prefix(PREFIX).unwrap_or(model))

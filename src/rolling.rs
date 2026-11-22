@@ -48,9 +48,34 @@ const MAX_TRIGGER: u64 = 2_000_000;
 
 /// The highest trigger a model with a `window`-token context allows: 90%
 /// of the window (to the 5k below), leaving room for the context to grow
-/// while a summary is written. Unknown windows aren't capped.
+/// while a summary is written. Unknown windows aren't capped. A window too
+/// short for the settings' least trigger (a plugin's model, Duck.ai's about
+/// 20k) gets 90% of it to the 1k below: a trigger past the window would
+/// never fire.
 pub fn max_trigger(window: Option<u64>) -> u64 {
-    window.map_or(MAX_TRIGGER, |w| w * 9 / 10 / 5_000 * 5_000).clamp(MIN_TRIGGER, MAX_TRIGGER)
+    match window {
+        None => MAX_TRIGGER,
+        Some(w) if w * 9 / 10 < MIN_TRIGGER => (w * 9 / 10 / 1_000 * 1_000).max(1_000),
+        Some(w) => (w * 9 / 10 / 5_000 * 5_000).clamp(MIN_TRIGGER, MAX_TRIGGER),
+    }
+}
+
+/// The least a summary must take out (tokens before its cut) on `model` to
+/// be worth making: 10k, or for a basic model (`local::basic`) a quarter of
+/// its trigger when that is less, since its turns are few and big next to
+/// its window.
+pub fn least_for(model: &str) -> u64 {
+    if crate::local::basic(model) { (config_for(model).trigger / 4).min(10_000) } else { 10_000 }
+}
+
+/// The size of a request of `n` messages, in tokens, when nothing said it:
+/// the last measured request on this summary's messages, and an estimate
+/// of what came after it (`context` when nothing was measured).
+pub fn size_of(messages: &[Value], base: usize, measured: &[Measure], context: u64) -> u64 {
+    match measured.iter().filter(|m| m.base == base && m.n <= messages.len()).max_by_key(|m| m.n) {
+        Some(m) => m.prompt + estimate(messages[m.n..].iter().map(chars).sum()),
+        None => context,
+    }
 }
 
 /// `c` within the cap: the trigger at most `max`, the keep at most three
@@ -68,7 +93,7 @@ pub fn capped(c: Config, max: u64) -> Config {
 /// summary leaves room for real work.
 pub fn config_for(model: &str) -> Config {
     let c = capped(config(), max_trigger(crate::api::context_window(model)));
-    if crate::local::serves(model) {
+    if crate::local::basic(model) {
         return Config { trigger: c.trigger, keep: c.keep.min(c.trigger / 4).max(2_000) };
     }
     c
@@ -750,7 +775,8 @@ pub struct Plan {
 /// `base..cleared` had their old tool output cleared by the summary at `base`.
 /// With `clear`, the new one clears tool output older than the newest
 /// `recent()` tokens.
-pub fn plan(messages: &[Value], base: usize, cleared: usize, total: u64, measured: &[Measure], keep: u64, clear: bool) -> Option<Plan> {
+#[allow(clippy::too_many_arguments)]
+pub fn plan(messages: &[Value], base: usize, cleared: usize, total: u64, measured: &[Measure], keep: u64, least: u64, clear: bool) -> Option<Plan> {
     let n = messages.len();
     if n < base + 3 {
         return None;
@@ -790,8 +816,8 @@ pub fn plan(messages: &[Value], base: usize, cleared: usize, total: u64, measure
     // Tool output in the newest `recent()` tokens stays.
     let clear = if clear { (cut..n).rev().find(|&k| full[k] >= recent()).unwrap_or(cut) } else { cut };
     let cleared = if clear > cut { gone[cut].saturating_sub(gone[clear]) } else { 0 };
-    // Not worth a summary for less than this.
-    (before >= 10_000).then_some(Plan { cut, before, clear, cleared })
+    // Not worth a summary for less than `least` (`least_for`).
+    (before >= least).then_some(Plan { cut, before, clear, cleared })
 }
 
 // ---------------------------------------------------------------- the summary request
@@ -840,7 +866,7 @@ pub fn is_housekeeping(text: &str) -> bool {
 }
 
 pub fn prompt_for(model: &str) -> String {
-    let local = crate::local::serves(model);
+    let local = crate::local::basic(model);
     format!(
         "This is a housekeeping request from me, not part of the work: I'm trimming the older part of our conversation \
          to keep the context small, and the summary you write now will replace it.\n\n\
@@ -1147,7 +1173,9 @@ mod tests {
         assert_eq!(max_trigger(Some(1_000_000)), 900_000);
         assert_eq!(max_trigger(Some(1_048_576)), 940_000);
         assert_eq!(max_trigger(Some(200_000)), 180_000);
-        assert_eq!(max_trigger(Some(10_000)), 20_000);
+        assert_eq!(max_trigger(Some(10_000)), 9_000);
+        assert_eq!(max_trigger(Some(20_000)), 18_000);
+        assert_eq!(max_trigger(Some(23_000)), 20_000);
         assert_eq!(max_trigger(None), 2_000_000);
         let c = Config { trigger: 1_500_000, keep: 1_000_000 };
         assert_eq!(capped(c, 180_000), Config { trigger: 180_000, keep: 135_000 });
@@ -1201,7 +1229,7 @@ mod tests {
     fn plan_keeps_about_the_target() {
         let m = transcript();
         let total = 20_000 + 3_000; // ~1000 tokens a turn, plus system and tools
-        let p = plan(&m, 0, 0, total, &[], 6_000, false).unwrap();
+        let p = plan(&m, 0, 0, total, &[], 6_000, 10_000, false).unwrap();
         let s = Summary { cut: p.cut, text: "s".into(), made_at: 0, ..Default::default() };
         assert!(valid(&view(&m, Some(&s))));
         let kept: usize = m[p.cut..].iter().map(chars).sum();
@@ -1209,7 +1237,33 @@ mod tests {
         assert!((6_000.0..9_000.0).contains(&kept), "kept {kept}");
         assert_eq!(m[p.cut]["content"][0]["text"].as_str().map(|t| t.starts_with("question")), Some(true));
         // Not worth a summary for less than 10k before the cut.
-        assert_eq!(plan(&m, 0, 0, 12_000, &[], 6_000, false), None);
+        assert_eq!(plan(&m, 0, 0, 12_000, &[], 6_000, 10_000, false), None);
+    }
+
+    /// A plugin's model with a short window (Duck.ai's: about 19k tokens,
+    /// each tool result up to 15,000 characters) can still be summarized
+    /// when it runs out: its chunky turns leave less than 10k before any
+    /// cut that keeps enough.
+    #[test]
+    fn a_short_window_is_summarized() {
+        let mut m = vec![user("read the project")];
+        let mut measured = vec![];
+        let mut prompt = 2_500; // the setup: system prompt and tools
+        for i in 0..5 {
+            measured.push(Measure { base: 0, n: m.len(), prompt });
+            m.push(json!({"role": "assistant", "content": [{"type": "text", "text": "Reading."}, {"type": "tool_call", "id": format!("t{i}"), "name": "READ", "input": {"path": "x"}}]}));
+            m.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": format!("t{i}"), "content": "x".repeat(12_000)}]}));
+            prompt += 12_000 / 4 + 30;
+        }
+        // The refusal said no size: the last request's, and what came
+        // after it, stand in.
+        let total = size_of(&m, 0, &measured, measured.last().unwrap().prompt + 50);
+        assert!((17_000..18_500).contains(&total), "{total}");
+        assert!(plan(&m, 0, 0, total, &measured, 4_250, 4_500, false).is_some(), "total {total}: no plan");
+        // Even counted short, with a short window's least.
+        let short = measured.last().unwrap().prompt + 50;
+        assert!(plan(&m, 0, 0, short, &measured, 4_250, 4_500, false).is_some(), "total {short}: no plan");
+        assert_eq!(plan(&m, 0, 0, short, &measured, 4_250, 10_000, false), None);
     }
 
     /// The API's own counts are used where a request ended at a boundary, so
@@ -1224,7 +1278,7 @@ mod tests {
         // The API says each round added 2000 tokens.
         let measured: Vec<Measure> = (0..30).map(|i| Measure { base: 0, n: 1 + 2 * i, prompt: 5_000 + 2_000 * i as u64 }).collect();
         let total = 5_000 + 2_000 * 30;
-        let p = plan(&m, 0, 0, total, &measured, 20_000, false).unwrap();
+        let p = plan(&m, 0, 0, total, &measured, 20_000, 10_000, false).unwrap();
         assert_eq!(m[p.cut]["role"], "assistant");
         assert_eq!(total - p.before, 20_000, "the measured sizes are used exactly");
         assert!(valid(&view(&m, Some(&Summary { cut: p.cut, text: "s".into(), made_at: 0, ..Default::default() }))));
@@ -1246,7 +1300,7 @@ mod tests {
             m.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": format!("t{i}"), "content": out}]}));
         }
         let total = 5_000 + 40 * 2_000;
-        let p = plan(&m, 0, 0, total, &[], 60_000, true).unwrap();
+        let p = plan(&m, 0, 0, total, &[], 60_000, 10_000, true).unwrap();
         let tail = |from: usize| m[from..].iter().map(chars).sum::<usize>() as f64 / m.iter().map(chars).sum::<usize>() as f64 * total as f64;
         assert!(tail(p.cut) >= 60_000.0 && tail(p.clear) >= recent() as f64 && tail(p.clear + 1) < recent() as f64 + 2_100.0, "{p:?}");
         assert!(p.cleared > 25_000, "{p:?}");
@@ -1268,12 +1322,12 @@ mod tests {
             m.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": format!("t{i}"), "content": big}]}));
         }
         let shown = 5_000 + estimate(view(&m, Some(&s))[1..].iter().map(chars).sum());
-        let again = plan(&m, 1, 61, shown, &[], 60_000, true).unwrap();
+        let again = plan(&m, 1, 61, shown, &[], 60_000, 10_000, true).unwrap();
         let kept = estimate(m[again.cut..].iter().map(chars).sum());
         assert!((54_000..70_000).contains(&kept), "{kept} {again:?}");
         assert!(again.clear > 61 && again.cleared > 25_000, "{again:?}");
         // Off: nothing is cleared.
-        let off = plan(&m, 0, 0, total, &[], 60_000, false).unwrap();
+        let off = plan(&m, 0, 0, total, &[], 60_000, 10_000, false).unwrap();
         assert_eq!((off.clear, off.cleared), (off.cut, 0));
     }
 

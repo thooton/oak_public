@@ -413,7 +413,7 @@ impl Worker {
     /// can't be added mid-conversation, until its tool is in the list).
     fn load(&self, call: &Value, input: &Value, stop: &str) -> (Value, bool) {
         let fail = |e: String| (result_block(call, json!(e), true), false);
-        if let Some(server) = crate::mcp::find(input["name"].as_str().unwrap_or("")).filter(|_| !crate::local::serves(&self.conv.lock().unwrap().model)) {
+        if let Some(server) = crate::mcp::find(input["name"].as_str().unwrap_or("")).filter(|_| !crate::local::basic(&self.conv.lock().unwrap().model)) {
             return self.load_server(call, &server, input);
         }
         let kit = input["name"].as_str().unwrap_or("").trim().to_uppercase();

@@ -211,6 +211,9 @@ impl App {
         if let Some(id) = pick.rename {
             self.start_rename(&id);
         }
+        if let Some(id) = pick.fork {
+            self.fork_conversation(&id, None, ui.ctx());
+        }
         if let Some(id) = pick.delete {
             self.deleting_chat = Some(id);
         }
@@ -683,6 +686,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
             local::remove();
             Ok(())
         }
+        AccountAct::Remove(Provider::Plugin, _) => Ok(()),
         AccountAct::Move(p, ids) => ids.iter().try_for_each(|id| match p {
             Provider::Claude => api::move_to_vault(id.parse().map_err(|_| "No such account.".to_string())?),
             Provider::Codex => codex::move_to_vault(id),
@@ -691,7 +695,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
             Provider::Refuseless => crate::refuseless::KEYS.move_to_vault(id),
             Provider::MuseCode => crate::musecode::KEYS.move_to_vault(id),
             Provider::Freebuff => freebuff::move_to_vault(id),
-            Provider::Local => Ok(()),
+            Provider::Local | Provider::Plugin => Ok(()),
         }),
     }
 }
@@ -856,6 +860,8 @@ fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &
         Provider::Local => {
             account_card(ui, t, w, (p, "local"), false, "Remove server", busy, act, crate::composer::local_panel);
         }
+        // (No accounts to list: `account_count` is 0.)
+        Provider::Plugin => {}
     }
 }
 
@@ -991,6 +997,8 @@ pub(crate) struct ChatListAction {
     pub(crate) open: Option<String>,
     /// The conversation whose "Rename…" was picked.
     pub(crate) rename: Option<String>,
+    /// The conversation to fork (`fork_conversation`).
+    pub(crate) fork: Option<String>,
     /// The conversation whose "Delete conversation" was picked.
     pub(crate) delete: Option<String>,
     /// The conversation whose "Clear scratchpad" was picked.
@@ -1030,6 +1038,11 @@ pub(crate) fn chat_list(ui: &mut Ui, t: &Theme, rows: &[ChatRow], can_delete: bo
                     action.rename = Some(row.id.clone());
                     ui.close();
                 }
+                if row.renamable && ui.button("Fork conversation").on_hover_text("A new conversation with this one's transcript and notes, and no running work. Files are shared.").clicked() {
+                    action.fork = Some(row.id.clone());
+                    ui.close();
+                }
+                ui.separator();
                 let size = crate::scratch::scan(Duration::from_secs(15), ui.ctx()).of(&row.id);
                 let label = match size {
                     Some(n) if n > 0 => format!("Clear scratchpad ({})", crate::scratch::fmt_bytes(n)),

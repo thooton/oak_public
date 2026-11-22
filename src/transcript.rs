@@ -1835,7 +1835,7 @@ fn work_block(ui: &mut Ui, t: &Theme, run: &[Item], results: &Results, revert: O
                 Item::Thinking(b, key, streaming, rewrite) => (ui.scope(|ui| thinking_row(ui, t, b, *key, *streaming, rewrite.as_ref(), true)).response.rect, *key),
                 _ => continue,
             };
-            item_menu(ui, rect, key_id("item-menu", key), None, revert.map(|m| (m, key)));
+            item_menu(ui, rect, key_id("item-menu", key), None, revert.map(|m| (m, key)), None);
         }
     });
     ui.add_space(2.0);
@@ -1937,7 +1937,7 @@ pub(crate) fn tail_sig(conv: &Conversation, live: &Live, editing: &Option<Editin
 pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::ops::Range<usize>, results: &Results, revert: Option<&[Value]>) {
     let run = &items[u.clone()];
     let menu = |ui: &mut Ui, rect: Rect, key: (usize, usize), message: Option<&dyn Fn() -> String>| {
-        item_menu(ui, rect, key_id("item-menu", key), message, revert.map(|m| (m, key)));
+        item_menu(ui, rect, key_id("item-menu", key), message, revert.map(|m| (m, key)), None);
     };
     if matches!(run[0], Item::Thinking(..) | Item::Tool(..)) {
         if run.iter().any(|x| matches!(x, Item::Tool(..))) {
@@ -2000,7 +2000,8 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
                     }));
                 let r = frame.response.rect;
                 let id = Id::unique(("user-menu", addr(text)));
-                item_menu(ui, r, id, Some(&|| text.to_string()), None);
+                // (From before the message: the same place Revert goes back to.)
+                item_menu(ui, r, id, Some(&|| text.to_string()), None, revert.map(|at| agent::RevertTo::Block(at.msg, at.block, at.first.clone())));
                 if let Some(at) = revert {
                     revert_control(ui, t, Rect::from_min_size(egui::pos2(r.right() - 30.0, r.top() + 8.0), vec2(22.0, 22.0)), *at);
                 }
@@ -2141,25 +2142,43 @@ fn revert_control(ui: &mut Ui, t: &Theme, rect: Rect, at: RevertAt) {
 /// (in an `Option`, which egui can take out).
 pub(crate) const REWIND_REQUEST: &str = "oak-rewind-request";
 
+/// Where the transcript asks the app to fork the conversation from before
+/// one of the user's messages or one of the model's items: an
+/// `agent::RevertTo` (in an `Option`, which egui can take out), as
+/// Rewind's is.
+pub(crate) const FORK_REQUEST: &str = "oak-fork-request";
+
 /// The right-click menu on one of the transcript's items (`rect`): copying
 /// (the selection, the item's text with `message`, a link), and with the
 /// conversation's messages (`revert`) and the item's `key`, Revert to
 /// before this (`key`: its message and block, the message `usize::MAX` for
 /// the reply streaming in; choosing it leaves the request for the app,
-/// `REWIND_REQUEST`).
-fn item_menu(ui: &mut Ui, rect: Rect, id: Id, message: Option<&dyn Fn() -> String>, revert: Option<(&[Value], (usize, usize))>) {
-    let entry = |ui: &mut Ui| {
-        let Some((messages, key)) = revert else { return };
-        let resp = ui
-            .button("Revert to before this")
-            .on_hover_text("Removes this and everything after it from the conversation; whatever Oak is doing stops. Files are unchanged.");
-        if resp.clicked()
-            && let Some(to) = revert_target(key, messages)
-        {
-            ui.data_mut(|d| d.insert_temp(Id::unique(REWIND_REQUEST), Some(to)));
+/// `REWIND_REQUEST`), and Fork from here (`fork`: where a fork goes back
+/// to; it leaves `FORK_REQUEST`).
+fn item_menu(ui: &mut Ui, rect: Rect, id: Id, message: Option<&dyn Fn() -> String>, revert: Option<(&[Value], (usize, usize))>, fork: Option<agent::RevertTo>) {
+    let target = revert.and_then(|(messages, key)| revert_target(key, messages));
+    // (Where a fork goes back to: the item's own place, or `fork`'s.)
+    let has_fork = fork.is_some() || target.is_some();
+    let fork = fork.or_else(|| target.clone());
+    let entry = move |ui: &mut Ui| {
+        if let Some(to) = target.clone() {
+            let resp = ui
+                .button("Revert to before this")
+                .on_hover_text("Removes this and everything after it from the conversation; whatever Oak is doing stops. Files are unchanged.");
+            if resp.clicked() {
+                ui.data_mut(|d| d.insert_temp(Id::unique(REWIND_REQUEST), Some(to)));
+            }
+        }
+        if let Some(to) = fork.clone() {
+            let resp = ui
+                .button("Fork from here")
+                .on_hover_text("A new conversation with this one's transcript up to here and its notes; this one keeps going as it is. Files are shared.");
+            if resp.clicked() {
+                ui.data_mut(|d| d.insert_temp(Id::unique(FORK_REQUEST), Some(to)));
+            }
         }
     };
-    crate::copy_menu::show(ui, id, rect, message, revert.is_some().then_some(&entry as &dyn Fn(&mut Ui)));
+    crate::copy_menu::show(ui, id, rect, message, (revert.is_some() || has_fork).then_some(&entry as &dyn Fn(&mut Ui)));
 }
 
 /// Where reverting to before the item at `key` goes back to: before its

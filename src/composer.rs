@@ -59,15 +59,34 @@ impl App {
         // box across it, and smart context and the account filling the
         // rest, flush with the window's edge. The message box grows with
         // its text, upwards (the panel is pinned to the window's bottom),
-        // up to `composer_max_h`; past that it scrolls. The buttons and
-        // boxes stay level with its bottom, plus room for any plugin rows.
+        // up to `composer_max_h`; past that it scrolls. The buttons, boxes
+        // and Settings link stay level with its bottom. The plugins' rows
+        // sit right above the Settings link, in the row's height; when they
+        // need more, the message box is that much taller (from the rows the
+        // last pass drew; a change is laid out again), never higher than
+        // the rest.
         let top = y;
-        let (resp, box_rect) = self.message_box(ui, t, lay.chat, top, id);
+        // (Height in use, height last drawn, and in which frame: what a
+        // pass measures counts from the next frame, so a second pass of
+        // this one lays out as the first did.)
+        let corner_id = Id::unique("composer-corner-h");
+        let frame_nr = ui.ctx().cumulative_frame_nr();
+        let (corner_h, _, _) = ui.data(|d| d.get_temp::<(f32, f32, u64)>(corner_id))
+            .map_or((0.0, 0.0, 0), |(used, drawn, at)| if at < frame_nr { (drawn, drawn, at) } else { (used, drawn, at) });
+        let min_h = COMPOSER_H.max(SETTINGS_H + corner_h);
+        let (resp, box_rect) = self.message_box(ui, t, lay.chat, top, min_h, id);
         if resp.has_focus() { self.side_active = false; }
-        let base_bottom = box_rect.bottom().max(top + COMPOSER_H);
+        let level = box_rect.bottom().max(top + min_h);
         let link_end = lay.plugin_box.map_or(lay.buttons, |u| u.min) - 8.0;
         let left = area.left() + GAP;
-        let bottom = base_bottom + plugins::composer_corner(ui, self, hooks, Rangef::new(left, link_end), base_bottom - SETTINGS_H);
+        let drawn = plugins::composer_corner(ui, self, hooks, Rangef::new(left, link_end), level - SETTINGS_H - corner_h);
+        // (Rows added this frame push the rest down for this frame alone,
+        // as `dock` handles any change in height; the next one is level.)
+        let bottom = level + (drawn - corner_h).max(0.0);
+        ui.data_mut(|d| d.insert_temp(corner_id, (corner_h, drawn, frame_nr)));
+        if (drawn - corner_h).abs() > 0.5 {
+            ui.ctx().request_repaint();
+        }
         let row = |x: Rangef| Rect::from_x_y_ranges(x, bottom - COMPOSER_H..=bottom);
         let pick = self.composer_buttons(ui, t, row(Rangef::new(lay.buttons, lay.buttons + BTN)));
         self.corner_links(ui, t, left, link_end, bottom);
@@ -91,11 +110,11 @@ impl App {
         drop_overlay(ui, t, Rect::from_x_y_ranges(area.x_range(), area.top()..=ui.min_rect().bottom()), "Drop files to attach them");
     }
 
-    /// The message box (`id`) across `x` from `top`, growing with its text
-    /// up to `composer_max_h` and scrolling past that. Gives its text box
-    /// and where the box is.
-    pub(crate) fn message_box(&mut self, ui: &mut Ui, t: &Theme, x: Rangef, top: f32, id: Id) -> (egui::Response, Rect) {
-        let max_h = composer_max_h(ui.ctx());
+    /// The message box (`id`) across `x` from `top`, at least `min_h`
+    /// tall, growing with its text up to `composer_max_h` and scrolling past
+    /// that. Gives its text box and where the box is.
+    pub(crate) fn message_box(&mut self, ui: &mut Ui, t: &Theme, x: Rangef, top: f32, min_h: f32, id: Id) -> (egui::Response, Rect) {
+        let max_h = composer_max_h(ui.ctx()).max(min_h);
         let focused = ui.memory(|m| m.has_focus(id));
         // Count what actually arrives in the composer: the CLI reports a
         // per-prompt input profile built from these numbers.
@@ -124,7 +143,7 @@ impl App {
                             ui,
                             sending_edit(&mut self.input, id)
                                 .frame(egui::Frame::NONE.inner_margin(Margin::same(10)))
-                                .min_size(vec2(w, COMPOSER_H - 2.0))
+                                .min_size(vec2(w, min_h - 2.0))
                                 .desired_width(w)
                                 .hint_text("Type message"),
                         )
@@ -726,6 +745,8 @@ fn account_box(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &Set
         }
         // The user's own server: the tokens used through it.
         api::Provider::Local => local_panel(ui, t, w).on_hover_text("llama.cpp server"),
+        // A plugin's model: who serves it.
+        api::Provider::Plugin => plugin_panel(ui, t, w),
         // NodeClub: its key, and the tokens used through it.
         api::Provider::NodeClub => nodeclub_panel(ui, t, crate::nodeclub::account_of_conv(&conv_id).as_ref(), None, w).on_hover_text("NodeClub, OpenAI-compatible API"),
         // Refuseless: its credits, and what this session spent.
@@ -993,6 +1014,16 @@ pub(crate) fn local_panel(ui: &mut Ui, t: &Theme, w: f32) -> egui::Response {
     .response
 }
 
+/// A plugin's provider's box: its name, and that its plugin serves it.
+pub(crate) fn plugin_panel(ui: &mut Ui, t: &Theme, w: f32) -> egui::Response {
+    side_box(ui, t, w, |ui| {
+        head_row(ui, t, crate::provided::name(), Some("free"));
+        let line = if crate::provided::on() { "Served by its plugin" } else { "Its plugin isn't running" };
+        caption(ui, line, t.ink3);
+    })
+    .response
+}
+
 /// A box's line (a key, an email, an error): small, in `color`, cut
 /// short, the whole on hover.
 fn key_line(ui: &mut Ui, text: &str, color: Color32) {
@@ -1117,8 +1148,9 @@ fn rolling_rows(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &mu
         Some(side) => Some(rolling::paired(cfg, side, rates)),
         None => rolling::suggestion(cfg, rolling::Side::Keep, rates),
     };
-    // None for a local model: they weigh API prices, and it is free.
-    let local = session.map_or(crate::local::serves(&settings.model), |s| crate::local::serves(&s.conv.lock().unwrap().model));
+    // None for a local model or a plugin's: they weigh API prices, and
+    // those are free.
+    let local = session.map_or(crate::local::basic(&settings.model), |s| crate::local::basic(&s.conv.lock().unwrap().model));
     let suggest = suggest.map(|s| rolling::capped(s, max)).filter(|s| *s != cfg && !local);
     let saved_text = if saved == 0 { "0".into() } else { format!("~{}", rolling::fmt_tokens(saved)) };
     let f = rolling::fmt_tokens;
@@ -1336,13 +1368,32 @@ mod tests {
             assert!((panel.bottom() - size.y).abs() <= 0.5, "undocked panel: {panel:?}");
             (panel, out)
         };
-        let (base, _) = frame(&[]);
+        // The message box (its painted frame, around "Type message") ends
+        // where the boxes right of it do, and Settings within its height.
+        let level = |out: &egui::FullOutput, panel: Rect| {
+            let labels = crate::app_hover_test::painted(out);
+            let hint = crate::app_hover_test::rect_of(&labels, "Type message");
+            let settings = crate::app_hover_test::rect_of(&labels, "Settings");
+            let panels: Vec<Rect> = out.shapes.iter().filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) if r.fill == t.panel => Some(r.rect),
+                _ => None,
+            }).collect();
+            let message = *panels.iter().find(|r| r.contains(hint.center())).unwrap();
+            let side = *panels.iter().find(|r| r.left() > message.right()).unwrap();
+            assert!((message.bottom() - side.bottom()).abs() <= 0.5, "message box {message:?} not level with {side:?}");
+            assert!(message.bottom() <= panel.bottom() - GAP + 0.5, "message box {message:?} below the row in {panel:?}");
+            assert!(settings.bottom() <= message.bottom() + 0.5 && settings.top() >= message.top(), "Settings {settings:?} outside the message box's height {message:?}");
+        };
+        let (base, out) = frame(&[]);
+        level(&out, base);
         let mut hooks = vec![hook(empty); 9];
         assert_eq!(frame(&hooks).0, base, "nine loaded hooks, none drawing a row");
         hooks.insert(1, hook(widget));
         hooks.insert(7, hook(paint));
+        frame(&hooks);
         let (panel, out) = frame(&hooks);
-        assert_eq!(panel.height(), base.height() + 56.0, "only the two drawn rows reserve room");
+        assert_eq!(panel.height(), base.height(), "two rows fit above Settings: the composer keeps its height");
+        level(&out, panel);
         let labels = crate::app_hover_test::painted(&out);
         let row = crate::app_hover_test::rect_of(&labels, "Plugin row");
         let settings = crate::app_hover_test::rect_of(&labels, "Settings");
@@ -1351,7 +1402,16 @@ mod tests {
             _ => None,
         }).unwrap();
         assert!(panel.top() < row.top() && row.bottom() < paint.top() && paint.bottom() < settings.top());
-        assert_eq!(frame(&[]).0, base, "removing plugin rows shrinks the panel immediately");
+        // Four rows need more than the row's height: the message box grows
+        // with them, its bottom still level with the buttons and Settings.
+        hooks.insert(3, hook(widget));
+        hooks.insert(5, hook(widget));
+        frame(&hooks);
+        let (panel, out) = frame(&hooks);
+        assert_eq!(panel.height(), base.height() + 4.0 * 28.0 + SETTINGS_H - COMPOSER_H, "only drawn rows past the row's height grow it");
+        level(&out, panel);
+        frame(&[]);
+        assert_eq!(frame(&[]).0, base, "removing plugin rows shrinks the panel back");
     }
 
     /// The user's last message, past what Oak added after it (tool

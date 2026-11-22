@@ -404,6 +404,7 @@ impl App {
         let mut grabbed = None;
         let (can_reopen, mut reopen) = (!self.closed_tabs.is_empty(), false);
         let mut rename = None;
+        let mut fork = None;
         for i in order {
             let id = &self.settings.tabs[i];
             let lifted = dragged.is_some_and(|d| d.0 == i);
@@ -420,6 +421,12 @@ impl App {
                         ui.close();
                     }
                     ui.separator();
+                }
+                // A fork is a conversation of its own: Oak's, not a cloud
+                // session's or a plugin's tab.
+                if self.sessions.contains_key(id) && ui.button("Fork conversation").on_hover_text("A new conversation with this one's transcript and notes, and no running work. Files are shared.").clicked() {
+                    fork = Some(id.clone());
+                    ui.close();
                 }
                 let any_inactive = self.settings.tabs.iter().any(|id| self.tab_inactive(id));
                 if let Some(action) = tab_menu(ui, i, n, on, any_inactive, can_reopen, &mut reopen) {
@@ -485,6 +492,9 @@ impl App {
         }
         if let Some(id) = rename {
             self.start_rename(&id);
+        }
+        if let Some(id) = fork {
+            self.fork_conversation(&id, None, ui.ctx());
         }
         (show, close, reopen)
     }
