@@ -60,7 +60,7 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     if let Err(e) = sock.send(&user) {
         return drop(tx.send(Sse::Err(e)));
     }
-    match pump(&mut sock, &folder, &tx) {
+    match pump(&mut sock, &folder, &thread, &tx) {
         // The stream says the turn is over: the reply is whole.
         Ok(()) => drop(tx.send(Sse::Done)),
         Err(e) => drop(tx.send(Sse::Err(e))),
@@ -69,8 +69,8 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
 
 /// Reads Quick's frames until the message ends, running the tools it asks
 /// for and answering each on the socket.
-fn pump(sock: &mut Socket, folder: &std::path::Path, tx: &Sender<Sse>) -> Result<(), String> {
-    let mut turn = Turn::default();
+fn pump(sock: &mut Socket, folder: &std::path::Path, thread: &str, tx: &Sender<Sse>) -> Result<(), String> {
+    let mut turn = Turn::for_message(thread, "");
     let started = std::time::Instant::now();
     // The tool calls of this turn, so a repeated one isn't run twice.
     let mut ran: Vec<(String, String)> = vec![];
@@ -87,6 +87,11 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, tx: &Sender<Sse>) -> Result
             return Ok(());
         };
         let kind = frame["type"].as_str().unwrap_or("").to_string();
+        // Another thread's frames, and older messages' of this one, are not
+        // this turn's (the socket carries several threads).
+        if !turn.accepts(&frame) {
+            continue;
+        }
         // A message from Quick that Oak doesn't show (keepalives, task
         // bookkeeping, the thread's title changes).
         for ev in turn.feed(&frame) {

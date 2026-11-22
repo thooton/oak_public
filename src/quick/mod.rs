@@ -769,9 +769,44 @@ pub(crate) struct Turn {
     /// A tool Oak must run: (call id, name, input).
     pub calls: Vec<(String, String, Value)>,
     started: bool,
+    /// The thread (`thread_id`) and assistant message (`message_id`) this
+    /// turn is reading. Quick's socket carries other threads' frames too, and
+    /// a thread keeps several messages, so frames of another thread (or of an
+    /// older message) are not this turn's.
+    thread: String,
+    message: String,
 }
 
 impl Turn {
+    /// A turn reading thread `thread`'s message `message` (Quick assigns the
+    /// assistant's `message_id` when it starts the reply; until then the turn
+    /// takes the first one the thread sends).
+    pub(crate) fn for_message(thread: &str, message: &str) -> Turn {
+        Turn { thread: thread.to_string(), message: message.to_string(), ..Default::default() }
+    }
+
+    /// Whether `v` is this turn's: its thread's (when it names one), and
+    /// its message's (when it names one, and once the turn knows it). Other
+    /// threads' frames and older messages' frames are not. The turn's driver
+    /// asks before it reads a frame, so a tool call of another thread is
+    /// never run.
+    pub(crate) fn accepts(&mut self, v: &Value) -> bool {
+        let field = |k: &str| v[k].as_str().unwrap_or("").to_string();
+        let thread = field("thread_id");
+        if !thread.is_empty() && thread != self.thread {
+            return false;
+        }
+        let message = field("message_id");
+        if message.is_empty() {
+            return true;
+        }
+        if self.message.is_empty() {
+            self.message = message;
+            return true;
+        }
+        message == self.message
+    }
+
     fn text(&mut self) -> usize {
         // One text block for the whole message: Quick streams text around
         // (and between) its tool calls, and the transcript reads better as
@@ -788,6 +823,9 @@ impl Turn {
     /// The stream's next frame, as Oak's events. `blocks` collects them, and
     /// `None` when a frame changes nothing Oak shows.
     pub(crate) fn feed(&mut self, v: &Value) -> Vec<Event> {
+        if !self.accepts(v) {
+            return vec![];
+        }
         let kind = v["type"].as_str().unwrap_or("");
         let p = &v["payload"];
         let mut out = vec![];
@@ -933,8 +971,32 @@ mod tests {
     }
 
     #[test]
+    fn another_threads_frames_are_not_the_turns() {
+        let mut t = Turn::for_message("thread-a", "");
+        // Another thread's text is another conversation's reply.
+        let other = json!({"type": "text_delta", "payload": {"delta": "not mine"},
+            "thread_id": "thread-b", "message_id": "msg-b1"});
+        assert!(t.feed(&other).is_empty());
+        assert!(t.accepts(&other) == false);
+        // This thread's first message claims the turn.
+        let first = json!({"type": "text_delta", "payload": {"delta": "mine"},
+            "thread_id": "thread-a", "message_id": "msg-a1"});
+        assert!(t.accepts(&first));
+        assert_eq!(t.feed(&first).len(), 1);
+        // An older message of the same thread is not.
+        let older = json!({"type": "text_delta", "payload": {"delta": "old"},
+            "thread_id": "thread-a", "message_id": "msg-a0"});
+        assert!(!t.accepts(&older));
+        // Nor is another thread's tool call (Oak must not run it).
+        let call = json!({"type": "tool_call", "payload": {"tool_name": "run_python", "tool_call_id": "c9"},
+            "thread_id": "thread-b"});
+        assert!(!t.accepts(&call));
+        assert_eq!(t.blocks()[0]["text"], "mine");
+    }
+
+    #[test]
     fn frames_become_oaks_events() {
-        let mut t = Turn::default();
+        let mut t = Turn::for_message("th", "");
         let mut ev = vec![];
         for f in [
             json!({"type": "message_start", "payload": {"role": "assistant"}}),
