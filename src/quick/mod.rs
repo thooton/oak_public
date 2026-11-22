@@ -769,6 +769,9 @@ pub(crate) struct Turn {
     /// A tool Oak must run: (call id, name, input).
     pub calls: Vec<(String, String, Value)>,
     started: bool,
+    /// The text block was announced to Oak (`Event::Block`), so its deltas
+    /// have a block to land in.
+    text_open: bool,
     /// The thread (`thread_id`) and assistant message (`message_id`) this
     /// turn is reading. Quick's socket carries other threads' frames too, and
     /// a thread keeps several messages, so frames of another thread (or of an
@@ -827,6 +830,20 @@ impl Turn {
         i
     }
 
+    /// The reply's text block has opened in Oak, so its `Text` events have
+    /// somewhere to land. Oak only fills blocks it was told about (`reply`
+    /// drops text for an index it never saw), so the block's `Block` comes
+    /// with the first text, and once: a delta of a block already opened adds
+    /// nothing.
+    fn open_text(&mut self, out: &mut Vec<Event>) {
+        if self.text_open {
+            return;
+        }
+        let i = self.text();
+        self.text_open = true;
+        out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+    }
+
     /// The stream's next frame, as Oak's events. `blocks` collects them, and
     /// `None` when a frame changes nothing Oak shows.
     pub(crate) fn feed(&mut self, v: &Value) -> Vec<Event> {
@@ -865,6 +882,7 @@ impl Turn {
             "text_delta" => {
                 let text = p["delta"].as_str().unwrap_or("");
                 if !text.is_empty() {
+                    self.open_text(&mut out);
                     let i = self.text();
                     if let Some(t) = self.blocks[i]["text"].as_str().map(str::to_string) {
                         self.blocks[i]["text"] = json!(format!("{t}{text}"));
@@ -874,11 +892,10 @@ impl Turn {
             }
             "text_complete" | "message_complete" => {
                 let text = p["text"].as_str().unwrap_or("");
-                if let Some(i) = self.text_at
-                    && let Some(seen) = self.blocks[i]["text"].as_str().map(str::to_string)
-                    && seen.is_empty()
-                    && !text.is_empty()
-                {
+                let unseen = self.text_at.is_none_or(|i| self.blocks[i]["text"].as_str() == Some(""));
+                if unseen && !text.is_empty() {
+                    self.open_text(&mut out);
+                    let i = self.text();
                     self.blocks[i]["text"] = json!(text);
                     out.push(Event::Text { index: i, text: text.to_string() });
                 }
@@ -886,6 +903,9 @@ impl Turn {
                     // The turn is over: Quick ran its own loop and Oak ran
                     // its tools as it asked, so nothing is left to do.
                     self.stop = stop::COMPLETE.into();
+                    if let Some(i) = self.text_at.filter(|_| self.text_open) {
+                        out.push(Event::BlockEnd { index: i });
+                    }
                     out.push(Event::Stop { reason: self.stop.clone(), detail: None });
                 }
             }
@@ -998,7 +1018,8 @@ mod tests {
         let first = json!({"type": "text_delta", "payload": {"delta": "mine"},
             "thread_id": "thread-a", "message_id": "msg-a1"});
         assert!(t.accepts(&first));
-        assert_eq!(t.feed(&first).len(), 1);
+        // A block opens, then the text fills it.
+        assert_eq!(t.feed(&first).len(), 2);
         // An older message of the same thread is not.
         let older = json!({"type": "text_delta", "payload": {"delta": "old"},
             "thread_id": "thread-a", "message_id": "msg-a0"});
@@ -1008,6 +1029,45 @@ mod tests {
             "thread_id": "thread-b"});
         assert!(!t.accepts(&call));
         assert_eq!(t.blocks()[0]["text"], "mine");
+    }
+
+    /// The reply's text must be announced as a block before its deltas: Oak's
+    /// reply drops text for a block it never saw opened, which is exactly how
+    /// a reply showed its thinking and then nothing.
+    #[test]
+    fn the_reply_text_is_announced_before_its_deltas() {
+        let mut t = Turn::for_message("th", "");
+        let mut ev = vec![];
+        for f in [
+            json!({"type": "message_start", "payload": {"role": "assistant"}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "thinking_start", "payload": {}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "thinking_delta", "payload": {"delta": "hm"}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "thinking_complete", "payload": {}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "text_delta", "payload": {"delta": "Hi"}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "text_delta", "payload": {"delta": " there"}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "message_complete", "payload": {"text": "Hi there"}, "thread_id": "th", "message_id": "m1"}),
+        ] {
+            ev.extend(t.feed(&f));
+        }
+        // The text block opens once, before its first delta.
+        let opened: Vec<usize> = ev
+            .iter()
+            .filter_map(|e| match e {
+                Event::Block { index, block } if block["type"] == "text" => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened.len(), 1, "the text block is announced exactly once");
+        let first_text = ev.iter().position(|e| matches!(e, Event::Text { .. })).unwrap();
+        let block_at = ev.iter().position(|e| matches!(e, Event::Block { block, .. } if block["type"] == "text")).unwrap();
+        assert!(block_at < first_text, "the block comes before the text that fills it");
+        // The block it opened is the one its deltas name.
+        let text_at = ev.iter().find_map(|e| match e {
+            Event::Text { index, .. } => Some(*index),
+            _ => None,
+        }).unwrap();
+        assert_eq!(opened[0], text_at, "the text lands in the block that was opened");
+        assert_eq!(t.text_at, Some(text_at));
     }
 
     #[test]
