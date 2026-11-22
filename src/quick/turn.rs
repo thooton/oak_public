@@ -65,6 +65,18 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     if sock.send(&json!({"type": "session_connect", "payload": connect})).is_err() {
         return drop(tx.send(Sse::Err("Quick closed the socket while connecting.".into())));
     }
+    // The app connects to its home session first, federates its sign-in,
+    // then joins the thread: Quick binds the machine's outpost to the session
+    // that way, and without it the agent is told it has no local device.
+    if sock.send(&json!({"type": "federate_status", "payload": {}})).is_err() {
+        return drop(tx.send(Sse::Err("Quick closed the socket while federating.".into())));
+    }
+    let mut home = base.clone();
+    home["session_id"] = json!("home");
+    home["focus_only"] = json!(true);
+    if sock.send(&json!({"type": "session_connect", "payload": home})).is_err() {
+        return drop(tx.send(Sse::Err("Quick closed the socket while connecting home.".into())));
+    }
     let mut focus = base.clone();
     focus["session_id"] = json!(thread);
     focus["focus_only"] = json!(true);
@@ -147,11 +159,15 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, thread: &str, tx: &Sender<S
                 };
                 // Quick's own tool ids (`tooluse_…`) come with its
                 // `tool_progress`; the answer goes by the call's id.
+                // Quick's app answers with the tool's result as a JSON
+                // object (a listing, a count), not as text: a string there is
+                // a result it can't read, and its agent says the tool failed.
+                let result = serde_json::from_str::<Value>(&content).unwrap_or_else(|_| json!(content));
                 let reply = json!({
                     "type": "tool_result",
                     "payload": {
                         "tool_call_id": call,
-                        "result": content,
+                        "result": result,
                         "error": if is_error { json!(content) } else { Value::Null },
                     }
                 });
@@ -213,8 +229,10 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
             // work in (`allowed_folders`); it names them this way, in its own
             // sandbox's vocabulary, and every later path comes back in it.
             if args["path"].as_str().unwrap_or("").trim().is_empty() {
+                // The app answers with the real paths (`/C:/…`), which is what
+                // its agent then asks to list.
                 return Ok(json!({
-                    "allowed_folders": [format!("/outposts/DESKTOP/{}", native(folder))],
+                    "allowed_folders": [format!("/{}", native(folder))],
                 })
                 .to_string());
             }
