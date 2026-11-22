@@ -46,6 +46,8 @@ pub mod turn;
 mod live_test;
 #[cfg(test)]
 mod models_test;
+#[cfg(test)]
+mod outpost_test;
 
 /// The surface Quick's desktop app reports; the agent tailors itself to it.
 const SURFACE: &str = "QUICK_WORK_DESKTOP_WINDOWS";

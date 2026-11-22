@@ -150,6 +150,55 @@ pub fn register() -> Result<(), String> {
     Ok(())
 }
 
+/// Registers `folder` as one this outpost may work in (`graph/folder`), so
+/// Quick knows the conversation's folder lives on this machine. Doing it
+/// again is harmless.
+pub fn register_folder(token: &str, host: &str, folder: &str) -> Result<(), String> {
+    let outpost = id();
+    let body = json!({
+        "path": folder,
+        "device_id": outpost,
+        "storage_type": "local",
+        "kg_enabled": false,
+        "rag_enabled": false,
+    });
+    let envelope = json!({
+        "eventType": "invokeAgent",
+        "eventBody": {"invokeAgent": {
+            "path": "graph/folder",
+            "queryParams": {"_method": "POST"},
+            "body": body.to_string(),
+            "outpostId": id(),
+        }}
+    });
+    let resp = api::http()
+        .post(format!("https://{host}/integration/quick-work/qbs-event"))
+        .bearer_auth(token)
+        .header("Content-Type", "application/json")
+        .header("X-QuickDsk-mdid", "user-conversation")
+        .header("x-amzn-quick-atype", "ufg")
+        .json(&envelope)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .map_err(api::network_error)?;
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(format!("Quick refused the folder ({status}): {}", text.chars().take(300).collect::<String>()));
+    }
+    // The agent answers in its own envelope; a refusal is inside it.
+    if let Some(inner) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["eventResponse"]["invokeAgentResponse"].as_str().map(String::from)) {
+        let parsed: Value = serde_json::from_str(&inner).unwrap_or(Value::Null);
+        let body = parsed["body"].as_str().unwrap_or("");
+        if let Ok(b) = serde_json::from_str::<Value>(body)
+            && b["success"].as_bool() == Some(false)
+        {
+            return Err(format!("Quick refused the folder: {body}"));
+        }
+    }
+    Ok(())
+}
+
 /// What a tool does, as Quick's agent reads it.
 fn describe(name: &str) -> &'static str {
     match name {

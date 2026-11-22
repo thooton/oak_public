@@ -49,6 +49,13 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     // tools it asks for here rather than running them in its own sandbox.
     // (Failure is not fatal: a turn still works, without local files.)
     let _ = crate::quick::outpost::register();
+    // Quick routes a folder's tools to the outpost that registered it, so the
+    // conversation's folder is registered against this machine.
+    if let (Ok(tok), Ok(h)) = (crate::quick::login::access_token(), crate::quick::login::host())
+        && let Some(f) = folder.to_str()
+    {
+        let _ = crate::quick::outpost::register_folder(&tok, &h, f);
+    }
     let outpost = outpost();
     let mut connect = base.clone();
     connect["actor_id"] = json!("");
@@ -248,7 +255,34 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
         }
         // Quick's own coding tool: Python in the conversation's folder, which
         // is how its agent runs shell commands (`subprocess`) too.
-        "run_python" | "python" => run_python(args, folder),
+        "run_python" | "python" | "run_python_outpost_local" | "run_python_outpost_local_with_write" => run_python(args, folder),
+        // The names the outpost declares (`outpost::TOOLS`), so a call made
+        // against this machine's registration runs here too.
+        "file_matches" => {
+            let want = args["path"].as_str().unwrap_or("").to_string();
+            Ok(json!({"matches": crate::quick::turn::find(folder, &want).lines().collect::<Vec<_>>(), "outside_allowed_folders": false}).to_string())
+        }
+        "folder_create" => {
+            let p = resolve(folder, args["path"].as_str().unwrap_or(""));
+            std::fs::create_dir_all(&p).map(|_| format!("Created {}.", native(&p))).map_err(|e| format!("Couldn't create {}: {e}", native(&p)))
+        }
+        "file_delete" => {
+            let p = resolve(folder, args["path"].as_str().unwrap_or(""));
+            if p.is_dir() { std::fs::remove_dir(&p) } else { std::fs::remove_file(&p) }
+                .map(|_| format!("Deleted {}.", native(&p)))
+                .map_err(|e| format!("Couldn't delete {}: {e}", native(&p)))
+        }
+        "file_copy" => {
+            let (from, to) = (resolve(folder, args["source"].as_str().unwrap_or("")), resolve(folder, args["destination"].as_str().unwrap_or("")));
+            std::fs::copy(&from, &to).map(|_| format!("Copied {} to {}.", native(&from), native(&to))).map_err(|e| format!("Couldn't copy: {e}"))
+        }
+        "file_type" => {
+            let p = resolve(folder, args["path"].as_str().unwrap_or(""));
+            match std::fs::metadata(&p) {
+                Ok(m) => Ok(format!("{}: {}, {} bytes.", native(&p), if m.is_dir() { "directory" } else { "file" }, m.len())),
+                Err(e) => Err(format!("{}: {e}", native(&p))),
+            }
+        }
         // Quick's sandbox's other tools (its shell, its browser). Its agent
         // reaches for these when it works locally, so they run here too.
         "run_shell" | "shell" => {
@@ -313,7 +347,7 @@ fn native(p: &std::path::Path) -> String {
 
 /// Files whose name matches `pattern` (fdfind's `args`, e.g. `-i -H pong`),
 /// from the conversation's folder down.
-fn find(folder: &std::path::Path, pattern: &str) -> String {
+pub(crate) fn find(folder: &std::path::Path, pattern: &str) -> String {
     let needle = pattern.split_whitespace().filter(|w| !w.starts_with('-')).collect::<Vec<_>>().join(" ").to_lowercase();
     let mut out = vec![];
     let mut stack = vec![folder.to_path_buf()];
