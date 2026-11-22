@@ -490,6 +490,9 @@ impl App {
                             std::thread::sleep(std::time::Duration::from_secs(2));
                             match crate::quick::login::state() {
                                 Some(crate::quick::login::State::Done) => {
+                                    // The picker has to learn Quick's models
+                                    // now, as it does for any other sign-in.
+                                    crate::api::note_signed_in();
                                     ctx.request_repaint();
                                     return;
                                 }

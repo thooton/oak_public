@@ -275,6 +275,9 @@ type Models = Arc<Mutex<Option<Result<Vec<api::Model>, String>>>>;
 struct App {
     settings: Settings,
     signed_in: bool,
+    /// The sign-ins counted at the last frame (`api::accounts_freed`), so a
+    /// provider's browser sign-in refreshes the model picker when it lands.
+    sign_ins: u64,
     /// Why removing an account or moving it to the vault failed.
     account_note: Option<String>,
     /// A removal or move of accounts, running in the background.
@@ -510,6 +513,19 @@ impl App {
         self.signed_in = true;
         self.fetch_models(ctx);
         self.account.lock().unwrap().fetched = None;
+        // The sign-in counts as an account that came free (a session waiting
+        // out a reset may have a provider to go to now).
+        api::note_signed_in();
+    }
+
+    /// A sign-in came in since the last frame (a provider's browser flow):
+    /// the models are fetched again, so its models are in the picker.
+    fn note_new_sign_in(&mut self, ctx: &egui::Context) {
+        let n = api::accounts_freed();
+        if n > self.sign_ins {
+            self.sign_ins = n;
+            self.accounts_changed(ctx);
+        }
     }
 
     /// Shows conversation `id`, in its tab (added if it has none).
@@ -640,6 +656,7 @@ impl eframe::App for App {
         if api::take_accounts_changed() {
             self.accounts_changed(ui.ctx());
         }
+        self.note_new_sign_in(ui.ctx());
         let ctx = ui.ctx().clone();
         for h in &plugins::parts().hooks {
             h.frame(&ctx, self);

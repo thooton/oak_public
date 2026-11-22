@@ -816,7 +816,9 @@ and `prompt=login`, takes the code on a loopback port, and exchanges it for an a
 `quick.json` (beside the client registration and the workspace's host); every request buys a
 fresh access token with it. There is no vault entry: the client is Oak's own registration, not a
 key a vault could share. `OAK_QUICK_HOST` names the socket's host instead of the one the
-sign-in's callback reports (a proxy or a stand-in, as `OAK_API_BASE` does for Claude).
+sign-in's callback reports (a proxy or a stand-in, as `OAK_API_BASE` does for Claude). The sign-in's
+callback doesn't always report the workspace, so Oak falls back to the cell Quick's desktop app
+signs this identity store in to (`DEFAULT_CELL`), and the account box says so when neither is known.
 
 **Tools are Oak's** — this is the part that differs from every other provider. Quick's agent asks
 for a tool by name and waits on the socket for its result; Quick's own sandbox would run it
@@ -841,6 +843,8 @@ second one.
 
 `quick_live_turn` (ignored; needs `OAK_DIR` with `quick.json`, and a prompt with
 `OAK_QUICK_PROMPT`) drives one real turn end to end, printing what Quick says.
+`quick_models_are_listed` (ignored; `OAK_DIR` a profile) prints the picker's model list and fails
+when Quick's models are missing from it.
 
 
 ## Cloud sessions

@@ -43,6 +43,8 @@ pub mod socket;
 pub mod turn;
 #[cfg(test)]
 mod live_test;
+#[cfg(test)]
+mod models_test;
 
 /// The surface Quick's desktop app reports; the agent tailors itself to it.
 const SURFACE: &str = "QUICK_WORK_DESKTOP_WINDOWS";
@@ -57,6 +59,12 @@ const CHAT_AGENT: &str = "arn:aws:quicksight:us-east-1:156891495215:agent/SYSTEM
 /// IAM Identity Center: the instance Quick's desktop app is registered
 /// against, which the sign-in flow reports (`issuerUrl`).
 const IDENTITY_STORE: &str = "ssoins-72233782ae72fb91";
+
+/// The cell Quick's desktop app signs this identity store's accounts in to
+/// (`tenantUrl` in its sign-in's callback). Quick's sign-in doesn't always
+/// report it, and the chat socket's host is per workspace, so this is the
+/// fallback; `OAK_QUICK_HOST` overrides it.
+const DEFAULT_CELL: &str = "qbs-cellff9e0f5c-3614-471c-b8fe-9d3c8f3afff9.dp.appintegrations.us-east-1.prod.plato.ai.aws.dev";
 
 /// The OIDC endpoints (region-scoped, as the app uses them).
 const OIDC_AUTHORIZE: &str = "https://oidc.us-east-1.amazonaws.com/authorize";
@@ -279,8 +287,8 @@ pub mod login {
     }
 
     /// The socket's host for the signed-in account: the `tenantUrl` Quick's
-    /// sign-in reports (its cell's own address), or the cell Oak has been
-    /// talking to for this identity store.
+    /// sign-in reports (its cell's own address), the cell Oak was configured
+    /// with, or the one Quick's desktop app uses for this identity store.
     pub fn host() -> Result<String, String> {
         let stored = STORE.lock().unwrap().host.clone();
         if !stored.is_empty() {
@@ -296,12 +304,21 @@ pub mod login {
         }
     }
 
-    /// The cell this identity store's Quick accounts run on, as far as Oak
-    /// has seen it. The host is per workspace (`<cell>.dp.appintegrations…`),
-    /// so it is saved from the sign-in rather than guessed. OAK_QUICK_HOST
-    /// names one for a stand-in or a proxy (as OAK_API_BASE does for Claude).
+    /// The host Oak saved at sign-in, for the UI.
+    pub fn saved_host() -> String {
+        STORE.lock().unwrap().host.clone()
+    }
+
+    /// The cell Oak's Quick login runs on. Quick's sign-in reports it
+    /// (`tenantUrl`); when the callback doesn't, this is the cell Quick's
+    /// desktop app signs in to for this identity store, and `OAK_QUICK_HOST`
+    /// names another (a stand-in or a proxy, as `OAK_API_BASE` does for
+    /// Claude).
     fn known_cell() -> Option<String> {
-        std::env::var("OAK_QUICK_HOST").ok().map(|h| h.trim().trim_start_matches("https://").trim_end_matches('/').to_string()).filter(|h| !h.is_empty())
+        if let Some(h) = std::env::var("OAK_QUICK_HOST").ok().map(|h| h.trim().trim_start_matches("https://").trim_end_matches('/').to_string()).filter(|h| !h.is_empty()) {
+            return Some(h);
+        }
+        (!DEFAULT_CELL.is_empty()).then(|| DEFAULT_CELL.to_string())
     }
 
     /// Starts a fresh sign-in: registers Oak's client with the identity
@@ -313,6 +330,10 @@ pub mod login {
         }
         let (verifier, challenge) = pkce();
         let state = hex(rand::random::<[u8; 16]>());
+        // Quick's desktop sign-in carries a `nonce`, and the workspace it
+        // signed in to comes back with the code (it names the cell Oak's
+        // socket goes to).
+        let nonce = hex(rand::random::<[u8; 16]>());
         // The client, then the port it comes back to: the registration has
         // to name the redirect URI, so the port is taken first.
         let listener = match listen() {
@@ -332,10 +353,11 @@ pub mod login {
             }
         };
         let url = format!(
-            "{OIDC_AUTHORIZE}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={state}&code_challenge={challenge}&code_challenge_method=S256&prompt=login",
+            "{OIDC_AUTHORIZE}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={state}&code_challenge={challenge}&code_challenge_method=S256&prompt=login&nonce={}",
             urlencode(&client.0),
             urlencode(&redirect),
             urlencode(SCOPE),
+            urlencode(&nonce),
         );
         set_state(State::Waiting { url: url.clone(), port });
         let client2 = client.clone();

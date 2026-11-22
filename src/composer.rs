@@ -1031,6 +1031,9 @@ pub(crate) fn quick_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::quick::Accou
         } else {
             key_line(ui, &a.email, t.ink3);
         }
+        if crate::quick::login::saved_host().is_empty() {
+            key_line(ui, "Workspace address not reported: set OAK_QUICK_HOST", t.ink3);
+        }
         match &a.error {
             Some(e) => key_line(ui, e, t.error),
             None => {
