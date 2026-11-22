@@ -60,8 +60,10 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     if let Err(e) = sock.send(&user) {
         return drop(tx.send(Sse::Err(e)));
     }
-    if let Err(e) = pump(&mut sock, &folder, &tx) {
-        let _ = tx.send(Sse::Err(e));
+    match pump(&mut sock, &folder, &tx) {
+        // The stream says the turn is over: the reply is whole.
+        Ok(()) => drop(tx.send(Sse::Done)),
+        Err(e) => drop(tx.send(Sse::Err(e))),
     }
 }
 
