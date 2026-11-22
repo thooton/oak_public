@@ -785,11 +785,10 @@ impl Turn {
         Turn { thread: thread.to_string(), message: message.to_string(), ..Default::default() }
     }
 
-    /// Whether `v` is this turn's: its thread's (when it names one), and
-    /// its message's (when it names one, and once the turn knows it). Other
-    /// threads' frames and older messages' frames are not. The turn's driver
-    /// asks before it reads a frame, so a tool call of another thread is
-    /// never run.
+    /// Whether `v` is this turn's. Other threads' frames never are. Joining
+    /// a thread makes Quick replay its older messages, so a turn begins only
+    /// at a `message_start` — the assistant message Quick opens for it — and
+    /// nothing of another message is taken, thinking included.
     pub(crate) fn accepts(&mut self, v: &Value) -> bool {
         let field = |k: &str| v[k].as_str().unwrap_or("").to_string();
         let thread = field("thread_id");
@@ -798,13 +797,21 @@ impl Turn {
         }
         let message = field("message_id");
         if message.is_empty() {
+            // What names no message (keepalives, the thread's title, status).
             return true;
         }
-        if self.message.is_empty() {
-            self.message = message;
-            return true;
+        match self.message.as_str() {
+            // Not begun: only a start opens this turn.
+            "" => {
+                let k = v["type"].as_str().unwrap_or("");
+                let opens = matches!(k, "message_start");
+                if opens {
+                    self.message = message;
+                }
+                opens
+            }
+            mine => message == mine,
         }
-        message == self.message
     }
 
     fn text(&mut self) -> usize {
@@ -978,7 +985,16 @@ mod tests {
             "thread_id": "thread-b", "message_id": "msg-b1"});
         assert!(t.feed(&other).is_empty());
         assert!(t.accepts(&other) == false);
-        // This thread's first message claims the turn.
+        // An older message of this thread, replayed as the thread is joined,
+        // is not (its text, thinking or calls).
+        let replayed = json!({"type": "thinking_delta", "payload": {"delta": "old thoughts"},
+            "thread_id": "thread-a", "message_id": "msg-a0"});
+        assert!(!t.accepts(&replayed));
+        assert!(t.feed(&replayed).is_empty());
+        // A start opens this turn's message.
+        let start = json!({"type": "message_start", "payload": {"role": "assistant"},
+            "thread_id": "thread-a", "message_id": "msg-a1"});
+        assert!(t.accepts(&start));
         let first = json!({"type": "text_delta", "payload": {"delta": "mine"},
             "thread_id": "thread-a", "message_id": "msg-a1"});
         assert!(t.accepts(&first));

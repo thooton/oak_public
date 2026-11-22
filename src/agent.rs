@@ -1914,6 +1914,12 @@ impl Worker {
                 self.files.lock().unwrap().refresh();
                 self.bench("files_refresh", json!({"ms": ms_since(t)}));
             }
+            // A done turn is the turn: its reply is written, its work (if the
+            // provider ran any) is in the transcript, and Oak asks for
+            // nothing more.
+            if done {
+                return;
+            }
         }
     }
 

@@ -89,7 +89,15 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, thread: &str, tx: &Sender<S
         let kind = frame["type"].as_str().unwrap_or("").to_string();
         // Another thread's frames, and older messages' of this one, are not
         // this turn's (the socket carries several threads).
-        if !turn.accepts(&frame) {
+        let mine = turn.accepts(&frame);
+        if std::env::var("OAK_QUICK_DEBUG").is_ok() {
+            eprintln!(
+                "FRAME kind={kind:22} thread={:28} msg={:12} accepted={mine}",
+                frame["thread_id"].as_str().unwrap_or("-"),
+                frame["message_id"].as_str().unwrap_or("-")
+            );
+        }
+        if !mine {
             continue;
         }
         // A message from Quick that Oak doesn't show (keepalives, task

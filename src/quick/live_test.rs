@@ -35,7 +35,7 @@ fn quick_live_turn() {
             "content": [{"type": "text", "text": std::env::var("OAK_QUICK_PROMPT").unwrap_or_else(|_| "Reply with exactly: PROBE-OK".into())}]
         })],
         folder: Some(folder),
-        conv: Some(format!("oak-probe-{}", crate::api::now_ms())),
+        conv: Some(std::env::var("OAK_QUICK_THREAD").unwrap_or_else(|_| format!("oak-probe-{}", crate::api::now_ms()))),
         thinking: true,
         effort: Some("low".into()),
         ..Default::default()
