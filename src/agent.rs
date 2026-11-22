@@ -1576,7 +1576,9 @@ impl Worker {
             let (block, mark) = apply_command(&mut c, cmd);
             let sent = block.as_ref().and_then(|b| b["text"].as_str()).map(String::from).or_else(|| c.held.last().cloned()).unwrap_or_default();
             blocks.extend(block);
-            self.marks.lock().unwrap().push((mark.0, mark.1, sent));
+            if let Some(mark) = mark {
+                self.marks.lock().unwrap().push((mark.0, mark.1, sent));
+            }
         }
         self.save(c);
         blocks
@@ -1593,12 +1595,12 @@ impl Worker {
     }
 
     /// Puts the pending command lines in the transcript, before the next
-    /// message: all of them once a reply came, else only the efforts and
-    /// models (they take effect without the model being told).
+    /// message: all of them once a reply came, else only the efforts (they
+    /// take effect without the model being told).
     fn add_marks(&self, replied: bool) {
         let (marks, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut *self.marks.lock().unwrap())
             .into_iter()
-            .partition(|(kind, _, _)| replied || matches!(kind, MarkKind::Effort | MarkKind::Model));
+            .partition(|(kind, _, _)| replied || matches!(kind, MarkKind::Effort));
         *self.marks.lock().unwrap() = wait;
         if marks.is_empty() {
             return;
@@ -2280,7 +2282,9 @@ pub(crate) fn code_mode_refuses_provider(code_mode: bool, provider: api::Provide
     }
 }
 
-fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKind, String)) {
+/// Does `cmd` to `c`: the block telling the model about a new goal, if any,
+/// and the transcript line to show for it, if any.
+fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, Option<(MarkKind, String)>) {
     match cmd {
         Command::Goal(goal, endless) => {
             let cleared = goal.is_empty();
@@ -2307,7 +2311,7 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKin
             c.goal_justification.clear();
             c.goal_finished = false;
             c.goal_paused = false;
-            ((!cleared).then(|| goal_block(&note)), (MarkKind::Goal, goal))
+            ((!cleared).then(|| goal_block(&note)), Some((MarkKind::Goal, goal)))
         }
         Command::Effort(e) => {
             // Claude's effort is part of its cache key: the next request
@@ -2318,9 +2322,10 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKin
                 c.cache.cold();
             }
             c.effort = e.clone();
-            (None, (MarkKind::Effort, e))
+            (None, Some((MarkKind::Effort, e)))
         }
-        // The model isn't told: it reads the conversation as it was. The
+        // The model isn't told, and the transcript gets no line for it: the
+        // switch is seamless (the session box's model row shows it). The
         // effort stays as set, and goes as the new model takes it
         // (`effort_for`).
         Command::Model(p, m) => {
@@ -2331,7 +2336,7 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, (MarkKin
                 c.served_by.clear();
             }
             c.provider = Some(p);
-            (None, (MarkKind::Model, m))
+            (None, None)
         }
     }
 }

@@ -1154,7 +1154,9 @@ pub enum MarkKind {
     /// At the start of a session: the tool definitions sent with every
     /// request; `text` says how many.
     Tools,
-    /// The user switched the conversation to another model; `text` is its id.
+    /// The user switched the conversation to another model; `text` is its
+    /// id. An older Oak's line: a switch adds none now (the session box's
+    /// model row shows it), and one saved back then still shows.
     Model,
     /// A Freebuff session hour ran out mid-turn; the grace period began.
     FreebuffHour,

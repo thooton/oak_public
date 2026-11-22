@@ -11,7 +11,7 @@ fn clearing_a_goal_waits_for_the_next_request() {
     apply_command(&mut c, Command::Goal("ship it".into(), false));
     let (block, mark) = apply_command(&mut c, Command::Goal(String::new(), false));
     assert!(block.is_none(), "a cleared goal gives the model nothing to do");
-    assert_eq!(mark.0, MarkKind::Goal);
+    assert_eq!(mark.unwrap().0, MarkKind::Goal);
     assert!(c.held[0].contains("cleared the goal"));
     // A new goal supersedes the waiting note.
     let (block, _) = apply_command(&mut c, Command::Goal("again".into(), false));
@@ -60,8 +60,8 @@ fn switching_models() {
     // Its own provider's: everything goes as it is, borrowed.
     assert!(matches!(for_provider(&c.messages, api::Provider::Claude), std::borrow::Cow::Borrowed(_)));
     let (block, mark) = apply_command(&mut c, Command::Model(api::Provider::Codex, "gpt-6-luna".into()));
-    assert!(block.is_none());
-    assert_eq!((mark.0, c.model.as_str(), c.effort.as_str(), c.served_by.as_str()), (MarkKind::Model, "gpt-6-luna", "max", ""));
+    assert!(block.is_none() && mark.is_none(), "a switch is seamless: no block, no transcript line");
+    assert_eq!((c.model.as_str(), c.effort.as_str(), c.served_by.as_str()), ("gpt-6-luna", "max", ""));
     c.messages.push(json!({"role": "user", "content": [oak::text("more")]}));
     c.messages.push(json!({"role": "assistant", "content": [think("codex"), oak::text("ok")]}));
     let sent = for_provider(&c.messages, api::Provider::Codex);
@@ -178,7 +178,7 @@ fn endless_goal_never_finishes() {
     let (block, mark) = apply_command(&mut c, Command::Goal(goal.into(), true));
     let text = block.unwrap()["text"].as_str().unwrap().to_string();
     assert!(text.starts_with(ENDLESS_GOAL_TAG) && text == goal_prompt(goal, true));
-    assert_eq!(mark, (MarkKind::Goal, goal.into()));
+    assert_eq!(mark, Some((MarkKind::Goal, goal.into())));
     assert!(c.goal_endless && render_memory(&c).contains("as endless"));
     assert!(tool(&mut c, "GOAL_JUSTIFICATION", json!({"justification": "done"})).is_err());
     assert!(tool(&mut c, "GOAL_FINISH", json!({})).is_err());
@@ -889,7 +889,7 @@ fn memory_changes_only_with_a_summary() {
     let (block, mark) = apply_command(&mut c, Command::Goal("ship v2".into(), false));
     let block = block.unwrap();
     assert!(block["text"].as_str().unwrap().starts_with(GOAL_TAG) && is_hidden_block(&block));
-    assert_eq!(mark, (MarkKind::Goal, "ship v2".into()));
+    assert_eq!(mark, Some((MarkKind::Goal, "ship v2".into())));
     memory_tool(&mut c, "NOTE_NEW", &json!({"text": "the db is postgres"}), 0).unwrap();
     let ttl = c.cache.ttl_ms();
     assert_eq!(memory_for_request(&mut c, ttl / 2), "", "a pause shorter than the cache's lifetime");
