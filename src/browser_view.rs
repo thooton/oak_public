@@ -148,7 +148,8 @@ fn tick(ctx: &egui::Context, conv: &str) -> (Option<Arc<Instance>>, ViewState) {
         }
         None => s.expanded = false,
     }
-    if (s.alpha > 0.0 && s.alpha < 1.0) || page_in(ctx, &s) < 1.0 {
+    // (Without a browser there is nothing to fade in: no frames then.)
+    if (s.alpha > 0.0 && s.alpha < 1.0) || (inst.is_some() && page_in(ctx, &s) < 1.0) {
         ctx.request_repaint();
     }
     store(ctx, conv, &s);
@@ -977,6 +978,22 @@ mod tests {
 
     const DEFAULT_W_TEST: u32 = browser::DEFAULT_W;
     const DEFAULT_H_TEST: u32 = browser::DEFAULT_H;
+
+    /// A conversation without a browser asks for no more frames: the
+    /// browser's fade-in once had the window drawn again every frame while
+    /// nothing changed (over two cores' worth of CPU on a software
+    /// renderer).
+    #[test]
+    fn no_browser_no_frames() {
+        let ctx = egui::Context::default();
+        for i in 0..5 {
+            let input = egui::RawInput { time: Some(i as f64 / 60.0), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| drop(tick(ui.ctx(), "no-browser-test")));
+            out.textures_delta.clear();
+            let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay).unwrap();
+            assert!(i < 2 || delay > std::time::Duration::from_secs(1), "frame {i} asked for another in {delay:?}: {:?}", ctx.repaint_causes());
+        }
+    }
 
     /// The whole app with a browser the model opened: it fades in as a
     /// preview between the transcript's column and the minimap; a click

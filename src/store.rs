@@ -1630,9 +1630,11 @@ impl Indexed {
 /// The index of the conversation files, in their folder: for each file
 /// (by name, size and time) what `Indexed` keeps, so that a start reads
 /// only the files changed since the last. Written after each start, in
-/// the background; a cache only (any file it doesn't match is read).
+/// the background; a cache only (any file it doesn't match is read). What
+/// `look` found depends on the rewriter (`rewrites::key`), which it is
+/// kept under: an index made under another is no index.
 const INDEX: &str = "index.bin";
-const INDEX_MAGIC: &[u8] = b"OAKINDEX1\n";
+const INDEX_MAGIC: &[u8] = b"OAKINDEX2\n";
 
 /// A file's size and time, as the index tells them apart.
 fn stamp(e: &std::fs::DirEntry) -> Option<(u64, u64)> {
@@ -1644,13 +1646,16 @@ fn stamp(e: &std::fs::DirEntry) -> Option<(u64, u64)> {
 type Index = std::collections::HashMap<String, ((u64, u64), Indexed)>;
 
 fn read_index() -> Index {
-    std::fs::read(conversations_dir().join(INDEX)).map(|b| parse_index(&b)).unwrap_or_default()
+    std::fs::read(conversations_dir().join(INDEX)).map(|b| parse_index(&b, crate::rewrites::key())).unwrap_or_default()
 }
 
-/// The index from its bytes (`index_bytes`); empty if they don't read.
-fn parse_index(buf: &[u8]) -> Index {
+/// The index from its bytes (`index_bytes`), made under the rewriter's key
+/// `key`; empty if they don't read or it was made under another.
+fn parse_index(buf: &[u8], key: &str) -> Index {
     let mut out = std::collections::HashMap::new();
     let Some(mut r) = buf.strip_prefix(INDEX_MAGIC) else { return out };
+    let Some(r2) = r.strip_prefix(&(key.len() as u32).to_le_bytes()[..]).and_then(|r| r.strip_prefix(key.as_bytes())) else { return out };
+    r = r2;
     fn take<'a>(r: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
         let (a, b) = r.split_at_checked(n)?;
         *r = b;
@@ -1683,12 +1688,14 @@ fn parse_index(buf: &[u8]) -> Index {
     out
 }
 
-fn write_index(entries: &[(String, (u64, u64), std::sync::Arc<Indexed>)]) {
-    let _ = write_atomic_unsynced(&conversations_dir().join(INDEX), index_bytes(entries));
+fn write_index(entries: &[(String, (u64, u64), std::sync::Arc<Indexed>)], key: &str) {
+    let _ = write_atomic_unsynced(&conversations_dir().join(INDEX), index_bytes(entries, key));
 }
 
-fn index_bytes(entries: &[(String, (u64, u64), std::sync::Arc<Indexed>)]) -> Vec<u8> {
+fn index_bytes(entries: &[(String, (u64, u64), std::sync::Arc<Indexed>)], key: &str) -> Vec<u8> {
     let mut out = INDEX_MAGIC.to_vec();
+    out.extend((key.len() as u32).to_le_bytes());
+    out.extend(key.as_bytes());
     let opt = |v: Option<usize>| v.map_or(u64::MAX, |v| v as u64);
     for (name, (size, time), i) in entries {
         out.extend((name.len() as u32).to_le_bytes());
@@ -1762,7 +1769,8 @@ fn read_all(files: &[std::fs::DirEntry], look: &Look) -> Vec<Option<Conversation
     let entries: Vec<(String, (u64, u64), std::sync::Arc<Indexed>)> =
         parsed.iter().filter_map(|(i, got)| Some((names[*i].clone(), stamp(&files[*i]).or(stamps[*i])?, got.as_ref()?.1.clone()))).collect();
     if read > 0 || entries.len() != index.len() {
-        std::thread::spawn(move || write_index(&entries));
+        let key = crate::rewrites::key();
+        std::thread::spawn(move || write_index(&entries, key));
     }
     parsed.into_iter().map(|p| p.1.map(|g| g.0)).collect()
 }
@@ -2077,14 +2085,16 @@ mod tests {
         let (read, x) = read_file(&path, &look).unwrap();
         assert_eq!(read.messages.lost_from, Some(Some(1)).flatten());
         let entry = (c.file_name(), (7, 9), std::sync::Arc::new(x));
-        let index = parse_index(&index_bytes(&[entry]));
+        let bytes = index_bytes(&[entry], "_key");
+        assert!(parse_index(&bytes, "_other").is_empty(), "an index made under another rewriter is no index");
+        let index = parse_index(&bytes, "_key");
         let ((size, time), x) = &index[&c.file_name()];
         assert_eq!((*size, *time), (7, 9));
         let from_index = x.conversation(&path).unwrap();
         assert!(!from_index.messages.loaded());
         assert_eq!(from_index.messages.lost_from, read.messages.lost_from);
         assert_eq!(serde_json::to_string(&from_index).unwrap(), serde_json::to_string(&c).unwrap());
-        assert!(parse_index(b"OAKINDEX1\n\x05").is_empty(), "a broken index is no index");
+        assert!(parse_index(b"OAKINDEX2\n\x05", "").is_empty(), "a broken index is no index");
         // Through `load_conversations`: the first start indexes it, the next
         // starts from the index; a change is read from the file.
         let load = || load_conversations().into_iter().find(|l| l.id == c.id).unwrap();

@@ -605,9 +605,11 @@ fn draw_long(ui: &mut Ui, cx: &mut Ctx, parsed: &Parsed) {
             let skip = match (sketching, ink) {
                 (true, Some(ink)) => {
                     let o = vec2(left, top);
-                    let p = ui.painter();
-                    for k in ink.iter() {
-                        p.add(egui::Shape::rect_filled(k.rect.translate(o), 0.0, k.color));
+                    if !crate::vlist::sketch_ink(ui, ink, o) {
+                        let p = ui.painter();
+                        for k in ink.iter() {
+                            p.add(egui::Shape::rect_filled(k.rect.translate(o), 0.0, k.color));
+                        }
                     }
                     true
                 }
@@ -1314,6 +1316,7 @@ mod tests {
         let md = long_reply(30);
         let (ctx, t) = test_ctx(true, false);
         let mut time = 0.0;
+        let mut straight = 0;
         let mut frame = |full: bool| {
             let mut sketch = vec![];
             let mut rect = Rect::NOTHING;
@@ -1322,7 +1325,8 @@ mod tests {
                 ui.set_clip_rect(Rect::from_min_size(egui::Pos2::ZERO, vec2(500.0, 1.0e6)));
                 let layer = ui.layer_id();
                 let start = crate::vlist::paint_len(ui.ctx(), layer);
-                rect = crate::vlist::as_sketching(|| {
+                let side;
+                (rect, side) = crate::vlist::as_sketching(layer, || {
                     ui.scope(|ui| {
                         if full {
                             let mut cx = Ctx { t: &t, id: Id::unique("sketch-full"), n: 0, highlighted: false };
@@ -1337,7 +1341,8 @@ mod tests {
                 });
                 let end = crate::vlist::paint_len(ui.ctx(), layer);
                 let all = egui::Rangef::new(f32::NEG_INFINITY, f32::INFINITY);
-                sketch = crate::vlist::capture(ui.ctx(), layer, (start, end), rect.min, all);
+                sketch = crate::vlist::capture_with(ui.ctx(), layer, (start, end), rect.min, all, &side);
+                straight = side.len();
             });
             drop(out);
             (rect, sketch)
@@ -1358,6 +1363,8 @@ mod tests {
         assert!(sketch0.len() > 500, "{}", sketch0.len());
         assert_eq!(sketch.len(), sketch0.len());
         assert!(same_ink(&sketch, &sketch0));
+        // (The blocks sketched before went into it without being painted.)
+        assert!(straight * 10 > sketch.len() * 9, "{straight} of {}", sketch.len());
     }
 
     /// A click anywhere on a link opens it, its last glyph's right half

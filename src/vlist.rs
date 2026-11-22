@@ -639,6 +639,7 @@ impl List {
         let layer = ui.layer_id();
         let clip = Rect::from_x_y_ranges(off, top..=top + 1.0e6);
         SKETCHING.set(true);
+        SIDE.with(|s| *s.borrow_mut() = (Some(layer), vec![]));
         let p = if disabled {
             let mut render = |ui: &mut Ui, i: usize| {
                 // Disabled, but drawn as it is on screen.
@@ -651,7 +652,8 @@ impl List {
             self.lay(ui, i, top, off, clip, render)
         };
         SKETCHING.set(false);
-        let ink = capture(&ctx, layer, p.shapes, pos2(off.min, top), Rangef::new(f32::NEG_INFINITY, f32::INFINITY));
+        let side = SIDE.with(|s| std::mem::take(&mut *s.borrow_mut()).1);
+        let ink = capture_with(&ctx, layer, p.shapes, pos2(off.min, top), Rangef::new(f32::NEG_INFINITY, f32::INFINITY), &side);
         ctx.graphics_mut(|g| {
             let l = g.entry(layer);
             for k in p.shapes.0..p.shapes.1 {
@@ -907,23 +909,57 @@ impl List {
 
 thread_local! {
     static SKETCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// While a unit is sketched: its layer, and the ink put straight into
+    /// its sketch (`sketch_ink`), each with how many shapes the layer held
+    /// then, so that it keeps its place among what is painted.
+    static SIDE: std::cell::RefCell<(Option<egui::LayerId>, SideInk)> = const { std::cell::RefCell::new((None, Vec::new())) };
+}
+
+/// Ink put into a sketch straight (`sketch_ink`), each after as many of
+/// the layer's shapes as it says.
+pub(crate) type SideInk = Vec<(usize, Ink)>;
+
+/// While a unit is sketched, `ink` (relative to `o`) goes into its sketch
+/// as if painted by `ui` now, without painting it (which would only be
+/// read back and taken away again: thousands of shapes for a long reply,
+/// every frame it streams). False when it must be painted: not sketching,
+/// or on another layer or faded, where painting changes it.
+pub(crate) fn sketch_ink(ui: &Ui, ink: &[Ink], o: Vec2) -> bool {
+    let layer = ui.layer_id();
+    if !SKETCHING.get() || ui.painter().opacity() != 1.0 {
+        return false;
+    }
+    SIDE.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.0 != Some(layer) {
+            return false;
+        }
+        let at = paint_len(ui.ctx(), layer);
+        // (A painted rect without color leaves no ink.)
+        s.1.extend(ink.iter().filter(|k| k.color.a() > 0).map(|k| (at, Ink { rect: k.rect.translate(o), color: k.color })));
+        true
+    })
 }
 
 /// Whether a unit is being laid out off screen for its height and sketch
 /// (`List::sketch_off_screen`): what it paints is taken back once its ink
 /// is captured, so painting a part's ink (`Ink` rects, as `capture` reads
-/// them) stands in for drawing it.
+/// them), or putting it into the sketch straight (`sketch_ink`), stands in
+/// for drawing it.
 pub(crate) fn sketching() -> bool {
     SKETCHING.get()
 }
 
 /// `f` run as if laying out a unit off screen (`sketching`).
+/// With what went into the sketch straight (`sketch_ink`), for
+/// `capture_with`.
 #[cfg(test)]
-pub(crate) fn as_sketching<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn as_sketching<R>(layer: egui::LayerId, f: impl FnOnce() -> R) -> (R, SideInk) {
     SKETCHING.set(true);
+    SIDE.with(|s| *s.borrow_mut() = (Some(layer), vec![]));
     let r = f();
     SKETCHING.set(false);
-    r
+    (r, SIDE.with(|s| std::mem::take(&mut *s.borrow_mut()).1))
 }
 
 /// `List::scene`'s: units with their tops, rows of text with their units.
@@ -1002,14 +1038,29 @@ fn shift(ctx: &egui::Context, layer: egui::LayerId, placed: &mut [Placed], d: f3
 /// The ink of shapes `range` of the layer, relative to `origin`, within
 /// `keep` (a y range relative to `origin`).
 pub(crate) fn capture(ctx: &egui::Context, layer: egui::LayerId, range: (usize, usize), origin: Pos2, keep: Rangef) -> Vec<Ink> {
-    let mut out = vec![];
+    capture_with(ctx, layer, range, origin, keep, &[])
+}
+
+/// `capture`, with `side`'s ink (`sketch_ink`: each after as many of the
+/// layer's shapes as it says) in its place among theirs.
+pub(crate) fn capture_with(ctx: &egui::Context, layer: egui::LayerId, range: (usize, usize), origin: Pos2, keep: Rangef, side: &[(usize, Ink)]) -> Vec<Ink> {
+    let mut out = Vec::with_capacity(side.len());
+    let o = origin.to_vec2();
+    let mut side = side.iter().peekable();
+    let mut put_side = |out: &mut Vec<Ink>, before: usize| {
+        while let Some((_, k)) = side.next_if(|(at, _)| *at <= before) {
+            out.push(Ink { rect: k.rect.translate(-o), color: k.color });
+        }
+    };
     ctx.graphics(|g| {
         if let Some(l) = g.get(layer) {
-            for c in l.all_entries().skip(range.0).take(range.1.saturating_sub(range.0)) {
-                ink(&c.shape, origin.to_vec2(), &mut out);
+            for (k, c) in l.all_entries().enumerate().skip(range.0).take(range.1.saturating_sub(range.0)) {
+                put_side(&mut out, k);
+                ink(&c.shape, o, &mut out);
             }
         }
     });
+    put_side(&mut out, usize::MAX);
     out.retain(|r| r.rect.bottom() >= keep.min && r.rect.top() <= keep.max);
     out
 }

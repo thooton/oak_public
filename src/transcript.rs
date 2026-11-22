@@ -441,15 +441,16 @@ pub(crate) enum Item<'a> {
     /// message it stands in for everything before (the cut), and when it
     /// was made (which tells banners apart).
     Summary { text: &'a str, cut: usize, time: i64 },
-    /// A task notification and a heartbeat, as sent to the model.
-    Note(&'a str),
-    Beat(&'a str),
+    /// A task notification and a heartbeat, as sent to the model, and when
+    /// (none from before OAK kept the time).
+    Note(&'a str, Option<i64>),
+    Beat(&'a str, Option<i64>),
     /// The user's answers to questions asked during a goal (or an older
     /// Oak's answer to a REQUEST_ASK), as sent to the model.
-    AskReply(&'a str),
+    AskReply(&'a str, Option<i64>),
     /// A message from another session (a subagent, or for a subagent the
     /// main session or another agent); `last` marks a final reply.
-    AgentMessage { from: &'a str, last: bool, body: &'a str, key: (usize, usize) },
+    AgentMessage { from: &'a str, last: bool, body: &'a str, key: (usize, usize), at: Option<i64> },
     /// A /goal or /effort taking effect, or a usage limit; never sent.
     Mark(&'a Mark),
     /// What the user wrote; the last item of each message the user sent
@@ -688,13 +689,13 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
                         continue; // shown as its mark
                     }
                     out.push(if text.starts_with(NOTE_TAG) || text.starts_with(agent::ALERT_TAG) {
-                        Item::Note(text)
+                        Item::Note(text, f.at)
                     } else if text.starts_with(BEAT_TAG) {
-                        Item::Beat(text)
+                        Item::Beat(text, f.at)
                     } else if text.starts_with(agent::ASK_TAG) || text.starts_with(agent::ANSWERS_TAG) {
-                        Item::AskReply(text)
+                        Item::AskReply(text, f.at)
                     } else if let Some((from, last, body)) = agent::parse_agent_message(text) {
-                        Item::AgentMessage { from, last, body, key: (mi, bi) }
+                        Item::AgentMessage { from, last, body, key: (mi, bi), at: f.at }
                     } else {
                         Item::UserText(text, revert, f.at, false)
                     });
@@ -1836,6 +1837,7 @@ fn work_block(ui: &mut Ui, t: &Theme, run: &[Item], results: &Results, revert: O
                 _ => continue,
             };
             item_menu(ui, rect, key_id("item-menu", key), None, revert.map(|m| (m, key)), None);
+            time_tip(ui, header(rect), key_id("item-time", key), item_at(x));
         }
     });
     ui.add_space(2.0);
@@ -1882,7 +1884,7 @@ pub(crate) fn unit_sig(run: &[Item], results: &Results) -> u64 {
         std::mem::discriminant(x).hash(&mut h);
         match x {
             Item::Summary { text, cut, time } => (text.len(), cut, time).hash(&mut h),
-            Item::Note(s) | Item::Beat(s) | Item::AskReply(s) => (addr(s), s.len()).hash(&mut h),
+            Item::Note(s, _) | Item::Beat(s, _) | Item::AskReply(s, _) => (addr(s), s.len()).hash(&mut h),
             Item::AgentMessage { body, key, last, .. } => (body.len(), key, last).hash(&mut h),
             Item::Mark(m) => (m.at, m.kind as u8, m.text.len(), m.time, m.done, m.sent.len()).hash(&mut h),
             Item::UserText(s, r, _, end) => (s.len(), r.map(|r| (r.msg, r.block)), end).hash(&mut h),
@@ -1947,17 +1949,18 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
                 if let Item::Thinking(b, key, streaming, rewrite) = x {
                     let r = ui.scope(|ui| thinking_row(ui, t, b, *key, *streaming, rewrite.as_ref(), false)).response.rect;
                     menu(ui, r, *key, None);
+                    time_tip(ui, header(r), key_id("item-time", *key), item_at(x));
                 }
             }
         }
         return;
     }
-    {
+    let drawn = ui.scope(|ui| {
         match &run[0] {
             Item::Summary { text, cut, time } => summary_banner(ui, t, text, *cut, *time),
-            Item::Note(note) => notice(ui, t, note, "note-open", TASK_NOTE_ICON, (agent::ALERT_TAG, "</usage-alert>"), Some((NOTE_TAG, "</task-notification>"))),
-            Item::Beat(beat) => notice(ui, t, beat, "beat-open", HEARTBEAT_ICON, (BEAT_TAG, "</heartbeat>"), None),
-            Item::AskReply(text) => {
+            Item::Note(note, _) => notice(ui, t, note, "note-open", TASK_NOTE_ICON, (agent::ALERT_TAG, "</usage-alert>"), Some((NOTE_TAG, "</task-notification>"))),
+            Item::Beat(beat, _) => notice(ui, t, beat, "beat-open", HEARTBEAT_ICON, (BEAT_TAG, "</heartbeat>"), None),
+            Item::AskReply(text, _) => {
                 let body = match text.strip_prefix(agent::ANSWERS_TAG) {
                     Some(b) => b.trim_end_matches("</ask-answers>"),
                     None => text.strip_prefix(agent::ASK_TAG).unwrap_or(text).trim_end_matches("</ask-request>"),
@@ -1976,7 +1979,7 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
                 });
             }
             Item::Mark(m) => mark_row(ui, t, m),
-            Item::AgentMessage { from, last, body, key } => {
+            Item::AgentMessage { from, last, body, key, .. } => {
                 let r = ui.scope(|ui| agent_message_row(ui, t, from, *last, body, *key)).response.rect;
                 menu(ui, r, *key, Some(&|| body.to_string()));
             }
@@ -2046,6 +2049,36 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
             }
             Item::Thinking(..) | Item::Tool(..) => {}
         }
+    });
+    let id = Id::unique(("item-time", u.start, SALT.with(|c| c.get())));
+    time_tip(ui, drawn.response.rect, id, item_at(&run[0]));
+}
+
+/// When an item went in (ms since 1970), when that was recorded: items
+/// from before OAK kept the time, and the reply streaming in, have none.
+fn item_at(x: &Item) -> Option<i64> {
+    let at = match x {
+        Item::Summary { time, .. } => Some(*time),
+        Item::Mark(m) => Some(m.time),
+        Item::Note(_, at) | Item::Beat(_, at) | Item::AskReply(_, at) | Item::AgentMessage { at, .. } | Item::UserText(_, _, at, _) | Item::Text(_, _, at, ..) => *at,
+        Item::Image(b, _) | Item::File(b, _) | Item::Display(b, _) | Item::Tool(b, _) | Item::Thinking(b, ..) => b.get("_oak_at").and_then(Value::as_i64),
+    };
+    at.filter(|&at| at > 0)
+}
+
+/// A tool's or thinking's row without what it shows opened under it.
+fn header(r: Rect) -> Rect {
+    Rect::from_min_size(r.min, vec2(r.width(), r.height().min(ROW_H)))
+}
+
+/// The full date and time `at` (`item_at`) on hover over `rect`, where an
+/// item is drawn; nothing for one without a time. Its own controls'
+/// tooltips (drawn first) win over it.
+pub(crate) fn time_tip(ui: &mut Ui, rect: Rect, id: Id, at: Option<i64>) {
+    if let Some(at) = at.filter(|&at| at > 0)
+        && ui.rect_contains_pointer(rect)
+    {
+        ui.interact(rect, id, Sense::hover()).on_hover_text(full_time(at, local_offset_ms()));
     }
 }
 

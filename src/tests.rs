@@ -223,6 +223,52 @@ fn fork_menu_on_the_models_items() {
     assert_eq!(conv.messages, before, "the conversation is untouched");
 }
 
+/// Resting the pointer on an item with a recorded time (a message, a
+/// reply mid-turn, a tool's row) shows its full date and time; one from
+/// before Oak kept the time shows none.
+#[test]
+fn items_show_their_time_on_hover() {
+    let (ctx, t) = test_ctx(true, true);
+    // Oct 28, 2026 and Oct 29, 2026, in the morning UTC.
+    let (asked, replied, called) = (1_793_200_000_000_i64, 1_793_286_400_000_i64, 1_793_286_460_000_i64);
+    let conv = Conversation {
+        id: "item-times".into(),
+        messages: vec![
+            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "an old question"}]}),
+            serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "An old answer."}]}),
+            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "a new question", "_oak_at": asked}]}),
+            serde_json::json!({"role": "assistant", "content": [
+                {"type": "text", "text": "Reading it first.", "_oak_at": replied},
+                {"type": "tool_call", "id": "r", "name": "READ", "input": {"path": "notes.txt"}, "_oak_at": called},
+            ]}),
+            serde_json::json!({"role": "user", "content": [{"type": "tool_result", "call_id": "r", "content": "ok"}]}),
+            serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "Done."}]}),
+        ].into(),
+        ..Default::default()
+    };
+    let live = Live::default();
+    let mut time = 0.0;
+    let mut frame = |events| painted(&run_frame(&ctx, vec2(1000.0, 900.0), &mut time, 0.25, events, |ui| transcript_view(ui, &t, &conv, &live)));
+    let at = |shapes: &[(String, Rect)], s: &str| shapes.iter().find(|(x, _)| x.contains(s)).map(|(_, r)| r.center()).unwrap_or_else(|| panic!("no {s:?} in {shapes:?}"));
+    let off = local_offset_ms();
+    let all = [asked, replied, called].map(|ms| full_time(ms, off));
+    let mut hover = |target: &str| {
+        let p = at(&frame(vec![]), target);
+        frame(vec![egui::Event::PointerMoved(p)]);
+        let mut shown = vec![];
+        for _ in 0..4 {
+            shown = frame(vec![]);
+        }
+        frame(vec![egui::Event::PointerGone]);
+        all.iter().filter(|s| shown.iter().any(|(x, _)| x == *s)).cloned().collect::<Vec<_>>()
+    };
+    assert_eq!(hover("a new question"), vec![full_time(asked, off)]);
+    assert_eq!(hover("Reading it first."), vec![full_time(replied, off)]);
+    assert_eq!(hover("notes.txt"), vec![full_time(called, off)]);
+    assert_eq!(hover("an old question"), Vec::<String>::new());
+    assert_eq!(hover("An old answer."), Vec::<String>::new());
+}
+
 /// Right-clicking a reply's selected text keeps the selection and offers
 /// Copy (it), Copy message, Copy link address over a link, and Revert to
 /// before this; the user's message has the copies too.

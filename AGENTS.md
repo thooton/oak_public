@@ -32,6 +32,10 @@ This file is the description of how Oak behaves that QA checks the app against: 
 with every change, and put here the decisions the code alone doesn't explain. How a part works
 belongs in its file's opening comment.
 
+## Keep changes in sync with the remote
+
+Unless the user explicitly asks to keep changes local, verify your changes, commit just the work for the task, and push it to the branch's upstream before reporting completion. The default branch here is `origin/master`. If the remote has advanced, rebase your commits on it, resolve any conflicts, and rerun affected checks before pushing. Never force-push or include unrelated edits. Confirm the push succeeded; if blocked, report what remains local and why.
+
 ## Build, run and test
 
 You need a recent stable Rust (edition 2024). Oak runs on Windows 10/11 with
@@ -717,7 +721,11 @@ conversation's transcript and session box are drawn, plugins draw over it (`Hook
 session box's boxes, which `look::panel_boxes` collects, and the units on screen with their rows
 of text, which `List::scene` reads from what they painted); Ctrl+F finds text
 in it (`src/find.rs`); Ctrl+A after clicking or selecting text in a message selects the whole message, copied as it reads (`src/select.rs`); replies are markdown, with links
-to files opening them. Right-clicking a chat's text (a transcript, a plugin's chat) offers
+to files opening them. Resting the pointer on a chat's item that has a recorded time (`_oak_at`:
+a message, a reply, an image or file, a tool's or thinking's row, a line Oak added; in a super
+agent's chat each bubble, error row, time under a stretch and day line) shows its full date and
+time (`transcript::time_tip`); an item from before Oak kept the time shows none, never a made-up
+one. Its own controls' tooltips win over it. Right-clicking a chat's text (a transcript, a plugin's chat) offers
 Copy for the selection, which the right-click leaves in place, Copy message, Copy link address over
 a link, and Revert to before this where it applies (`src/copy_menu.rs`). Middle-clicking a
 transcript or a plugin's chat scrolls it as browsers do (`src/autoscroll.rs`): the further the pointer goes above or
