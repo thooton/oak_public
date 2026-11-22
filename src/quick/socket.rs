@@ -85,6 +85,24 @@ impl Socket {
         Ok(s)
     }
 
+    /// Connects to a full `wss://` address (the chat path is built by the
+    /// caller; the data plane has its own).
+    pub(crate) fn connect_url(url: &str) -> Result<Socket, String> {
+        let rest = url.strip_prefix("wss://").ok_or_else(|| format!("not a wss address: {url}"))?;
+        let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+        Socket::connect(host, &path)
+    }
+
+    /// Sends a frame as it is, not in the chat envelope (the data plane's
+    /// protocol is its own).
+    pub(crate) fn send_raw(&mut self, v: &Value) -> Result<(), String> {
+        let text = v.to_string();
+        let frame = crate::cdp::frame(0x2, text.as_bytes(), true);
+        self.write_all(&frame).map_err(|e| format!("Quick's socket closed: {e}"))?;
+        self.flush().ok();
+        Ok(())
+    }
+
     /// Sends one JSON frame in Quick's envelope. The app sends them as
     /// binary frames (its socket's writer does that for text too), which is
     /// what the server takes.

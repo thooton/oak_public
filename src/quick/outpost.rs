@@ -199,6 +199,40 @@ pub fn register_folder(token: &str, host: &str, folder: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Tells Quick this outpost's device state (`graph/status`): the app calls it
+/// with its outpost id and Quick then answers with the folders this machine
+/// has, `initialized: true`, which is what its agent reads before it decides
+/// whether a local tool can run. Without it the outpost stays a name with no
+/// device behind it.
+pub fn put_status(token: &str, host: &str) -> Result<String, String> {
+    let outpost = id();
+    let envelope = json!({
+        "eventType": "invokeAgent",
+        "eventBody": {"invokeAgent": {
+            "path": "graph/status",
+            "queryParams": {"_method": "GET", "device_id": outpost},
+            "body": json!({"device_id": outpost}).to_string(),
+            "outpostId": id(),
+        }}
+    });
+    let resp = api::http()
+        .post(format!("https://{host}/integration/quick-work/qbs-event"))
+        .bearer_auth(token)
+        .header("Content-Type", "application/json")
+        .header("X-QuickDsk-mdid", "user-conversation")
+        .header("x-amzn-quick-atype", "ufg")
+        .json(&envelope)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .map_err(api::network_error)?;
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(format!("Quick refused the device status ({status}): {}", text.chars().take(200).collect::<String>()));
+    }
+    Ok(text)
+}
+
 /// What a tool does, as Quick's agent reads it.
 fn describe(name: &str) -> &'static str {
     match name {

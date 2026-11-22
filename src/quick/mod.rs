@@ -40,6 +40,10 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 pub mod outpost;
+
+/// The device's own data plane, which keeps its outpost online with Quick's
+/// server (see `dataplane`).
+pub mod dataplane;
 pub mod socket;
 pub mod turn;
 #[cfg(test)]

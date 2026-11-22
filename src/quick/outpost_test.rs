@@ -54,6 +54,12 @@ fn quick_outpost_status() {
         println!("\nfolders answer: {}", &t[k..end]);
     }
 
+    // What graph/status says for Oak's own outpost once it is told.
+    if let Ok(t) = crate::quick::outpost::put_status(&token, &host) {
+        let k = t.find("invokeAgentResponse").unwrap_or(0);
+        println!("\nput_status answer: {}", &t[k..(k + 500).min(t.len())].replace("\\\"", "\""));
+    }
+
     println!("\n{} outposts on this account:", items.len());
     for o in &items {
         println!(
