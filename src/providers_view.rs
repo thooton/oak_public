@@ -184,7 +184,12 @@ pub(crate) fn provider_box(ui: &mut Ui, t: &Theme, p: Kind, accounts: usize, sho
                         Kind::Codex => ", each plan counting by its size (Plus 1, Pro 5x 5, Pro 20x 20)",
                         _ => "",
                     };
-                    r.on_hover_text(format!("{}% of the {} {} limits used, all together{how}{reset}.", s.used.floor(), s.accounts, s.label));
+                    if p == Kind::Quick {
+                        let reset = s.next_reset.map(|r| format!("; they reset in {}", crate::time::until(r))).unwrap_or_default();
+                        r.on_hover_text(format!("{}% of Quick's monthly units used{reset}.", s.used.floor()));
+                    } else {
+                        r.on_hover_text(format!("{}% of the {} {} limits used, all together{how}{reset}.", s.used.floor(), s.accounts, s.label));
+                    }
                 }
             }
             Shown::Credits(left, spent, error) => {
@@ -240,6 +245,20 @@ pub(crate) fn shown(p: Kind) -> Shown {
         },
         Metered::Credits => match openrouter::account() {
             Some(a) => Shown::Credits(a.left, a.spent, a.error),
+            None => Shown::Loading,
+        },
+        // Quick's one login: its month, as `user-info` last read it.
+        Metered::Limits if p == Kind::Quick => match crate::quick::account() {
+            Some(a) => match (a.usage, a.usage_error) {
+                (Some(u), _) => {
+                    // A month whose reset has passed is unused again.
+                    let next_reset = u.month_resets_at.filter(|&r| r > now);
+                    let used = if u.month_resets_at.is_some() && next_reset.is_none() { 0.0 } else { u.month_percent };
+                    Shown::Limits(vec![Summed { label: "Month".into(), used, accounts: 1, next_reset }])
+                }
+                (None, Some(_)) => Shown::Note("usage unavailable"),
+                (None, None) => Shown::Loading,
+            },
             None => Shown::Loading,
         },
         Metered::Limits => {

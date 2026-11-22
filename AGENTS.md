@@ -841,6 +841,21 @@ The socket is Oak's own (`quick/socket.rs`, rustls, the frame code in `cdp.rs`);
 permessage-deflate, and installs rustls' ring provider itself because reqwest's TLS brings a
 second one.
 
+**Usage** is read as Quick's desktop app reads it (`quick/usage.rs`): a POST of `{}` to the
+workspace's `/integration/quick-work/user-info`, whose `usageSummary` has the month's units
+(`monthlyUsage`: `availableUnits` of `provisionedUnits`, `usedPercentage`, `resetsAt` in seconds),
+the session window (`sessionUsage`: `usedPercentage`, `resumeInMinutes`), the subscription
+(`subscriptionType`, a free trial's `expiryDate`) and `entitlementStatus`. It is fetched with the
+other providers' usage (every two minutes, and after a sign-in) and kept in memory, not in
+`quick.json`. The account box (a Quick conversation's bottom right, and the login's card on Home)
+names the plan ("AWS Quick, Lite trial"; the trial's end on hover) and shows the month as a plan's
+limits show: "Month", the percent used and when it resets, over a bar that turns red at 90% or
+when Quick says the account can't run, and on hover the units used, of how many, and left. The
+session window shows under it while it is in use, when the box has room for it (not on Home's
+card, which also counts conversations). A failed fetch keeps the last reading, marked "as of"
+its time; with none, the box says usage is unavailable. Quick's provider box on Home shows the
+month too, where it said "free".
+
 `quick_live_turn` (ignored; needs `OAK_DIR` with `quick.json`, and a prompt with
 `OAK_QUICK_PROMPT`) drives one real turn end to end, printing what Quick says.
 `quick_models_are_listed` (ignored; `OAK_DIR` a profile) prints the picker's model list and fails

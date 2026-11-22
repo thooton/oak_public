@@ -1017,11 +1017,27 @@ pub(crate) fn local_panel(ui: &mut Ui, t: &Theme, w: f32) -> egui::Response {
     .response
 }
 
-/// Quick's box: who signed in, and that Quick runs its own agent (Oak runs
-/// the tools it asks for, in the conversation's folder).
+/// Quick's box: who signed in, on which plan ("AWS Quick, Lite trial"),
+/// and its monthly limit as `user-info` last read it (`quick::usage`): the
+/// percent of the month's units used, when they reset, and a bar, as a
+/// plan's limits show; the session window too while it is in use, when
+/// there is room. Quick runs its own agent (Oak runs the tools it asks for,
+/// in the conversation's folder), which the first row says on the right.
 pub(crate) fn quick_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::quick::Account>, status: Option<&str>, w: f32) -> egui::Response {
     side_box(ui, t, w, |ui| {
-        head_row(ui, t, "AWS Quick", Some("Quick's agent"));
+        let usage = a.and_then(|a| a.usage.as_ref());
+        let head = match usage.and_then(|u| crate::quick::usage::plan_label(&u.plan)) {
+            Some(plan) => format!("AWS Quick, {plan}"),
+            None => "AWS Quick".to_string(),
+        };
+        // A failed refresh keeps the reading from before, marked as of then.
+        let stale = a.and_then(|a| a.usage_error.as_ref().filter(|_| a.usage.is_some()).map(|e| (format!("as of {}", clock(a.usage_at)), e)));
+        let r = ui.scope(|ui| head_row(ui, t, &head, Some(stale.as_ref().map_or("Quick's agent", |s| s.0.as_str())))).response;
+        if let Some((_, e)) = &stale {
+            r.on_hover_text(format!("Usage refresh failed; retrying shortly.\n{e}"));
+        } else if let Some(end) = usage.and_then(|u| u.trial_ends_at).filter(|&e| e > api::now_ms()) {
+            r.on_hover_text(format!("The free trial ends in {}.", until(end)));
+        }
         let Some(a) = a else {
             caption(ui, "Not signed in", t.ink3);
             return;
@@ -1031,7 +1047,8 @@ pub(crate) fn quick_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::quick::Accou
         } else {
             key_line(ui, &a.email, t.ink3);
         }
-        if crate::quick::login::saved_host().is_empty() {
+        let no_host = crate::quick::login::saved_host().is_empty();
+        if no_host {
             key_line(ui, "Workspace address not reported: set OAK_QUICK_HOST", t.ink3);
         }
         match &a.error {
@@ -1040,11 +1057,62 @@ pub(crate) fn quick_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::quick::Accou
                 if let Some(s) = status {
                     kv(ui, t, "Conversations", s, t.ink);
                 }
-                caption(ui, "Its model works here, with Oak's tools", t.ink3);
+                match (usage, &a.usage_error) {
+                    // The session's row only fits without the lines above.
+                    (Some(u), _) => quick_limits(ui, t, u, status.is_none() && !no_host),
+                    (None, Some(e)) => {
+                        ui.label(RichText::new("Usage unavailable").small().color(t.error)).on_hover_text(e.as_str());
+                    }
+                    (None, None) => loading(ui, t, "loading usage\u{2026}"),
+                }
             }
         }
     })
     .response
+}
+
+/// Quick's month (and, with `room`, its session window while it is in use):
+/// the percent used and when it resets, over a bar that turns red at 90%,
+/// or when Quick says the account can't run.
+fn quick_limits(ui: &mut Ui, t: &Theme, u: &crate::quick::usage::Usage, room: bool) {
+    let w = ui.available_width();
+    let now = api::now_ms();
+    let row = |ui: &mut Ui, label: &str, percent: f32, full: bool, value: String, tip: String| {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            kv(ui, t, label, &value, if full { t.error } else { t.ink });
+            meter(ui, t, w, percent / 100.0, if full { t.error } else { t.accent });
+        })
+        .response
+        .on_hover_text(tip);
+    };
+    let with_reset = |percent: f32, at: Option<i64>| match at {
+        Some(r) => format!("{}%, {}", percent.floor(), until(r)),
+        None => format!("{}%", percent.floor()),
+    };
+    // A month whose reset has passed is unused again, until the next read.
+    let reset = u.month_resets_at.filter(|&r| r > now);
+    let month = if u.month_resets_at.is_some() && reset.is_none() { 0.0 } else { u.month_percent };
+    let mut tip = match (u.units_used(), u.units_total, u.units_left) {
+        (Some(used), Some(total), Some(left)) => format!("{used} of the month's {total} units used ({left} left)"),
+        _ => format!("{}% of the month's units used", month.floor()),
+    };
+    if let Some(r) = reset {
+        tip += &format!("; they reset in {}", until(r));
+    }
+    tip.push('.');
+    if !u.allowed() {
+        tip += &format!("\nQuick says the account can't run now ({}).", u.entitlement.to_lowercase());
+    }
+    row(ui, "Month", month, month >= 90.0 || !u.allowed(), with_reset(month, reset), tip);
+    if room && u.session_percent > 0.0 {
+        let resume = u.session_resumes_at.filter(|&r| r > now);
+        let tip = match resume {
+            Some(r) => format!("Quick's session window is used up; it lets requests in again in {}.", until(r)),
+            None => format!("{}% of Quick's session window used.", u.session_percent.floor()),
+        };
+        row(ui, "Session", u.session_percent, u.session_percent >= 90.0, with_reset(u.session_percent, resume), tip);
+    }
 }
 
 /// A plugin's provider's box: its name, and that its plugin serves it.

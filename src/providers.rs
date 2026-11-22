@@ -46,7 +46,8 @@ pub enum Kind {
 /// What a provider's box measures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Metered {
-    /// 5-hour and weekly limits (a subscription).
+    /// A subscription's limits: Claude's and Codex's 5-hour and weekly
+    /// windows, Quick's month.
     Limits,
     /// Credits bought: what is left and what was spent.
     Credits,
@@ -116,11 +117,10 @@ impl Kind {
 
     pub fn metered(self) -> Metered {
         match self {
-            Kind::Claude | Kind::Codex => Metered::Limits,
+            Kind::Claude | Kind::Codex | Kind::Quick => Metered::Limits,
             Kind::OpenRouter | Kind::Refuseless => Metered::Credits,
             Kind::MuseCode => Metered::Spent,
             Kind::NodeClub | Kind::Freebuff | Kind::Local | Kind::Plugin => Metered::Free,
-            Kind::Quick => Metered::Free,
         }
     }
 

@@ -1300,8 +1300,8 @@ pub fn refresh_account(id: u64) {
 }
 
 /// Fetches the vault's account list (accounts added or removed by another
-/// machine), then every account's profile and usage, and the
-/// OpenRouter credits left.
+/// machine), then every account's profile and usage, the OpenRouter
+/// credits left, and Quick's month.
 pub fn refresh_accounts() {
     if vault_on() {
         let _ = sync_vault();
@@ -1312,6 +1312,7 @@ pub fn refresh_accounts() {
     crate::refuseless::refresh();
     crate::musecode::refresh();
     crate::codex::refresh();
+    crate::quick::usage::refresh();
     let ids: Vec<u64> = ACCOUNTS.lock().unwrap().list.iter().map(|s| s.id).collect();
     for id in ids {
         refresh_account(id);

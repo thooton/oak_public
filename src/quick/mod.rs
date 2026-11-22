@@ -46,6 +46,7 @@ pub mod outpost;
 pub mod dataplane;
 pub mod socket;
 pub mod turn;
+pub mod usage;
 #[cfg(test)]
 mod live_test;
 #[cfg(test)]
@@ -655,6 +656,12 @@ pub struct Account {
     /// The refresh token, shortened.
     pub label: String,
     pub error: Option<String>,
+    /// Its limits as `user-info` last read them (`usage`): the month's
+    /// units and the session window.
+    pub usage: Option<usage::Usage>,
+    /// Why the last read of them failed, and when the reading was taken (ms).
+    pub usage_error: Option<String>,
+    pub usage_at: i64,
 }
 
 pub fn account() -> Option<Account> {
@@ -662,10 +669,14 @@ pub fn account() -> Option<Account> {
     if s.refresh.is_empty() {
         return None;
     }
+    let (usage, usage_error, usage_at) = usage::last();
     Some(Account {
         email: s.email.clone(),
         label: provider::short_key(&s.refresh),
         error: (!s.error.is_empty()).then(|| s.error.clone()),
+        usage,
+        usage_error,
+        usage_at,
     })
 }
 
