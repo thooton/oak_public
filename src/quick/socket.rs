@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) struct Socket {
     tls: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
     closed: Arc<AtomicBool>,
+    /// Messages read from the frame in hand but not yet returned (a frame
+    /// carries several).
+    held: std::collections::VecDeque<Value>,
 }
 
 fn tls_config() -> Arc<rustls::ClientConfig> {
@@ -46,7 +49,7 @@ impl Socket {
         let _ = tcp.set_read_timeout(Some(Duration::from_secs(600)));
         let name = ServerName::try_from(host.to_string()).map_err(|_| format!("Quick's host name is unusual: {host}"))?;
         let conn = rustls::ClientConnection::new(tls_config(), name).map_err(|e| format!("TLS to Quick failed: {e}"))?;
-        let mut s = Socket { tls: rustls::StreamOwned::new(conn, tcp), closed: Arc::new(AtomicBool::new(false)) };
+        let mut s = Socket { tls: rustls::StreamOwned::new(conn, tcp), closed: Arc::new(AtomicBool::new(false)), held: std::collections::VecDeque::new() };
         let key = base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 16]>());
         let hello = format!(
             "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nPragma: no-cache\r\nCache-Control: no-cache\r\n\
@@ -95,13 +98,37 @@ impl Socket {
 
     /// The next frame's JSON (a text frame), or None at the end.
     pub(crate) fn next(&mut self) -> Option<Value> {
+        self.next_of(&|_| true)
+    }
+
+    /// The next frame `keep` accepts. Quick packs several messages into one
+    /// WebSocket frame (a chunk of text deltas, a status, a usage reading
+    /// together), so a frame is read to its end before the next one is asked
+    /// for: taking one message per frame would drop the rest, which is how a
+    /// reply's text arrived in pieces with gaps.
+    pub(crate) fn next_of(&mut self, keep: &dyn Fn(&Value) -> bool) -> Option<Value> {
+        loop {
+            if let Some(v) = self.held.pop_front() {
+                if keep(&v) {
+                    return Some(v);
+                }
+                continue;
+            }
+            if !self.fill() {
+                return None;
+            }
+        }
+    }
+
+    /// Reads one WebSocket frame into `held`. False when the socket ended.
+    fn fill(&mut self) -> bool {
         loop {
             let mut reader = BufReader::new(&mut self.tls);
             let (op, payload) = match crate::cdp::ws_read(&mut reader) {
                 Ok((op, p)) => (op, p),
                 Err(_) => {
                     self.closed.store(true, Ordering::SeqCst);
-                    return None;
+                    return false;
                 }
             };
             match op {
@@ -110,37 +137,37 @@ impl Socket {
                     let why = String::from_utf8_lossy(payload.get(2..).unwrap_or(&[])).to_string();
                     eprintln!("Quick closed the socket: {code} {why}");
                     self.closed.store(true, Ordering::SeqCst);
-                    return None;
+                    return false;
                 }
                 0x9 => {
-                    // Ping: answer it, then carry on.
                     let pong = crate::cdp::frame(0xA, &payload, true);
                     let _ = self.write_all(&pong);
                     let _ = self.flush();
                     continue;
                 }
                 0x1 => {
-                    let v = unwrap_frame(&payload);
-                    if v.is_none() {
-                        eprintln!("Quick sent a frame Oak couldn't read: {}", String::from_utf8_lossy(&payload[..payload.len().min(300)]));
+                    if let Some(v) = unwrap_frame(&payload) {
+                        self.held.push_back(v);
+                        return true;
                     }
-                    return v;
+                    continue;
                 }
                 0x2 => {
                     // Quick answers in AWS event-stream messages, whose body
-                    // is the JSON the app reads.
+                    // is the JSON the app reads; one frame carries several.
+                    let mut any = false;
                     for body in crate::quick::event_bodies(&payload) {
-                        match crate::quick::unwrap_frame(&body) {
-                            Some(v) => return Some(v),
-                            None => eprintln!("Quick sent a message Oak couldn't read: {}", String::from_utf8_lossy(&body[..body.len().min(300)])),
+                        if let Some(v) = unwrap_frame(&body) {
+                            self.held.push_back(v);
+                            any = true;
                         }
+                    }
+                    if any {
+                        return true;
                     }
                     continue;
                 }
-                other => {
-                    eprintln!("Quick frame opcode {other}, {} bytes", payload.len());
-                    continue;
-                }
+                _ => continue,
             }
         }
     }

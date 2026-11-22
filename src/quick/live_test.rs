@@ -78,4 +78,5 @@ fn quick_live_turn() {
     }
     let _ = handle.join();
     println!("\n=== TEXT ===\n{text}");
+    let _ = std::fs::write(std::env::temp_dir().join("oak_quick_text.txt"), &text);
 }
