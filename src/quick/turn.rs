@@ -45,6 +45,10 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
         "external_agent_sign_in": 1,
         "recents_promotion": 1,
     });
+    // This machine registers itself as Quick's outpost, so Quick routes the
+    // tools it asks for here rather than running them in its own sandbox.
+    // (Failure is not fatal: a turn still works, without local files.)
+    let _ = crate::quick::outpost::register();
     let outpost = outpost();
     let mut connect = base.clone();
     connect["actor_id"] = json!("");

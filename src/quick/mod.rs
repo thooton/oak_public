@@ -39,6 +39,7 @@ use std::sync::LazyLock;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+pub mod outpost;
 pub mod socket;
 pub mod turn;
 #[cfg(test)]
@@ -65,6 +66,10 @@ const IDENTITY_STORE: &str = "ssoins-72233782ae72fb91";
 /// report it, and the chat socket's host is per workspace, so this is the
 /// fallback; `OAK_QUICK_HOST` overrides it.
 const DEFAULT_CELL: &str = "qbs-cellff9e0f5c-3614-471c-b8fe-9d3c8f3afff9.dp.appintegrations.us-east-1.prod.plato.ai.aws.dev";
+
+/// Quick's desktop app for this workspace, whose outpost id an older Oak
+/// saved before it registered its own (`outpost::id` replaces it).
+pub const DEFAULT_OUTPOST_ID: &str = "8cd71ba4-b3e6-4dba-869e-5f364e1ccf71";
 
 /// The OIDC endpoints (region-scoped, as the app uses them).
 const OIDC_AUTHORIZE: &str = "https://oidc.us-east-1.amazonaws.com/authorize";
@@ -311,6 +316,14 @@ pub mod login {
     /// The host Oak saved at sign-in, for the UI.
     pub fn saved_host() -> String {
         STORE.lock().unwrap().host.clone()
+    }
+
+    /// Saves this machine's own outpost id (`outpost::id`).
+    pub fn set_outpost(id: &str) {
+        let mut s = STORE.lock().unwrap();
+        s.outpost = id.to_string();
+        drop(s);
+        save();
     }
 
     /// The outpost Quick routes this machine's tools to, saved from the
