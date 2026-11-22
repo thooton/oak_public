@@ -4,7 +4,8 @@ A coding agent for Windows and Linux, written in Rust with [egui](https://github
 Each conversation works in a folder you choose, with a model from one of Oak's providers: Claude
 (a subscription login or an API key), the GPT models a ChatGPT plan includes for Codex,
 OpenRouter, Muse Code (Meta's Muse models through a Meta Model API key, `src/musecode.rs`), NodeClub,
-Freebuff, Refuseless (abliterated GLM 5.3 Flash and DeepSeek V4.1 Flash), a llama.cpp server of
+Freebuff, Refuseless (abliterated GLM 5.3 Flash and DeepSeek V4.1 Flash), AWS Quick (`src/quick.rs`: Amazon
+Quick's own agent, over its OIDC sign-in and chat WebSocket), a llama.cpp server of
 your own, or models a plugin serves (Duck.ai's, through the private duck plugin). Cloud sessions run Claude Code in Anthropic's cloud on your Claude accounts.
 
 Oak is one executable. It loads plugins when it starts: dynamic libraries that add tabs, cloud
@@ -74,7 +75,8 @@ Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`
   `live_agents`, `live_openrouter` (`OAK_DIR` a scratch folder with a copy of openrouter.json;
   `OAK_TEST_MODELS`, `OAK_TEST_RUNS`, `OAK_TEST_DUMP` for the request bodies), `live_freebuff` (`OAK_TEST_PROMPT`, `OAK_TEST_FOLDER`) and `live_cloud_list`
   (read only), `live_rewrite`, `live_search` and `live_images_search` (`OAK_TEST_QUERY`). `live_hidden_desktop` (Windows, after `cargo build`)
-  opens Oak on a hidden desktop. `closes_tk_apps_and_cmd_wrappers` (Windows, after `cargo build`,
+  opens Oak on a hidden desktop. `quick_live_turn` drives one real AWS Quick turn end to end (a signed-in
+  `OAK_DIR` with `quick.json`; `OAK_QUICK_PROMPT` sets the prompt), printing what Quick says. `closes_tk_apps_and_cmd_wrappers` (Windows, after `cargo build`,
   Python with Tk required; `OAK_TEST_PYTHON` overrides its path) checks literal argument passing,
   quoted `cmd.exe /c` assignments, normal close and the five-second forced-close fallback; set
   `OAK_WINDOW_TEST_DIR` for its fixtures and logs.
@@ -155,7 +157,8 @@ when nothing needs them (`agent::forget_messages`: all of a conversation not sho
 minutes, else those well above its view; never while it works). A save writes only the
 messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `code-mode/` (each Code Mode conversation's saved REPL context), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
 login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
-`refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`;
+`refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`,
+`quick.json`;
 owner-only on Linux), `window.json` (the window's
 size, place and maximized state), `seats.json` (which account each
 conversation is on), `tasks/` and `task-output/` (background tasks; `tasks/tray.json` is what
@@ -797,6 +800,48 @@ egui's `PointerGone` (`raw_input_hook` in `src/lib.rs`) so hover and drags work;
 release and wheel message follows a fresh move (`point_at`), as winit forgets the position at
 each leave and would drop them. On Linux the
 prompt points the agent at Xvfb, xdotool and ImageMagick instead.
+
+## AWS Quick
+
+The AWS Quick provider (`src/quick/`) is a provider of the Freebuff kind: a separate agent Oak
+talks to as a pipe. Quick runs its own system prompt, agent loop and model (Claude Opus through
+Bedrock; `turn_usage.resolved_model_id` says which), so Oak sends neither its prompt nor its
+tools, and the picker's models are Quick's three modes (`smart`, `fast`, `balanced`, sent as
+`agent_mode`), not model ids.
+
+**Signing in** is Quick's own OIDC flow against AWS IAM Identity Center: Oak registers a public
+client for itself (`/client/register`), opens the browser at the authorization endpoint with PKCE
+and `prompt=login`, takes the code on a loopback port, and exchanges it for an access token
+(`aoa…`, an hour) and a refresh token (`aor…`). The refresh token is what Oak keeps in
+`quick.json` (beside the client registration and the workspace's host); every request buys a
+fresh access token with it. There is no vault entry: the client is Oak's own registration, not a
+key a vault could share. `OAK_QUICK_HOST` names the socket's host instead of the one the
+sign-in's callback reports (a proxy or a stand-in, as `OAK_API_BASE` does for Claude).
+
+**Tools are Oak's** — this is the part that differs from every other provider. Quick's agent asks
+for a tool by name and waits on the socket for its result; Quick's own sandbox would run it
+against copies under `/outposts/<device>/…`, not the user's folder, so Oak answers every call
+itself, in the conversation's working folder, with the same tools it runs for other models
+(`quick::turn`, `run_tool`). Quick's agent reaches for `run_python` (and its `file_*`, `fdfind`,
+`ripgrep`), so those are mapped too: `run_python` runs the snippet with Python in the folder.
+That is why a Quick conversation works on the real project rather than on a copy of it.
+
+**A conversation is a Quick thread**: its conversation's id is the thread's, which is how Quick
+keeps the history, so a request sends only its newest user turn (`user_message`) and Quick
+replays the rest. A turn ends the way Quick's does: `stop::COMPLETE` says the reply's tool calls
+are the record of work already done and answered, not work for Oak's loop to run again (the
+loop's `batch.finish` would otherwise repeat every call Oak already answered).
+
+**The wire is Quick's**: client frames are binary WebSocket frames carrying
+`{"eventType":"rawInputEvent","payload":{"payload":"<base64 JSON>"}}`, and answers are AWS
+event-stream records whose body is the JSON the app reads (base64 again inside its `payload`).
+The socket is Oak's own (`quick/socket.rs`, rustls, the frame code in `cdp.rs`); it sends no
+permessage-deflate, and installs rustls' ring provider itself because reqwest's TLS brings a
+second one.
+
+`quick_live_turn` (ignored; needs `OAK_DIR` with `quick.json`, and a prompt with
+`OAK_QUICK_PROMPT`) drives one real turn end to end, printing what Quick says.
+
 
 ## Cloud sessions
 

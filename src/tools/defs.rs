@@ -563,6 +563,7 @@ fn model_list(models: &[crate::api::Model]) -> String {
                 Provider::NodeClub => "NodeClub, an OpenAI-compatible API",
                 Provider::Refuseless => "Refuseless, abliterated (refusal-removed) open models, paid per token",
                 Provider::MuseCode => "Meta's Muse models (Muse Code's), paid per token",
+                Provider::Quick => "AWS Quick, which runs its own agent, with Oak's tools in the conversation's folder",
                 Provider::Plugin => "A plugin's",
                 Provider::Claude => "Claude",
             };

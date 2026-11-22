@@ -262,6 +262,12 @@ fn note_sign_in() {
     FREED.fetch_add(1, Ordering::SeqCst);
 }
 
+/// A provider signed in (a sign-in, not a token renewal): sessions waiting
+/// out a reset try again.
+pub fn note_signed_in() {
+    note_sign_in();
+}
+
 /// An account came free early (its usage reading shows room): sessions
 /// waiting for a reset try again.
 fn note_freed() {
@@ -297,6 +303,8 @@ pub fn load_auth() -> bool {
     let nodeclub = crate::nodeclub::KEYS.load();
     let refuseless = crate::refuseless::KEYS.load();
     let musecode = crate::musecode::KEYS.load();
+    // Quick's login (quick.json): its refresh token is what lasts.
+    crate::quick::login::load();
     let codex = crate::codex::load();
     // Freebuff's token, and its balances in the background: it is a separate
     // service, so it does not count as being signed in to Oak.
@@ -889,6 +897,10 @@ pub fn preamble(model: &str, system: &str, tools: &Value) -> Preamble {
             plain(system, tools)
         }
         Provider::NodeClub | Provider::Refuseless => plain(system.into(), crate::nodeclub::chat_tools(&oak_tools())),
+        // Quick runs its own agent and system prompt: Oak's aren't sent, and
+        // Quick asks for tools by its own names, which Oak runs itself
+        // (`crate::quick::turn`).
+        Provider::Quick => plain(String::new(), vec![]),
         // Claude: the billing header and identity go before the prompt.
         Provider::Claude => Preamble { identity: Some(system_preamble()), system: system.into(), tools: oak_tools() },
     }
@@ -1514,6 +1526,7 @@ fn stream(mut req: crate::oak::Request, cont: Option<(String, usize)>, thread: b
         Provider::NodeClub => return crate::nodeclub::stream(req, tx),
         Provider::Refuseless => return crate::refuseless::stream(req, tx),
         Provider::MuseCode => return crate::musecode::stream(req, tx),
+        Provider::Quick => return crate::quick::turn::stream(req, tx),
         Provider::Local => return crate::local::stream(req, tx),
         Provider::Plugin => return crate::provided::stream(req, tx),
         Provider::Claude => {}

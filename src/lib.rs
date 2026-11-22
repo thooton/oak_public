@@ -48,6 +48,7 @@ mod provider;
 mod providers;
 mod providers_view;
 mod refuseless;
+mod quick;
 mod musecode;
 mod rolling;
 mod rotation;

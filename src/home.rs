@@ -480,6 +480,30 @@ impl App {
             Add::NodeClub => self.adding_nodeclub.open = true,
             Add::Refuseless => self.adding_refuseless.open = true,
             Add::MuseCode => self.adding_musecode.open = true,
+            Add::Quick => match crate::quick::login::start() {
+                Ok(url) => {
+                    let _ = open::that(&url);
+                    // Keep polling until the browser approves it.
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        for _ in 0..300 {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            match crate::quick::login::state() {
+                                Some(crate::quick::login::State::Done) => {
+                                    ctx.request_repaint();
+                                    return;
+                                }
+                                Some(crate::quick::login::State::Failed(_)) | None => {
+                                    ctx.request_repaint();
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                }
+                Err(e) => self.account_note = Some(e),
+            },
             Add::Local => self.adding_local = true,
             Add::Freebuff => match freebuff::login_start() {
                 Ok(url) => {
@@ -513,6 +537,7 @@ enum Add {
     Freebuff,
     Refuseless,
     MuseCode,
+    Quick,
     Local,
 }
 
@@ -536,6 +561,7 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
         (Provider::NodeClub, "NodeClub API key", "NodeClub, OpenAI-compatible API (Qwen).", Add::NodeClub),
         (Provider::Freebuff, "Freebuff account", "Freebuff, sign in in the browser; its models run a separate system.", Add::Freebuff),
         (Provider::Refuseless, "Refuseless API key", "Refuseless, abliterated models, pay per token.", Add::Refuseless),
+        (Provider::Quick, "AWS Quick account", "Amazon Quick, sign in in the browser. Its models run Quick's own agent, with the tools Oak runs in your folder.", Add::Quick),
     ] {
         if item(ui, provider, label).on_hover_text(format!("{tip}{remote}")).clicked() {
             pick = Some(add);
@@ -681,6 +707,10 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
         AccountAct::Remove(Provider::NodeClub, id) => crate::nodeclub::KEYS.remove(&id),
         AccountAct::Remove(Provider::Refuseless, id) => crate::refuseless::KEYS.remove(&id),
         AccountAct::Remove(Provider::MuseCode, id) => crate::musecode::KEYS.remove(&id),
+        AccountAct::Remove(Provider::Quick, _) => {
+            crate::quick::login::sign_out();
+            Ok(())
+        }
         AccountAct::Remove(Provider::Freebuff, id) => freebuff::sign_out(&id),
         AccountAct::Remove(Provider::Local, _) => {
             local::remove();
@@ -695,7 +725,9 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
             Provider::Refuseless => crate::refuseless::KEYS.move_to_vault(id),
             Provider::MuseCode => crate::musecode::KEYS.move_to_vault(id),
             Provider::Freebuff => freebuff::move_to_vault(id),
-            Provider::Local | Provider::Plugin => Ok(()),
+            // Quick's client is Oak's own registration, not a key a vault
+            // could keep for every machine.
+            Provider::Quick | Provider::Local | Provider::Plugin => Ok(()),
         }),
     }
 }
@@ -859,6 +891,24 @@ fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &
         }
         Provider::Local => {
             account_card(ui, t, w, (p, "local"), false, "Remove server", busy, act, crate::composer::local_panel);
+        }
+        Provider::Quick => {
+            if let Some(a) = crate::quick::account() {
+                let status = on("quick");
+                account_card(ui, t, w, (p, "quick"), false, "Sign out of Quick", busy, act, |ui, t, w| {
+                    crate::composer::quick_panel(ui, t, Some(&a), status.as_deref(), w)
+                });
+            } else if let Some(crate::quick::login::State::Waiting { .. }) = crate::quick::login::state() {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    caption(ui, "Waiting for the browser to approve Oak…", t.ink3);
+                });
+            } else if let Some(crate::quick::login::State::Failed(e)) = crate::quick::login::state() {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    caption(ui, &format!("Quick sign-in failed: {e}"), t.error);
+                });
+            }
         }
         // (No accounts to list: `account_count` is 0.)
         Provider::Plugin => {}

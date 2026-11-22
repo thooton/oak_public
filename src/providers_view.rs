@@ -20,6 +20,7 @@ pub(crate) fn logo(ctx: &egui::Context, p: Kind) -> egui::TextureHandle {
         Kind::Freebuff => include_bytes!("../assets/logo-freebuff.png"),
         Kind::Refuseless => include_bytes!("../assets/logo-refuseless.png"),
         Kind::MuseCode => include_bytes!("../assets/logo-musecode.png"),
+        Kind::Quick => include_bytes!("../assets/logo-quick.png"),
         Kind::Local => include_bytes!("../assets/logo-local.png"),
         Kind::Plugin => &[],
     };
@@ -271,6 +272,7 @@ pub(crate) fn account_count(p: Kind) -> usize {
         Kind::Freebuff => crate::freebuff::accounts().len(),
         Kind::Refuseless => crate::refuseless::accounts().len(),
         Kind::MuseCode => crate::musecode::accounts().len(),
+        Kind::Quick => crate::quick::account().map(|_| 1).unwrap_or(0),
         Kind::Local => local::on() as usize,
         // (No accounts: its plugin has a page of its own.)
         Kind::Plugin => 0,

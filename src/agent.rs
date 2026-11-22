@@ -1882,7 +1882,12 @@ impl Worker {
             }
             refusals = 0;
             let calls = self.keep_reply(blocks);
-            if calls.is_empty() {
+            // A turn whose provider already did its work (Quick runs its own
+            // agent loop and Oak ran its tools as they were asked for): the
+            // calls are in the transcript as what happened, and nothing is
+            // left for Oak's loop to run.
+            let done = stop == oak::stop::COMPLETE;
+            if !done && calls.is_empty() {
                 // A goal that isn't finished keeps the model going.
                 if self.goal_step() {
                     continue;
@@ -1894,17 +1899,20 @@ impl Worker {
                 };
                 return self.set(|l| l.error = Some(error.into()));
             }
-            let stopped = batch.finish(&calls, &stop);
+            if !done {
+                let stopped = batch.finish(&calls, &stop);
+                // Stopped by an ultrapause, the turn holds (paused) and carries
+                // on from the killed calls' results once resumed.
+                if stopped && !self.paused.load(Ordering::SeqCst) && !self.absorb_queued() {
+                    return;
+                }
+                continue;
+            }
             // Files OAK's own commands changed aren't news to the model.
             if calls.iter().any(|b| matches!(b["name"].as_str(), Some("EXECUTE" | "TASK_NEW")) || (b["name"] == "TASK" && b["input"]["action"] == "new")) {
                 let t = Instant::now();
                 self.files.lock().unwrap().refresh();
                 self.bench("files_refresh", json!({"ms": ms_since(t)}));
-            }
-            // Stopped by an ultrapause, the turn holds (paused) and carries
-            // on from the killed calls' results once resumed.
-            if stopped && !self.paused.load(Ordering::SeqCst) && !self.absorb_queued() {
-                return;
             }
         }
     }

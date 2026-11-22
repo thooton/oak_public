@@ -755,6 +755,9 @@ fn account_box(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &Set
         // Muse Code: its key, and what this session spent.
         api::Provider::MuseCode => musecode_panel(ui, t, crate::musecode::account_of_conv(&conv_id).as_ref(), ("This session", spent), None, w)
             .on_hover_text("Meta's Muse models through the Meta Model API, paid per token"),
+        // Quick: the account it runs on, and that Quick runs its own agent.
+        api::Provider::Quick => quick_panel(ui, t, crate::quick::account().as_ref(), None, w)
+            .on_hover_text("AWS Quick, runs its own agent and model; Oak runs the tools it asks for"),
         api::Provider::Claude => {
             let accounts = api::accounts();
             let account = seat(api::Provider::Claude).and_then(|id| accounts.iter().find(|a| a.id.to_string() == id)).or_else(|| accounts.iter().find(|a| a.current));
@@ -1010,6 +1013,33 @@ pub(crate) fn local_panel(ui: &mut Ui, t: &Theme, w: f32) -> egui::Response {
             crate::local::tokens_text(s.output),
             s.requests
         ));
+    })
+    .response
+}
+
+/// Quick's box: who signed in, and that Quick runs its own agent (Oak runs
+/// the tools it asks for, in the conversation's folder).
+pub(crate) fn quick_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::quick::Account>, status: Option<&str>, w: f32) -> egui::Response {
+    side_box(ui, t, w, |ui| {
+        head_row(ui, t, "AWS Quick", Some("Quick's agent"));
+        let Some(a) = a else {
+            caption(ui, "Not signed in", t.ink3);
+            return;
+        };
+        if a.email.is_empty() {
+            key_line(ui, &a.label, t.ink3);
+        } else {
+            key_line(ui, &a.email, t.ink3);
+        }
+        match &a.error {
+            Some(e) => key_line(ui, e, t.error),
+            None => {
+                if let Some(s) = status {
+                    kv(ui, t, "Conversations", s, t.ink);
+                }
+                caption(ui, "Its model works here, with Oak's tools", t.ink3);
+            }
+        }
     })
     .response
 }

@@ -241,6 +241,11 @@ pub mod stop {
     /// The model ran out of context while writing.
     pub const CONTEXT: &str = "context";
     pub const PAUSE: &str = "pause";
+    /// The turn is over and its work already done: its tool calls are in the
+    /// transcript as what happened, not as work still to do. (Quick runs its
+    /// own loop, and Oak runs the tools as they are asked for, so nothing is
+    /// left for Oak's loop to run.)
+    pub const COMPLETE: &str = "complete";
 }
 
 /// What a provider's stream says, in Oak's terms.

@@ -33,6 +33,10 @@ pub enum Kind {
     /// paid per token.
     #[serde(alias = "MuseCode")]
     MuseCode,
+    /// Amazon Quick's own agent (`crate::quick`): it runs its own system
+    /// prompt, agent loop and model, and Oak runs the tools it asks for.
+    #[serde(alias = "Quick")]
+    Quick,
     /// Models a plugin serves (`crate::provided`): named for the plugin's
     /// provider ("Duck.ai") wherever providers are shown.
     #[serde(alias = "Plugin")]
@@ -54,7 +58,7 @@ pub enum Metered {
 
 impl Kind {
     /// Every provider, in the order pickers and Home list them.
-    pub const ALL: [Kind; 9] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::MuseCode, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Local, Kind::Plugin];
+    pub const ALL: [Kind; 10] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::MuseCode, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Quick, Kind::Local, Kind::Plugin];
 
     /// Signed in to it: a login or key (for Claude, an account here or a
     /// vault, which has them).
@@ -68,6 +72,7 @@ impl Kind {
             Kind::NodeClub => crate::nodeclub::on(),
             Kind::Refuseless => crate::refuseless::on(),
             Kind::MuseCode => crate::musecode::on(),
+            Kind::Quick => crate::quick::on(),
             Kind::Plugin => crate::provided::on(),
         }
     }
@@ -83,6 +88,7 @@ impl Kind {
             Kind::NodeClub => "nodeclub",
             Kind::Refuseless => "refuseless",
             Kind::MuseCode => "musecode",
+            Kind::Quick => "quick",
             Kind::Plugin => "plugin",
         }
     }
@@ -103,6 +109,7 @@ impl Kind {
             Kind::NodeClub => "NodeClub",
             Kind::Refuseless => "Refuseless",
             Kind::MuseCode => "Muse Code",
+            Kind::Quick => "AWS Quick",
             Kind::Plugin => crate::provided::name(),
         }
     }
@@ -113,6 +120,7 @@ impl Kind {
             Kind::OpenRouter | Kind::Refuseless => Metered::Credits,
             Kind::MuseCode => Metered::Spent,
             Kind::NodeClub | Kind::Freebuff | Kind::Local | Kind::Plugin => Metered::Free,
+            Kind::Quick => Metered::Free,
         }
     }
 
@@ -137,6 +145,8 @@ impl Kind {
             Kind::Refuseless
         } else if crate::musecode::serves(model) {
             Kind::MuseCode
+        } else if crate::quick::serves(model) {
+            Kind::Quick
         } else {
             Kind::Claude
         }

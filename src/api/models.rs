@@ -72,6 +72,7 @@ fn sale(model: &str) -> Option<Sale> {
         Provider::NodeClub => crate::nodeclub::model(model).map(|m| listed(m.id, m.name, m.context, m.max_output)),
         Provider::Refuseless => crate::refuseless::model(model).map(|m| listed(m.id, m.name, m.context, m.max_output)),
         Provider::MuseCode => crate::musecode::model(model).map(|m| listed(m.id, m.name, m.context, m.max_output)),
+        Provider::Quick => crate::quick::model(model).map(|m| listed(m.id, m.name, m.context, m.max_output)),
         Provider::Freebuff => crate::freebuff::model(model).map(|m| Sale { name: m.name, context: m.context, max_output: None }),
         _ => None,
     }
@@ -103,6 +104,7 @@ fn provider_models(provider: Provider) -> Vec<Model> {
         Provider::Plugin => crate::provided::models().into_iter().map(|m| Model { name: m.name, id: m.id, provider }).collect(),
         Provider::Refuseless => crate::refuseless::MODELS.iter().map(|m| listed(m.id, m.name)).collect(),
         Provider::MuseCode => crate::musecode::MODELS.iter().map(|m| listed(m.id, m.name)).collect(),
+        Provider::Quick => crate::quick::MODELS.iter().map(|m| listed(m.id, m.name)).collect(),
         _ => crate::nodeclub::MODELS.iter().map(|m| listed(m.id, m.name)).collect(),
     }
 }
