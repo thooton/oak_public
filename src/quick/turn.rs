@@ -36,7 +36,7 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
         Ok(s) => s,
         Err(e) => return drop(tx.send(Sse::Err(e))),
     };
-    let base = json!({
+    let mut base = json!({
         "surfaceType": SURFACE,
         "appVersion": APP_VERSION,
         "acp_first_text": 1,
@@ -45,18 +45,29 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
         "external_agent_sign_in": 1,
         "recents_promotion": 1,
     });
+    let outpost = outpost();
     let mut connect = base.clone();
     connect["actor_id"] = json!("");
+    if let Some(o) = outpost.as_deref() {
+        connect["outpostId"] = json!(o);
+    }
     if sock.send(&json!({"type": "session_connect", "payload": connect})).is_err() {
         return drop(tx.send(Sse::Err("Quick closed the socket while connecting.".into())));
     }
     let mut focus = base.clone();
     focus["session_id"] = json!(thread);
     focus["focus_only"] = json!(true);
+    // Quick routes a tool call to the machine that owns an outpost; without
+    // one it runs the tool in its own sandbox, which has none of the user's
+    // files. The outpost is the one this machine registered (quick.json's
+    // `outpost`, or OAK_QUICK_OUTPOST for a stand-in).
+    if let Some(o) = outpost.as_deref() {
+        focus["outpostId"] = json!(o);
+    }
     if sock.send(&json!({"type": "session_connect", "payload": focus})).is_err() {
         return drop(tx.send(Sse::Err("Quick closed the socket while joining the thread.".into())));
     }
-    let user = user_message(&body, &thread, m);
+    let user = user_message(&body, &thread, m, outpost.as_deref());
     if let Err(e) = sock.send(&user) {
         return drop(tx.send(Sse::Err(e)));
     }
@@ -136,6 +147,9 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, thread: &str, tx: &Sender<S
                 if let Err(e) = sock.send(&reply) {
                     return Err(e);
                 }
+                // Quick carries the turn on in a new message once it has the
+                // result; that message is this turn's too.
+                turn.awaiting_continuation = true;
                 if tx.send(Sse::Event(Event::BlockEnd { index: turn.blocks().len().saturating_sub(1) })).is_err() {
                     return Ok(());
                 }
@@ -183,17 +197,46 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
             crate::tools::edit(folder, &input)
         }
         "folder_list" | "list_dir" | "list_directory" => {
-            let input = json!({"command": format!("ls -la {}", args["path"].as_str().unwrap_or("."))});
-            execute(&input, folder)
+            let path = resolve(folder, args["path"].as_str().unwrap_or(""));
+            // Asking with no path is how Quick learns which folders it may
+            // work in (`allowed_folders`); it names them this way, in its own
+            // sandbox's vocabulary, and every later path comes back in it.
+            if args["path"].as_str().unwrap_or("").trim().is_empty() {
+                return Ok(json!({
+                    "allowed_folders": [format!("/outposts/DESKTOP/{}", native(folder))],
+                })
+                .to_string());
+            }
+            let mut entries = vec![];
+            if let Ok(read) = std::fs::read_dir(&path) {
+                for e in read.flatten().take(500) {
+                    let p = e.path();
+                    let kind = if p.is_dir() { "directory" } else { "file" };
+                    entries.push(json!({
+                        "name": e.file_name().to_string_lossy(),
+                        "type": kind,
+                        "path": format!("/outposts/DESKTOP/{}", native(&p)),
+                    }));
+                }
+            }
+            entries.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+            Ok(json!({
+                "success": true,
+                "path": format!("/outposts/DESKTOP/{}", native(&path)),
+                "entries": entries,
+                "count": entries.len(),
+            })
+            .to_string())
         }
         "fdfind" | "fd" => {
-            let input = json!({"command": format!("find . -iname '*{}*' -not -path '*/node_modules/*' | head -200", args["args"].as_str().unwrap_or("").replace(['*', '\'', '"'], ""))});
-            execute(&input, folder)
+            let pattern = args["args"].as_str().unwrap_or("").to_string();
+            let found = find(folder, &pattern);
+            Ok(json!({"success": true, "output": found}).to_string())
         }
         "ripgrep" | "rg" | "grep" => {
-            let pat = args["patterns"].as_array().and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("");
-            let input = json!({"command": format!("grep -rIn --max-count=50 -- {pat:?} . 2>/dev/null | head -200")});
-            execute(&input, folder)
+            let pat = args["patterns"].as_array().and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("").to_string();
+            let found = grep(folder, &pat, args["options"].as_str().unwrap_or(""));
+            Ok(json!({"success": true, "output": found}).to_string())
         }
         "bash" | "shell" | "run_command" | "execute_command" => {
             let cmd = args["command"].as_str().or(args["cmd"].as_str()).unwrap_or("").to_string();
@@ -202,14 +245,147 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
         // Quick's own coding tool: Python in the conversation's folder, which
         // is how its agent runs shell commands (`subprocess`) too.
         "run_python" | "python" => run_python(args, folder),
-        other => Err(format!("Quick asked for {other}, which Oak doesn't run. Oak's tools: READ, WRITE, EDIT, EXECUTE, SEARCH, FETCH.")),
+        // Quick's sandbox's other tools (its shell, its browser). Its agent
+        // reaches for these when it works locally, so they run here too.
+        "run_shell" | "shell" => {
+            let cmd = args["command"].as_str().or(args["cmd"].as_str()).unwrap_or("").to_string();
+            execute(&json!({ "command": cmd }), folder)
+        }
+        other => Err(format!(
+            "Quick asked for {other}, which Oak doesn't run (Oak has no such tool). Oak's own tools are READ, WRITE, EDIT, EXECUTE, SEARCH and FETCH; run              shell commands with EXECUTE or run_python."
+        )),
     }
+}
+
+/// The folder a path Quick sent names. Quick works in its outpost's
+/// vocabulary (`/outposts/<device>/C:/Users/…`, and `artifacts/`,
+/// `agent_files/` beside it), which doesn't exist on this machine: a path
+/// under an outpost is the real one, and the workspace's own roots are the
+/// conversation's folder. Anything else is resolved against it.
+fn resolve(folder: &std::path::Path, path: &str) -> std::path::PathBuf {
+    let p = path.trim();
+    if p.is_empty() {
+        return folder.to_path_buf();
+    }
+    // `/outposts/<device>/C:/Users/sussy/Documents/oak_public` → `C:/Users/…`.
+    let after = p.strip_prefix("/outposts/");
+    let real = match after {
+        Some(rest) => {
+            let without_device = rest.split_once('/').map(|(_, tail)| tail).unwrap_or(rest);
+            // The drive comes back with a leading slash (`/C:/…`).
+            without_device.trim_start_matches('/').to_string()
+        }
+        None => p.to_string(),
+    };
+    // Quick's own workspace roots are the conversation's folder.
+    let bare = real.trim_start_matches("workspace/").trim_end_matches('/');
+    let roots = ["artifacts", "agent_files", "attached_files"];
+    if bare.is_empty() || roots.contains(&bare) || roots.iter().any(|r| bare.starts_with(&format!("{r}/"))) {
+        let tail = bare.split_once('/').map(|(_, t)| t).unwrap_or("");
+        return if tail.is_empty() { folder.to_path_buf() } else { folder.join(tail) };
+    }
+    let path = std::path::PathBuf::from(&real);
+    // An absolute path as sent (C:/… or /C:/…) is used as it is; a relative
+    // one is the conversation's folder's.
+    if path.is_absolute() || real.chars().nth(1) == Some(':') {
+        if !path.exists() {
+            // A drive path sent with a leading slash.
+            let fixed = std::path::PathBuf::from(real.trim_start_matches('/'));
+            if fixed.exists() {
+                return fixed;
+            }
+        }
+        path
+    } else {
+        folder.join(path)
+    }
+}
+
+/// A path as Quick's outpost names it (`C:/Users/…`), for the paths it is
+/// sent back.
+fn native(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+/// Files whose name matches `pattern` (fdfind's `args`, e.g. `-i -H pong`),
+/// from the conversation's folder down.
+fn find(folder: &std::path::Path, pattern: &str) -> String {
+    let needle = pattern.split_whitespace().filter(|w| !w.starts_with('-')).collect::<Vec<_>>().join(" ").to_lowercase();
+    let mut out = vec![];
+    let mut stack = vec![folder.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        for e in read.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if matches!(name.as_str(), ".git" | "node_modules" | "target" | ".oak") {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p.clone());
+            }
+            if needle.is_empty() || name.contains(&needle) {
+                out.push(native(&p));
+                if out.len() >= 200 {
+                    out.sort();
+                    return out.join("\n");
+                }
+            }
+        }
+    }
+    out.sort();
+    out.join("\n")
+}
+
+/// Lines matching the first of ripgrep's `patterns`, from the conversation's
+/// folder down (`options` may say `-i` for case-insensitive).
+fn grep(folder: &std::path::Path, pattern: &str, options: &str) -> String {
+    if pattern.is_empty() {
+        return String::new();
+    }
+    let insensitive = options.split_whitespace().any(|o| o.starts_with('-') && !o.starts_with("--") && o[1..].contains('i'));
+    let needle = if insensitive { pattern.to_lowercase() } else { pattern.to_string() };
+    let mut out = vec![];
+    let mut stack = vec![folder.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        for e in read.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if matches!(name.as_str(), ".git" | "node_modules" | "target" | ".oak") {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            // A few megabytes at most: a search of the project, not of data.
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.len() > 2_000_000 {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&p) else { continue };
+            if bytes.contains(&0) {
+                continue; // binary
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            for (n, line) in text.lines().enumerate() {
+                let hit = if insensitive { line.to_lowercase().contains(&needle) } else { line.contains(&needle) };
+                if hit {
+                    out.push(format!("{}:{}: {}", native(&p), n + 1, line.trim_end()));
+                    if out.len() >= 200 {
+                        return out.join("\n");
+                    }
+                }
+            }
+        }
+    }
+    out.join("\n")
 }
 
 /// Runs a shell command in `folder`, with the output clipped for a tool
 /// result.
-fn execute(input: &Value, folder: &std::path::Path) -> Result<String, String> {
-    let command = input["command"].as_str().unwrap_or("").trim();
+fn execute(input: &Value, folder: &std::path::Path) -> Result<String, String> {    let command = input["command"].as_str().unwrap_or("").trim();
     if command.is_empty() {
         return Err("EXECUTE needs a `command`.".into());
     }
@@ -327,6 +503,20 @@ fn python_command() -> std::process::Command {
         }
     }
     std::process::Command::new(candidates[0])
+}
+
+/// The outpost Quick routes this machine's tool calls to: the one saved at
+/// sign-in, or `OAK_QUICK_OUTPOST` (the desktop app registers one per
+/// machine; Quick's sandbox is used when there is none).
+fn outpost() -> Option<String> {
+    if let Ok(o) = std::env::var("OAK_QUICK_OUTPOST") {
+        let o = o.trim().to_string();
+        if !o.is_empty() {
+            return Some(o);
+        }
+    }
+    let saved = crate::quick::login::saved_outpost();
+    (!saved.is_empty()).then_some(saved)
 }
 
 fn urlencode(s: &str) -> String {

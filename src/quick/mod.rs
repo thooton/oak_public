@@ -163,6 +163,10 @@ pub mod login {
         /// The socket's host (`<cell>.dp.appintegrations.<region>.prod.plato.ai.aws.dev`).
         #[serde(default)]
         pub host: String,
+        /// This machine's Quick outpost: tools Quick asks for are routed to
+        /// the machine that owns it, and Oak runs them.
+        #[serde(default)]
+        pub outpost: String,
         /// The last sign-in or request error.
         #[serde(default)]
         pub error: String,
@@ -309,6 +313,12 @@ pub mod login {
         STORE.lock().unwrap().host.clone()
     }
 
+    /// The outpost Quick routes this machine's tools to, saved from the
+    /// sign-in's callback (`outpostId`) or `OAK_QUICK_OUTPOST`.
+    pub fn saved_outpost() -> String {
+        std::env::var("OAK_QUICK_OUTPOST").ok().map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).unwrap_or_else(|| STORE.lock().unwrap().outpost.clone())
+    }
+
     /// The cell Oak's Quick login runs on. Quick's sign-in reports it
     /// (`tenantUrl`); when the callback doesn't, this is the cell Quick's
     /// desktop app signs in to for this identity store, and `OAK_QUICK_HOST`
@@ -368,11 +378,14 @@ pub mod login {
             .spawn(move || {
                 let out = wait_for_code(listener, &state2);
                 match out {
-                    Ok((code, host)) => match exchange(&client2, &code, &redirect, &verifier2) {
+                    Ok((code, host, outpost)) => match exchange(&client2, &code, &redirect, &verifier2) {
                         Ok(()) => {
                             let mut s = STORE.lock().unwrap();
                             if !host.is_empty() {
                                 s.host = host;
+                            }
+                            if !outpost.is_empty() {
+                                s.outpost = outpost;
                             }
                             s.client_id = client2.0.clone();
                             s.client_secret = client2.1.clone();
@@ -470,7 +483,7 @@ pub mod login {
 
     /// Waits for the browser's redirect with the code (and the workspace's
     /// host), answering the page.
-    fn wait_for_code((listener, _port): (std::net::TcpListener, u16), expect: &str) -> Result<(String, String), String> {
+    fn wait_for_code((listener, _port): (std::net::TcpListener, u16), expect: &str) -> Result<(String, String, String), String> {
         use std::io::{BufRead, BufReader, Write};
         listener.set_nonblocking(false).ok();
         let deadline = std::time::Instant::now() + Duration::from_secs(600);
@@ -506,9 +519,10 @@ pub mod login {
             }
             let Some(code) = q.get("code").cloned() else { continue };
             let host = q.get("tenantUrl").map(|u| u.trim_start_matches("https://").trim_end_matches('/').to_string()).unwrap_or_default();
+            let outpost = q.get("outpostId").cloned().unwrap_or_default();
             let page = "<!doctype html><meta charset=utf-8><title>Oak</title><body style=\"font:16px system-ui;padding:40px\">Signed in to AWS Quick. You can close this tab.</body>";
             let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
-            return Ok((code, host));
+            return Ok((code, host, outpost));
         }
         Err("The sign-in listener closed before the browser came back.".into())
     }
@@ -689,15 +703,13 @@ pub fn unwrap_frame(payload: &[u8]) -> Option<Value> {
 
 /// The `user_message` frame for Oak request `r` on thread `thread`: the
 /// newest user turn, since Quick keeps the thread's history.
-fn user_message(r: &Request, thread: &str, m: &Model) -> Value {
+fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> Value {
     let text = newest_user_text(r);
     let trace = hex_uuid();
-    json!({
-        "type": "user_message",
-        "payload": {
-            "traceId": trace,
-            "text": text,
-            "send_origin": "composer",
+    let mut payload = json!({
+        "traceId": trace,
+        "text": text,
+        "send_origin": "composer",
             "had_physical_input": true,
             "surfaceType": SURFACE,
             "appVersion": APP_VERSION,
@@ -716,8 +728,14 @@ fn user_message(r: &Request, thread: &str, m: &Model) -> Value {
             "web_search_enabled": false,
             "direct_chat": false,
             "voice_mode": false,
-        }
-    })
+    });
+    // The outpost names this machine: with it Quick routes the tools it
+    // needs to run here, and Oak runs them; without it Quick answers from
+    // its own empty sandbox.
+    if let Some(outpost) = outpost {
+        payload["outpostId"] = json!(outpost);
+    }
+    json!({"type": "user_message", "payload": payload})
 }
 
 /// The conversation's newest user text: what the user typed, past Oak's own
@@ -772,6 +790,9 @@ pub(crate) struct Turn {
     /// The text block was announced to Oak (`Event::Block`), so its deltas
     /// have a block to land in.
     text_open: bool,
+    /// Oak has been given tool results and is waiting for Quick to carry the
+    /// turn on: the next `message_start` of this thread is still this turn.
+    awaiting_continuation: bool,
     /// The thread (`thread_id`) and assistant message (`message_id`) this
     /// turn is reading. Quick's socket carries other threads' frames too, and
     /// a thread keeps several messages, so frames of another thread (or of an
@@ -813,7 +834,22 @@ impl Turn {
                 }
                 opens
             }
-            mine => message == mine,
+            mine if message == mine => true,
+            // After its tool results Quick carries the turn on in a fresh
+            // assistant message: that is this turn's too, and its text is its
+            // own block.
+            _ => {
+                let k = v["type"].as_str().unwrap_or("");
+                if k == "message_start" && self.awaiting_continuation {
+                    self.message = message;
+                    self.awaiting_continuation = false;
+                    self.text_at = None;
+                    self.text_open = false;
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -1068,6 +1104,40 @@ mod tests {
         }).unwrap();
         assert_eq!(opened[0], text_at, "the text lands in the block that was opened");
         assert_eq!(t.text_at, Some(text_at));
+    }
+
+    /// After a tool result Quick carries the turn on in a fresh assistant
+    /// message; its text is the reply's, and must be drawn.
+    #[test]
+    fn the_turn_carries_on_in_the_next_message_after_a_tool() {
+        let mut t = Turn::for_message("th", "");
+        let mut ev = vec![];
+        for f in [
+            json!({"type": "message_start", "payload": {}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "text_delta", "payload": {"delta": "let me look"}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "message_complete", "payload": {}, "thread_id": "th", "message_id": "m1"}),
+        ] {
+            ev.extend(t.feed(&f));
+        }
+        // Oak answered the tool: the turn waits for the continuation.
+        t.awaiting_continuation = true;
+        let mut second = vec![];
+        for f in [
+            json!({"type": "message_start", "payload": {}, "thread_id": "th", "message_id": "m2"}),
+            json!({"type": "text_delta", "payload": {"delta": "it is there"}, "thread_id": "th", "message_id": "m2"}),
+            json!({"type": "message_complete", "payload": {}, "thread_id": "th", "message_id": "m2"}),
+        ] {
+            second.extend(t.feed(&f));
+        }
+        assert!(!second.is_empty(), "the continuation is part of the turn");
+        let texts: Vec<&str> = second.iter().filter_map(|e| match e {
+            Event::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(texts, ["it is there"]);
+        // Both messages' text is in the reply.
+        let all: String = t.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join("|");
+        assert!(all.contains("let me look") && all.contains("it is there"), "{all}");
     }
 
     #[test]
