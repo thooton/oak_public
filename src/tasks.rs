@@ -270,8 +270,14 @@ fn instant_at(ms: i64) -> Instant {
     now.checked_sub(Duration::from_millis((now_ms() - ms).max(0) as u64)).unwrap_or(now)
 }
 
-/// Where commands' output goes.
+/// Where commands' output goes. Under test, a folder of the test run's own
+/// instead of `store::dir()`, so tests don't touch the user's folder and
+/// parallel tests that point `OAK_DIR` at a scratch folder and delete it
+/// can't remove `task-output` under a running command.
 fn output_dir() -> PathBuf {
+    #[cfg(test)]
+    let d = std::env::temp_dir().join(format!("oak-test-task-output-{}", std::process::id()));
+    #[cfg(not(test))]
     let d = crate::store::dir().join("task-output");
     let _ = std::fs::create_dir_all(&d);
     d

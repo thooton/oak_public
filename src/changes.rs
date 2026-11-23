@@ -184,7 +184,8 @@ mod tests {
     #[test]
     fn notices_flatten_paths() {
         let m = message(&[Change::Deleted("/home/sam/wave/../oak/./README.md".into())]);
-        assert!(m.contains("Note: /home/sam/oak/README.md was deleted"), "{m}");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert!(m.contains(&format!("Note: {sep}home{sep}sam{sep}oak{sep}README.md was deleted")), "{m}");
     }
 
     #[test]

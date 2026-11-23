@@ -1261,12 +1261,18 @@ fn execute_returns_when_its_command_exits() {
     let dir = std::env::temp_dir();
     let (w, _s) = idle_worker("exec-exit", Conversation { folder: dir.clone(), ..Default::default() });
     let run = |cmd: &str| w.tool("EXECUTE", &json!({"command": cmd, "summary": "Run it", "timeout": 20}));
-    let quickest = |f: &dyn Fn()| (0..10).map(|_| { let t = Instant::now(); f(); t.elapsed() }).min().unwrap();
-    let execute = quickest(&|| {
+    // Interleave EXECUTE and bare runs so both see the same machine load
+    // during a parallel `cargo test`.
+    let (mut execute, mut bare) = (Duration::MAX, Duration::MAX);
+    for _ in 0..10 {
+        let t = Instant::now();
         let (r, interrupted) = run("echo hi");
+        execute = execute.min(t.elapsed());
         assert!(r.as_ref().is_ok_and(|r| r.starts_with("hi\n[exit code 0")) && !interrupted, "{r:?}"); // "[exit code 0, ran 7.1s]" on a busy machine
-    });
-    let bare = quickest(&|| assert_eq!(tasks::spawn("echo hi", &dir).unwrap().wait_exit(Duration::from_secs(20)), Some(0)));
+        let t = Instant::now();
+        assert_eq!(tasks::spawn("echo hi", &dir).unwrap().wait_exit(Duration::from_secs(20)), Some(0));
+        bare = bare.min(t.elapsed());
+    }
     assert!(execute < bare + Duration::from_millis(15), "EXECUTE took {execute:?}, the command itself {bare:?}");
     std::thread::scope(|scope| {
         scope.spawn(|| {
