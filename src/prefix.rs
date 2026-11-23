@@ -8,7 +8,6 @@
 //! messages instead:
 //!
 //! - the date: "Today's date is now …";
-//! - the model: "Your underlying model is now …";
 //! - the notes' limit (the "Notes limit" setting): "The limit on your
 //!   notes is now …";
 //! - a tool whose definition changed (AGENT's model list follows the
@@ -417,9 +416,12 @@ impl State {
         if self.said("date", cut).unwrap_or(&pin.day) != now.day {
             new.push(SysMsg { text: format!("Today's date is now {}.", now.day), ..msg("date".into(), now.day.clone()) });
         }
-        if !now.model.is_empty() && self.said("model", cut).unwrap_or(&pin.model) != now.model {
-            new.push(SysMsg { text: format!("Your underlying model is now {}.", crate::api::model_name(&now.model)), ..msg("model".into(), now.model.clone()) });
-        }
+        // Another model isn't told it was switched to: it reads the
+        // conversation as its own, under the system prompt as sent (which
+        // names the model it was rendered for, until a summary renews it).
+        // What a switch changes that the model needs (tools it can't call
+        // here, a kit's tool through LOAD) is told below as any change is.
+        // ("model" messages an older Oak sent stay where they were.)
         // The "Notes limit" setting changed (none for a session without notes).
         let limit = now.notes_limit.to_string();
         let told = self.said("notes_limit", cut).map(str::to_string).unwrap_or_else(|| pin.notes_limit.to_string());
@@ -692,13 +694,14 @@ mod tests {
         // Back to the first list and effort: told again.
         s.prepare(setup(Mode::Claude, 11, now("2026-11-07", "high", tools(&["a"]))));
         assert_eq!(s.sys.len(), 6);
-        // Another model: told once, the prompt naming the first.
+        // Another model: not told (a switch is seamless), the prompt still
+        // naming the first.
         let other = Pin { model: "N".into(), ..now("2026-11-07", "high", tools(&["a"])) };
         let p = s.prepare(setup(Mode::Claude, 13, other.clone()));
-        assert_eq!((p.model.as_str(), s.sys.len()), ("M", 7));
-        assert_eq!(s.sys[6].text, "Your underlying model is now N.");
+        assert_eq!((p.model.as_str(), s.sys.len()), ("M", 6));
+        assert!(s.sys.iter().all(|m| m.kind != "model" && !m.text.contains("model is now")));
         s.prepare(setup(Mode::Claude, 15, other));
-        assert_eq!(s.sys.len(), 7);
+        assert_eq!(s.sys.len(), 6);
         // Renewed only by a summary: everything as built, the messages gone.
         let p = s.prepare(Setup { cut: 10, ..setup(Mode::Claude, 17, now("2026-11-08", "high", t.clone())) });
         assert_eq!((p.day.as_str(), p.tools.clone(), s.sys.len(), s.folded, s.cut), ("2026-11-08", t, 0, 17, Some(10)));

@@ -323,11 +323,25 @@ can't read.
   (`providers::Kind::ready`: signed in; for Claude, Codex and Antigravity an account with room;
   for a plugin's model its plugin running; other providers are tried as they are). The request
   goes again there. The move is a switch as the session box makes one (effort kept, cache cold,
-  "Your underlying model is now" for the model), ends a wait for the old provider's limit, and
+  the model not told), ends a wait for the old provider's limit, and
   adds a transcript line, "fell back to <model> on <provider>, after: <why>". The conversation
   stays on the fallback. A reply clears what failed this turn; with no fallback left the turn
   fails, or waits for the reset, as it did. A model the user picked meanwhile goes first, and a
   safety classifier's refusal or an interrupt never falls back.
+- Switching models works between every provider (the session box's pickers, a subagent's, a
+  fallback's, a Mix's SWITCH). Nothing is written to the transcript and the model isn't told; what
+  it needs is what any change needs (`src/prefix.rs`). What one provider's model wrote and another
+  can't take is left out of its request (`agent::for_provider`): reasoning another provider signed
+  (as before), a Quick snippet's own call block (`quick::QUIET_KEY`) and its result, the Freebuff
+  call an Oak call was made from (`freebuff_tools::KEY`). Tool call ids are fitted to Claude's
+  pattern and made unique per conversation (`oak::fit_call_ids`) wherever an API checks them
+  (Claude, Muse, Codex, Antigravity, and OpenRouter only for its Claude models), so a plugin's,
+  NodeClub's or Quick's ids never collide with another reply's. Antigravity gives another model's
+  calls the stand-in signature Google documents (`skip_thought_signature_validator`) rather than
+  turning them into text. Each reply's blocks are marked with the provider that wrote them
+  (`agent::BY_KEY`, never sent), and Quick, which keeps its own copy of a thread, is sent what
+  other models wrote since its own last reply (`agent::unseen_by`, carried as `<conversation_so_far>`),
+  so switching to it loses nothing.
 - A Claude account's plan is read from its profile: Pro, Max, Ultra, Team Standard or Team
   Premium. Max and Ultra are the two sizes of Max (rate-limit tiers `..._max_5x` and `..._max_20x`);
   accounts, the usage log and vaults keep them as "Max 5x" and "Max 20x", the names they had
@@ -364,9 +378,11 @@ can't read.
   is the only moment it is rebuilt. The cache expiring, another account or model, an effort, date,
   goal, note, notes-limit or instruction-file change, smart context turned off or on, a save and
   restart, a newer Oak's prompt text: none of them changes it. What changes reaches the model after
-  the latest user turn ("Today's date is now", "Your underlying model is now", "The limit on your
-  notes is now", a tool definition, Claude's effort): Claude and Codex as their own mid-conversation messages, which turn themselves off if
-  refused (then, like other providers, as a text note where they were). A loaded kit stays where
+  the latest user turn ("Today's date is now", "The limit on your notes is now", a tool
+  definition, Claude's effort): Claude and Codex as their own mid-conversation messages, which turn themselves off if
+  refused (then, like other providers, as a text note where they were). A model switch is not
+  told: the new model reads the conversation as its own, under the system prompt as it was sent,
+  until a summary renews it (a Mix's SWITCH result, which the model asked for, is the exception). A loaded kit stays where
   its LOAD put it: its instructions LOAD's result, its tool right after it (where tools can't be
   added, called through LOAD). Only once a summary covers the LOAD do the kit's prompt block and tool
   join the system prompt and tool list. A revert to before a LOAD unloads the kit. A revert (or an
@@ -379,6 +395,11 @@ can't read.
   tools with the current date, so its prompt's date is always today's (`freebuff::system_prompt`,
   tested by `the_prompt_has_todays_date_and_the_row_name`) and a new day renews its cache; its
   messages still only grow. No other provider or event gets this.
+- Quick keeps a conversation itself (its thread on Quick's server), so a request sends only its
+  newest user turn. A conversation that other providers' models worked on since Quick's own last
+  reply sends what it missed too, as `<conversation_so_far>` in that message (`agent::unseen_by`,
+  `quick::so_far`): the user turns, calls, results and replies since, without what the request
+  sends anyway. With nothing new from the user it is told to carry on from there (`CARRY_ON_SO_FAR`).
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
   the prompt, and is never offered to subagents (it serves one request at a time).
 - Plugins' models (`src/provided.rs`, `oak_sdk::ModelProvider`, interface version 10) are one
@@ -719,8 +740,8 @@ with Stop and Pause or Resume, its model and effort pickers), each with notes an
 under it when there are any. A subagent's model switches in place, from its pickers or the super
 agent's AGENT action=set: its conversation and work carry on, a request under way finishes on the
 model it started on (the box says it is switching until then, AGENT_LIST and set's reply too), and
-the next request, with that one's tool results, goes to the new model with the "Your underlying
-model is now" line appended; a switch to another provider asks first, as the session box does.
+the next request, with that one's tool results, goes to the new model, which isn't told of the
+switch; a switch to another provider asks first, as the session box does.
 Each session has a pulse (`src/agent/pulse.rs`), as the command center's workers do: its phase
 from its status line (its model writing, its tools running, waiting on a retry, a usage limit, an
 answer or its agents, summarizing; idle, paused) and since when, its last progress (its model's
@@ -908,7 +929,8 @@ with a device's paths as the device has them.
 
 **A conversation is a Quick thread**: its conversation's id is the thread's, which is how Quick
 keeps the history, so a request sends only its newest user turn (`user_message`) and Quick
-replays the rest. A turn ends the way Quick's does: `stop::COMPLETE` says the reply's tool calls
+replays the rest; a conversation another model worked on since Quick's last reply sends that
+part too (`unseen_by`, above). A turn ends the way Quick's does: `stop::COMPLETE` says the reply's tool calls
 are the record of work already done and answered, not work for Oak's loop to run again (the
 loop's `batch.finish` would otherwise repeat every call Oak already answered).
 Only what the user said since Quick's last reply is sent (`newest_user_text`): a request

@@ -602,6 +602,14 @@ impl Worker {
             start_marks(&mut c, marks_before, &p, &context, at);
         }
         let mut messages = request_messages(&c, &c.messages);
+        // Quick keeps the conversation itself: what other models wrote
+        // since it last replied goes with the request, so a switch to it
+        // carries the conversation over.
+        let unseen = if provider == api::Provider::Quick {
+            unseen_by(&c.messages, &messages, provider, cut)
+        } else {
+            vec![]
+        };
         if let Some(mode) = mode {
             c.prefix.fold(&mut messages, cut, n);
             messages = c.prefix.inject(mode, messages, cut, n);
@@ -627,6 +635,7 @@ impl Worker {
             conv: Some(c.id.clone()),
             ttl: cache.ttl,
             anchor: cache.anchor,
+            unseen,
             ..Default::default()
         };
         (req, c.messages.len(), c.rolling.base())
@@ -637,9 +646,16 @@ impl Worker {
     /// the reply is kept, its tool calls run, and the next request waits.
     pub(super) fn ask(&self, batch: &mut Batch) -> Reply {
         self.set(|l| l.requesting = true);
-        let reply = self.ask_inner(batch);
+        let mut reply = self.ask_inner(batch);
         self.end_request();
         self.settle_steers();
+        // Which provider wrote the reply (`BY_KEY`), on each block.
+        let by = self
+            .last_request
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(body, ..)| body.provider);
         // Cut short (or refused) once tool calls had started: the reply is
         // kept up to the last of them, which go on, and the turn carries on
         // from their results.
@@ -652,11 +668,12 @@ impl Worker {
                 Reply::Done(b, ..) => b,
                 _ => finish_blocks(std::mem::take(&mut self.live.lock().unwrap().blocks)),
             };
-            return Reply::Done(
-                batch.kept(blocks),
-                tool_calls::CUT_SHORT.into(),
-                Usage::default(),
-            );
+            let mut blocks = batch.kept(blocks);
+            mark_by(&mut blocks, by);
+            return Reply::Done(blocks, tool_calls::CUT_SHORT.into(), Usage::default());
+        }
+        if let Reply::Done(blocks, ..) = &mut reply {
+            mark_by(blocks, by);
         }
         if matches!(reply, Reply::Paused | Reply::Interrupted) {
             self.set(|l| l.blocks.clear());

@@ -366,13 +366,16 @@ fn block_thought_sig<'a>(b: &'a Value, model_id: &str) -> Option<&'a str> {
     b["sig"].as_str().filter(|s| is_valid_thought_signature(s))
 }
 
-fn convert_messages(messages: &[Value], public_model: &str, runtime_model: &str) -> (Vec<Value>, bool) {
+/// The thought signature Google documents for a function call its model
+/// didn't make (another model's, after a switch, or one replayed from a
+/// trace without signatures): Gemini 3 then skips checking it, and the call
+/// stays a real `functionCall` rather than text the model would imitate.
+const SKIP_SIGNATURE: &str = "skip_thought_signature_validator";
+
+fn convert_messages(messages: &[Value], public_model: &str, runtime_model: &str) -> Vec<Value> {
     let mut contents: Vec<Value> = Vec::new();
-    let mut degraded = false;
     let requires_sig = gemini_requires_thought_signature(runtime_model);
     let need_ids = tool_call_id_needed(public_model, runtime_model);
-    // Tool call id -> serialized args JSON for unsigned tool calls degraded to text.
-    let mut dropped_ids: HashMap<String, String> = HashMap::new();
     // Call id -> tool name (Oak's `tool_result` has `call_id` but not `name`).
     let mut call_names: HashMap<String, String> = HashMap::new();
 
@@ -394,6 +397,8 @@ fn convert_messages(messages: &[Value], public_model: &str, runtime_model: &str)
             let first_has_sig = tool_calls.first().and_then(|tc| block_thought_sig(tc, public_model)).is_some();
             let all_sigs_valid = tool_calls.iter().all(|tc| tc["sig"].is_null() || block_thought_sig(tc, public_model).is_some());
             let group_signed = first_has_sig && all_sigs_valid;
+            // Gemini 3 checks the first call of each step for its signature.
+            let mut first_call = true;
 
             for b in &blocks {
                 match b["type"].as_str().unwrap_or("") {
@@ -431,26 +436,23 @@ fn convert_messages(messages: &[Value], public_model: &str, runtime_model: &str)
                         if !raw_id.is_empty() {
                             call_names.insert(raw_id.to_string(), name.to_string());
                         }
-                        if requires_sig && !group_signed {
-                            dropped_ids.insert(raw_id.to_string(), args.to_string());
-                        } else {
-                            dropped_ids.remove(raw_id);
-                            let mut fc = json!({"name": name, "args": args});
-                            if need_ids {
-                                fc["id"] = json!(sanitize_tool_call_id(raw_id, name));
-                            }
-                            let mut p = json!({"functionCall": fc});
-                            if let Some(s) = block_thought_sig(b, public_model) {
-                                p["thoughtSignature"] = json!(s);
-                            }
-                            parts.push(p);
+                        let mut fc = json!({"name": name, "args": args});
+                        if need_ids {
+                            fc["id"] = json!(sanitize_tool_call_id(raw_id, name));
                         }
+                        let mut p = json!({"functionCall": fc});
+                        match block_thought_sig(b, public_model) {
+                            Some(s) => p["thoughtSignature"] = json!(s),
+                            // Another model's call (or one whose signature is
+                            // gone): the documented stand-in.
+                            None if requires_sig && first_call => p["thoughtSignature"] = json!(SKIP_SIGNATURE),
+                            None => {}
+                        }
+                        first_call = false;
+                        parts.push(p);
                     }
                     _ => {}
                 }
-            }
-            if parts.is_empty() && requires_sig && !group_signed && !tool_calls.is_empty() {
-                parts.push(json!({"text": "[Earlier tool call omitted because its signature is unavailable.]"}));
             }
             append_turn(&mut contents, "model", parts);
             continue;
@@ -489,26 +491,13 @@ fn convert_messages(messages: &[Value], public_model: &str, runtime_model: &str)
                 let joined = text_chunks.join("\n");
                 let response_text = if joined.is_empty() && is_err { "Tool failed".to_string() } else { joined };
 
-                if requires_sig && let Some(dropped_args) = dropped_ids.remove(raw_id) {
-                    let first_degraded = !degraded;
-                    degraded = true;
-                    let label = if dropped_args == "{}" { format!("`{name}`") } else { format!("`{name}` ({dropped_args})") };
-                    user_parts.push(json!({"text": format!("[Observation from {label}:\n{response_text}]")}));
-                    if first_degraded {
-                        user_parts.push(json!({
-                            "text": "[History note: Earlier \"[Observation from ...]\" blocks are historical tool results, not a format to imitate. To use a tool now, emit a real functionCall.]"
-                        }));
-                    }
-                    user_parts.extend(img_parts);
-                } else {
-                    let resp_obj = if is_err { json!({"error": response_text}) } else { json!({"output": response_text}) };
-                    let mut fr = json!({"name": name, "response": resp_obj});
-                    if need_ids {
-                        fr["id"] = json!(sanitize_tool_call_id(raw_id, name));
-                    }
-                    user_parts.push(json!({"functionResponse": fr}));
-                    user_parts.extend(img_parts);
+                let resp_obj = if is_err { json!({"error": response_text}) } else { json!({"output": response_text}) };
+                let mut fr = json!({"name": name, "response": resp_obj});
+                if need_ids {
+                    fr["id"] = json!(sanitize_tool_call_id(raw_id, name));
                 }
+                user_parts.push(json!({"functionResponse": fr}));
+                user_parts.extend(img_parts);
             } else if let Some(p) = user_block_part(b) {
                 user_parts.push(p);
             }
@@ -600,7 +589,7 @@ fn convert_messages(messages: &[Value], public_model: &str, runtime_model: &str)
         append_turn(&mut contents, "user", vec![json!({"text": CONTINUATION_TEXT})]);
     }
 
-    (contents, degraded)
+    contents
 }
 
 // ---------------------------------------------------------------- request envelope
@@ -638,7 +627,9 @@ pub(crate) fn request_body(req: &Request) -> Value {
 pub(crate) fn request_body_for(req: &Request, project_id: &str, runtime_model: &str, retry_nonce: u32, now_ms: i64) -> Value {
     let pub_id = catalog::public_id(&req.model);
     let msgs = req.messages_with_instruction();
-    let (mut contents, _degraded) = convert_messages(&msgs, pub_id, runtime_model);
+    // (Call ids other providers' models made, fitted and one per call.)
+    let msgs = crate::oak::fit_call_ids(&msgs, 64);
+    let mut contents = convert_messages(&msgs, pub_id, runtime_model);
 
     let system_text = req.system.trim();
     let system_parts: Vec<Value> = if !system_text.is_empty() {

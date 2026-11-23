@@ -115,6 +115,95 @@ fn switching_models() {
     assert_eq!(c.messages, before);
 }
 
+/// A reply's blocks are marked with the provider that wrote them (moved
+/// here as providers are: `for_provider`), never sent.
+#[test]
+fn replies_are_marked_with_their_provider() {
+    let mut blocks = vec![oak::text("hi"), json!({"type": "tool_call", "id": "c", "name": "READ", "input": {}})];
+    mark_by(&mut blocks, Some(api::Provider::Codex));
+    let marked = vec![json!({"role": "assistant", "content": blocks})];
+    assert_eq!(written_by(&marked[0]), Some("codex"));
+    assert!(marked[0]["content"][0][BY_KEY].is_string());
+    assert!(crate::rolling::view(&marked, None)[0]["content"][0].get(BY_KEY).is_none(), "never sent");
+}
+
+/// For a provider that keeps the conversation itself (Quick), what another
+/// provider's model wrote since its own last reply is sent as well, so a
+/// switch to it loses nothing; with none of its replies in view, all of it.
+#[test]
+fn a_thread_hears_what_other_models_wrote() {
+    let reply = |by: &str, text: &str| {
+        let mut blocks = vec![oak::text(text)];
+        mark_by(&mut blocks, api::Provider::from_id(by));
+        json!({"role": "assistant", "content": blocks})
+    };
+    let user = |t: &str| json!({"role": "user", "content": [oak::text(t)]});
+    let transcript = vec![user("do it"), reply("quick", "on it"), user("more"), reply("claude", "done"), user("and now")];
+    let asked = unseen_by(&transcript, &transcript, api::Provider::Quick, 0);
+    assert_eq!(asked, transcript[2..4].to_vec(), "what came after Quick's own reply, without the new message");
+    let after = [transcript.clone(), vec![reply("quick", "done too")]].concat();
+    assert!(unseen_by(&after, &after, api::Provider::Quick, 0).is_empty());
+    // No reply of its own since the summary: the summary and all after it.
+    let old = vec![user("summarized"), reply("claude", "a"), user("b"), reply("claude", "c"), user("d")];
+    assert_eq!(unseen_by(&old, &old, api::Provider::Quick, 0), old[0..4].to_vec());
+    // Nothing says another model wrote it (an older Oak's replies): nothing sent.
+    let plain = vec![user("a"), json!({"role": "assistant", "content": [oak::text("b")]}), user("c")];
+    assert!(unseen_by(&plain, &plain, api::Provider::Quick, 0).is_empty());
+    // Under a summary (cut 0), the view carries it first: the index of a
+    // transcript message is its own, plus the summary's two.
+    let summary = vec![user("Summary."), reply("claude", "ack")];
+    let view = [summary.clone(), transcript.clone()].concat();
+    assert_eq!(
+        unseen_by(&transcript, &view, api::Provider::Quick, 0),
+        view[4..6].to_vec()
+    );
+    // A cut past Quick's reply: the summary and all after it.
+    let cut_view = [summary, transcript[2..].to_vec()].concat();
+    assert_eq!(
+        unseen_by(&transcript, &cut_view, api::Provider::Quick, 2),
+        cut_view[0..4].to_vec()
+    );
+}
+
+/// A conversation moves between providers seamlessly: what one provider
+/// can't take, or mustn't see twice, stays out of another's request.
+#[test]
+fn a_switch_leaves_out_what_the_provider_cannot_take() {
+    let freebuff = crate::freebuff_tools::KEY;
+    let quiet = crate::quick::QUIET_KEY;
+    let messages = vec![
+        json!({"role": "user", "content": [oak::text("hi")]}),
+        json!({"role": "assistant", "content": [
+            json!({"type": "tool_call", "id": "snip", "name": "run_python_on_device", quiet: true, "input": {"code": "READ(path=\"a\") "}}),
+            json!({"type": "tool_call", "id": "inner", "name": "READ", "input": {"path": "a"}}),
+        ]}),
+        json!({"role": "user", "content": [
+            json!({"type": "tool_result", "call_id": "snip", "content": "ran it"}),
+            json!({"type": "tool_result", "call_id": "inner", "content": "fn main"}),
+        ]}),
+        json!({"role": "assistant", "content": [
+            json!({"type": "tool_call", "id": "f1", "name": "READ", "input": {"path": "b", freebuff: {"name": "read_files", "args": {}}}}),
+        ]}),
+    ];
+    // Quick keeps its own snippets: the others don't run its tool.
+    let claude = for_provider(&messages, api::Provider::Claude).into_owned();
+    let blocks = &claude[1]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1, "the snippet's call stays out: {blocks:?}");
+    assert_eq!(claude[2]["content"].as_array().unwrap().len(), 1, "its result too");
+    assert!(claude[3]["content"][0]["input"].get(freebuff).is_none(), "Freebuff's own call goes only to Freebuff");
+    assert_eq!(claude[3]["content"][0]["input"], json!({"path": "b"}));
+    // Freebuff keeps the call it made, and loses the snippet's with the rest.
+    let free = for_provider(&messages, api::Provider::Freebuff).into_owned();
+    assert!(free[3]["content"][0]["input"].get(freebuff).is_some());
+    assert_eq!(free[2]["content"].as_array().unwrap().len(), 1);
+    // Quick takes its own as it is, and Oak's wrapped calls without
+    // Freebuff's own record of them.
+    let quick = for_provider(&messages, api::Provider::Quick).into_owned();
+    assert_eq!(quick[1]["content"].as_array().unwrap().len(), 2);
+    assert_eq!(quick[2]["content"].as_array().unwrap().len(), 2);
+    assert_eq!(quick[3]["content"][0]["input"], json!({"path": "b"}));
+}
+
 /// A failed model's conversation moves to the first of its fallbacks that
 /// can take the request: not its model now, nor one that failed this turn,
 /// nor one a chat can't use, nor one that can't send now.
@@ -2657,7 +2746,8 @@ fn prefix_only_grows(
     assert!(flat(&step(&mut prev, &w, "another day")).contains("Today's date is now "));
     s.conv.lock().unwrap().model = other_model.into();
     reply("ok", "still on");
-    assert!(flat(&step(&mut prev, &w, "another model")).contains("Your underlying model is now "));
+    // (Seamless: the model isn't told it was switched to.)
+    assert!(!flat(&step(&mut prev, &w, "another model")).contains("model is now"));
     // The cache expires or the account changes; a goal is set; the
     // instruction files change; old tool output piles up.
     s.conv.lock().unwrap().cache.cold();

@@ -1229,7 +1229,18 @@ fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> 
 /// `user_message`, opened with Oak's briefing where the thread needs it
 /// (`brief`), else with the reminder.
 fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, brief: bool) -> Value {
-    let newest = newest_user_text(r);
+    let newest = match new_user_text(r) {
+        // The conversation went on without this thread: it carries on from
+        // there, not from a cut connection.
+        None if r.instruction.is_none() && !r.unseen.is_empty() => CARRY_ON_SO_FAR.to_string(),
+        _ => newest_user_text(r),
+    };
+    // What the thread hasn't seen of the conversation goes first (a
+    // summary's own request carries its instruction alone).
+    let newest = match so_far(&r.unseen).filter(|_| r.instruction.is_none()) {
+        Some(s) => format!("{s}\n\n{newest}"),
+        None => newest,
+    };
     let text = if r
         .instruction
         .as_deref()
@@ -1350,11 +1361,103 @@ pub(crate) fn steer_message(
     let mut said = r.clone();
     said.messages = vec![json!({"role": "user", "content": [{"type": "text", "text": text}]})];
     said.instruction = None;
-    // (Mid-turn: the turn's own message had the briefing.)
+    said.unseen.clear();
+    // (Mid-turn: the turn's own message had the briefing, and what the
+    // thread hadn't seen.)
     let mut v = user_message_as(&said, thread, m, outpost, false);
     v["payload"]["mid_turn"] = json!(true);
     v["payload"]["message_id"] = json!(id);
     v
+}
+
+/// What Quick is sent after the conversation so far (`so_far`) when the
+/// user has said nothing since (a turn under way moved to Quick).
+pub(crate) const CARRY_ON_SO_FAR: &str = "Carry on with the work from where the conversation above leaves off.";
+
+/// The most of the conversation so far a message carries (characters): the
+/// newest turns, and a line saying earlier ones were left out.
+const SO_FAR_CHARS: usize = 400_000;
+
+/// The most of one call's input or result it carries (characters).
+const SO_FAR_PART: usize = 6_000;
+
+/// `s`, clipped to `max` characters, saying so.
+fn clip(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}… [{} more characters]", &s[..i], s[i..].chars().count()),
+        None => s.to_string(),
+    }
+}
+
+/// The conversation so far that Quick's thread doesn't have (a request's
+/// `unseen`: other models wrote it), as text for the message: its turns in
+/// order, "Assistant" for the model's (Quick's own, as Quick reads them).
+/// The model isn't told of any switch: this is the conversation, which
+/// its thread lacks. None when there is nothing.
+fn so_far(unseen: &[Value]) -> Option<String> {
+    let mut names = std::collections::HashMap::new();
+    let mut turns: Vec<String> = vec![];
+    for m in unseen {
+        let assistant = m["role"] == "assistant";
+        let mut lines = vec![];
+        for b in m["content"].as_array().into_iter().flatten() {
+            match b["type"].as_str().unwrap_or("") {
+                "text" => {
+                    let t = b["text"].as_str().unwrap_or("").trim();
+                    if !t.is_empty() {
+                        lines.push(format!("{}: {t}", if assistant { "Assistant" } else { "User" }));
+                    }
+                }
+                "tool_call" => {
+                    let name = b["name"].as_str().unwrap_or("tool");
+                    names.insert(b["id"].as_str().unwrap_or("").to_string(), name.to_string());
+                    lines.push(format!("Assistant called {name}: {}", clip(&b["input"].to_string(), SO_FAR_PART)));
+                }
+                "tool_result" => {
+                    let name = names.get(b["call_id"].as_str().unwrap_or("")).map_or("the call", String::as_str);
+                    let content = match &b["content"] {
+                        Value::String(s) => s.clone(),
+                        Value::Array(parts) => parts
+                            .iter()
+                            .map(|p| match p["type"].as_str() {
+                                Some("text") => p["text"].as_str().unwrap_or("").to_string(),
+                                Some(other) => format!("[{other}]"),
+                                None => String::new(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    let error = if b["is_error"] == true { " (an error)" } else { "" };
+                    lines.push(format!("Result of {name}{error}: {}", clip(content.trim(), SO_FAR_PART)));
+                }
+                "image" => lines.push("[a picture]".into()),
+                "document" => lines.push(format!("[a document: {}]", b["title"].as_str().unwrap_or("untitled"))),
+                _ => {}
+            }
+        }
+        if !lines.is_empty() {
+            turns.push(lines.join("\n"));
+        }
+    }
+    if turns.is_empty() {
+        return None;
+    }
+    // The newest turns, as many as fit.
+    let mut size = 0;
+    let keep = turns.iter().rev().take_while(|t| {
+        size += t.len() + 2;
+        size <= SO_FAR_CHARS
+    });
+    let keep = keep.count().max(1);
+    let left_out = turns.len() - keep;
+    let mut body = turns.split_off(left_out).join("\n\n");
+    if left_out > 0 {
+        body = format!("[{left_out} earlier turns left out.]\n\n{body}");
+    }
+    Some(format!(
+        "<conversation_so_far>\nThis conversation so far, which this thread's history doesn't have, oldest first (\"Assistant\" is you). Carry on from it.\n\n{body}\n</conversation_so_far>"
+    ))
 }
 
 /// What Quick is sent when Oak asks again in the middle of a turn with
@@ -2337,6 +2440,45 @@ mod tests {
         // A summary sends its instruction alone.
         r.instruction = Some("Summarize.".into());
         assert_eq!(sent(&r), "Summarize.");
+    }
+
+    /// A switch to Quick carries the conversation over: what other models
+    /// wrote since Quick's own last reply goes first, and the user's new
+    /// message last; its thread's own work isn't repeated.
+    #[test]
+    fn a_thread_continues_a_conversation_another_model_worked_on() {
+        let m = &MODELS[0];
+        let (thread, outpost) = ("th-switched", Some("dev"));
+        let reply = |by: &str, text: &str| json!({"role": "assistant", "content": [{"type": "text", "text": text, crate::agent::BY_KEY: by}]});
+        let r = Request {
+            provider: crate::providers::Kind::Quick,
+            model: m.id.into(),
+            messages: vec![
+                json!({"role": "user", "content": [{"type": "text", "text": "fix the build"}]}),
+                reply("claude", "The test fails."),
+                json!({"role": "user", "content": [
+                    {"type": "tool_result", "call_id": "t1", "content": "error: no such file"},
+                    {"type": "text", "text": "carry on ask Quick to fix it"}
+                ]}),
+            ],
+            unseen: vec![
+                json!({"role": "assistant", "content": [{"type": "text", "text": "The test fails."}]}),
+                json!({"role": "user", "content": [{"type": "tool_result", "call_id": "t1", "content": "error: no such file"}]}),
+            ],
+            ..Default::default()
+        };
+        let text = user_message(&r, thread, m, outpost)["payload"]["text"].as_str().unwrap().to_string();
+        let so_far = text.find("<conversation_so_far>").expect("the conversation so far: {text}");
+        let said = text.find("carry on ask Quick to fix it").expect("the new message");
+        assert!(so_far < said, "what it missed comes first: {text}");
+        assert!(text.contains("Assistant: The test fails.") && text.contains("Result of the call: error: no such file"), "{text}");
+        assert!(!text.contains("fix the build"), "what the thread has isn't repeated: {text}");
+        // Nothing new to say: it carries on from there.
+        let mut quiet = r.clone();
+        quiet.messages.pop();
+        quiet.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "t1", "content": "error"}]}));
+        let text = user_message(&quiet, thread, m, outpost)["payload"]["text"].as_str().unwrap().to_string();
+        assert!(text.contains(CARRY_ON_SO_FAR) && text.contains("<conversation_so_far>"), "{text}");
     }
 
     /// Oak's calls through Quick's device Python are blocks of their own,

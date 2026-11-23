@@ -13,9 +13,10 @@
 //
 // Thought signatures returned by Gemini 3+ models are stored on Oak's
 // reasoning, text and tool_call blocks (`sig`, `by: "antigravity"`,
-// `sig_model`) and replayed when continuing on the same model; unsigned tool
-// calls from other providers or models are degraded to text observations so
-// Gemini accepts the history.
+// `sig_model`) and replayed when continuing on the same model; a call another
+// provider's or model's made (after a switch) stays a real function call,
+// with the stand-in signature Google documents for it, so Gemini 3 accepts
+// the history and the model reads it as its own.
 
 mod auth;
 mod catalog;

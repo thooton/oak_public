@@ -107,7 +107,13 @@ pub fn cache_mark(ttl: oak::Ttl) -> Value {
 /// instruction joins the last user turn after a breakpoint on what was
 /// there, so the request reads exactly what the one it copies wrote.
 pub fn body(req: &Request, by: &str, signed: bool) -> Value {
-    let mut messages = messages(&req.messages, by, signed);
+    // Claude checks tool call ids (its pattern, and one per call): a
+    // conversation's calls from other providers' models are made to fit.
+    // (Through OpenRouter only for Claude's models: others' ids stay as
+    // their own models wrote them.)
+    let strict = matches!(by, "claude" | "musecode") || (by == "openrouter" && req.model.starts_with("anthropic/"));
+    let sent = if strict { oak::fit_call_ids(&req.messages, 64) } else { std::borrow::Cow::Borrowed(req.messages.as_slice()) };
+    let mut messages = messages(&sent, by, signed);
     if let Some(instruction) = &req.instruction {
         // System messages that end the request it copies came after its
         // breakpoint: a user turn can't follow them, and they don't concern

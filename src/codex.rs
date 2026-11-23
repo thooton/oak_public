@@ -1222,7 +1222,8 @@ pub(crate) fn request_body(req: &Request) -> Value {
         "store": false,
         "stream": true,
         "instructions": instructions(&req.system),
-        "input": input_items(&req.messages_with_instruction()),
+        // (Call ids other providers' models made, fitted: `oak::fit_call_ids`.)
+        "input": input_items(&crate::oak::fit_call_ids(&req.messages_with_instruction(), 64)),
         "text": {"verbosity": "low"},
         "include": ["reasoning.encrypted_content"],
         "prompt_cache_key": cache_key(req),

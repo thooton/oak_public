@@ -8,10 +8,11 @@
 //! carries it out and switches back when it is stuck, at most
 //! `Mix::max_help` times per message from the user (0: no limit).
 //!
-//! A switch is the session box's (`agent::apply_command`: cache cold, "Your
-//! underlying model is now" for the model), with each model's own effort,
-//! and SWITCH's result tells the new model its role and the note it was
-//! handed. The roles themselves are in the system prompt (`mix/prompt.md`,
+//! A switch is the session box's (`agent::apply_command`: cache cold, the
+//! model not told of it), with each model's own effort, and SWITCH's result
+//! tells the new model its role, which model it is, and the note it was
+//! handed: the one place a model hears of a switch, since a Mix's models
+//! work by taking turns. The roles themselves are in the system prompt (`mix/prompt.md`,
 //! after the role's), pinned as any system prompt is.
 
 use crate::store::Mix;

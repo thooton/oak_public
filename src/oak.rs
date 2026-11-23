@@ -74,6 +74,77 @@ pub fn clean_blocks(blocks: &mut [Value]) {
     }
 }
 
+/// Whether `id` is a tool call id the strictest APIs take: 1 to `max`
+/// characters of `A-Z a-z 0-9 _ -` (Claude's pattern).
+fn fit_id(id: &str, max: usize) -> bool {
+    !id.is_empty() && id.len() <= max && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// `id` made to fit (`fit_id`): other characters as `_`, clipped.
+fn fitted_id(id: &str, max: usize) -> String {
+    let s: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).take(max).collect();
+    if s.is_empty() { "call".into() } else { s }
+}
+
+/// `messages` with tool call ids an API that checks them takes, whichever
+/// provider's model made the calls (a conversation moves between them): each
+/// fits Claude's pattern (`fit_id`, at most `max` characters) and no two calls
+/// share one (some servers number every reply's calls from 0, and a plugin's
+/// may give none). A result goes with the newest call before it of its id.
+/// Ids that are fine stay as they are, and what one becomes depends only on
+/// the messages before it, so requests still only grow (`crate::prefix`).
+/// Borrowed when nothing changes.
+pub fn fit_call_ids(messages: &[Value], max: usize) -> std::borrow::Cow<'_, [Value]> {
+    use std::collections::{HashMap, HashSet};
+    let blocks = || messages.iter().flat_map(|m| m["content"].as_array().into_iter().flatten());
+    let mut seen = HashSet::new();
+    let fine = blocks().all(|b| match b["type"].as_str() {
+        Some("tool_call") => b["id"].as_str().is_some_and(|id| fit_id(id, max) && seen.insert(id)),
+        Some("tool_result") => b["call_id"].as_str().is_some_and(|id| fit_id(id, max)),
+        _ => true,
+    });
+    if fine {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+    let mut used: HashSet<String> = HashSet::new();
+    let mut now: HashMap<String, String> = HashMap::new();
+    let mut out = messages.to_vec();
+    for b in out.iter_mut().flat_map(|m| m["content"].as_array_mut().into_iter().flatten()) {
+        match b["type"].as_str() {
+            Some("tool_call") => {
+                let was = match &b["id"] {
+                    Value::String(s) => s.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                let base = fitted_id(&was, max);
+                let mut id = base.clone();
+                let mut k = 2;
+                while used.contains(&id) {
+                    let tail = format!("_{k}");
+                    let head: String = base.chars().take(max.saturating_sub(tail.len())).collect();
+                    id = format!("{head}{tail}");
+                    k += 1;
+                }
+                used.insert(id.clone());
+                now.insert(was, id.clone());
+                b["id"] = json!(id);
+            }
+            Some("tool_result") => {
+                let was = match &b["call_id"] {
+                    Value::String(s) => s.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                let id = now.get(&was).cloned().unwrap_or_else(|| fitted_id(&was, max));
+                b["call_id"] = json!(id);
+            }
+            _ => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Messages without Oak's own keys.
 pub fn clean(mut messages: Vec<Value>) -> Vec<Value> {
     for m in messages.iter_mut() {
@@ -172,6 +243,10 @@ pub struct Request {
     pub folder: Option<String>,
     /// The conversation it is for: its account stays the same (`rotation`).
     pub conv: Option<String>,
+    /// For a provider that keeps the conversation itself (Quick): the part
+    /// of `messages` it hasn't seen (other models wrote it), which it is
+    /// sent besides the newest user turn (`agent::unseen_by`).
+    pub unseen: Vec<Value>,
 }
 
 impl Request {
@@ -457,5 +532,36 @@ mod tests {
         assert_eq!(c.text, "Hello");
         assert_eq!(c.stop, "end");
         assert_eq!(c.usage.output, 4);
+    }
+
+    /// Call ids from every provider's models are made to fit the strictest
+    /// API's pattern and to be unique, with each result keeping its call; ids
+    /// that fit stay as they are.
+    #[test]
+    fn call_ids_fit_the_strictest_api() {
+        let call = |id: Value| json!({"role": "assistant", "content": [{"type": "tool_call", "id": id, "name": "READ", "input": {}}]});
+        let result = |id: Value| json!({"role": "user", "content": [{"type": "tool_result", "call_id": id, "content": "x"}]});
+        let ok = vec![call(json!("call_1")), result(json!("call_1"))];
+        assert!(matches!(fit_call_ids(&ok, 64), std::borrow::Cow::Borrowed(_)));
+        let plain = vec![
+            call(json!("call:1/bad")),
+            result(json!("call:1/bad")),
+            // Two calls of one id (a plugin's: one per reply).
+            call(json!("call_0")),
+            result(json!("call_0")),
+            call(json!("call_0")),
+            result(json!("call_0")),
+            // A call with no id at all.
+            call(Value::Null),
+        ];
+        let out = fit_call_ids(&plain, 64).into_owned();
+        let ids: Vec<String> = out.iter().filter_map(|m| m["content"][0]["id"].as_str().map(String::from)).collect();
+        assert_eq!(ids, ["call_1_bad", "call_0", "call_0_2", "call"], "{ids:?}");
+        let results: Vec<String> = out.iter().filter_map(|m| m["content"][0]["call_id"].as_str().map(String::from)).collect();
+        assert_eq!(results, ["call_1_bad", "call_0", "call_0_2"], "each result its newest call's id");
+        // Long ones are clipped.
+        let long = vec![call(json!("x".repeat(100)))];
+        let out = fit_call_ids(&long, 64).into_owned();
+        assert_eq!(out[0]["content"][0]["id"].as_str().unwrap().len(), 64);
     }
 }

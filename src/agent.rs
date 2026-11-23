@@ -2970,30 +2970,159 @@ fn cache_choice(
     }
 }
 
-/// The transcript as `provider` can take it: reasoning another provider
-/// wrote left out, as its signature means nothing to this one (Claude
-/// refuses a thinking block it didn't sign; Codex's reasoning rides in the
-/// signature). Within a provider it stays: Claude models read each other's,
-/// as Codex models do. A reply left with nothing says so in a line, so the
-/// turn still has content. Borrowed as it is when nothing is left out.
+/// The provider that wrote a reply's block (`Kind::id`), as the transcript
+/// keeps it: never sent (an `_oak_` key). A provider that keeps the
+/// conversation itself (Quick) is sent what it didn't write since it last
+/// replied (`unseen_by`).
+pub(crate) const BY_KEY: &str = "_oak_by";
+
+/// Marks each of a reply's blocks as written by `by`'s model.
+fn mark_by(blocks: &mut [Value], by: Option<api::Provider>) {
+    let Some(by) = by else { return };
+    for b in blocks.iter_mut() {
+        if let Some(o) = b.as_object_mut() {
+            o.entry(BY_KEY).or_insert(json!(by.id()));
+        }
+    }
+}
+
+/// Which provider wrote assistant message `m`, as far as it says: its
+/// blocks' `BY_KEY`, else (a reply from before Oak kept that) the provider
+/// whose reasoning it has.
+fn written_by(m: &Value) -> Option<&str> {
+    let blocks = m["content"].as_array()?;
+    blocks
+        .iter()
+        .find_map(|b| b[BY_KEY].as_str())
+        .or_else(|| blocks.iter().filter(|b| oak::is_reasoning(b)).find_map(|b| b["by"].as_str()))
+}
+
+/// What of the conversation a provider that keeps its own copy of it
+/// (Quick: a thread on its server, which a request only adds the newest
+/// user turn to) hasn't seen, so a switch to it loses nothing: in the form
+/// a request sends messages (`messages`: `request_messages` of the
+/// `transcript`, whose summary cut is `cut`), what came after its own last
+/// reply, once another provider's model replied since; or all of it (the
+/// summary first) when another provider's model wrote some and it none.
+/// Left out: the newest user turns' text and pictures (the request sends
+/// them), and the results of its own calls (it has those). Empty when it has
+/// seen everything, or nothing says otherwise (replies from before Oak
+/// marked them, with no reasoning to tell).
+fn unseen_by(
+    transcript: &[Value],
+    messages: &[Value],
+    provider: api::Provider,
+    cut: usize,
+) -> Vec<Value> {
+    let n = transcript.len();
+    let me = provider.id();
+    let assistant = |k: &usize| transcript[*k]["role"] == "assistant";
+    let mine = (cut..n).rev().filter(assistant).find(|&k| written_by(&transcript[k]) == Some(me));
+    let others = |from: usize| {
+        (from..n)
+            .filter(assistant)
+            .any(|k| written_by(&transcript[k]).is_some_and(|by| by != me))
+    };
+    // Where the unseen part starts, in `messages` (whose last `n - cut`
+    // are the transcript's from the cut on).
+    let offset = messages.len().saturating_sub(n - cut);
+    let from = match mine {
+        Some(k) if others(k + 1) => offset + (k - cut) + 1,
+        // Its own replies are all before the summary's cut, or there are
+        // none: the summary and all after it.
+        None if others(cut) => 0,
+        _ => return vec![],
+    };
+    let mut out: Vec<Value> = messages[from.min(messages.len())..].to_vec();
+    // The newest user turns' text and pictures go as the message itself.
+    let last = out.iter().rposition(|m| m["role"] == "assistant").map_or(0, |i| i + 1);
+    for m in &mut out[last..] {
+        if let Some(c) = m["content"].as_array_mut() {
+            c.retain(|b| !oak::is(b, "text") && !oak::is(b, "image"));
+        }
+    }
+    // Results of calls made before (its own model's).
+    let calls: std::collections::HashSet<String> = out
+        .iter()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|b| oak::is_call(b))
+        .filter_map(|b| b["id"].as_str().map(String::from))
+        .collect();
+    for m in &mut out {
+        if let Some(c) = m["content"].as_array_mut() {
+            c.retain(|b| !oak::is_result(b) || b["call_id"].as_str().is_some_and(|id| calls.contains(id)));
+        }
+    }
+    out.retain(|m| m["content"].as_array().is_none_or(|c| !c.is_empty()));
+    out
+}
+
+/// The transcript as `provider` can take it, so a conversation moves
+/// between providers seamlessly:
+/// - reasoning another provider wrote is left out, as its signature means
+///   nothing to this one (Claude refuses a thinking block it didn't sign;
+///   Codex's reasoning rides in the signature). Within a provider it stays:
+///   Claude models read each other's, as Codex models do;
+/// - a Quick snippet's own call (`quick::QUIET_KEY`) and its result are left
+///   out for any other provider: the Oak calls it ran are in the transcript
+///   on their own, with their results, and the snippet's tool is Quick's;
+/// - the Freebuff call an Oak call was made from (`freebuff_tools::KEY`, in
+///   its input) goes to Freebuff alone.
+///
+/// A message left with nothing says so in a line, so the turn still has
+/// content. Borrowed as it is when nothing is left out.
 fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow<'_, [Value]> {
+    let quick = provider == api::Provider::Quick;
+    let freebuff = provider == api::Provider::Freebuff;
     let foreign =
         |b: &Value| oak::is_reasoning(b) && b["by"].as_str().is_some_and(|by| by != provider.id());
+    let quiet = |b: &Value| !quick && oak::is_call(b) && b[crate::quick::QUIET_KEY] == true;
+    let wrapped = |b: &Value| {
+        !freebuff && oak::is_call(b) && b["input"].get(crate::freebuff_tools::KEY).is_some()
+    };
+    let touched = |b: &Value| foreign(b) || quiet(b) || wrapped(b);
     let has = |m: &Value| {
         m["role"] == "assistant"
             && m["content"]
                 .as_array()
-                .is_some_and(|c| c.iter().any(foreign))
+                .is_some_and(|c| c.iter().any(touched))
     };
     if !messages.iter().any(has) {
         return std::borrow::Cow::Borrowed(messages);
     }
+    // The snippets' calls, whose results go with them.
+    let snippets: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|b| quiet(b))
+        .filter_map(|b| b["id"].as_str())
+        .collect();
+    let snippet_result =
+        |b: &Value| oak::is_result(b) && b["call_id"].as_str().is_some_and(|id| snippets.contains(id));
     let mut out = messages.to_vec();
-    for m in out.iter_mut().filter(|m| has(m)) {
-        let content = m["content"].as_array_mut().unwrap();
-        content.retain(|b| !foreign(b));
-        if content.is_empty() {
-            content.push(oak::text("(No reply text.)"));
+    for m in out.iter_mut() {
+        let assistant = m["role"] == "assistant";
+        let Some(content) = m["content"].as_array_mut() else {
+            continue;
+        };
+        let before = content.len();
+        if assistant {
+            content.retain(|b| !foreign(b) && !quiet(b));
+            for b in content.iter_mut().filter(|b| wrapped(b)) {
+                if let Some(o) = b["input"].as_object_mut() {
+                    o.remove(crate::freebuff_tools::KEY);
+                }
+            }
+        } else if !snippets.is_empty() {
+            content.retain(|b| !snippet_result(b));
+        }
+        if content.is_empty() && before > 0 {
+            content.push(oak::text(if assistant {
+                "(No reply text.)"
+            } else {
+                "(empty)"
+            }));
         }
     }
     std::borrow::Cow::Owned(out)
@@ -3280,6 +3409,9 @@ fn summary_request_for(
 ) -> oak::Request {
     let mut request = body.clone();
     request.messages = summary_messages(c, body.provider, n, cut);
+    // (A provider that keeps the conversation itself reads the summary's
+    // instruction alone: what its thread lacks isn't what is summarized.)
+    request.unseen.clear();
     if request.ttl == oak::Ttl::OneHour {
         request.ttl = oak::Ttl::FiveMinutes;
     }

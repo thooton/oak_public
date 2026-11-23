@@ -157,15 +157,25 @@ fn request_conversion_system_cap_schemas_and_signatures() {
     assert_eq!(body["request"]["labels"]["used_claude"], "false");
     assert!(body["request"]["labels"].get("last_execution_id").is_some());
 
-    // 2. Unsigned tool_call on Gemini 3+ is degraded to text observation (no unsigned functionCall).
+    // 2. Another model's calls on Gemini 3+ (after a switch): real function
+    // calls, the first of the step with Google's stand-in signature, and
+    // their results as function responses (not text the model would imitate).
     let mut unsigned = req.clone();
     unsigned.messages[1] = json!({"role": "assistant", "content": [
-        {"type": "tool_call", "id": "c1", "name": "READ", "input": {"path": "a.rs"}}
+        {"type": "reasoning", "text": "Claude's thought", "sig": "EqQB", "by": "claude"},
+        {"type": "tool_call", "id": "c1", "name": "READ", "input": {"path": "a.rs"}},
+        {"type": "tool_call", "id": "c2", "name": "READ", "input": {"path": "b.rs"}}
     ]});
     let ub = wire::request_body_for(&unsigned, "proj-1", "gemini-3.8-flash-high", 0, 1_700_000_000_000);
-    let s = ub["request"]["contents"].to_string();
-    assert!(!s.contains("\"functionCall\""), "unsigned tool call must not be sent as functionCall: {s}");
-    assert!(s.contains("[Observation from `READ`"), "degraded observation expected: {s}");
+    let contents = &ub["request"]["contents"];
+    let s = contents.to_string();
+    assert!(!s.contains("Observation from") && !s.contains("Claude's thought"), "{s}");
+    let calls = contents[1]["parts"].as_array().unwrap();
+    assert_eq!(calls.len(), 2, "{s}");
+    assert_eq!(calls[0]["functionCall"]["name"], "READ");
+    assert_eq!(calls[0]["thoughtSignature"], "skip_thought_signature_validator");
+    assert!(calls[1].get("thoughtSignature").is_none());
+    assert_eq!(contents[2]["parts"][0]["functionResponse"]["name"], "READ");
 
     // 3. Short system prompt (<= 126 chars) stays in systemInstruction; Claude uses legacy `parameters` allowlist + tool call IDs.
     let claude_req = Request {
