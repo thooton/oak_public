@@ -18,6 +18,7 @@ macro_rules! switch {
 }
 
 mod agent;
+mod antigravity;
 mod api;
 mod approval;
 mod cache_ttl;
@@ -296,6 +297,11 @@ struct App {
     codex_login: Option<codex::Login>,
     codex_paste: String,
     codex_error: Option<String>,
+    /// An Antigravity sign-in under way from Home; the address pasted for it;
+    /// why the last one failed.
+    antigravity_login: Option<antigravity::Login>,
+    antigravity_paste: String,
+    antigravity_error: Option<String>,
     sessions: HashMap<String, Session>,
     /// When the sessions' messages were last swept (`agent::forget_messages`).
     messages_swept: Option<std::time::Instant>,
@@ -541,7 +547,7 @@ impl App {
     /// Fetches every account's usage now and then: every two minutes,
     /// after a rotation, or sooner when `fetched` is cleared.
     fn refresh_account(&self, ctx: &egui::Context) {
-        let services = (openrouter::on(), codex::on(), freebuff::on(), local::on(), nodeclub::on(), refuseless::on(), musecode::on());
+        let services = [openrouter::on(), codex::on(), antigravity::on(), freebuff::on(), local::on(), nodeclub::on(), refuseless::on(), musecode::on()];
         let mut a = self.account.lock().unwrap();
         // The first fetch can come before the vault's accounts
         // have: an account arriving (or added) fetches the list again.
@@ -578,6 +584,9 @@ impl App {
             refuseless::model(id).map(|m| m.name),
             musecode::model(id).map(|m| m.name),
         ];
+        if antigravity::serves(id) {
+            return antigravity::model_name(id);
+        }
         if local::serves(id) {
             return local::model_name(id);
         }

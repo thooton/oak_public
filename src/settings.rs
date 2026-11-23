@@ -558,6 +558,49 @@ impl App {
         done
     }
 
+    /// Signing in to Antigravity from Home: listens on localhost:51121, with a
+    /// field for pasting the callback URL if the browser cannot reach it.
+    /// True once signed in.
+    pub(crate) fn antigravity_add_box(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
+        let Some(login) = self.antigravity_login.take() else { return false };
+        let (mut done, mut keep) = (false, true);
+        match antigravity::login_result(&login) {
+            Some(Ok(())) => done = true,
+            Some(Err(e)) => self.antigravity_error = Some(e),
+            None => ui.ctx().request_repaint_after(Duration::from_millis(300)),
+        }
+        if !done {
+            let (mut add, mut cancel) = (false, false);
+            side_box(ui, t, w, |ui| {
+                sign_in_heading(ui, t, "Add Antigravity account", &login.url);
+                let edit = TextEdit::singleline(&mut self.antigravity_paste).id(Id::unique("add-antigravity-address")).hint_text("Callback URL");
+                (add, cancel) = add_field(ui, t, edit, None, self.antigravity_error.as_ref(), |ui| {
+                    if login.listening {
+                        caption(ui, "Waiting for Google sign-in…", t.ink3);
+                    } else {
+                        ui.label(RichText::new("Paste the callback URL after sign-in.").small().color(t.ink3))
+                            .on_hover_text("localhost:51121 is unavailable. Copy the callback URL even if the page fails to load.");
+                    }
+                });
+            });
+            if cancel {
+                keep = false;
+            } else if add && !self.antigravity_paste.trim().is_empty() {
+                match antigravity::finish_login(&login, &self.antigravity_paste) {
+                    Ok(()) => done = true,
+                    Err(e) => self.antigravity_error = Some(e),
+                }
+            }
+        }
+        if done || !keep {
+            self.antigravity_paste.clear();
+            self.antigravity_error = None;
+        } else {
+            self.antigravity_login = Some(login);
+        }
+        done
+    }
+
     /// Adding the user's own llama.cpp server from Home: its address (the
     /// launcher's `--port`). True once added.
     pub(crate) fn local_add_box(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
@@ -729,10 +772,10 @@ enum Conn {
     Off,
 }
 
-/// The connections Settings lists: Claude, Codex, OpenRouter, Muse Code, NodeClub,
-/// Freebuff, Refuseless and the local llama.cpp server, how each is, and what its dot's
+/// The connections Settings lists: Claude, Codex, Antigravity, OpenRouter, Muse Code,
+/// NodeClub, Freebuff, Refuseless and the local llama.cpp server, how each is, and what its dot's
 /// hover says.
-fn connections() -> [(&'static str, Conn, String); 8] {
+fn connections() -> [(&'static str, Conn, String); 9] {
     let kept = |remote: bool| if remote { " (shared)" } else if api::vault_on() { " (on this machine)" } else { "" };
     let accounts = api::accounts();
     let claude = if accounts.is_empty() {
@@ -750,6 +793,16 @@ fn connections() -> [(&'static str, Conn, String); 8] {
             None => {
                 let who: Vec<&str> = [a.email.as_str(), a.plan.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
                 (Conn::Ok, format!("{}{}", if who.is_empty() { "Signed in".to_string() } else { who.join(", ") }, kept(codex::remote())))
+            }
+        },
+    };
+    let agy = match antigravity::account() {
+        None => (Conn::Off, "No Antigravity account: add one on Home.".to_string()),
+        Some(a) => match a.error.filter(|_| a.limits.is_empty()) {
+            Some(e) => (Conn::Failing, e),
+            None => {
+                let who: Vec<&str> = [a.email.as_str(), a.plan.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
+                (Conn::Ok, format!("{}{}", if who.is_empty() { "Signed in".to_string() } else { who.join(", ") }, kept(antigravity::remote())))
             }
         },
     };
@@ -794,7 +847,7 @@ fn connections() -> [(&'static str, Conn, String); 8] {
         None => (Conn::Off, "No local llama.cpp server: add one on Home.".to_string()),
         Some(s) => (Conn::Ok, format!("{}, {}", if s.alias.is_empty() { "llama.cpp" } else { &s.alias }, s.url)),
     };
-    [("Claude", claude.0, claude.1), ("Codex", codex.0, codex.1), ("OpenRouter", router.0, router.1),
+    [("Claude", claude.0, claude.1), ("Codex", codex.0, codex.1), ("Antigravity", agy.0, agy.1), ("OpenRouter", router.0, router.1),
         ("Muse Code", muse.0, muse.1), ("NodeClub", nodeclub.0, nodeclub.1),
         ("Freebuff", freebuff.0, freebuff.1), ("Refuseless", refuseless.0, refuseless.1), ("Local", llama.0, llama.1)]
 }

@@ -1357,6 +1357,22 @@ fn generic_sent(r: &oak::Request) -> Sent {
     (b["system"].clone(), b["tools"].clone(), b["messages"].as_array().unwrap().clone())
 }
 
+fn antigravity_sent(r: &oak::Request) -> Sent {
+    let b = crate::antigravity::request_body(r);
+    let req = &b["request"];
+    let mut contents = req["contents"].as_array().unwrap().clone();
+    // `prefix_only_grows` probes the fork source right after an assistant reply;
+    // Antigravity appends a synthetic user bridge only to satisfy Google's
+    // "cannot end on model turn" wire rule.
+    if r.messages.last().is_some_and(|m| m["role"] == "assistant")
+        && contents.last().is_some_and(|t| t["role"] == "user" && t["parts"][0]["text"].as_str().is_some_and(|s| s.starts_with("Continue the active task")))
+    {
+        contents.pop();
+    }
+    let system = req.get("systemInstruction").cloned().unwrap_or_else(|| contents[0]["parts"][0].clone());
+    (system, req["tools"].clone(), contents)
+}
+
 /// `b` sends all `a` sent, unchanged, at its start (where they differ,
 /// briefly).
 fn assert_starts_with(a: &Sent, b: &Sent, what: &str) {
@@ -1545,6 +1561,12 @@ fn the_prefix_only_grows_on_codex() {
 fn the_prefix_only_grows_where_system_messages_cant_go() {
     let conv = Conversation { provider: Some(crate::providers::Kind::OpenRouter), model: "openai/gpt-5".into(), ..Default::default() };
     prefix_only_grows("prefix-generic", conv, "deepseek/deepseek-v4-flash", generic_sent);
+}
+
+#[test]
+fn the_prefix_only_grows_on_antigravity() {
+    let conv = Conversation { provider: Some(crate::providers::Kind::Antigravity), model: "antigravity/gemini-3.8-flash".into(), ..Default::default() };
+    prefix_only_grows("prefix-antigravity", conv, "antigravity/gemini-3.1-pro", antigravity_sent);
 }
 
 /// NOTE with the notes' limit at `limit` tokens on this thread (100 tokens:
@@ -1747,6 +1769,8 @@ fn group_pause_picks_by_model() {
         ("sol", "gpt-6.1-sol", Kind::Codex),
         ("gpt", "gpt-6.1-sol", Kind::Codex),
         ("codex", "gpt-6.1-sol", Kind::Codex),
+        ("antigravity", "antigravity/gemini-3.8-flash", Kind::Antigravity),
+        ("gemini", "antigravity/gemini-3.8-flash", Kind::Antigravity),
         ("claude", "claude-sonnet-5", Kind::Claude),
     ] {
         assert!(on_model(word, model, kind), "{word} {model}");

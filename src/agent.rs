@@ -261,6 +261,9 @@ pub fn efforts(model: &str) -> Vec<&'static str> {
     if let Some(m) = crate::codex::model(model) {
         return m.efforts.to_vec();
     }
+    if crate::antigravity::serves(model) {
+        return crate::antigravity::efforts(model);
+    }
     if let Some(m) = crate::freebuff::model(model) {
         return m.efforts.to_vec();
     }

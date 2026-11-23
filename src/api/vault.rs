@@ -102,8 +102,9 @@ fn forget_vault() {
         a.save();
     }
     drop(a);
-    // The Codex logins and the keys from the vault go too.
+    // The Codex and Antigravity logins and the keys from the vault go too.
     crate::codex::forget_remote();
+    crate::antigravity::forget_remote();
     crate::openrouter::KEYS.forget_remote();
     crate::nodeclub::KEYS.forget_remote();
     crate::refuseless::KEYS.forget_remote();

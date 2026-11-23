@@ -35,7 +35,7 @@ pub(crate) fn haiku() -> Option<String> {
 /// is no Haiku. Also returns what it cost through OpenRouter (dollars).
 pub(crate) fn title_for(text: &str, model: &str) -> (Option<String>, f64) {
     let text: String = text.head(4000);
-    let elsewhere = crate::openrouter::serves(model) || crate::codex::serves(model) || crate::nodeclub::serves(model) || crate::refuseless::serves(model) || crate::musecode::serves(model);
+    let elsewhere = crate::openrouter::serves(model) || crate::codex::serves(model) || crate::antigravity::serves(model) || crate::nodeclub::serves(model) || crate::refuseless::serves(model) || crate::musecode::serves(model);
     let mut tries: Vec<(String, Option<&str>)> = vec![];
     if crate::openrouter::on() {
         tries.push((crate::openrouter::title_models()[0].to_string(), None));

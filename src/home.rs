@@ -334,7 +334,7 @@ impl App {
                     crate::widgets::error_note(ui, t, e);
                 }
                 // Logins kept on this machine though meant for the vault.
-                for note in [codex::note(), openrouter::KEYS.note(), crate::nodeclub::KEYS.note(), crate::refuseless::KEYS.note(), crate::musecode::KEYS.note(), freebuff::note()].into_iter().flatten() {
+                for note in [codex::note(), antigravity::note(), openrouter::KEYS.note(), crate::nodeclub::KEYS.note(), crate::refuseless::KEYS.note(), crate::musecode::KEYS.note(), freebuff::note()].into_iter().flatten() {
                     caption(ui, &note, t.ink3);
                 }
                 if busy {
@@ -391,6 +391,7 @@ impl App {
     /// A form adding an account is open (it takes the place of the button).
     fn adding_form_open(&self) -> bool {
         self.codex_login.is_some()
+            || self.antigravity_login.is_some()
             || self.adding_local
             || self.adding_openrouter.open
             || self.adding_nodeclub.open
@@ -428,6 +429,8 @@ impl App {
         // True once added.
         let added = if self.codex_login.is_some() {
             Some(self.codex_add_box(ui, t, w))
+        } else if self.antigravity_login.is_some() {
+            Some(self.antigravity_add_box(ui, t, w))
         } else if self.adding_local {
             Some(self.local_add_box(ui, t, w))
         } else if self.adding_openrouter.open {
@@ -475,6 +478,11 @@ impl App {
                 let login = codex::start_login();
                 let _ = open::that(&login.url);
                 self.codex_login = Some(login);
+            }
+            Add::Antigravity => {
+                let login = antigravity::start_login();
+                let _ = open::that(&login.url);
+                self.antigravity_login = Some(login);
             }
             Add::OpenRouter => self.adding_openrouter.open = true,
             Add::NodeClub => self.adding_nodeclub.open = true,
@@ -535,6 +543,7 @@ impl App {
 enum Add {
     Claude,
     Codex,
+    Antigravity,
     OpenRouter,
     NodeClub,
     Freebuff,
@@ -559,6 +568,7 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
     let remote = if shared { format!(" Shared through {}.", api::vault_name()) } else { String::new() };
     for (provider, label, tip, add) in [
         (Provider::Codex, "Codex account", "ChatGPT plan, Codex models.", Add::Codex),
+        (Provider::Antigravity, "Antigravity account", "Google Antigravity (Gemini, Claude, GPT-OSS), sign in with Google.", Add::Antigravity),
         (Provider::OpenRouter, "OpenRouter API key", "OpenRouter, pay per token.", Add::OpenRouter),
         (Provider::MuseCode, "Muse Code API key", "Meta's Muse models (Wonder, Spark, Ember), as Muse Code runs them: a Meta Model API key, pay per token.", Add::MuseCode),
         (Provider::NodeClub, "NodeClub API key", "NodeClub, OpenAI-compatible API (Qwen).", Add::NodeClub),
@@ -590,7 +600,7 @@ pub(crate) struct AccountState {
     /// Whether there were an OpenRouter key and a Codex login when the
     /// models were last listed: a sync with the vault that
     /// brings or takes one lists them again.
-    pub(crate) services: Option<(bool, bool, bool, bool, bool, bool, bool)>,
+    pub(crate) services: Option<[bool; 8]>,
     /// Whether a Claude account was there last time: the model list is
     /// asked for again when one arrives.
     pub(crate) claude: Option<bool>,
@@ -706,6 +716,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
             Ok(())
         }
         AccountAct::Remove(Provider::Codex, id) => codex::sign_out(&id),
+        AccountAct::Remove(Provider::Antigravity, id) => antigravity::sign_out(&id),
         AccountAct::Remove(Provider::OpenRouter, id) => openrouter::KEYS.remove(&id),
         AccountAct::Remove(Provider::NodeClub, id) => crate::nodeclub::KEYS.remove(&id),
         AccountAct::Remove(Provider::Refuseless, id) => crate::refuseless::KEYS.remove(&id),
@@ -723,6 +734,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
         AccountAct::Move(p, ids) => ids.iter().try_for_each(|id| match p {
             Provider::Claude => api::move_to_vault(id.parse().map_err(|_| "No such account.".to_string())?),
             Provider::Codex => codex::move_to_vault(id),
+            Provider::Antigravity => antigravity::move_to_vault(id),
             Provider::OpenRouter => openrouter::KEYS.move_to_vault(id),
             Provider::NodeClub => crate::nodeclub::KEYS.move_to_vault(id),
             Provider::Refuseless => crate::refuseless::KEYS.move_to_vault(id),
@@ -848,6 +860,14 @@ fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &
             let remove = if paired { "Sign out (every machine)" } else { "Sign out" };
             for (id, a) in codex::accounts() {
                 let movable = codex::movable(&id);
+                let status = status(&id, movable);
+                account_card(ui, t, w, (p, &id), movable, remove, busy, act, |ui, t, w| usage_panel(ui, t, Some(&a), status.as_deref(), false, w));
+            }
+        }
+        Provider::Antigravity => {
+            let remove = if paired { "Sign out (every machine)" } else { "Sign out" };
+            for (id, a) in antigravity::accounts() {
+                let movable = antigravity::movable(&id);
                 let status = status(&id, movable);
                 account_card(ui, t, w, (p, &id), movable, remove, busy, act, |ui, t, w| usage_panel(ui, t, Some(&a), status.as_deref(), false, w));
             }

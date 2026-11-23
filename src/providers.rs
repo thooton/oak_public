@@ -16,6 +16,10 @@ pub enum Kind {
     /// A ChatGPT plan's Codex models, through its login.
     #[serde(alias = "Codex")]
     Codex,
+    /// Google Antigravity / Cloud Code Assist models (Gemini, Claude, GPT-OSS),
+    /// through a Google sign-in.
+    #[serde(alias = "Antigravity")]
+    Antigravity,
     /// Freebuff's models through its own login.
     #[serde(alias = "Freebuff")]
     Freebuff,
@@ -59,7 +63,7 @@ pub enum Metered {
 
 impl Kind {
     /// Every provider, in the order pickers and Home list them.
-    pub const ALL: [Kind; 10] = [Kind::Claude, Kind::Codex, Kind::OpenRouter, Kind::MuseCode, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Quick, Kind::Local, Kind::Plugin];
+    pub const ALL: [Kind; 11] = [Kind::Claude, Kind::Codex, Kind::Antigravity, Kind::OpenRouter, Kind::MuseCode, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Quick, Kind::Local, Kind::Plugin];
 
     /// Signed in to it: a login or key (for Claude, an account here or a
     /// vault, which has them).
@@ -68,6 +72,7 @@ impl Kind {
             Kind::Claude => !crate::api::accounts().is_empty() || crate::api::vault_on(),
             Kind::OpenRouter => crate::openrouter::on(),
             Kind::Codex => crate::codex::on(),
+            Kind::Antigravity => crate::antigravity::on(),
             Kind::Freebuff => crate::freebuff::on(),
             Kind::Local => crate::local::on(),
             Kind::NodeClub => crate::nodeclub::on(),
@@ -84,6 +89,7 @@ impl Kind {
             Kind::Claude => "claude",
             Kind::OpenRouter => "openrouter",
             Kind::Codex => "codex",
+            Kind::Antigravity => "antigravity",
             Kind::Freebuff => "freebuff",
             Kind::Local => "local",
             Kind::NodeClub => "nodeclub",
@@ -105,6 +111,7 @@ impl Kind {
             Kind::Claude => "Claude",
             Kind::OpenRouter => "OpenRouter",
             Kind::Codex => "Codex",
+            Kind::Antigravity => "Antigravity",
             Kind::Freebuff => "Freebuff",
             Kind::Local => "Local",
             Kind::NodeClub => "NodeClub",
@@ -117,7 +124,7 @@ impl Kind {
 
     pub fn metered(self) -> Metered {
         match self {
-            Kind::Claude | Kind::Codex | Kind::Quick => Metered::Limits,
+            Kind::Claude | Kind::Codex | Kind::Antigravity | Kind::Quick => Metered::Limits,
             Kind::OpenRouter | Kind::Refuseless => Metered::Credits,
             Kind::MuseCode => Metered::Spent,
             Kind::NodeClub | Kind::Freebuff | Kind::Local | Kind::Plugin => Metered::Free,
@@ -131,6 +138,8 @@ impl Kind {
     pub fn of(model: &str) -> Kind {
         if crate::provided::serves(model) {
             Kind::Plugin
+        } else if crate::antigravity::serves(model) {
+            Kind::Antigravity
         } else if crate::openrouter::routed(model) {
             Kind::OpenRouter
         } else if crate::codex::serves(model) {

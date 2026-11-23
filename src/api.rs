@@ -242,6 +242,7 @@ pub fn rotation_on() -> bool {
 /// in step with the vault's (they are kept there too).
 fn sync_other_logins() {
     crate::codex::sync();
+    crate::antigravity::sync();
     crate::openrouter::KEYS.sync();
     crate::nodeclub::KEYS.sync();
     crate::refuseless::KEYS.sync();
@@ -306,6 +307,7 @@ pub fn load_auth() -> bool {
     // Quick's login (quick.json): its refresh token is what lasts.
     crate::quick::login::load();
     let codex = crate::codex::load();
+    let antigravity = crate::antigravity::load();
     // Freebuff's token, and its balances in the background: it is a separate
     // service, so it does not count as being signed in to Oak.
     if crate::freebuff::load() {
@@ -316,7 +318,7 @@ pub fn load_auth() -> bool {
     if local {
         std::thread::spawn(crate::local::refresh);
     }
-    let ok = !a.list.is_empty() || openrouter || nodeclub || refuseless || musecode || codex || local;
+    let ok = !a.list.is_empty() || openrouter || nodeclub || refuseless || musecode || codex || antigravity || local;
     *ACCOUNTS.lock().unwrap() = a;
     ok
 }
@@ -387,7 +389,7 @@ pub fn signed_in() -> bool {
 }
 
 fn any_login() -> bool {
-    !ACCOUNTS.lock().unwrap().list.is_empty() || vault_on() || crate::openrouter::on() || crate::nodeclub::on() || crate::refuseless::on() || crate::musecode::on() || crate::codex::on()
+    !ACCOUNTS.lock().unwrap().list.is_empty() || vault_on() || crate::openrouter::on() || crate::nodeclub::on() || crate::refuseless::on() || crate::musecode::on() || crate::codex::on() || crate::antigravity::on()
 }
 
 /// Why there is no account to send a request through.
@@ -892,6 +894,10 @@ pub fn preamble(model: &str, system: &str, tools: &Value) -> Preamble {
         // OpenRouter is asked first: it also serves the session-title models.
         Provider::OpenRouter | Provider::Local | Provider::MuseCode | Provider::Plugin => plain(system.into(), oak_tools()),
         Provider::Codex => plain(crate::codex::instructions(system), crate::codex::wire_tools(&oak_tools())),
+        Provider::Antigravity => {
+            let (s, t) = crate::antigravity::preamble(model, system, &oak_tools());
+            plain(s, t)
+        }
         Provider::Freebuff => {
             let (system, tools) = crate::freebuff::preamble(model);
             plain(system, tools)
@@ -1312,6 +1318,7 @@ pub fn refresh_accounts() {
     crate::refuseless::refresh();
     crate::musecode::refresh();
     crate::codex::refresh();
+    crate::antigravity::refresh();
     crate::quick::usage::refresh();
     let ids: Vec<u64> = ACCOUNTS.lock().unwrap().list.iter().map(|s| s.id).collect();
     for id in ids {
@@ -1523,6 +1530,7 @@ fn stream(mut req: crate::oak::Request, cont: Option<(String, usize)>, thread: b
     match req.provider {
         Provider::OpenRouter => return crate::openrouter::stream(req, tx),
         Provider::Codex => return crate::codex::stream(req, tx),
+        Provider::Antigravity => return crate::antigravity::stream(req, tx),
         Provider::Freebuff => return crate::freebuff::stream(req, tx),
         Provider::NodeClub => return crate::nodeclub::stream(req, tx),
         Provider::Refuseless => return crate::refuseless::stream(req, tx),

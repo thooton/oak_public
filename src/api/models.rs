@@ -99,6 +99,7 @@ fn provider_models(provider: Provider) -> Vec<Model> {
     match provider {
         Provider::OpenRouter => crate::openrouter::models().into_iter().map(|m| listed(m.id, m.name)).collect(),
         Provider::Codex => crate::codex::MODELS.iter().filter(|m| m.listed).map(|m| listed(m.id, m.name)).collect(),
+        Provider::Antigravity => crate::antigravity::models().into_iter().map(|m| Model { id: m.id, name: m.name, provider }).collect(),
         Provider::Freebuff => crate::freebuff::MODELS.iter().map(|m| listed(m.id, m.name)).collect(),
         Provider::Local => crate::local::model_id().map(|id| Model { name: crate::local::model_name(&id), id, provider }).into_iter().collect(),
         Provider::Plugin => crate::provided::models().into_iter().map(|m| Model { name: m.name, id: m.id, provider }).collect(),
@@ -112,7 +113,11 @@ fn provider_models(provider: Provider) -> Vec<Model> {
 /// A model's name ("Claude Opus 5.5"), as far as it is known; else its id.
 pub fn model_name(id: &str) -> String {
     let known = sale(id).map(|m| m.name.to_string());
-    if let Some(name) = known.or_else(|| crate::local::serves(id).then(|| crate::local::model_name(id))).or_else(|| crate::provided::model(id).map(|m| m.name)) {
+    if let Some(name) = known
+        .or_else(|| crate::antigravity::serves(id).then(|| crate::antigravity::model_name(id)))
+        .or_else(|| crate::local::serves(id).then(|| crate::local::model_name(id)))
+        .or_else(|| crate::provided::model(id).map(|m| m.name))
+    {
         return name;
     }
     KNOWN.lock().unwrap().models.iter().find(|m| m.id == id).map_or(id.to_string(), |m| m.name.clone())
@@ -120,7 +125,12 @@ pub fn model_name(id: &str) -> String {
 
 /// The model's context window (tokens), when known.
 pub fn context_window(model: &str) -> Option<u64> {
-    sale(model).map(|m| m.context).or_else(|| crate::local::serves(model).then(|| crate::local::context(model))).or_else(|| crate::provided::model(model).map(|m| m.context)).or_else(|| KNOWN.lock().unwrap().context.get(model).copied())
+    sale(model)
+        .map(|m| m.context)
+        .or_else(|| crate::antigravity::serves(model).then(|| crate::antigravity::context_window(model)).flatten())
+        .or_else(|| crate::local::serves(model).then(|| crate::local::context(model)))
+        .or_else(|| crate::provided::model(model).map(|m| m.context))
+        .or_else(|| KNOWN.lock().unwrap().context.get(model).copied())
 }
 
 /// The effort levels a Claude model takes, as the Models API last listed
@@ -150,7 +160,11 @@ pub const DEFAULT_MAX_OUTPUT: u64 = 32_000;
 /// stops at the window). Until the model list has come in, Claude Code's
 /// default for models it doesn't know.
 pub fn max_output(model: &str) -> u64 {
-    let own = sale(model).and_then(|m| m.max_output).or_else(|| crate::local::serves(model).then(|| crate::local::max_output(model))).or_else(|| crate::provided::model(model).map(|m| m.max_output));
+    let own = sale(model)
+        .and_then(|m| m.max_output)
+        .or_else(|| crate::antigravity::serves(model).then(|| crate::antigravity::max_output(model)))
+        .or_else(|| crate::local::serves(model).then(|| crate::local::max_output(model)))
+        .or_else(|| crate::provided::model(model).map(|m| m.max_output));
     own.unwrap_or_else(|| KNOWN.lock().unwrap().max_output.get(model).copied().unwrap_or(DEFAULT_MAX_OUTPUT))
 }
 

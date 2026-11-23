@@ -558,6 +558,7 @@ fn model_list(models: &[crate::api::Model]) -> String {
             let head = match p {
                 Provider::OpenRouter => "Via OpenRouter, paid per token (:free ones free but rate-limited), far cheaper, for bulk or simple work",
                 Provider::Codex => "OpenAI, on the user's ChatGPT plan",
+                Provider::Antigravity => "Google Antigravity (Gemini, Claude, GPT-OSS), on the user's Google account",
                 Provider::Freebuff => "Freebuff, billed in hours, a pipe with its own agent that can't start subagents",
                 Provider::Local => "The user's own server",
                 Provider::NodeClub => "NodeClub, an OpenAI-compatible API",

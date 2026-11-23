@@ -15,6 +15,7 @@ pub(crate) fn logo(ctx: &egui::Context, p: Kind) -> egui::TextureHandle {
     let bytes: &[u8] = match p {
         Kind::Claude => include_bytes!("../assets/logo-claude.png"),
         Kind::Codex => include_bytes!("../assets/logo-codex.png"),
+        Kind::Antigravity => include_bytes!("../assets/logo-antigravity.png"),
         Kind::OpenRouter => include_bytes!("../assets/logo-openrouter.png"),
         Kind::NodeClub => include_bytes!("../assets/logo-nodeclub.png"),
         Kind::Freebuff => include_bytes!("../assets/logo-freebuff.png"),
@@ -264,6 +265,7 @@ pub(crate) fn shown(p: Kind) -> Shown {
         Metered::Limits => {
             let all: Vec<api::Account> = match p {
                 Kind::Codex => codex::accounts().into_iter().map(|(_, a)| a).collect(),
+                Kind::Antigravity => crate::antigravity::accounts().into_iter().map(|(_, a)| a).collect(),
                 _ => api::accounts(),
             };
             // API keys have no limits.
@@ -286,6 +288,7 @@ pub(crate) fn account_count(p: Kind) -> usize {
     match p {
         Kind::Claude => api::accounts().len(),
         Kind::Codex => codex::accounts().len(),
+        Kind::Antigravity => crate::antigravity::accounts().len(),
         Kind::OpenRouter => openrouter::accounts().len(),
         Kind::NodeClub => crate::nodeclub::accounts().len(),
         Kind::Freebuff => crate::freebuff::accounts().len(),

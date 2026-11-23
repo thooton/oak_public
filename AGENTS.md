@@ -3,6 +3,7 @@
 A coding agent for Windows and Linux, written in Rust with [egui](https://github.com/emilk/egui).
 Each conversation works in a folder you choose, with a model from one of Oak's providers: Claude
 (a subscription login or an API key), the GPT models a ChatGPT plan includes for Codex,
+Google Antigravity (`src/antigravity/`: Gemini, Claude and GPT-OSS models over Google OAuth and Cloud Code Assist),
 OpenRouter, Muse Code (Meta's Muse models through a Meta Model API key, `src/musecode.rs`), NodeClub,
 Freebuff, Refuseless (abliterated GLM 5.3 Flash and DeepSeek V4.1 Flash), AWS Quick (`src/quick.rs`: Amazon
 Quick's own agent, over its OIDC sign-in and chat WebSocket), a llama.cpp server of
@@ -156,7 +157,7 @@ request sends them (from the summary's cut on). Messages on disk as they are are
 when nothing needs them (`agent::forget_messages`: all of a conversation not shown for ten
 minutes, else those well above its view; never while it works). A save writes only the
 messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `code-mode/` (each Code Mode conversation's saved REPL context), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
-login files (`accounts.json`, `codex.json`, `openrouter.json`, `nodeclub.json`,
+login files (`accounts.json`, `codex.json`, `antigravity.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`,
 `quick.json`;
 owner-only on Linux), `window.json` (the window's

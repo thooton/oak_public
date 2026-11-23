@@ -261,6 +261,14 @@ fn status() -> Value {
             v
         })
         .collect();
+    let antigravity: Vec<Value> = crate::antigravity::accounts()
+        .iter()
+        .map(|(key, a)| {
+            let mut v = account_json(a);
+            v["id"] = json!(key);
+            v
+        })
+        .collect();
     let now = crate::api::now_ms();
     let nodeclub: Vec<Value> = crate::nodeclub::KEYS
         .list()
@@ -273,6 +281,7 @@ fn status() -> Value {
         "version": crate::update::VERSION,
         "claude": claude,
         "codex": codex,
+        "antigravity": antigravity,
         "nodeclub": nodeclub,
         "freebuff": freebuff,
         "local": crate::local::on(),
@@ -302,10 +311,10 @@ fn request_of(b: &Value) -> Result<(Request, Option<String>, u32), String> {
     // seats the conversation there, warm for an hour, so rotation keeps it there while the
     // account can make requests (the caller keeps each account under its own usage caps).
     let account = b["account"].as_str().map(str::to_string).or_else(|| b["account"].as_u64().map(|n| n.to_string()));
-    if let (Some(acc), Some(c)) = (&account, &conv) {
-        if matches!(provider, crate::providers::Kind::Claude | crate::providers::Kind::Codex) {
-            crate::rotation::used(provider, c, acc, 3_600_000, crate::api::now_ms());
-        }
+    if let (Some(acc), Some(c)) = (&account, &conv)
+        && matches!(provider, crate::providers::Kind::Claude | crate::providers::Kind::Codex | crate::providers::Kind::Antigravity)
+    {
+        crate::rotation::used(provider, c, acc, 3_600_000, crate::api::now_ms());
     }
     let r = Request {
         provider,

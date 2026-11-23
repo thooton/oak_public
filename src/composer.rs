@@ -737,6 +737,12 @@ fn account_box(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &Set
             let mine = seat(api::Provider::Codex).and_then(|id| all.iter().find(|a| a.0 == id)).or(all.first()).map(|a| &a.1);
             usage_panel(ui, t, mine, None, false, w).on_hover_text("ChatGPT plan, Codex usage")
         }
+        // An Antigravity model: the Google account's Antigravity quota.
+        api::Provider::Antigravity => {
+            let all = crate::antigravity::accounts();
+            let mine = seat(api::Provider::Antigravity).and_then(|id| all.iter().find(|a| a.0 == id)).or(all.first()).map(|a| &a.1);
+            usage_panel(ui, t, mine, None, false, w).on_hover_text("Google Antigravity quota")
+        }
         // A Freebuff model: the account it goes through.
         api::Provider::Freebuff => {
             let all = freebuff::accounts();
