@@ -1125,6 +1125,20 @@ impl<'scope, 'env> Batch<'scope, 'env> {
         self.results.push(None);
     }
 
+    /// A call that ran already, with its result (`result`, a `tool_result`
+    /// block): it counts as done, and its result joins the transcript with
+    /// the others.
+    pub(crate) fn provided(&mut self, call: Value, result: Value) {
+        self.calls.push(call);
+        self.dirty = true;
+        self.started.push(true);
+        self.running.push(None);
+        // The caller holds `live` locked (a reply's events are applied
+        // under it) and keeps the result with the reply's early ones
+        // (`Live::early`); delivering it here would lock `live` again.
+        self.results.push(Some(result));
+    }
+
     pub(crate) fn any_started(&self) -> bool {
         self.started.iter().any(|&s| s)
     }

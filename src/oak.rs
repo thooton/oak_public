@@ -246,6 +246,10 @@ pub mod stop {
     /// own loop, and Oak runs the tools as they are asked for, so nothing is
     /// left for Oak's loop to run.)
     pub const COMPLETE: &str = "complete";
+    /// Quick took in a message the user typed while its turn ran: the reply
+    /// so far is done (its calls run and answered), the message goes in after
+    /// it, and the next request reads on in Quick's same turn.
+    pub const STEERED: &str = "steered";
 }
 
 /// What a provider's stream says, in Oak's terms.

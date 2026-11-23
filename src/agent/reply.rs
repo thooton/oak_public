@@ -167,8 +167,27 @@ impl Streaming {
                     }
                 }
                 if oak::is_call(b) {
-                    finish_call(b);
-                    batch.add(b.clone());
+                    // A call its provider already ran (Quick asks Oak to run
+                    // its tools as it goes) comes with its result: that goes
+                    // in the transcript, and the call isn't run again.
+                    let ran = b.as_object_mut().and_then(|o| o.remove("_oak_result"));
+                    match ran {
+                        Some(result) => {
+                            // `l` is locked already: the result is held with
+                            // the reply's early results, which go in the
+                            // transcript after it (delivering it here would
+                            // lock `live` again, and hang).
+                            let call = b.clone();
+                            if let Some(held) = l.early.as_mut() {
+                                held.push(result.clone());
+                            }
+                            batch.provided(call, result);
+                        }
+                        None => {
+                            finish_call(b);
+                            batch.add(b.clone());
+                        }
+                    }
                 }
             }
             Event::Start { id, .. } => {
@@ -414,6 +433,7 @@ impl Worker {
         self.set(|l| l.requesting = true);
         let reply = self.ask_inner(batch);
         self.end_request();
+        self.settle_steers();
         // Cut short (or refused) once tool calls had started: the reply is
         // kept up to the last of them, which go on, and the turn carries on
         // from their results.
@@ -450,6 +470,44 @@ impl Worker {
         }
     }
 
+    /// The thread of a Quick request's turn, which takes in the messages
+    /// typed while it runs (`steer_quick`); None for any other provider, or
+    /// with `OAK_QUICK_STEER=off`.
+    fn steers_to(&self) -> Option<String> {
+        if std::env::var("OAK_QUICK_STEER").as_deref() == Ok("off") {
+            return None;
+        }
+        let r = self.last_request.lock().unwrap();
+        let (body, ..) = r.as_ref()?;
+        if body.provider != api::Provider::Quick {
+            return None;
+        }
+        body.conv.clone()
+    }
+
+    /// Hands the messages queued meanwhile to the Quick turn on `thread`,
+    /// as Quick's app does: its agent takes each in at its next step. They
+    /// stay queued (shown as sent) till Quick says it took them in.
+    fn steer_quick(&self, thread: &str) {
+        let mut l = self.live.lock().unwrap();
+        for q in l.queued.iter_mut().filter(|q| !q.held && !q.steered && !q.text.trim().is_empty()) {
+            q.steered = true;
+            crate::quick::turn::steer(thread, q.id, &q.text);
+        }
+    }
+
+    /// The request is over: the messages Quick took in stay marked so (they
+    /// join the transcript after the reply's results, and no request sends
+    /// them again); the rest go with the next request as messages of their own.
+    fn settle_steers(&self) {
+        let id = self.conv.lock().unwrap().id.clone();
+        let took = crate::quick::turn::take_ingested(&id);
+        let mut l = self.live.lock().unwrap();
+        for q in l.queued.iter_mut().filter(|q| q.steered) {
+            q.steered = took.contains(&q.id);
+        }
+    }
+
     fn ask_inner(&self, batch: &mut Batch) -> Reply {
         // Freebuff's own agent works on a project (its prompt, its tools,
         // the folder's snapshot): no chat goes there.
@@ -460,6 +518,7 @@ impl Worker {
             return Reply::Failed(why);
         }
         let (rx, thread) = self.send_request();
+        let steer = self.steers_to();
         self.set(|l| {
             l.blocks.clear();
             l.status = "Waiting for the model".into();
@@ -482,6 +541,9 @@ impl Worker {
             }
             if self.interrupted() {
                 return Reply::Interrupted;
+            }
+            if let Some(t) = &steer {
+                self.steer_quick(t);
             }
             // Tool calls that streamed in start as soon as they may.
             batch.pump(false, oak::stop::TOOL_CALLS);

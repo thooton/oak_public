@@ -40,10 +40,6 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 pub mod outpost;
-
-/// The device's own data plane, which keeps its outpost online with Quick's
-/// server (see `dataplane`).
-pub mod dataplane;
 pub mod socket;
 pub mod turn;
 pub mod usage;
@@ -768,29 +764,71 @@ fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> 
     json!({"type": "user_message", "payload": payload})
 }
 
-/// The conversation's newest user text: what the user typed, past Oak's own
-/// additions (`_oak_file` blocks, notes), or the last request's instruction
-/// when there is none (a summary).
+/// What the user said since Quick last replied: the text of the user turn
+/// (or turns) after the newest assistant message, past Oak's own additions
+/// (`_oak_file` blocks). Quick keeps the thread's history, so this is all it
+/// is sent. Only that part of the transcript is looked at: when Oak asks
+/// again in the middle of a turn (the stream dropped, a pause or a usage limit
+/// cut it, a retry), the newest user turn holds only the tool results, and
+/// reading on back to an older user turn would send the user's earlier
+/// message again, which Quick's agent then takes for the same message sent
+/// twice. With nothing new it is told to carry on instead. A request with an
+/// instruction of its own (a summary) sends that.
 fn newest_user_text(r: &Request) -> String {
+    if let Some(i) = r.instruction.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+        return i.to_string();
+    }
+    match new_user_text(r) {
+        Some(t) => t,
+        None if r.messages.iter().any(|m| m["role"] == "assistant") => CARRY_ON.into(),
+        None => "Continue.".into(),
+    }
+}
+
+/// The text of the user turns after the newest assistant message, past
+/// Oak's own additions (`_oak_file` blocks) and the messages Quick already
+/// took in mid-turn (`STEERED_KEY`): None when there is none.
+pub(crate) fn new_user_text(r: &Request) -> Option<String> {
+    let mut parts = vec![];
     for m in r.messages.iter().rev() {
+        if m["role"] == "assistant" {
+            break;
+        }
         if m["role"] != "user" {
             continue;
         }
         let Some(blocks) = m["content"].as_array() else { continue };
-        let mut out = String::new();
-        for b in blocks {
-            if b["type"] == "text" && b.get("_oak_file").is_none() {
-                out.push_str(b["text"].as_str().unwrap_or(""));
-                out.push('\n');
-            }
-        }
-        let out = out.trim();
-        if !out.is_empty() {
-            return out.to_string();
-        }
+        let said = |b: &&Value| b["type"] == "text" && b.get("_oak_file").is_none() && b.get(STEERED_KEY).is_none();
+        let text: Vec<&str> = blocks.iter().filter(said).filter_map(|b| b["text"].as_str()).collect();
+        parts.push(text.join("\n"));
     }
-    r.instruction.clone().unwrap_or_else(|| "Continue.".into())
+    parts.reverse();
+    let out = parts.join("\n");
+    let out = out.trim();
+    (!out.is_empty()).then(|| out.to_string())
 }
+
+/// Marks a user message Quick took in while its turn ran (`steering_ingested`):
+/// it is in Quick's history already, so no request sends it again.
+pub(crate) const STEERED_KEY: &str = "_oak_steered";
+
+/// The `user_message` frame for `text`, a message the user typed while the
+/// turn on `thread` runs, sent as Quick's app sends one: `mid_turn`, with a
+/// `message_id` of its own (`id`), which Quick names when its agent takes the
+/// message in at its next step (`steering_ingested`).
+pub(crate) fn steer_message(r: &Request, text: &str, id: &str, thread: &str, m: &Model, outpost: Option<&str>) -> Value {
+    let mut said = r.clone();
+    said.messages = vec![json!({"role": "user", "content": [{"type": "text", "text": text}]})];
+    said.instruction = None;
+    let mut v = user_message(&said, thread, m, outpost);
+    v["payload"]["mid_turn"] = json!(true);
+    v["payload"]["message_id"] = json!(id);
+    v
+}
+
+/// What Quick is sent when Oak asks again in the middle of a turn with
+/// nothing new from the user (only the results of the calls Oak ran).
+pub(crate) const CARRY_ON: &str = "(From Oak, the device that runs your tools.) The connection to you was cut in the middle of your turn. There is no new message from me: carry on with what I asked from where you stopped, without starting over or repeating tool calls that already ran.";
 
 fn hex_uuid() -> String {
     let b: [u8; 16] = rand::random();
@@ -829,6 +867,84 @@ pub(crate) struct Turn {
     /// older message) are not this turn's.
     thread: String,
     message: String,
+    /// Where the text block's current section began (its bytes before it are
+    /// sections Quick has already given whole), and whether Quick has given
+    /// one whole in this message (`text_complete`).
+    section_at: usize,
+    section_given: bool,
+    /// The message's thinking Quick has given whole so far: each
+    /// `thinking_complete` carries all of it, so its newest thought is what
+    /// follows this.
+    thinking_given: String,
+    /// The text blocks this message has opened: Quick's whole text for the
+    /// message stands for its deltas only when there was one.
+    message_texts: usize,
+    /// Where this message's blocks begin (`blocks` before it are an earlier
+    /// message's of the turn): Quick's whole text can run the message's
+    /// earlier text blocks in at its start.
+    message_from: usize,
+    /// The calls of the turn by Quick's report of them (`tool_start`) and
+    /// by the calls Oak runs (`tool_call`): one block for each, whoever runs
+    /// it.
+    quick_calls: Vec<QuickCall>,
+    /// The text this message wrote in the replies Oak read before this one
+    /// (Quick took in a message the user typed and its message went on in a
+    /// new reply, `resume`): Quick's whole text can run it in too.
+    earlier: Vec<String>,
+}
+
+/// A call in the turn: one Quick's agent made (`tool_start`), one Oak runs
+/// (`tool_call`), or both, since Quick reports the calls it hands Oak too.
+#[derive(Default, Clone)]
+struct QuickCall {
+    /// Quick's id for the call (`tool_id`), once Quick has reported it.
+    tool_id: String,
+    /// The call's block.
+    block: usize,
+    /// Oak runs it (a `tool_call` came for it): its result is Oak's, not
+    /// Quick's record of it.
+    device: bool,
+    /// Its block has ended.
+    done: bool,
+}
+
+/// A call's input as Quick gives it: the tool's own arguments, which Quick
+/// nests under `params.arguments` when it hands a call to Oak.
+fn quick_input(p: &Value) -> Value {
+    let nested = &p["arguments"]["params"]["arguments"];
+    let input = if nested.is_null() { &p["arguments"] } else { nested };
+    if input.is_null() { json!({}) } else { input.clone() }
+}
+
+/// Whether `quick` (a tool as Quick's agent called it) and `device` (the
+/// name its call to Oak came with) are one tool: the device's Python is
+/// `run_python_on_device` to the agent and `run_python_outpost_local` to
+/// Oak, and a device's own tools carry its name before theirs.
+fn same_tool(quick: &str, device: &str) -> bool {
+    let plain = |n: &str| n.replace("run_python_on_device", "run_python_outpost_local");
+    let (q, d) = (plain(quick), plain(device));
+    q == d || q.ends_with(&format!("_{d}"))
+}
+
+/// What Quick's record of a call (a `tool_result`) says it returned, or
+/// why it failed.
+fn quick_result(p: &Value) -> Result<String, String> {
+    let said = match &p["result"] {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    let error = match &p["error"] {
+        Value::Null | Value::Bool(false) => None,
+        Value::String(e) if e.trim().is_empty() => None,
+        Value::String(e) => Some(e.clone()),
+        e => Some(e.to_string()),
+    };
+    match error {
+        Some(e) => Err(e),
+        None if p["status"].as_str() == Some("error") || p["is_error"].as_bool() == Some(true) => Err(said),
+        None => Ok(said),
+    }
 }
 
 impl Turn {
@@ -875,6 +991,13 @@ impl Turn {
                     self.awaiting_continuation = false;
                     self.text_at = None;
                     self.text_open = false;
+                    self.section_at = 0;
+                    self.section_given = false;
+                    self.thinking_at = None;
+                    self.thinking_given.clear();
+                    self.message_texts = 0;
+                    self.message_from = self.blocks.len();
+                    self.earlier.clear();
                     true
                 } else {
                     false
@@ -883,31 +1006,55 @@ impl Turn {
         }
     }
 
+    /// The block new text goes in: the text block while nothing has come
+    /// after it, else a new one at the end. Quick sends a whole agent loop
+    /// (thoughts, text, calls, more thoughts, the answer) as one message,
+    /// and the reply grows at its end, as every other provider's does: text
+    /// after a thought or a call is a block below it, never more of the text
+    /// above.
     fn text(&mut self) -> usize {
-        // One text block for the whole message: Quick streams text around
-        // (and between) its tool calls, and the transcript reads better as
-        // one reply than as an interleaving of many.
-        if let Some(i) = self.text_at {
+        if let Some(i) = self.text_at
+            && i + 1 == self.blocks.len()
+        {
             return i;
         }
         let i = self.blocks.len();
         self.blocks.push(json!({"type": "text", "text": ""}));
         self.text_at = Some(i);
+        self.text_open = false;
+        self.section_at = 0;
+        self.message_texts += 1;
         i
     }
 
-    /// The reply's text block has opened in Oak, so its `Text` events have
-    /// somewhere to land. Oak only fills blocks it was told about (`reply`
-    /// drops text for an index it never saw), so the block's `Block` comes
-    /// with the first text, and once: a delta of a block already opened adds
-    /// nothing.
-    fn open_text(&mut self, out: &mut Vec<Event>) {
-        if self.text_open {
-            return;
+    /// The text block new text goes in, opened in Oak, so its `Text` events
+    /// have somewhere to land. Oak only fills blocks it was told about
+    /// (`reply` drops text for an index it never saw), so a block's `Block`
+    /// comes with its first text, and once. A text block something came
+    /// after is done: it ends as the next one opens.
+    fn open_text(&mut self, out: &mut Vec<Event>) -> usize {
+        if let Some(i) = self.text_at.filter(|&i| self.text_open && i + 1 == self.blocks.len()) {
+            return i;
+        }
+        if let Some(i) = self.text_at.filter(|_| self.text_open) {
+            out.push(Event::BlockEnd { index: i });
         }
         let i = self.text();
         self.text_open = true;
         out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+        i
+    }
+
+    /// A new thought at the end of the reply (the one before, if open, ends).
+    fn open_thinking(&mut self, out: &mut Vec<Event>) -> usize {
+        if let Some(i) = self.thinking_at.take() {
+            out.push(Event::BlockEnd { index: i });
+        }
+        let i = self.blocks.len();
+        self.blocks.push(json!({"type": "reasoning", "text": "", "by": "quick"}));
+        self.thinking_at = Some(i);
+        out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+        i
     }
 
     /// The stream's next frame, as Oak's events. `blocks` collects them, and
@@ -924,16 +1071,17 @@ impl Turn {
                 self.started = true;
             }
             "thinking_start" => {
-                let i = self.blocks.len();
-                self.blocks.push(json!({"type": "reasoning", "text": "", "by": "quick"}));
-                self.thinking_at = Some(i);
-                out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                self.open_thinking(&mut out);
             }
             "thinking_delta" => {
                 let text = p["delta"].as_str().unwrap_or("");
-                if !text.is_empty()
-                    && let Some(i) = self.thinking_at
-                {
+                if !text.is_empty() {
+                    // Quick opens only a message's first thought; each later
+                    // one comes as deltas alone, and is a block of its own.
+                    let i = match self.thinking_at {
+                        Some(i) => i,
+                        None => self.open_thinking(&mut out),
+                    };
                     if let Some(t) = self.blocks[i]["text"].as_str().map(str::to_string) {
                         self.blocks[i]["text"] = json!(format!("{t}{text}"));
                     }
@@ -941,15 +1089,30 @@ impl Turn {
                 }
             }
             "thinking_complete" => {
+                // Quick gives all of the message's thinking so far: what
+                // follows the last of it is this thought whole, which stands
+                // for its deltas (some may never have come, or none did).
+                let total = p["thinking"].as_str().unwrap_or("").to_string();
+                let newest = total.strip_prefix(self.thinking_given.as_str()).unwrap_or(&total).trim().to_string();
+                if !total.is_empty() {
+                    self.thinking_given = total.clone();
+                }
+                if self.thinking_at.is_none() && !newest.is_empty() {
+                    self.open_thinking(&mut out);
+                }
                 if let Some(i) = self.thinking_at.take() {
+                    let had = self.blocks[i]["text"].as_str().unwrap_or("").trim().to_string();
+                    if !newest.is_empty() && had != newest {
+                        self.blocks[i]["text"] = json!(newest);
+                        out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                    }
                     out.push(Event::BlockEnd { index: i });
                 }
             }
             "text_delta" => {
                 let text = p["delta"].as_str().unwrap_or("");
                 if !text.is_empty() {
-                    self.open_text(&mut out);
-                    let i = self.text();
+                    let i = self.open_text(&mut out);
                     if let Some(t) = self.blocks[i]["text"].as_str().map(str::to_string) {
                         self.blocks[i]["text"] = json!(format!("{t}{text}"));
                     }
@@ -957,35 +1120,99 @@ impl Turn {
                 }
             }
             "text_complete" | "message_complete" => {
+                // Quick gives the text whole when it ends (a section, then
+                // the message): that is what it wrote, whatever the deltas
+                // made of it, so it replaces them.
                 let text = p["text"].as_str().unwrap_or("");
-                let unseen = self.text_at.is_none_or(|i| self.blocks[i]["text"].as_str() == Some(""));
-                if unseen && !text.is_empty() {
-                    self.open_text(&mut out);
-                    let i = self.text();
-                    self.blocks[i]["text"] = json!(text);
-                    out.push(Event::Text { index: i, text: text.to_string() });
+                let section = kind == "text_complete";
+                if !text.is_empty() && (section || (!self.section_given && self.message_texts <= 1)) {
+                    self.settle_text(text, section, &mut out);
                 }
                 if kind == "message_complete" {
                     // The turn is over: Quick ran its own loop and Oak ran
                     // its tools as it asked, so nothing is left to do.
-                    self.stop = stop::COMPLETE.into();
-                    if let Some(i) = self.text_at.filter(|_| self.text_open) {
-                        out.push(Event::BlockEnd { index: i });
+                    out.extend(self.close(stop::COMPLETE));
+                }
+            }
+            // Quick's report of a call its agent made: shown as it is made,
+            // whether Quick runs it on its server or hands it to Oak (then
+            // the call Oak runs is this block, not one more).
+            "tool_start" => {
+                let id = p["tool_id"].as_str().or(p["tool_call_id"].as_str()).unwrap_or("").to_string();
+                let name = p["tool_name"].as_str().unwrap_or("").to_string();
+                let input = quick_input(p);
+                if !id.is_empty() && !name.is_empty() && !self.quick_calls.iter().any(|c| c.tool_id == id) {
+                    match self.unreported_device_call(&name, &input) {
+                        Some(k) => self.quick_calls[k].tool_id = id,
+                        None => {
+                            if let Some(t) = self.thinking_at.take() {
+                                out.push(Event::BlockEnd { index: t });
+                            }
+                            let i = self.blocks.len();
+                            self.blocks.push(json!({"type": "tool_call", "id": id, "name": name, "input": input}));
+                            out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                            self.quick_calls.push(QuickCall { tool_id: id, block: i, ..Default::default() });
+                        }
                     }
-                    out.push(Event::Stop { reason: self.stop.clone(), detail: None });
+                }
+            }
+            "tool_arguments" => {
+                let id = p["tool_id"].as_str().unwrap_or("");
+                let input = quick_input(p);
+                if let Some(c) = self.quick_calls.iter().find(|c| !id.is_empty() && c.tool_id == id && !c.device && !c.done)
+                    && input.as_object().is_some_and(|o| !o.is_empty())
+                    && self.blocks[c.block]["input"] != input
+                {
+                    let i = c.block;
+                    self.blocks[i]["input"] = input;
+                    out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                }
+            }
+            // What a call Quick ran returned: its block ends with it. Quick
+            // records the calls Oak ran too; those end with Oak's result.
+            "tool_result" => {
+                let id = ["tool_id", "tool_call_id", "tool_use_id", "id"].iter().find_map(|k| p[*k].as_str()).unwrap_or("");
+                if let Some(k) = self.quick_calls.iter().position(|c| !id.is_empty() && c.tool_id == id && !c.device && !c.done) {
+                    let input = quick_input(p);
+                    let i = self.quick_calls[k].block;
+                    if input.as_object().is_some_and(|o| !o.is_empty()) {
+                        self.blocks[i]["input"] = input;
+                    }
+                    self.quick_calls[k].done = true;
+                    let call = self.blocks[i]["id"].as_str().unwrap_or("").to_string();
+                    out.extend(self.end_call(i, &call, &quick_result(p)));
                 }
             }
             "tool_call" => {
                 let id = p["tool_call_id"].as_str().unwrap_or("").to_string();
                 let name = p["tool_name"].as_str().unwrap_or("").to_string();
-                // Quick's arguments nest the tool's own under `params.arguments`.
-                let args = p["arguments"]["params"]["arguments"].clone();
-                let input = if args.is_null() { p["arguments"].clone() } else { args };
+                let input = quick_input(p);
                 if !name.is_empty() {
-                    let i = self.blocks.len();
-                    self.blocks.push(json!({"type": "tool_call", "id": id, "name": name, "input": input}));
-                    out.push(Event::Block { index: i, block: self.blocks[i].clone() });
-                    out.push(Event::BlockEnd { index: i });
+                    // The block ends once Oak has run the call
+                    // (`finished_call`), with its result: a call that ended
+                    // here would go to Oak's own tools, which don't know
+                    // Quick's names.
+                    // A thought still open is done: the call comes after it.
+                    if let Some(t) = self.thinking_at.take() {
+                        out.push(Event::BlockEnd { index: t });
+                    }
+                    let block = json!({"type": "tool_call", "id": id, "name": name, "input": input});
+                    // The call Quick reported is this one: its block becomes
+                    // the call Oak runs.
+                    match self.reported_call(&name, &input) {
+                        Some(k) => {
+                            self.quick_calls[k].device = true;
+                            let i = self.quick_calls[k].block;
+                            self.blocks[i] = block;
+                            out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                        }
+                        None => {
+                            let i = self.blocks.len();
+                            self.blocks.push(block);
+                            out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                            self.quick_calls.push(QuickCall { block: i, device: true, ..Default::default() });
+                        }
+                    }
                     self.calls.push((id, name, input));
                 }
             }
@@ -1009,6 +1236,173 @@ impl Turn {
             }
             _ => {}
         }
+        out
+    }
+
+    /// Quick's whole text for the current section (`section`) or message:
+    /// the block's text from where the section began becomes it, and Oak is
+    /// told (a `Block` with the text, which replaces the one it has).
+    fn settle_text(&mut self, text: &str, section: bool, out: &mut Vec<Event>) {
+        // Whole text that comes once a thought or a call has begun is still
+        // the text block's above it while that block's section is open (its
+        // deltas came, its whole text not yet); otherwise it is new text, at
+        // the end.
+        let late = self.text_at.filter(|&i| {
+            self.text_open && i + 1 < self.blocks.len() && self.blocks[i]["text"].as_str().is_some_and(|t| t.len() > self.section_at)
+        });
+        let i = match late {
+            Some(i) => i,
+            None => self.open_text(out),
+        };
+        let text = self.own_text(text, i);
+        if text.trim().is_empty() {
+            return;
+        }
+        let had = self.blocks[i]["text"].as_str().unwrap_or("").to_string();
+        let start = if section { self.section_at.min(had.len()) } else { 0 };
+        let kept = had.get(..start).unwrap_or("");
+        // A section's whole text that already holds the block's sections
+        // before it is the block's whole text.
+        let want = if !kept.is_empty() && text.starts_with(kept) { text.to_string() } else { format!("{kept}{text}") };
+        if want != had {
+            if std::env::var("OAK_QUICK_DEBUG").is_ok() {
+                eprintln!("TEXT the deltas made {} bytes of a section Quick wrote as {}; Quick's is kept", had.len().saturating_sub(start), text.len());
+            }
+            self.blocks[i]["text"] = json!(want);
+            out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+        }
+        if section {
+            self.section_at = want.len();
+            self.section_given = true;
+        }
+    }
+
+    /// The call Oak runs Quick reported first (`tool_start`) with no call to
+    /// Oak yet for it: the one of `name` with this input, else the first of
+    /// `name`.
+    fn reported_call(&self, name: &str, input: &Value) -> Option<usize> {
+        let open = |c: &QuickCall| !c.device && !c.done && same_tool(self.blocks[c.block]["name"].as_str().unwrap_or(""), name);
+        let same = self.quick_calls.iter().position(|c| open(c) && self.blocks[c.block]["input"] == *input);
+        same.or_else(|| self.quick_calls.iter().position(open))
+    }
+
+    /// A call Oak runs that Quick hasn't reported yet, for Quick's report of
+    /// a call of `name` (the one with this input, else the first).
+    fn unreported_device_call(&self, name: &str, input: &Value) -> Option<usize> {
+        let open = |c: &QuickCall| c.device && c.tool_id.is_empty() && same_tool(name, self.blocks[c.block]["name"].as_str().unwrap_or(""));
+        let same = self.quick_calls.iter().position(|c| open(c) && self.blocks[c.block]["input"] == *input);
+        same.or_else(|| self.quick_calls.iter().position(open))
+    }
+
+    /// What of Quick's whole text `text` is block `i`'s own. Quick's whole
+    /// text can carry what the message wrote before it: the text of the
+    /// message's last text blocks above `i` (all of them, or those since the
+    /// section Quick last gave whole), run together, then this block's.
+    /// Those blocks have it already, so it is left out, or the answer
+    /// repeats what was said between its calls. The longest such run is
+    /// taken; text that starts with none is taken as it is.
+    fn own_text<'a>(&self, text: &'a str, i: usize) -> &'a str {
+        let from = self.message_from.min(i);
+        let here = self.blocks[from..i].iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str());
+        let above: Vec<&str> = self.earlier.iter().map(String::as_str).chain(here).map(str::trim).filter(|t| !t.is_empty()).collect();
+        for k in 0..above.len() {
+            let mut rest = text;
+            let all = above[k..].iter().all(|t| match rest.trim_start().strip_prefix(t) {
+                Some(r) => {
+                    rest = r;
+                    true
+                }
+                None => false,
+            });
+            if all {
+                return rest.trim_start();
+            }
+        }
+        text
+    }
+
+    /// Oak ran call `id` (`result`: what it returned, or why it failed): its
+    /// block ends, with the result, which goes in the transcript as the
+    /// call's (the agent doesn't run it again).
+    pub(crate) fn finished_call(&mut self, id: &str, result: &Result<String, String>) -> Vec<Event> {
+        let Some(i) = self.blocks.iter().rposition(|b| b["type"] == "tool_call" && b["id"] == id) else { return vec![] };
+        self.end_call(i, id, result)
+    }
+
+    /// Call block `i` (`id`) ends with `result`, which goes in the
+    /// transcript as the call's.
+    fn end_call(&mut self, i: usize, id: &str, result: &Result<String, String>) -> Vec<Event> {
+        let (content, is_error) = match result {
+            Ok(s) => (s.clone(), false),
+            Err(e) => (e.clone(), true),
+        };
+        self.blocks[i]["_oak_result"] = oak::tool_result(&json!(id), json!(content), is_error);
+        let out = vec![Event::Block { index: i, block: self.blocks[i].clone() }, Event::BlockEnd { index: i }];
+        // The transcript's copy of the call has no result in it.
+        if let Some(o) = self.blocks[i].as_object_mut() {
+            o.remove("_oak_result");
+        }
+        out
+    }
+
+    /// The reply Oak is reading ends here (`stop`): the open thought and
+    /// text end, and a call Quick ran and never said the result of ends
+    /// saying so (left open, Oak's agent would run it).
+    pub(crate) fn close(&mut self, stop: &str) -> Vec<Event> {
+        let mut out = vec![];
+        self.stop = stop.into();
+        if let Some(i) = self.thinking_at.take() {
+            out.push(Event::BlockEnd { index: i });
+        }
+        for k in 0..self.quick_calls.len() {
+            let c = self.quick_calls[k].clone();
+            if c.device || c.done {
+                continue;
+            }
+            self.quick_calls[k].done = true;
+            let call = self.blocks[c.block]["id"].as_str().unwrap_or("").to_string();
+            out.extend(self.end_call(c.block, &call, &Ok("Quick didn't say what this call returned.".into())));
+        }
+        if let Some(i) = self.text_at.filter(|_| self.text_open) {
+            out.push(Event::BlockEnd { index: i });
+        }
+        out.push(Event::Stop { reason: self.stop.clone(), detail: None });
+        out
+    }
+
+    /// Quick took in a message the user typed meanwhile: the reply Oak read
+    /// ended there (`close`), and Quick's message goes on in Oak's next one,
+    /// which starts empty. The text the message wrote so far is kept
+    /// (`earlier`), so its whole text, which can run that in, repeats none of it.
+    pub(crate) fn resume(&mut self) {
+        let from = self.message_from.min(self.blocks.len());
+        let texts: Vec<String> = self.blocks[from..].iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).map(String::from).collect();
+        self.earlier.extend(texts);
+        self.blocks.clear();
+        self.text_at = None;
+        self.thinking_at = None;
+        self.text_open = false;
+        self.section_at = 0;
+        self.message_from = 0;
+        self.quick_calls.clear();
+        self.calls.clear();
+        self.stop.clear();
+    }
+
+    /// Oak is giving Quick, in a message of its own, results its relay lost:
+    /// Quick answers in a fresh assistant message, and that is this turn's
+    /// too. The text read so far is closed, so the answer is a block of its
+    /// own.
+    pub(crate) fn await_resend(&mut self) -> Vec<Event> {
+        let mut out = vec![];
+        if let Some(i) = self.text_at.filter(|_| self.text_open) {
+            out.push(Event::BlockEnd { index: i });
+        }
+        self.text_at = None;
+        self.text_open = false;
+        self.section_at = 0;
+        self.section_given = false;
+        self.awaiting_continuation = true;
         out
     }
 
@@ -1061,6 +1455,101 @@ mod tests {
         assert_eq!(newest_user_text(&r), "new");
         let empty = Request { instruction: Some("Summarize.".into()), ..Default::default() };
         assert_eq!(newest_user_text(&empty), "Summarize.");
+    }
+
+    /// Asked again mid-turn (a dropped stream, a pause, a retry), the newest
+    /// user turn holds only tool results: the user's earlier message is not
+    /// sent again (Quick's agent read it as the same message sent twice).
+    #[test]
+    fn a_request_mid_turn_does_not_send_the_first_message_again() {
+        let r = Request {
+            messages: vec![
+                json!({"role": "user", "content": [{"type": "text", "text": "fix the bug"}]}),
+                json!({"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "ripgrep", "input": {}}]}),
+                json!({"role": "user", "content": [{"type": "tool_result", "call_id": "c1", "content": "found it"}]}),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(newest_user_text(&r), CARRY_ON);
+    }
+
+    /// A message typed while Quick worked joins the user turn after the
+    /// tool results: it is what goes, not the message that started the turn.
+    #[test]
+    fn a_message_sent_mid_turn_is_the_one_that_goes() {
+        let r = Request {
+            messages: vec![
+                json!({"role": "user", "content": [{"type": "text", "text": "fix the bug"}]}),
+                json!({"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "ripgrep", "input": {}}]}),
+                json!({"role": "user", "content": [{"type": "tool_result", "call_id": "c1", "content": "found it"}, {"type": "text", "text": "also show the server's calls"}]}),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(newest_user_text(&r), "also show the server's calls");
+    }
+
+    /// A message Quick took in mid-turn is in its history: the request that
+    /// reads on after it sends nothing new.
+    #[test]
+    fn a_message_quick_took_in_mid_turn_is_not_sent_again() {
+        let r = Request {
+            messages: vec![
+                json!({"role": "user", "content": [{"type": "text", "text": "fix the bug"}]}),
+                json!({"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "ripgrep", "input": {}}]}),
+                json!({"role": "user", "content": [{"type": "tool_result", "call_id": "c1", "content": "found it"}, {"type": "text", "text": "NO TESTING", STEERED_KEY: true}]}),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(new_user_text(&r), None);
+        assert_eq!(newest_user_text(&r), CARRY_ON);
+    }
+
+    /// A message typed mid-turn goes as Quick's app sends one (the capture's
+    /// "NO TESTING"): `mid_turn`, with its own message id.
+    #[test]
+    fn a_mid_turn_message_is_sent_as_quicks_app_sends_it() {
+        let m = model("smart").unwrap();
+        let v = steer_message(&Request::default(), "NO TESTING", "msg-87fa24c3", "th", m, Some("dev"));
+        assert_eq!(v["type"], "user_message");
+        assert_eq!(v["payload"]["text"], "NO TESTING");
+        assert_eq!(v["payload"]["mid_turn"], true);
+        assert_eq!(v["payload"]["message_id"], "msg-87fa24c3");
+        assert_eq!(v["payload"]["thread_id"], "th");
+        assert_eq!(v["payload"]["outpostId"], "dev");
+    }
+
+    /// Quick took in a message: the reply Oak read ends (`STEERED`), the
+    /// next starts empty in the same Quick message, and Quick's whole text,
+    /// which runs the earlier part in, repeats none of it.
+    #[test]
+    fn a_message_taken_in_mid_turn_splits_the_reply_and_nothing_repeats() {
+        let f = |kind: &str, p: Value| json!({"type": kind, "payload": p, "thread_id": "th", "message_id": "m1"});
+        let mut t = Turn::for_message("th", "");
+        t.feed(&f("message_start", json!({"role": "assistant"})));
+        t.feed(&f("text_delta", json!({"delta": "Looking now."})));
+        let ev = t.close(stop::STEERED);
+        assert!(ev.contains(&Event::Stop { reason: stop::STEERED.into(), detail: None }));
+        assert_eq!(t.blocks()[0]["text"], "Looking now.");
+        t.resume();
+        assert!(t.blocks().is_empty());
+        t.feed(&f("text_delta", json!({"delta": "No tests, then."})));
+        t.feed(&f("text_complete", json!({"text": "Looking now.No tests, then."})));
+        t.feed(&f("message_complete", json!({"text": "Looking now.No tests, then."})));
+        assert_eq!(t.stop, stop::COMPLETE);
+        let b = t.blocks();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0]["text"], "No tests, then.");
+    }
+
+    /// A summary sends its instruction, not the user's last message again.
+    #[test]
+    fn a_summary_sends_its_instruction() {
+        let r = Request {
+            messages: vec![json!({"role": "user", "content": [{"type": "text", "text": "fix the bug"}]})],
+            instruction: Some("Summarize the conversation.".into()),
+            ..Default::default()
+        };
+        assert_eq!(newest_user_text(&r), "Summarize the conversation.");
     }
 
     #[test]
@@ -1170,6 +1659,88 @@ mod tests {
         assert!(all.contains("let me look") && all.contains("it is there"), "{all}");
     }
 
+    /// After Oak gives back results the relay lost, Quick's answer comes in
+    /// a new assistant message: that is the turn's, in a block of its own.
+    #[test]
+    fn the_answer_to_a_resend_is_the_turns() {
+        let mut t = Turn::for_message("th", "");
+        for f in [
+            json!({"type": "message_start", "payload": {}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "text_delta", "payload": {"delta": "I couldn't get the byte count."}, "thread_id": "th", "message_id": "m1"}),
+        ] {
+            t.feed(&f);
+        }
+        let closed = t.await_resend();
+        assert!(matches!(closed.as_slice(), [Event::BlockEnd { .. }]));
+        let mut ev = vec![];
+        for f in [
+            json!({"type": "message_start", "payload": {}, "thread_id": "th", "message_id": "m3"}),
+            json!({"type": "text_delta", "payload": {"delta": "34711"}, "thread_id": "th", "message_id": "m3"}),
+        ] {
+            ev.extend(t.feed(&f));
+        }
+        assert!(ev.iter().any(|e| matches!(e, Event::Text { text, .. } if text == "34711")));
+        let texts: Vec<String> = t.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+    }
+
+    /// Quick's whole text replaces what its deltas made, a section at a
+    /// time: deltas that came late, twice or not at all leave no mark.
+    #[test]
+    fn quicks_whole_text_replaces_the_deltas() {
+        let mut t = Turn::for_message("th", "");
+        let f = |k: &str, p: Value| json!({"type": k, "payload": p, "thread_id": "th", "message_id": "m1"});
+        let mut ev = vec![];
+        for frame in [
+            f("message_start", json!({})),
+            f("text_delta", json!({"delta": "hidden "})),
+            f("text_delta", json!({"delta": "-a"})),
+            f("text_delta", json!({"delta": "than plain"})),
+            f("text_complete", json!({"text": "hidden dotfiles, so it's closer to `ls -a` than plain `ls`:"})),
+            f("text_delta", json!({"delta": " after"})),
+            f("text_complete", json!({"text": " after the tool."})),
+            f("message_complete", json!({"text": " after the tool."})),
+        ] {
+            ev.extend(t.feed(&frame));
+        }
+        let text = t.blocks().iter().find(|b| b["type"] == "text").unwrap()["text"].as_str().unwrap().to_string();
+        assert_eq!(text, "hidden dotfiles, so it's closer to `ls -a` than plain `ls`: after the tool.");
+        // Oak was told: the last block it was given for the text is whole.
+        let last = ev.iter().rev().find_map(|e| match e {
+            Event::Block { block, .. } if block["type"] == "text" => block["text"].as_str().map(String::from),
+            _ => None,
+        });
+        assert_eq!(last.as_deref(), Some(text.as_str()));
+        // A message whose text came only whole is taken whole.
+        let mut u = Turn::for_message("th", "");
+        u.feed(&f("message_start", json!({})));
+        u.feed(&f("text_delta", json!({"delta": "garb"})));
+        u.feed(&f("message_complete", json!({"text": "Whole."})));
+        assert_eq!(u.blocks()[0]["text"], "Whole.");
+    }
+
+    /// A call Quick asked for ends once Oak has run it, carrying its result,
+    /// so Oak's own agent doesn't run it (it knows none of Quick's names).
+    #[test]
+    fn a_call_ends_with_the_result_oak_got() {
+        let mut t = Turn::for_message("th", "");
+        let mut ev = vec![];
+        for frame in [
+            json!({"type": "message_start", "payload": {}, "thread_id": "th", "message_id": "m1"}),
+            json!({"type": "tool_call", "payload": {"tool_name": "folder_list", "tool_call_id": "c1",
+                "arguments": {"params": {"name": "folder_list", "arguments": {"path": "/C:/x"}}}}, "thread_id": "th", "message_id": "m1"}),
+        ] {
+            ev.extend(t.feed(&frame));
+        }
+        assert!(!ev.iter().any(|e| matches!(e, Event::BlockEnd { .. })), "the call doesn't end before it has run");
+        let done = t.finished_call("c1", &Ok("{\"entries\": []}".into()));
+        let (Event::Block { block, .. }, Event::BlockEnd { .. }) = (&done[0], &done[1]) else { panic!("{done:?}") };
+        assert_eq!(block["_oak_result"]["type"], "tool_result");
+        assert_eq!(block["_oak_result"]["call_id"], "c1");
+        assert_eq!(block["input"]["path"], "/C:/x", "the input is Quick's");
+        assert!(t.blocks()[0].get("_oak_result").is_none());
+    }
+
     #[test]
     fn frames_become_oaks_events() {
         let mut t = Turn::for_message("th", "");
@@ -1191,7 +1762,192 @@ mod tests {
         assert_eq!(t.stop, stop::COMPLETE);
         assert!(ev.iter().any(|e| matches!(e, Event::Text { text, .. } if text == "Hi")));
         let blocks = t.blocks();
-        assert_eq!(blocks[0]["type"], "text");
+        // A thought Quick sends without its start is shown too, where it came.
+        let kinds: Vec<&str> = blocks.iter().filter_map(|b| b["type"].as_str()).collect();
+        assert_eq!(kinds, ["reasoning", "text", "tool_call"]);
+        assert_eq!(blocks[0]["text"], "hm");
         assert_eq!(blocks.iter().find(|b| b["type"] == "tool_call").unwrap()["input"]["command"], "ls");
+    }
+
+    /// Quick sends a whole agent loop as one message (as its app's captures
+    /// show): a thought opened with `thinking_start`, text, a call, later
+    /// thoughts as deltas alone, more calls, the answer. Each lands in a
+    /// block of its own at the end, in the order it came, so the reply only
+    /// grows at its end: no text goes back into a block above a call, and no
+    /// thought is lost.
+    #[test]
+    fn the_reply_grows_at_the_end() {
+        let f = |k: &str, p: Value| json!({"type": k, "payload": p, "thread_id": "th", "message_id": "m1"});
+        let call = |id: &str| {
+            json!({"type": "tool_call", "payload": {"tool_name": "fdfind", "tool_call_id": id,
+                "arguments": {"params": {"name": "fdfind", "arguments": {"args": "pong"}}}}})
+        };
+        let mut t = Turn::for_message("th", "");
+        let mut ev = vec![];
+        for frame in [
+            f("message_start", json!({"role": "assistant"})),
+            f("thinking_start", json!({})),
+            f("thinking_delta", json!({"delta": "Look first."})),
+            f("thinking_complete", json!({"thinking": "Look first.\n\n"})),
+            f("text_delta", json!({"delta": "I'll look."})),
+            call("c1"),
+            // The next thought: deltas alone, some of them lost.
+            f("thinking_delta", json!({"delta": "Nothing there"})),
+            f("thinking_complete", json!({"thinking": "Look first.\n\nNothing there, so search.\n\n"})),
+            call("c2"),
+            // A thought whose deltas never came at all.
+            f("thinking_complete", json!({"thinking": "Look first.\n\nNothing there, so search.\n\nFound it.\n\n"})),
+            f("text_delta", json!({"delta": "It is "})),
+            f("text_delta", json!({"delta": "there."})),
+            f("text_complete", json!({"text": "It is there."})),
+            f("message_complete", json!({"text": "It is there."})),
+        ] {
+            ev.extend(t.feed(&frame));
+        }
+        let blocks = t.blocks();
+        let kinds: Vec<&str> = blocks.iter().filter_map(|b| b["type"].as_str()).collect();
+        assert_eq!(kinds, ["reasoning", "text", "tool_call", "reasoning", "tool_call", "reasoning", "text"]);
+        let said: Vec<&str> = blocks.iter().filter(|b| b["type"] != "tool_call").filter_map(|b| b["text"].as_str()).collect();
+        assert_eq!(said, ["Look first.", "I'll look.", "Nothing there, so search.", "Found it.", "It is there."]);
+        // Every block is announced once, in order, and what streams in goes
+        // to the newest block: nothing is added above what came after it.
+        let mut newest: Option<usize> = None;
+        for e in &ev {
+            match e {
+                Event::Block { index, .. } if newest.is_none_or(|n| *index > n) => newest = Some(*index),
+                Event::Text { index, .. } | Event::Reasoning { index, .. } => assert_eq!(Some(*index), newest, "{e:?} went above the reply's end"),
+                _ => {}
+            }
+        }
+        assert_eq!(newest, Some(blocks.len() - 1));
+        // Whole text that comes just after a call began is still the text
+        // its deltas went to, not new text below the call.
+        let mut u = Turn::for_message("th", "");
+        for frame in [f("message_start", json!({})), f("text_delta", json!({"delta": "Let me"})), call("c3"), f("text_complete", json!({"text": "Let me look."}))] {
+            u.feed(&frame);
+        }
+        let shown: Vec<String> = u.blocks().iter().map(|b| format!("{}:{}", b["type"].as_str().unwrap_or(""), b["text"].as_str().unwrap_or(""))).collect();
+        assert_eq!(shown, ["text:Let me look.", "tool_call:"]);
+    }
+
+    /// A call Quick runs on its server is shown as one Oak ran: its block
+    /// opens as Quick starts it and ends with what Quick says it returned,
+    /// so Oak's agent doesn't run it. A call Quick reports and then hands
+    /// Oak is one block, whichever comes first.
+    #[test]
+    fn quicks_own_calls_are_shown() {
+        let f = |k: &str, p: Value| json!({"type": k, "payload": p, "thread_id": "th", "message_id": "m1"});
+        let mut t = Turn::for_message("th", "");
+        let mut ev = vec![];
+        for frame in [
+            f("message_start", json!({})),
+            f("tool_start", json!({"tool_name": "web_search", "tool_id": "s1", "arguments": {}})),
+            f("tool_arguments", json!({"tool_id": "s1", "arguments": {"query": "rust egui"}})),
+            f("tool_result", json!({"tool_id": "s1", "result": "3 results", "error": null})),
+            // Reported, then handed to Oak.
+            f("tool_start", json!({"tool_name": "run_python_on_device", "tool_id": "s2", "arguments": {"code": "print(1)"}})),
+            f("tool_call", json!({"tool_name": "run_python_outpost_local", "tool_call_id": "c2",
+                "arguments": {"params": {"name": "run_python_outpost_local", "arguments": {"code": "print(1)"}}}})),
+            // Handed to Oak, then reported.
+            f("tool_call", json!({"tool_name": "folder_list", "tool_call_id": "c3",
+                "arguments": {"params": {"name": "folder_list", "arguments": {"path": "/x"}}}})),
+            f("tool_start", json!({"tool_name": "folder_list", "tool_id": "s3", "arguments": {"path": "/x"}})),
+            // Quick's records of Oak's calls aren't the results shown.
+            f("tool_result", json!({"tool_id": "s2", "result": "relay's", "error": null})),
+            f("tool_result", json!({"tool_id": "s3", "result": "relay's", "error": null})),
+            // One Quick never gives the result of.
+            f("tool_start", json!({"tool_name": "kg_search", "tool_id": "s4", "arguments": {"query": "oak"}})),
+            f("tool_start", json!({"tool_name": "url_fetch", "tool_id": "s5", "arguments": {"url": "https://x"}})),
+            f("tool_result", json!({"tool_id": "s5", "result": "", "error": "403"})),
+            f("message_complete", json!({})),
+        ] {
+            ev.extend(t.feed(&frame));
+        }
+        let blocks = t.blocks();
+        let named: Vec<(&str, &str)> = blocks.iter().map(|b| (b["name"].as_str().unwrap_or(""), b["id"].as_str().unwrap_or(""))).collect();
+        assert_eq!(named, [("web_search", "s1"), ("run_python_outpost_local", "c2"), ("folder_list", "c3"), ("kg_search", "s4"), ("url_fetch", "s5")]);
+        assert_eq!(blocks[0]["input"]["query"], "rust egui");
+        // Only Oak's own calls are Oak's to run.
+        let ran: Vec<&str> = t.calls.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(ran, ["c2", "c3"]);
+        // Each of Quick's calls ends, with its result.
+        let ended = |i: usize| ev.iter().any(|e| matches!(e, Event::BlockEnd { index } if *index == i));
+        let result = |i: usize| {
+            ev.iter().rev().find_map(|e| match e {
+                Event::Block { index, block } if *index == i => block.get("_oak_result").cloned(),
+                _ => None,
+            })
+        };
+        for i in [0, 3, 4] {
+            assert!(ended(i) && result(i).is_some(), "block {i} ends with a result");
+        }
+        assert!(!ended(1) && !ended(2), "Oak's calls end once Oak has run them");
+        assert_eq!(result(0).unwrap()["content"], "3 results");
+        assert_eq!(result(4).unwrap()["is_error"], true);
+        assert!(blocks.iter().all(|b| b.get("_oak_result").is_none()));
+        assert!(same_tool("DESKTOP-1_folder_list", "folder_list") && same_tool("run_python_on_device_with_write", "run_python_outpost_local_with_write"));
+        assert!(!same_tool("run_python", "run_python_outpost_local"));
+    }
+
+    /// Quick's whole text for the answer can carry what the message said
+    /// between its calls, run together: each block keeps only its own, so
+    /// the answer doesn't repeat the steps above it.
+    #[test]
+    fn the_answer_does_not_repeat_the_steps_above_it() {
+        let f = |k: &str, p: Value| json!({"type": k, "payload": p, "thread_id": "th", "message_id": "m1"});
+        let call = |id: &str| {
+            json!({"type": "tool_call", "payload": {"tool_name": "ripgrep", "tool_call_id": id,
+                "arguments": {"params": {"name": "ripgrep", "arguments": {}}}}, "thread_id": "th", "message_id": "m1"})
+        };
+        let mut t = Turn::for_message("th", "");
+        for frame in [
+            f("message_start", json!({})),
+            f("text_delta", json!({"delta": "I'll check the notes."})),
+            f("text_complete", json!({"text": "I'll check the notes."})),
+            call("c1"),
+            f("text_delta", json!({"delta": "Cargo is installed."})),
+            call("c2"),
+            f("text_delta", json!({"delta": "It built."})),
+            f("text_complete", json!({"text": "I'll check the notes.Cargo is installed.It built."})),
+            f("message_complete", json!({"text": "I'll check the notes.Cargo is installed.It built."})),
+        ] {
+            t.feed(&frame);
+        }
+        let said: Vec<String> = t.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(said, ["I'll check the notes.", "Cargo is installed.", "It built."]);
+        // With whitespace between them, and whole text Quick gives for an
+        // earlier section that holds only that section, the same.
+        let mut u = Turn::for_message("th", "");
+        for frame in [
+            f("message_start", json!({})),
+            f("text_delta", json!({"delta": "Looking."})),
+            call("c3"),
+            f("text_delta", json!({"delta": "Done"})),
+            f("text_complete", json!({"text": "Looking.\n\nDone, it is there."})),
+        ] {
+            u.feed(&frame);
+        }
+        let said: Vec<String> = u.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(said, ["Looking.", "Done, it is there."]);
+        // Whole text that carries only the blocks since the section Quick
+        // last gave whole, the same.
+        let mut v = Turn::for_message("th", "");
+        for frame in [
+            f("message_start", json!({})),
+            f("text_delta", json!({"delta": "One."})),
+            f("text_complete", json!({"text": "One."})),
+            call("c4"),
+            f("text_delta", json!({"delta": "Two."})),
+            call("c5"),
+            f("text_delta", json!({"delta": "Three."})),
+            call("c6"),
+            f("text_delta", json!({"delta": "Four."})),
+            f("text_complete", json!({"text": "Two.Three.Four."})),
+            f("message_complete", json!({"text": "Two.Three.Four."})),
+        ] {
+            v.feed(&frame);
+        }
+        let said: Vec<String> = v.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(said, ["One.", "Two.", "Three.", "Four."]);
     }
 }

@@ -828,12 +828,58 @@ itself, in the conversation's working folder, with the same tools it runs for ot
 (`quick::turn`, `run_tool`). Quick's agent reaches for `run_python` (and its `file_*`, `fdfind`,
 `ripgrep`), so those are mapped too: `run_python` runs the snippet with Python in the folder.
 That is why a Quick conversation works on the real project rather than on a copy of it.
+Quick hands this machine's tool calls to every socket Oak has open to it, whatever thread asked
+(a call names its thread only in its arguments, `_quickwork.offload_session_id`), so each turn
+runs and shows only its own thread's calls: another conversation's is left to that
+conversation's turn, and a call of a thread no turn reads is run once, by the first turn to see
+it, and shown nowhere (`turn::owner`). Snippets run with `CREATE_NO_WINDOW`
+(`turn::no_console`), as every console program Oak starts does, so neither they nor what they
+start open a console on the user's desktop (`a_snippet_opens_no_console_window`). The transcript
+shows a `run_python*` call's code, as Python.
+
+**The reply grows at its end**, as every other provider's does (`the_reply_grows_at_the_end`):
+Quick sends a whole agent loop (thoughts, text, calls, more thoughts, the answer) as one message,
+and text after a thought or a call is a new block below it, never more of the text above. Quick
+opens only a message's first thought with `thinking_start`; each later one comes as deltas alone
+and is a block of its own. Each `thinking_complete` carries all of the message's thinking so far,
+so what follows the last of it is the newest thought whole, which stands for deltas that went
+missing.
+Quick's whole text (`text_complete`, `message_complete`) can likewise carry the message's earlier
+text blocks run together before the block's own (`the_answer_does_not_repeat_the_steps_above_it`):
+those are left out, so the answer doesn't repeat what was said between the calls.
+
+**Quick's own calls are shown too** (`quicks_own_calls_are_shown`): Quick reports each call its agent
+makes (`tool_start`, `tool_arguments`, `tool_result`), the ones it runs on its server (`web_search`,
+`kg_search`, cloud `run_python`, `load_skill`) as well as the ones it hands Oak. A call Quick runs is a
+tool block like any other, ending with what Quick says it returned, so Oak's agent never runs it; one
+that has no result when the message ends ends saying so. A call Quick reports and hands Oak is one
+block, whichever frame comes first, and ends with Oak's result, not Quick's record of it.
+Quick's tools take the colors of the OAK tools that do the same work (`like_oaks` in `transcript.rs`:
+its file reads READ's blue, Python EXECUTE's violet, the web SEARCH's and FETCH's cyans, its
+knowledge and memory tools the notes' sage), as Freebuff's do, and their rows say what they work on,
+with a device's paths as the device has them.
 
 **A conversation is a Quick thread**: its conversation's id is the thread's, which is how Quick
 keeps the history, so a request sends only its newest user turn (`user_message`) and Quick
 replays the rest. A turn ends the way Quick's does: `stop::COMPLETE` says the reply's tool calls
 are the record of work already done and answered, not work for Oak's loop to run again (the
 loop's `batch.finish` would otherwise repeat every call Oak already answered).
+Only what the user said since Quick's last reply is sent (`newest_user_text`): a request
+in the middle of a turn (after a dropped stream, a pause, a retry or a usage limit) has only tool
+results in its newest user turn, and it tells Quick to carry on (`CARRY_ON`) rather than read back
+to an older user turn, which sent the user's first message again
+(`a_request_mid_turn_does_not_send_the_first_message_again`). A summary sends its instruction.
+
+**A message typed while Quick works goes into its turn**, as Quick's app sends one: a `user_message`
+with `mid_turn: true` and a `message_id` of its own (`steer_message`), on the turn's socket, between
+Quick's frames (`quick::turn::steer`, handed over by `steer_quick` while the request streams; it
+stays queued, shown as sent to Quick). Quick's agent takes it in at its next step and says so
+(`steering_ingested`, naming the id): the reply Oak was reading ends there (`stop::STEERED`, its
+calls run and answered), the message joins the transcript after their results marked
+`quick::STEERED_KEY` (so no request sends it again), and the next request reads on in Quick's same
+message on the parked socket (`PARKED`, a minute at most), which starts a reply of its own
+(`a_message_taken_in_mid_turn_splits_the_reply_and_nothing_repeats`). A message Quick didn't take in
+before its turn ended goes with the next request, as before. `OAK_QUICK_STEER=off` turns it off.
 
 **The wire is Quick's**: client frames are binary WebSocket frames carrying
 `{"eventType":"rawInputEvent","payload":{"payload":"<base64 JSON>"}}`, and answers are AWS

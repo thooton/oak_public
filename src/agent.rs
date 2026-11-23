@@ -632,6 +632,11 @@ pub struct Queued {
     /// Attached images, as content blocks.
     pub images: Vec<Value>,
     pub held: bool,
+    /// Handed to the Quick turn running meanwhile (`mid_turn`), which takes
+    /// it in at its next step; still queued until Quick says it did, then
+    /// it joins the transcript where Quick read it, marked so that no request
+    /// sends it again (`quick::STEERED_KEY`).
+    pub steered: bool,
 }
 
 impl Queued {
@@ -639,7 +644,11 @@ impl Queued {
     fn content(self) -> Vec<Value> {
         let mut c = self.images;
         if !self.text.trim().is_empty() {
-            c.push(oak::text(&self.text));
+            let mut b = oak::text(&self.text);
+            if self.steered {
+                b[crate::quick::STEERED_KEY] = json!(true);
+            }
+            c.push(b);
         }
         c
     }
@@ -844,21 +853,22 @@ impl Session {
     pub fn send(&self, text: String, images: Vec<Value>) {
         let mut l = self.live.lock().unwrap();
         let id = l.next_queued_id();
-        l.queued.push(Queued { id, text, images, held: false });
+        l.queued.push(Queued { id, text, images, held: false, steered: false });
         l.error = None;
         drop(l);
         self.wake();
     }
 
-    /// Takes a message out of the queue unsent.
+    /// Takes a message out of the queue unsent (one handed to Quick's turn
+    /// is sent already, and stays).
     pub fn unqueue(&self, id: u64) {
-        self.live.lock().unwrap().queued.retain(|q| q.id != id);
+        self.live.lock().unwrap().queued.retain(|q| q.id != id || q.steered);
     }
 
     /// Holds a queued message for editing. False if it was already sent.
     pub fn hold(&self, id: u64) -> bool {
         let mut l = self.live.lock().unwrap();
-        l.queued.iter_mut().find(|q| q.id == id).map(|q| q.held = true).is_some()
+        l.queued.iter_mut().find(|q| q.id == id && !q.steered).map(|q| q.held = true).is_some()
     }
 
     /// Releases a held message, with new text if it was edited (empty text
@@ -1458,7 +1468,7 @@ impl Worker {
                     drop(c);
                     let mut l = self.live.lock().unwrap();
                     let id = l.next_queued_id();
-                    l.queued.push(Queued { id, text: "Continue where you left off.".into(), images: vec![], held: false });
+                    l.queued.push(Queued { id, text: "Continue where you left off.".into(), images: vec![], held: false, steered: false });
                 }
             }
         }
@@ -1890,6 +1900,13 @@ impl Worker {
             // calls are in the transcript as what happened, and nothing is
             // left for Oak's loop to run.
             let done = stop == oak::stop::COMPLETE;
+            // Quick took in a message typed meanwhile and carries on
+            // (`stop::STEERED`): the reply so far and its calls (run and
+            // answered) are in, the message joins the transcript after their
+            // results (`gather_input`), and the next request reads on.
+            if stop == oak::stop::STEERED {
+                continue;
+            }
             if !done && calls.is_empty() {
                 // A goal that isn't finished keeps the model going.
                 if self.goal_step() {

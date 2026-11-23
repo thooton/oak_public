@@ -451,7 +451,7 @@ mod tests {
         .into();
         assert!(is_super(&c) && !is_super_agent(&c));
         let mut live = Live::default();
-        live.queued.push(Queued { id: 9, text: "Tag it".into(), images: vec![], held: false });
+        live.queued.push(Queued { id: 9, text: "Tag it".into(), images: vec![], held: false, steered: false });
         let chat = chat_of("k", &c, &live);
         let said: Vec<(&str, &str)> = chat.messages.iter().map(|m| (m.kind.as_str(), m.text.as_str())).collect();
         assert_eq!(said, vec![("user", "Ship the release"), ("oak", "On it."), ("oak", "Agent 1 runs the build."), ("oak", "The build passes."), ("user", "Tag it")]);

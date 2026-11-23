@@ -114,6 +114,12 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             let summary = if name == "Bash" { s("description") } else { s("summary") };
             if summary.trim().is_empty() { s("command") } else { crate::tools::one_line(&summary) }
         }
+        // Python a provider's agent runs (Quick's run_python tools): what it
+        // says the code does, else the code's first line.
+        _ if is_python(name) => {
+            let explanation = s("explanation");
+            if explanation.trim().is_empty() { python_line(&s("code")) } else { crate::tools::one_line(&explanation) }
+        }
         "READ" | "WRITE" | "EDIT" | "CD" => s("path"),
         // A Code Mode script: its first line that isn't blank or a comment's start.
         "REPL" => {
@@ -240,6 +246,20 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             let first = qs.first().and_then(|q| q["question"].as_str()).unwrap_or("");
             if qs.len() > 1 { format!("{first} (+{} more)", qs.len() - 1) } else { first.to_string() }
         }
+        // AWS Quick's agent's tools, whether Oak or Quick runs them.
+        "file_read" | "file_read_pdf" | "file_read_docx" | "file_read_pptx" | "file_read_image" | "file_write" | "file_edit" | "file_delete" | "file_type" | "file_get_page_raster" | "folder_list"
+        | "folder_create" | "file_matches" | "open_in_session_tab" => device_path(&s(if input["path"].is_string() { "path" } else { "file_path" })),
+        "file_move" | "file_copy" => format!("{} \u{2192} {}", device_path(&s("source")), device_path(&s("destination"))),
+        "fdfind" => s("args"),
+        "ripgrep" => input["patterns"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(" | "),
+        "web_search" | "kg_search" | "file_rag_search" | "search_all" | "search_knowledge_bases" | "recall_memories" | "search_tools" => s("query"),
+        "url_fetch" | "download_file" => s("url"),
+        "load_skill" => s("skill_name"),
+        "load_tools" => input["tool_names"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(", "),
+        "start_task" => if s("name").is_empty() { crate::tools::one_line(&s("objective")) } else { s("name") },
+        "calendar_lookup" => format!("{}-{:02}", input["year"], input["month"].as_u64().unwrap_or(0)),
+        "convert_timezone" => [s("time"), s("from_timezone"), s("to_timezone")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" \u{2192} "),
+        "message_react" | "ephemeral_react" => s("emoji"),
         _ => String::new(),
     }
 }
@@ -1284,8 +1304,50 @@ fn tool_color(name: &str) -> Color32 {
         n if n.starts_with("PROGRESS_") => 0x9dc8c0,
         n if n.starts_with("GOAL_") => 0xa3c38b,
         n if n.starts_with("AGENT_") => 0xa9b2f1,
-        _ => 0xb0b8c1,
+        n => match like_oaks(n) {
+            Some(oak) => return tool_color(oak),
+            None => 0xb0b8c1,
+        },
     })
+}
+
+/// The OAK tool another agent's tool does the work of, for its color: AWS
+/// Quick's (its file tools, Python, web, knowledge and task tools), as
+/// Freebuff's calls are shown as OAK's. A device's own tools carry its
+/// name first (`DESKTOP-1_folder_list`).
+fn like_oaks(name: &str) -> Option<&'static str> {
+    let oak = match name {
+        "file_read" | "read_file" | "file_read_pdf" | "file_read_docx" | "file_read_pptx" | "file_read_image" | "file_type" | "folder_list" | "list_dir" | "list_directory" => "READ",
+        "file_write" | "write_file" | "folder_create" => "WRITE",
+        "file_edit" | "file_move" | "file_copy" => "EDIT",
+        "file_delete" => "TASK_DELETE",
+        "fdfind" | "fd" | "ripgrep" | "rg" | "grep" | "file_matches" => "Grep",
+        "run_javascript" | "bash" | "shell" | "run_shell" | "run_command" | "execute_command" => "EXECUTE",
+        n if is_python(n) => "EXECUTE",
+        "web_search" => "SEARCH",
+        "url_fetch" | "download_file" | "download_file_from_connector" => "FETCH",
+        "file_get_page_raster" => "SCREENSHOT",
+        "open_in_session_tab" => "DISPLAY",
+        "kg_search" | "file_rag_search" | "search_all" | "search_knowledge_bases" | "get_full_document" | "recall_memories" | "memory_get_detail" | "save_to_memory" => "NOTE_NEW",
+        "start_task" | "steer_task" | "get_task_result" | "inspect_task" | "list_tasks" | "cancel_task" => "AGENT_NEW",
+        "load_skill" | "load_tools" | "search_tools" => "CD",
+        "get_current_time" | "calendar_lookup" | "convert_timezone" => "PROGRESS_SET",
+        "message_react" | "ephemeral_react" | "send_notification" => "HEARTBEAT_START",
+        "list_outposts" => "DISPLAY",
+        n if n.starts_with("browser") => "BROWSER",
+        n => return n.split_once('_').and_then(|(_, tool)| like_oaks(tool)).filter(|_| n.contains('-')),
+    };
+    Some(oak)
+}
+
+/// A path as a device has it: Quick names a device's files under
+/// `/outposts/<device>/` (and a Windows drive as the path's first part).
+fn device_path(path: &str) -> String {
+    match path.strip_prefix("/outposts/").and_then(|rest| rest.split_once('/')) {
+        Some((_, rest)) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        Some((_, rest)) => format!("/{rest}"),
+        None => path.to_string(),
+    }
 }
 
 /// The characters of a tool's output its row shows (the model gets it all).
@@ -1305,6 +1367,21 @@ pub(crate) fn cut_output(text: &str) -> (String, usize) {
 /// Whether a call of `name` runs a shell command.
 fn is_command(name: &str) -> bool {
     matches!(name, "EXECUTE" | "TASK_NEW" | "BASH" | "Bash")
+}
+
+/// Python run as a tool: Quick's agent's own coding tools.
+fn is_python(name: &str) -> bool {
+    matches!(
+        name,
+        "run_python" | "python" | "run_python_with_write" | "run_python_outpost_local" | "run_python_outpost_local_with_write" | "run_python_on_device" | "run_python_on_device_with_write"
+    )
+}
+
+/// A Python snippet's first line that isn't blank or a comment (its first
+/// line when every line is).
+fn python_line(code: &str) -> String {
+    let lines = || code.lines().map(str::trim).filter(|l| !l.is_empty());
+    lines().find(|l| !l.starts_with('#')).or_else(|| lines().next()).unwrap_or("").to_string()
 }
 
 fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
@@ -1336,7 +1413,8 @@ fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
     let shown = p.text(egui::pos2(rect.left() + NAME_X, y), Align2::LEFT_CENTER, &shown_name, font.clone(), name_color);
     let x = rect.left() + NAME_X + name_w.max(shown.width()) + 18.0;
     // A command shown as it is (no summary) is code: the code font.
-    let raw_command = is_command(name) && input[if name == "Bash" { "description" } else { "summary" }].as_str().is_none_or(|s| s.trim().is_empty());
+    let raw_command = (is_command(name) && input[if name == "Bash" { "description" } else { "summary" }].as_str().is_none_or(|s| s.trim().is_empty()))
+        || (is_python(name) && input["explanation"].as_str().is_none_or(|s| s.trim().is_empty()));
     let font = if raw_command { markdown::code_font(12.5) } else { font };
     // After the summary: an EDIT's lines added and removed and READ's lines
     // (the summary is cut short first when there is too little room).
@@ -1427,6 +1505,11 @@ fn tool_input_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
         "REPL" => {
             let code = cut("code");
             ui.push_id("repl-code", |ui| code_view(ui, t, highlight::for_path("script.js"), &[(None, code.trim_end())], Some(input["code"].as_str().unwrap_or(""))));
+        }
+        // Python a provider's agent runs: its code, as Python.
+        _ if is_python(name) => {
+            let code = cut("code");
+            ui.push_id("python-code", |ui| code_view(ui, t, highlight::for_path("snippet.py"), &[(None, code.trim_end())], Some(input["code"].as_str().unwrap_or(""))));
         }
         _ => {}
     }
@@ -2536,7 +2619,9 @@ pub(crate) fn queue_view(ui: &mut Ui, t: &Theme, conv: &str, queued: &[agent::Qu
                 if !q.text.trim().is_empty() {
                     ui.label(RichText::new(&q.text).color(t.ink3));
                 }
-                ui.label(RichText::new("queued").small().color(t.ink3.gamma_multiply(0.7)));
+                // Handed to Quick's running turn: its agent reads it at its next step.
+                let state = if q.steered { "sent to Quick, read at its next step" } else { "queued" };
+                ui.label(RichText::new(state).small().color(t.ink3.gamma_multiply(0.7)));
             });
         let rect = card.response.rect;
         if ui.rect_contains_pointer(rect) {
@@ -2559,6 +2644,35 @@ pub(crate) fn queue_view(ui: &mut Ui, t: &Theme, conv: &str, queued: &[agent::Qu
 mod tests {
     use super::*;
     use crate::app_hover_test::{run_frame, test_ctx};
+
+    /// A Python call shows its code: its row says what the agent says the
+    /// code does, else the code's first line.
+    #[test]
+    fn a_python_call_shows_its_code() {
+        let code = serde_json::json!({"code": "# list the folder\n\nimport os\nprint(os.listdir('.'))"});
+        assert_eq!(tool_summary("run_python_outpost_local", &code), "import os");
+        assert_eq!(tool_summary("run_python", &serde_json::json!({"code": "print(1)", "explanation": "Counting files"})), "Counting files");
+        assert_eq!(python_line("# only a comment"), "# only a comment");
+        assert!(is_python("run_python_outpost_local_with_write") && !is_command("run_python"));
+    }
+
+    /// AWS Quick's tools take the colors of OAK's that do the same work, and
+    /// their rows say what they work on.
+    #[test]
+    fn quicks_tools_look_like_oaks() {
+        assert_eq!(tool_color("file_read"), tool_color("READ"));
+        assert_eq!(tool_color("run_python_outpost_local_with_write"), tool_color("EXECUTE"));
+        assert_eq!(tool_color("web_search"), tool_color("SEARCH"));
+        assert_eq!(tool_color("url_fetch"), tool_color("FETCH"));
+        assert_eq!(tool_color("ripgrep"), tool_color("Grep"));
+        assert_eq!(tool_color("kg_search"), tool_color("NOTE_NEW"));
+        assert_eq!(tool_color("DESKTOP-VE88UPH_folder_list"), tool_color("READ"));
+        assert_eq!(tool_color("no_such_tool"), hex(0xb0b8c1));
+        assert_eq!(tool_summary("file_read", &serde_json::json!({"path": "/outposts/DESKTOP-1/C:/Users/x/a.rs"})), "C:/Users/x/a.rs");
+        assert_eq!(tool_summary("folder_list", &serde_json::json!({"path": "/outposts/backend/app"})), "/app");
+        assert_eq!(tool_summary("web_search", &serde_json::json!({"query": "egui"})), "egui");
+        assert_eq!(tool_summary("ripgrep", &serde_json::json!({"patterns": ["a", "b"]})), "a | b");
+    }
 
     /// A reply's widgets (its copy bar, text, menu) are its conversation's
     /// own: a side chat's copy of a reply never shares them with its source.

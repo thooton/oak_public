@@ -102,9 +102,14 @@ fn name() -> String {
 /// asks for are routed here. Called before a turn: registering again is
 /// harmless (Quick takes the newest description of the same outpost).
 pub fn register() -> Result<(), String> {
+    register_as(&id())
+}
+
+/// Registers `outpost` with Quick (the same call as [`register`], for a named
+/// outpost: a probe uses its own, so what it measures is its own).
+pub fn register_as(outpost: &str) -> Result<(), String> {
     let token = login::access_token()?;
     let host = login::host()?;
-    let outpost = id();
     let capabilities = ["file_operations", "code_execution"]
         .iter()
         .map(|group| {
@@ -245,6 +250,11 @@ pub fn put_device_state_report(token: &str, host: &str) -> Vec<(String, bool, St
 
 /// Whether Quick lists this machine's outpost as ONLINE.
 pub fn is_online(token: &str, host: &str) -> Result<bool, String> {
+    is_online_of(token, host, &id())
+}
+
+/// Whether Quick lists `outpost` as ONLINE (a probe asks about its own).
+pub fn is_online_of(token: &str, host: &str, outpost: &str) -> Result<bool, String> {
     let body = json!({"eventType": "listOutposts", "eventBody": {"listOutposts": {"scope": "USER", "surface": "QUICK_WORK"}}});
     let resp = api::http()
         .post(format!("https://{host}/integration/quick-work/qbs-event"))
@@ -259,8 +269,27 @@ pub fn is_online(token: &str, host: &str) -> Result<bool, String> {
     let text = resp.text().unwrap_or_default();
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let items = v["eventResponse"]["listOutpostsResponse"]["items"].as_array().cloned().unwrap_or_default();
-    let mine = id();
-    Ok(items.iter().any(|o| o["id"].as_str() == Some(mine.as_str()) && o["status"].as_str() == Some("ONLINE")))
+    Ok(items.iter().any(|o| o["id"].as_str() == Some(outpost) && o["status"].as_str() == Some("ONLINE")))
+}
+
+/// Waits (briefly) until Quick lists `outpost` as ONLINE. A socket that names
+/// its outpost in its address turns that outpost ONLINE when its session
+/// connects; a turn that asks for a tool before Quick has listed it would have
+/// that tool run in Quick's own sandbox instead of here. The wait is short and
+/// best-effort: a turn still goes ahead without it.
+pub fn await_online(token: &str, host: &str, outpost: &str) {
+    for i in 0..8 {
+        if is_online_of(token, host, outpost).unwrap_or(false) {
+            if std::env::var("OAK_QUICK_DEBUG").is_ok() {
+                eprintln!("outpost {outpost} is ONLINE (after {i} polls)");
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    if std::env::var("OAK_QUICK_DEBUG").is_ok() {
+        eprintln!("outpost {outpost} never showed ONLINE before the turn");
+    }
 }
 
 /// What a tool does, as Quick's agent reads it.
