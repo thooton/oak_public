@@ -103,26 +103,57 @@ pub fn tool_schema(name: &str) -> Value {
     }
 }
 
-/// This machine's outpost id: saved in quick.json at first use, so the same
-/// one is registered again rather than a new one each start.
+/// This machine's outpost id: made at first use and saved in quick.json, so
+/// the same one is registered again rather than a new one each start. Each
+/// machine has its own: two Oaks on one id are one device to Quick, which
+/// then routes each call to whichever answers. The shared id an older Oak
+/// saved (`DEFAULT_OUTPOST_ID`) is replaced the same way.
 pub fn id() -> String {
     let saved = login::saved_outpost();
-    if !saved.is_empty() {
+    if !saved.is_empty() && saved != DEFAULT_OUTPOST_ID {
         return saved;
     }
-    // The machine's own outpost: Quick's desktop app registers one per
-    // machine, and it is the one Quick reports ONLINE for this device, so
-    // Oak answers as that outpost rather than registering a second name that
-    // nothing routes to.
-    login::set_outpost(DEFAULT_OUTPOST_ID);
-    DEFAULT_OUTPOST_ID.to_string()
+    let fresh = fresh_id();
+    login::set_outpost(&fresh);
+    fresh
 }
 
-/// The name Quick shows for this outpost.
+/// A new outpost id for this process (a v4 UUID), the same on every call so
+/// one that couldn't be saved (no login yet) doesn't change under the turn.
+fn fresh_id() -> String {
+    static FRESH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FRESH.get_or_init(|| uuid_v4(rand::random())).clone()
+}
+
+/// `b` as a v4 UUID (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`).
+fn uuid_v4(mut b: [u8; 16]) -> String {
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// The name Quick shows for this outpost, and its agent calls it by
+/// (`/outposts/<name>/…`, `<name>_<tool>`): `Oak-<host>`, so two machines'
+/// Oaks are told apart; `Oak` when the host has no name.
 fn name() -> String {
-    std::env::var("COMPUTERNAME")
+    let host = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "Oak".into())
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .unwrap_or_default();
+    name_for(&host)
+}
+
+/// The outpost name for host `host`: only characters safe in a path and a
+/// tool name are kept.
+fn name_for(host: &str) -> String {
+    let host: String = host
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if host.is_empty() { "Oak".into() } else { format!("Oak-{host}") }
 }
 
 /// Registers this machine's outpost with Quick, so the tools Quick's agent
@@ -214,9 +245,6 @@ fn event(token: &str, host: &str, kind: &str, body: Value) -> Result<Value, Stri
     }
     Ok(v["eventResponse"].clone())
 }
-
-/// The policy that lets a tool run without asking.
-const ALLOW: &str = "ALWAYS_ALLOW";
 
 /// The policy that lets a tool run without asking.
 const ALLOW: &str = "ALWAYS_ALLOW";
@@ -607,5 +635,30 @@ fn describe(name: &str) -> &'static str {
             "Run Oak's tools in the conversation's folder: the code is one or more Oak tool calls written as Python calls, a line each, with literal arguments (READ(path=\"src/main.rs\"), EXECUTE(command=\"cargo test\", summary=\"Run the tests\")), all run at the same time, and the result has each call's. It isn't Python: nothing but the calls runs."
         }
         _ => "A tool this machine runs.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outpost_ids_are_v4_uuids_and_differ() {
+        let a = uuid_v4([0xff; 16]);
+        assert_eq!(a, "ffffffff-ffff-4fff-bfff-ffffffffffff");
+        let (x, y) = (uuid_v4(rand::random()), uuid_v4(rand::random()));
+        assert_ne!(x, y);
+        assert_eq!(x.len(), 36);
+        assert_ne!(x, DEFAULT_OUTPOST_ID);
+        // One process keeps one fresh id, so a turn doesn't see it change.
+        assert_eq!(fresh_id(), fresh_id());
+    }
+
+    #[test]
+    fn outpost_names_carry_the_host() {
+        assert_eq!(name_for("sam-desktop\n"), "Oak-sam-desktop");
+        assert_eq!(name_for("DESKTOP-AB12"), "Oak-DESKTOP-AB12");
+        assert_eq!(name_for("my box.local"), "Oak-myboxlocal");
+        assert_eq!(name_for("  "), "Oak");
     }
 }
