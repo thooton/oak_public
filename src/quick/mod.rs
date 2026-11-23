@@ -1125,7 +1125,34 @@ pub fn unwrap_frame(payload: &[u8]) -> Option<Value> {
 
 /// What a message to Quick opens with once the thread has Oak's briefing
 /// as it is now (`oak_preface`).
-pub(crate) const OAK_REMINDER: &str = "[Oak, on this device: your device Python tool (run_python_on_device, with or without write) runs Oak's tool calls only, as Oak's notes at the start of this conversation describe: e.g. READ(path=\"src/main.rs\") and EXECUTE(command=\"cargo test\", summary=\"Run the tests\") on lines of their own, run at the same time.]";
+pub(crate) const OAK_REMINDER: &str = "[Oak, on this device: your device Python tool (run_python_on_device, with or without write) runs Oak's tool calls only, the tools in <tools_loaded> at the start of this conversation, worked with as <instructions_loaded> there says: e.g. READ(path=\"src/main.rs\") and EXECUTE(command=\"cargo test\", summary=\"Run the tests\") on lines of their own, run at the same time.]";
+
+/// The names Quick calls this machine's Python by (a device's own tools may
+/// carry its name before them), which run Oak's tools (`calls`).
+pub(crate) fn is_snippet(name: &str) -> bool {
+    [
+        "run_python_outpost_local",
+        "run_python_outpost_local_with_write",
+        "run_python_on_device",
+        "run_python_on_device_with_write",
+    ]
+    .iter()
+    .any(|n| name == *n || name.ends_with(&format!("_{n}")))
+}
+
+/// Marks a snippet's own call block (`is_snippet`), which the transcript
+/// doesn't show: the Oak calls it ran are blocks of their own, and that is
+/// all the user sees of it. One that failed is shown, with why.
+pub(crate) const QUIET_KEY: &str = "_oak_quiet";
+
+/// A call block as Oak keeps it: quiet when it is a snippet's (`QUIET_KEY`).
+fn call_block(id: &str, name: &str, input: Value) -> Value {
+    let mut block = json!({"type": "tool_call", "id": id, "name": name, "input": input});
+    if is_snippet(name) {
+        block[QUIET_KEY] = json!(true);
+    }
+    block
+}
 
 /// The briefing each thread was sent last (a hash of it), by thread.
 static BRIEFED: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
@@ -1159,16 +1186,20 @@ fn briefing(r: &Request) -> String {
             t["input_schema"]
         ));
     }
+    // The instructions and tools come first, each in a section of its own,
+    // so Quick's agent takes them as what it was loaded with, not as part
+    // of what the user wrote; how to call them follows.
     let system = r.system.trim();
-    let instructions = if system.is_empty() {
-        String::new()
+    let (instructions, which) = if system.is_empty() {
+        (String::new(), "Above are the tools")
     } else {
-        format!(
-            "\n\nOak's own instructions for working here, as it gives them to every model it runs (where they say tool calls in one reply run at the same time, for you that is the calls of one snippet):\n<oak_instructions>\n{system}\n</oak_instructions>"
+        (
+            format!("<instructions_loaded>\n{system}\n</instructions_loaded>\n\n"),
+            "Above are the instructions and tools",
         )
     };
     format!(
-        "[Oak, on this device]\nThis device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). ASK isn't available this way: ask the user in your reply. Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's.{instructions}\n\nOak's tools:\n<oak_tools>{tools}</oak_tools>\n[End of Oak's notes. The user's message follows.]"
+        "{instructions}<tools_loaded>{tools}</tools_loaded>\n\n[Oak, on this device]\n{which} Oak has loaded for you here: its own system prompt, as it gives it to every model it runs, and its tool definitions. Follow them as your instructions for this work. This device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, the ones in <tools_loaded>, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Where the loaded instructions say tool calls in one reply run at the same time, for you that is the calls of one snippet. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). ASK isn't available this way: ask the user in your reply. Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's.\n[End of Oak's notes. The user's message follows.]"
     )
 }
 
@@ -1727,7 +1758,7 @@ impl Turn {
                                 out.push(Event::BlockEnd { index: t });
                             }
                             let i = self.blocks.len();
-                            self.blocks.push(json!({"type": "tool_call", "id": id, "name": name, "input": input}));
+                            self.blocks.push(call_block(&id, &name, input));
                             out.push(Event::Block {
                                 index: i,
                                 block: self.blocks[i].clone(),
@@ -1794,8 +1825,7 @@ impl Turn {
                     if let Some(t) = self.thinking_at.take() {
                         out.push(Event::BlockEnd { index: t });
                     }
-                    let block =
-                        json!({"type": "tool_call", "id": id, "name": name, "input": input});
+                    let block = call_block(&id, &name, input.clone());
                     // The call Quick reported is this one: its block becomes
                     // the call Oak runs.
                     match self.reported_call(&name, &input) {
@@ -2033,6 +2063,11 @@ impl Turn {
             Ok(s) => (s.clone(), false),
             Err(e) => (e.clone(), true),
         };
+        // A snippet that failed is shown, with why: no Oak call of its own
+        // says so.
+        if is_error && let Some(o) = self.blocks[i].as_object_mut() {
+            o.remove(QUIET_KEY);
+        }
         self.blocks[i]["_oak_result"] = oak::tool_result(&json!(id), json!(content), is_error);
         let out = vec![
             Event::Block {
@@ -2291,14 +2326,14 @@ mod tests {
         };
         let sent = |r: &Request| user_message(r, thread, m, Some("dev"))["payload"]["text"].as_str().unwrap().to_string();
         let first = sent(&r);
-        assert!(first.starts_with("[Oak, on this device]"), "{first}");
-        assert!(first.contains("<oak_instructions>\nYou are Oak.\n</oak_instructions>"), "{first}");
-        assert!(first.contains("### READ\nRead a file.\nInput: {"), "{first}");
+        // The instructions and tools come first, then how to call them.
+        assert!(first.starts_with("<instructions_loaded>\nYou are Oak.\n</instructions_loaded>\n\n<tools_loaded>\n### READ\nRead a file.\nInput: {"), "{first}");
+        assert!(first.contains("\n</tools_loaded>\n\n[Oak, on this device]\nAbove are the instructions and tools"), "{first}");
         assert!(!first.contains("### ASK"), "ASK can't be called through a snippet: {first}");
         assert!(first.ends_with("[End of Oak's notes. The user's message follows.]\n\nfind all todo comments"), "{first}");
         assert_eq!(sent(&r), format!("{OAK_REMINDER}\n\nfind all todo comments"));
         r.system = "You are Oak, with a note.".into();
-        assert!(sent(&r).starts_with("[Oak, on this device]"), "a changed prompt is sent again");
+        assert!(sent(&r).starts_with("<instructions_loaded>\nYou are Oak, with a note."), "a changed prompt is sent again");
         // A summary sends its instruction alone.
         r.instruction = Some("Summarize.".into());
         assert_eq!(sent(&r), "Summarize.");
@@ -2916,6 +2951,10 @@ mod tests {
             ]
         );
         assert_eq!(blocks[0]["input"]["query"], "rust egui");
+        // The device Python's block is quiet (its Oak calls are shown
+        // instead); the others are shown.
+        let quiet: Vec<bool> = blocks.iter().map(|b| b.get(QUIET_KEY).is_some()).collect();
+        assert_eq!(quiet, [false, true, false, false, false]);
         // Only Oak's own calls are Oak's to run.
         let ran: Vec<&str> = t.calls.iter().map(|c| c.0.as_str()).collect();
         assert_eq!(ran, ["c2", "c3"]);
@@ -2951,6 +2990,11 @@ mod tests {
                 )
         );
         assert!(!same_tool("run_python", "run_python_outpost_local"));
+        // A snippet that failed is shown, with why.
+        let failed = t.finished_call("c2", &Err("Not an Oak call.".into()));
+        assert!(failed.iter().any(|e| matches!(e, Event::Block { index: 1, block }
+            if block.get(QUIET_KEY).is_none() && block["_oak_result"]["is_error"] == true)));
+        assert!(is_snippet("Oak_run_python_on_device") && !is_snippet("run_python"));
     }
 
     /// Quick's whole text for the answer can carry what the message said

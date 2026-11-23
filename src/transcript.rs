@@ -841,6 +841,8 @@ fn push_assistant<'a>(
                 });
             out.push(Item::Thinking(b, key, live && ms.is_none(), rewrite))
         }
+        // Quick's device Python, run as Oak calls: those are shown instead.
+        "tool_call" if b.get(crate::quick::QUIET_KEY).is_some() => {}
         "tool_call" if name.is_some_and(|n| n == "DISPLAY") => out.push(Item::Display(b, key)),
         "tool_call" => out.push(Item::Tool(b, key)),
         _ => {}
@@ -4024,6 +4026,19 @@ mod tests {
         );
         assert_eq!(python_line("# only a comment"), "# only a comment");
         assert!(is_python("run_python_outpost_local_with_write") && !is_command("run_python"));
+    }
+
+    /// A Quick snippet's own call isn't a row: the Oak calls it ran are.
+    #[test]
+    fn a_quiet_call_is_not_shown() {
+        let mut quiet = serde_json::json!({"type": "tool_call", "id": "c1", "name": "run_python_outpost_local", "input": {}});
+        quiet[crate::quick::QUIET_KEY] = serde_json::json!(true);
+        let read = serde_json::json!({"type": "tool_call", "id": "c1_oak0", "name": "READ", "input": {"path": "a"}});
+        let mut out = vec![];
+        push_assistant(&mut out, &quiet, (0, 0), false, false);
+        assert!(out.is_empty());
+        push_assistant(&mut out, &read, (0, 1), false, false);
+        assert!(matches!(out[..], [Item::Tool(b, _)] if b["name"] == "READ"));
     }
 
     /// AWS Quick's tools take the colors of OAK's that do the same work, and

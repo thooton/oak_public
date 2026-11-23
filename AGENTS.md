@@ -850,13 +850,15 @@ snippet with anything else is refused before any of it runs. Each call becomes a
 reply (`Turn::oak_call`) that the conversation's agent runs as it runs any model's calls, all at
 once (those on a file one of them writes in order), so they show, stream and are tracked as Oak's
 own; the turn waits for their results (`turn::run_oak_alive`, handed each by the batch through
-`turn::ran`) and answers Quick with each one's, in order, while the snippet's own row says which
-calls it ran. ASK can't be called that way (it waits for the reply's end, which the turn never
+`turn::ran`) and answers Quick with each one's, in order. The snippet's own call is no row of the
+transcript (`quick::QUIET_KEY`, `a_quiet_call_is_not_shown`): the user sees only the Oak calls it
+ran, unless it failed (a snippet Oak refused), when it shows with why. ASK can't be called that way (it waits for the reply's end, which the turn never
 reaches while it waits). A snippet of a thread no conversation's agent reads runs here directly,
 with only READ, WRITE, EDIT, EXECUTE, SEARCH and FETCH. Quick is told all this in the user message
-(`oak_preface`): a thread's first message since Oak started opens with Oak's briefing (the call
-syntax, Oak's own system prompt as the request has it, notes included, and its tool definitions),
-later ones with a one-line reminder, and the briefing goes again whenever the prompt or tools
+(`oak_preface`): a thread's first message since Oak started opens with Oak's briefing: first Oak's
+own system prompt as the request has it, notes included, in `<instructions_loaded>`, and its tool
+definitions in `<tools_loaded>`, so Quick's agent takes them as what it was loaded with rather
+than as the user's words, then the call syntax; later ones with a one-line reminder, and the briefing goes again whenever the prompt or tools
 change (`user_message_tells_quick_how_to_call_oaks_tools`); a summary's instruction goes alone.
 That is why a Quick conversation works on the real project rather than on a copy of it.
 Quick hands this machine's tool calls to every socket Oak has open to it, whatever thread asked
@@ -866,7 +868,7 @@ conversation's turn, and a call of a thread no turn reads is run once, by the fi
 it, and shown nowhere (`turn::owner`). Snippets run with `CREATE_NO_WINDOW`
 (`turn::no_console`), as every console program Oak starts does, so neither they nor what they
 start open a console on the user's desktop (`a_snippet_opens_no_console_window`). The transcript
-shows a `run_python*` call's code, as Python.
+shows a `run_python*` call's code, as Python (Quick's cloud `run_python`, and a failed snippet).
 
 **The reply grows at its end**, as every other provider's does (`the_reply_grows_at_the_end`):
 Quick sends a whole agent loop (thoughts, text, calls, more thoughts, the answer) as one message,

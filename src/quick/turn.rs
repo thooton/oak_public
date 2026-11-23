@@ -1203,18 +1203,6 @@ fn pump(
     }
 }
 
-/// The names Quick calls this machine's Python by, which run Oak's tools
-/// (`crate::quick::calls`).
-fn is_snippet(name: &str) -> bool {
-    matches!(
-        name,
-        "run_python_outpost_local"
-            | "run_python_outpost_local_with_write"
-            | "run_python_on_device"
-            | "run_python_on_device_with_write"
-    )
-}
-
 /// A snippet's code, under whichever name its call gives it.
 fn snippet_code(args: &Value) -> &str {
     args["code"]
