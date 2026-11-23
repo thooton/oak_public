@@ -581,7 +581,7 @@ pub(crate) fn owner(p: &Value, thread: &str) -> Owner {
 /// Streams one Oak request through Quick's agent, sending its events to
 /// `tx`. Quick keeps the thread's history itself, so only the newest user
 /// turn goes; the tools it asks for are run in `body.folder`.
-pub fn stream(body: Request, tx: Sender<Sse>) {
+pub fn stream(mut body: Request, tx: Sender<Sse>) {
     let id = body.model.clone();
     let Some(m) = model(&id) else {
         return drop(tx.send(Sse::Err(format!("Quick doesn't serve {id}."))));
@@ -600,10 +600,28 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
         .filter(|c| !c.is_empty())
         .unwrap_or_else(hex_uuid);
     let (ctl, _ctl_guard) = CtlGuard::register(&thread);
+    let parked = take_parked(&thread);
+    // The login the conversation goes through (`login_for`): a parked turn
+    // reads on on its own. A conversation that moved to another login
+    // sends what that login's thread lacks: all of it.
+    let conv = body.seat_conv();
+    let acct = match &parked {
+        Some(_) => crate::rotation::seat(crate::api::Provider::Quick, &conv),
+        None => match crate::quick::login_for(&conv) {
+            Some((a, moved)) => {
+                if moved && body.instruction.is_none() {
+                    body.unseen = crate::quick::all_unseen(&body.messages);
+                }
+                Some(a)
+            }
+            None => None,
+        },
+    };
+    crate::quick::login::set_using(acct);
     // Quick took in a message typed meanwhile and carries on: this request
     // reads on where the last one stopped, on the same socket. Anything said
     // since that Quick hasn't had goes to it mid-turn too.
-    if let Some(p) = take_parked(&thread) {
+    if let Some(p) = parked {
         if let Some(text) = new_user_text(&body) {
             steer(&thread, 0, &text);
         }
@@ -1539,9 +1557,12 @@ fn run_tool_alive(
         folder.to_path_buf(),
         ctl.clone(),
     );
+    // The tool's uploads go through the turn's login.
+    let acct = crate::quick::login::using();
     std::thread::Builder::new()
         .name(format!("quick-tool-{name}"))
         .spawn(move || {
+            crate::quick::login::set_using(acct);
             CURRENT_CTL.with(|cell| *cell.borrow_mut() = Some(c));
             let res = run_tool(&n, &a, &f);
             CURRENT_CTL.with(|cell| *cell.borrow_mut() = None);

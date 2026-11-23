@@ -58,16 +58,20 @@ struct Kept {
     at: i64,
 }
 
-static KEPT: Mutex<Kept> = Mutex::new(Kept {
-    usage: None,
-    error: None,
-    at: 0,
-});
+/// Each login's (by its id).
+static KEPT: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Kept>>> =
+    std::sync::LazyLock::new(Default::default);
 
-/// The last reading, the last fetch's error, and when the reading was taken.
-pub fn last() -> (Option<Usage>, Option<String>, i64) {
+/// Login `id`'s last reading, the last fetch's error, and when the reading
+/// was taken.
+pub fn last_of(id: &str) -> (Option<Usage>, Option<String>, i64) {
     let k = KEPT.lock().unwrap();
-    (k.usage.clone(), k.error.clone(), k.at)
+    k.get(id).map_or((None, None, 0), |k| (k.usage.clone(), k.error.clone(), k.at))
+}
+
+/// Login `id` was signed out: its reading goes.
+pub fn forget(id: &str) {
+    KEPT.lock().unwrap().remove(id);
 }
 
 /// A time Quick sends in seconds (a value past 1e12 is taken as ms already).
@@ -148,10 +152,10 @@ pub fn plan_label(plan: &str) -> Option<String> {
     }
 }
 
-/// Asks Quick for the account's usage.
-fn fetch() -> Result<Usage, String> {
-    let access = login::access_token()?;
-    let host = login::host()?;
+/// Asks Quick for login `id`'s usage.
+fn fetch(id: &str) -> Result<Usage, String> {
+    let access = login::access_token_of(id, None)?;
+    let host = login::host_of(id)?;
     let resp = api::http()
         .post(format!("https://{host}/integration/quick-work/user-info"))
         .bearer_auth(access)
@@ -170,25 +174,34 @@ fn fetch() -> Result<Usage, String> {
     }
     let v: Value =
         serde_json::from_str(&text).map_err(|e| format!("Quick's usage was unreadable: {e}"))?;
+    login::note_email(id, v["email"].as_str().unwrap_or(""));
     parse(&v, api::now_ms()).ok_or_else(|| "Quick's answer had no monthly usage".to_string())
 }
 
-/// Fetches the usage again (in the background, with the other providers').
-/// Signed out, the reading is forgotten.
+/// Fetches every login's usage again (in the background, with the other
+/// providers'). The readings of logins signed out are forgotten. A login
+/// that comes free (its session window or month back) wakes sessions
+/// waiting on a limit.
 pub fn refresh() {
-    if !login::on() {
-        *KEPT.lock().unwrap() = Kept::default();
-        return;
-    }
-    let r = fetch();
-    let mut k = KEPT.lock().unwrap();
-    match r {
-        Ok(u) => {
-            k.usage = Some(u);
-            k.error = None;
-            k.at = api::now_ms();
+    let ids: Vec<String> = login::all().into_iter().map(|s| s.id).collect();
+    KEPT.lock().unwrap().retain(|id, _| ids.contains(id));
+    for id in ids {
+        let r = fetch(&id);
+        let mut all = KEPT.lock().unwrap();
+        let k = all.entry(id).or_default();
+        match r {
+            Ok(u) => {
+                let was_out = k.usage.as_ref().is_some_and(|o| !o.allowed() || o.session_resumes_at.is_some());
+                let free = u.allowed() && u.session_resumes_at.is_none();
+                k.usage = Some(u);
+                k.error = None;
+                k.at = api::now_ms();
+                if was_out && free {
+                    crate::api::note_signed_in();
+                }
+            }
+            Err(e) => k.error = Some(e),
         }
-        Err(e) => k.error = Some(e),
     }
 }
 

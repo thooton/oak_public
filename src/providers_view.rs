@@ -306,20 +306,25 @@ pub(crate) fn shown(p: Kind) -> Shown {
             Some(a) => Shown::Credits(a.left, a.spent, a.error),
             None => Shown::Loading,
         },
-        // Quick's one login: its month, as `user-info` last read it.
-        Metered::Limits if p == Kind::Quick => match crate::quick::account() {
-            Some(a) => match (a.usage, a.usage_error) {
-                (Some(u), _) => {
-                    // A month whose reset has passed is unused again.
-                    let next_reset = u.month_resets_at.filter(|&r| r > now);
-                    let used = if u.month_resets_at.is_some() && next_reset.is_none() { 0.0 } else { u.month_percent };
-                    Shown::Limits(vec![Summed { label: "Month".into(), used, accounts: 1, next_reset }])
-                }
-                (None, Some(_)) => Shown::Note("usage unavailable"),
-                (None, None) => Shown::Loading,
-            },
-            None => Shown::Loading,
-        },
+        // Quick's logins: their months, as `user-info` last read them, averaged.
+        Metered::Limits if p == Kind::Quick => {
+            let all = crate::quick::accounts();
+            let read: Vec<_> = all.iter().filter_map(|a| a.usage.as_ref()).collect();
+            if read.is_empty() {
+                return match () {
+                    _ if !all.is_empty() && all.iter().all(|a| a.usage_error.is_some()) => Shown::Note("usage unavailable"),
+                    _ => Shown::Loading,
+                };
+            }
+            // A month whose reset has passed is unused again.
+            let used_of = |u: &crate::quick::usage::Usage| match u.month_resets_at {
+                Some(r) if r <= now => 0.0,
+                _ => u.month_percent,
+            };
+            let used = read.iter().map(|u| used_of(u)).sum::<f32>() / read.len() as f32;
+            let next_reset = read.iter().filter_map(|u| u.month_resets_at).filter(|&r| r > now).min();
+            Shown::Limits(vec![Summed { label: "Month".into(), used, accounts: read.len(), next_reset }])
+        }
         Metered::Limits if p == Kind::Antigravity => {
             let all = crate::antigravity::accounts_detailed();
             let pools = sum_antigravity_pools(&all, now);
@@ -360,7 +365,7 @@ pub(crate) fn account_count(p: Kind) -> usize {
         Kind::Freebuff => crate::freebuff::accounts().len(),
         Kind::Refuseless => crate::refuseless::accounts().len(),
         Kind::MuseCode => crate::musecode::accounts().len(),
-        Kind::Quick => crate::quick::account().map(|_| 1).unwrap_or(0),
+        Kind::Quick => crate::quick::accounts().len(),
         Kind::Local => local::on() as usize,
         // (No accounts: its plugin has a page of its own.)
         Kind::Plugin => 0,

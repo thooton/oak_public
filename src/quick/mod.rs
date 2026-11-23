@@ -187,16 +187,28 @@ pub mod login {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// quick.json: the registered client, the refresh token, who signed in,
-    /// and what Quick's absence costs (the last error).
+    /// One Quick login in quick.json: the registered client, the refresh
+    /// token, who signed in, and what Quick's absence costs (the last error).
+    /// A login kept on the vault (`remote`) has no client or refresh token
+    /// here: the vault renews it and hands out access tokens.
     #[derive(Clone, Debug, Default, Serialize, Deserialize)]
     pub struct Stored {
+        /// Which login this is: the email, lowercased, else one made at
+        /// sign-in (`fill_id`). Rotation's seats and the vault name it.
+        #[serde(default)]
+        pub id: String,
+        /// The login is on the vault: tokens come from there.
+        #[serde(default)]
+        pub remote: bool,
         /// The OIDC client Oak registered for itself (`client_id`).
+        #[serde(default)]
         pub client_id: String,
         /// Its secret, as the registration gave it.
+        #[serde(default)]
         pub client_secret: String,
         /// The token that lasts (`aor…`); each request buys an access token
-        /// with it.
+        /// with it. Empty for a login on the vault.
+        #[serde(default)]
         pub refresh: String,
         /// The access token (`aoa…`), and when it stops working (ms).
         #[serde(default)]
@@ -242,9 +254,37 @@ pub mod login {
         Failed(String),
     }
 
-    pub(super) static STORE: LazyLock<Mutex<Stored>> =
-        LazyLock::new(|| Mutex::new(crate::store::read_json(&path()).unwrap_or_default()));
+    /// quick.json: the logins (one, from before there could be more).
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum File {
+        Logins { logins: Vec<Stored> },
+        One(Box<Stored>),
+    }
+
+    /// The logins, and why one is on this machine although a vault is
+    /// connected, when that was not asked for.
+    pub(super) struct Logins {
+        pub(super) list: Vec<Stored>,
+        note: Option<String>,
+    }
+
+    pub(super) static STORE: LazyLock<Mutex<Logins>> = LazyLock::new(|| {
+        Mutex::new(Logins {
+            list: read_file(),
+            note: None,
+        })
+    });
     pub(super) static STATE: Mutex<Option<State>> = Mutex::new(None);
+    /// Held while an access token is renewed, so two requests don't spend
+    /// one refresh token at once.
+    static RENEWING: Mutex<()> = Mutex::new(());
+
+    std::thread_local! {
+        /// The login this thread's requests go through (`using`): a turn's,
+        /// as rotation picked it for its conversation. Unset, the first.
+        static USING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
     /// A sign-in in flight: incremented on each `start()` so a new attempt
     /// cancels any older listener still waiting for the browser.
     static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -254,14 +294,131 @@ pub mod login {
         crate::store::dir().join("quick.json")
     }
 
-    pub(super) fn save() {
-        let s = STORE.lock().unwrap();
-        let _ = crate::store::write_private_json(&path(), &*s);
+    /// The logins in quick.json, each with its id (one from before ids
+    /// gets its own).
+    fn read_file() -> Vec<Stored> {
+        logins_of(crate::store::read_json(&path()))
     }
 
-    /// The stored login, for the UI.
+    /// The logins a quick.json holds (`v`), each with its id.
+    pub(crate) fn logins_of(v: Option<Value>) -> Vec<Stored> {
+        let mut list = match v.and_then(|v| serde_json::from_value(v).ok()) {
+            Some(File::Logins { logins }) => logins,
+            Some(File::One(s)) => vec![*s],
+            None => vec![],
+        };
+        list.retain(|s| s.remote || !s.refresh.is_empty());
+        for s in &mut list {
+            fill_id(s);
+        }
+        list
+    }
+
+    fn write(l: &Logins) {
+        if l.list.is_empty() {
+            let _ = std::fs::remove_file(path());
+            return;
+        }
+        let _ = crate::store::write_private_json(&path(), &File::Logins { logins: l.list.clone() });
+    }
+
+    /// Gives login `s` its id when it has none: its email, else one made
+    /// from its client (which a sign-in registers afresh).
+    pub(crate) fn fill_id(s: &mut Stored) {
+        if !s.id.is_empty() {
+            return;
+        }
+        s.id = if !s.email.trim().is_empty() {
+            s.email.trim().to_lowercase()
+        } else {
+            use sha2::{Digest, Sha256};
+            let seed = if s.client_id.is_empty() { &s.refresh } else { &s.client_id };
+            let d = Sha256::digest(seed.as_bytes());
+            format!("acct-{}", d.iter().take(6).map(|b| format!("{b:02x}")).collect::<String>())
+        };
+    }
+
+    /// The login this thread's requests go through: the one `using` set,
+    /// else the first.
+    pub fn current() -> Option<String> {
+        let set = USING.with(|u| u.borrow().clone());
+        let l = STORE.lock().unwrap();
+        set.filter(|id| l.list.iter().any(|s| &s.id == id))
+            .or_else(|| l.list.first().map(|s| s.id.clone()))
+    }
+
+    /// The login this thread's requests go through from now (`None`: the
+    /// first). Threads a turn starts take it with them (`turn::run_in`).
+    pub fn set_using(id: Option<String>) {
+        USING.with(|u| *u.borrow_mut() = id);
+    }
+
+    /// The login `set_using` set on this thread.
+    pub fn using() -> Option<String> {
+        USING.with(|u| u.borrow().clone())
+    }
+
+    /// Login `id`, as stored.
+    pub fn stored_of(id: &str) -> Option<Stored> {
+        STORE.lock().unwrap().list.iter().find(|s| s.id == id).cloned()
+    }
+
+    /// The login this thread's requests go through, for the UI.
     pub fn stored() -> Stored {
-        STORE.lock().unwrap().clone()
+        current().and_then(|id| stored_of(&id)).unwrap_or_default()
+    }
+
+    /// Every login, in order.
+    pub fn all() -> Vec<Stored> {
+        STORE.lock().unwrap().list.clone()
+    }
+
+    /// Changes login `id` in place (and saves); false when it is gone.
+    fn update(id: &str, f: impl FnOnce(&mut Stored)) -> bool {
+        let mut l = STORE.lock().unwrap();
+        let Some(s) = l.list.iter_mut().find(|s| s.id == id) else {
+            return false;
+        };
+        f(s);
+        write(&l);
+        true
+    }
+
+    /// Who login `id` is, as `user-info` says, when it didn't say at
+    /// sign-in (so signing it in again finds it).
+    pub(crate) fn note_email(id: &str, email: &str) {
+        let email = email.trim();
+        if !email.is_empty() && stored_of(id).is_some_and(|s| s.email.is_empty()) {
+            update(id, |s| s.email = email.to_string());
+        }
+    }
+
+    /// Keeps login `s` in place of the one with its id (or its email: the
+    /// same account signed in again keeps its id), else beside the others.
+    /// One kept here keeps the outpost the old one had.
+    pub(crate) fn keep(mut s: Stored) {
+        fill_id(&mut s);
+        let mut l = STORE.lock().unwrap();
+        // (The vault's own logins are told apart by their ids alone.)
+        let same = |o: &Stored| o.id == s.id || (!s.email.is_empty() && !o.remote && o.email.eq_ignore_ascii_case(&s.email));
+        match l.list.iter_mut().find(|o| same(o)) {
+            Some(o) => {
+                // One on this machine keeps the id its seats name; the
+                // vault's goes by the vault's.
+                if !s.remote {
+                    s.id = o.id.clone();
+                }
+                if s.outpost.is_empty() {
+                    s.outpost = std::mem::take(&mut o.outpost);
+                }
+                if s.host.is_empty() {
+                    s.host = std::mem::take(&mut o.host);
+                }
+                *o = s;
+            }
+            None => l.list.push(s),
+        }
+        write(&l);
     }
 
     pub fn state() -> Option<State> {
@@ -272,62 +429,251 @@ pub mod login {
         *STATE.lock().unwrap() = Some(s);
     }
 
-    /// Loads quick.json at start.
+    /// Loads quick.json at start (a login from before ids is saved with
+    /// its own).
     pub fn load() -> bool {
-        let s = crate::store::read_json::<Stored>(&path()).unwrap_or_default();
-        let on = !s.refresh.is_empty();
-        *STORE.lock().unwrap() = s;
+        let list = read_file();
+        let on = !list.is_empty();
+        let mut l = STORE.lock().unwrap();
+        l.list = list;
+        write(&l);
         on
     }
 
-    /// A login is on this machine (an expired access token still counts: the
-    /// refresh token is what Oak keeps).
+    /// A login is kept (an expired access token still counts: the refresh
+    /// token, or the vault, is what lasts).
     pub fn on() -> bool {
-        !STORE.lock().unwrap().refresh.is_empty()
+        !STORE.lock().unwrap().list.is_empty()
     }
 
-    /// Forgets the login, here and in the browser's session.
-    pub fn sign_out() {
-        {
-            let mut s = STORE.lock().unwrap();
-            *s = Stored::default();
+    /// Signs login `id` out: one on the vault is removed there too, for
+    /// every machine (when it can't be reached, it stays, and Err says why).
+    pub fn sign_out(id: &str) -> Result<(), String> {
+        if stored_of(id).is_some_and(|s| s.remote) {
+            api::vault_remove("quick", id)?;
         }
-        let _ = std::fs::remove_file(path());
+        forget(id);
         set_state(State::Idle);
-        crate::rotation::forget_account(crate::api::Provider::Quick, "");
+        Ok(())
     }
 
-    /// The access token, bought with the refresh token (`expires_at` kept).
-    /// Err says what the server said, and marks the login failed.
-    pub fn access_token() -> Result<String, String> {
-        let (id, secret, refresh, mut access, expires, region, token_endpoint, resource) = {
-            let s = STORE.lock().unwrap();
-            (
-                s.client_id.clone(),
-                s.client_secret.clone(),
-                s.refresh.clone(),
-                s.access.clone(),
-                s.expires_at,
-                s.oidc_region.clone(),
-                s.token_endpoint.clone(),
-                s.resource.clone(),
-            )
+    /// Drops login `id` on this machine.
+    fn forget(id: &str) {
+        let mut l = STORE.lock().unwrap();
+        l.list.retain(|s| s.id != id);
+        l.note = None;
+        write(&l);
+        drop(l);
+        crate::rotation::forget_account(crate::api::Provider::Quick, id);
+        super::usage::forget(id);
+    }
+
+    /// Disconnected from the vault: its logins go from this machine.
+    pub fn forget_remote() {
+        let mut l = STORE.lock().unwrap();
+        let n = l.list.len();
+        l.list.retain(|s| !s.remote);
+        if l.list.len() != n {
+            write(&l);
+        }
+    }
+
+    /// A login on the vault as this machine keeps it: who it is and where
+    /// its workspace is, and the access token it handed out, if any.
+    fn remote_login(info: &Value, access: Option<(String, i64)>) -> Stored {
+        let field = |k: &str| info[k].as_str().unwrap_or("").to_string();
+        let (access, expires_at) = access.unwrap_or_default();
+        Stored {
+            id: field("account_id"),
+            remote: true,
+            access,
+            expires_at,
+            email: field("email"),
+            tenant: field("tenant"),
+            host: field("host"),
+            ..Stored::default()
+        }
+    }
+
+    /// Brings the logins in step with the vault's: its logins are used (one
+    /// on this machine too becomes its), and ones removed there go. This
+    /// machine's outpost for each stays.
+    pub fn sync() {
+        let Ok(logins) = api::vault_list("quick") else { return };
+        let ids: Vec<&str> = logins
+            .iter()
+            .filter_map(|i| i["account_id"].as_str())
+            .filter(|a| !a.is_empty())
+            .collect();
+        let mut l = STORE.lock().unwrap();
+        let before: Vec<(String, bool)> = l.list.iter().map(|s| (s.id.clone(), s.remote)).collect();
+        l.list.retain(|s| !s.remote || ids.contains(&s.id.as_str()));
+        for info in &logins {
+            let Some(id) = info["account_id"].as_str().filter(|a| !a.is_empty()) else {
+                continue;
+            };
+            let fresh = remote_login(info, None);
+            match l.list.iter_mut().find(|s| s.id == id) {
+                Some(s) if s.remote => {
+                    s.email = fresh.email;
+                    s.tenant = fresh.tenant;
+                    if !fresh.host.is_empty() {
+                        s.host = fresh.host;
+                    }
+                }
+                Some(s) => {
+                    let (outpost, host) = (std::mem::take(&mut s.outpost), std::mem::take(&mut s.host));
+                    *s = fresh;
+                    s.outpost = outpost;
+                    if s.host.is_empty() {
+                        s.host = host;
+                    }
+                }
+                None => l.list.push(fresh),
+            }
+        }
+        let after: Vec<(String, bool)> = l.list.iter().map(|s| (s.id.clone(), s.remote)).collect();
+        let added = after.iter().any(|a| !before.contains(a));
+        if after != before {
+            write(&l);
+        }
+        drop(l);
+        if added {
+            crate::api::note_signed_in();
+        }
+    }
+
+    /// Login `id` is on this machine while a vault is connected: it can
+    /// move there.
+    pub fn movable(id: &str) -> bool {
+        api::vault_on() && stored_of(id).is_some_and(|s| !s.remote)
+    }
+
+    /// Why a login stayed on this machine, when it was meant for the vault.
+    pub fn note() -> Option<String> {
+        STORE.lock().unwrap().note.clone()
+    }
+
+    /// What the vault is given of login `s`: everything it needs to renew
+    /// it (the client Oak registered, its region or Gateway endpoint) and
+    /// to say where its workspace is.
+    pub(crate) fn upload_body(s: &Stored) -> Value {
+        json!({
+            "account_id": s.id,
+            "email": s.email,
+            "tenant": s.tenant,
+            "host": s.host,
+            "client_id": s.client_id,
+            "client_secret": s.client_secret,
+            "oidc_region": s.oidc_region,
+            "token_endpoint": s.token_endpoint,
+            "resource": s.resource,
+            "refresh_token": s.refresh,
+            "access_token": s.access,
+            "expires_at": s.expires_at,
+        })
+    }
+
+    /// Puts login `s` on the vault; what this machine keeps of it.
+    fn upload(s: &Stored) -> Result<Stored, String> {
+        let info = api::vault_add("quick", &upload_body(s))?;
+        if info["account_id"].as_str().is_none_or(str::is_empty) {
+            return Err(format!(
+                "{} didn't say which Quick account it took.",
+                api::capital(&api::vault_name())
+            ));
+        }
+        let mut kept = remote_login(&info, Some((s.access.clone(), s.expires_at)));
+        if kept.host.is_empty() {
+            kept.host = s.host.clone();
+        }
+        if kept.email.is_empty() {
+            kept.email = s.email.clone();
+        }
+        kept.outpost = s.outpost.clone();
+        Ok(kept)
+    }
+
+    /// Moves login `id` on this machine to the vault, which from then on is
+    /// the only one to renew it.
+    pub fn move_to_vault(id: &str) -> Result<(), String> {
+        // No renewal may start while it moves.
+        let _renewing = RENEWING.lock().unwrap();
+        let s = stored_of(id)
+            .filter(|s| !s.remote)
+            .ok_or("There is no such Quick login on this machine.")?;
+        let moved = upload(&s)?;
+        if moved.id != id {
+            forget(id);
+        }
+        keep(moved);
+        STORE.lock().unwrap().note = None;
+        Ok(())
+    }
+
+    /// A fresh sign-in: connected to a vault it goes there (one from before
+    /// it kept Quick logins leaves it here, saying why).
+    fn keep_signed_in(s: Stored) -> Result<(), String> {
+        let mut note = None;
+        let s = if api::signing_in_remotely() {
+            match upload(&s) {
+                Ok(r) => r,
+                Err(e) if api::vault_cannot_keep(&e) => {
+                    note = Some(format!("Kept on this machine: {e}"));
+                    s
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            s
         };
-        if refresh.is_empty() {
+        keep(s);
+        STORE.lock().unwrap().note = note;
+        Ok(())
+    }
+
+    /// The access token of the login this thread's requests go through
+    /// (`current`).
+    pub fn access_token() -> Result<String, String> {
+        let id = current().ok_or("No Quick account: sign in on Home.")?;
+        access_token_of(&id, None)
+    }
+
+    /// Login `id`'s access token: the one it has while it lasts, else one
+    /// bought with its refresh token (or, on the vault, asked of it). With
+    /// `refused` (Quick turned that token down) a new one, whatever its
+    /// time. Err says what the server said, and marks the login failed.
+    pub fn access_token_of(id: &str, refused: Option<&str>) -> Result<String, String> {
+        let fresh = |s: &Stored| {
+            !s.access.is_empty()
+                && refused != Some(s.access.as_str())
+                && s.expires_at > crate::api::now_ms() + 60_000
+        };
+        let s = stored_of(id).ok_or("That Quick account is no longer signed in: sign in on Home.")?;
+        if fresh(&s) {
+            return Ok(s.access);
+        }
+        // One renewal at a time: another request may have just renewed it.
+        let _renewing = RENEWING.lock().unwrap();
+        let s = stored_of(id).ok_or("That Quick account is no longer signed in: sign in on Home.")?;
+        if fresh(&s) {
+            return Ok(s.access);
+        }
+        if s.remote {
+            return remote_access(&s, refused);
+        }
+        if s.refresh.is_empty() {
             return Err("No Quick account: sign in on Home.".into());
         }
-        if !access.is_empty() && expires > crate::api::now_ms() + 60_000 {
-            return Ok(access);
-        }
-        let resp = if !token_endpoint.is_empty() {
+        let resp = if !s.token_endpoint.is_empty() {
             let form = format!(
                 "grant_type=refresh_token&client_id={}&refresh_token={}&resource={}",
-                urlencode(&id),
-                urlencode(&refresh),
-                urlencode(&resource),
+                urlencode(&s.client_id),
+                urlencode(&s.refresh),
+                urlencode(&s.resource),
             );
             api::http()
-                .post(&token_endpoint)
+                .post(&s.token_endpoint)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("Accept", "application/json")
                 .body(form)
@@ -336,13 +682,13 @@ pub mod login {
                 .map_err(api::network_error)?
         } else {
             let body = json!({
-                "clientId": id,
-                "clientSecret": secret,
+                "clientId": s.client_id,
+                "clientSecret": s.client_secret,
                 "grantType": "refresh_token",
-                "refreshToken": refresh,
+                "refreshToken": s.refresh,
             });
             api::http()
-                .post(oidc_url(&region, "token"))
+                .post(oidc_url(&s.oidc_region, "token"))
                 .header("Content-Type", "application/json")
                 .json(&body)
                 .timeout(Duration::from_secs(30))
@@ -355,15 +701,12 @@ pub mod login {
             let why = serde_json::from_str::<Value>(&text)
                 .map(|v| provider::error_msg(&v, &text, None))
                 .unwrap_or_else(|_| text.chars().take(300).collect());
-            let mut s = STORE.lock().unwrap();
-            s.error = format!("Quick refused to renew the sign-in ({status}): {why}");
-            drop(s);
-            save();
+            update(id, |s| s.error = format!("Quick refused to renew the sign-in ({status}): {why}"));
             return Err(format!("Quick: {why}. Sign in again on Home."));
         }
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| format!("Quick sent an unreadable answer: {e}"))?;
-        access = v["accessToken"]
+        let access = v["accessToken"]
             .as_str()
             .or(v["access_token"].as_str())
             .unwrap_or("")
@@ -380,31 +723,63 @@ pub mod login {
         if access.is_empty() {
             return Err("Quick's sign-in answered without an access token.".into());
         }
-        {
-            let mut s = STORE.lock().unwrap();
+        update(id, |s| {
             s.access = access.clone();
             s.expires_at = crate::api::now_ms() + ttl * 1000;
             if !next.is_empty() {
                 s.refresh = next;
             }
             s.error.clear();
-        }
-        save();
+        });
         Ok(access)
     }
 
-    /// The socket's host for the signed-in account: the `tenantUrl` Quick's
-    /// sign-in reports (its cell's own address), the cell Oak was configured
-    /// with, or the one Quick's desktop app uses for this identity store.
+    /// An access token for login `s` from the vault: the one it has, or a
+    /// new one when `refused` is still its current one.
+    fn remote_access(s: &Stored, refused: Option<&str>) -> Result<String, String> {
+        let Some(v) = api::vault_token("quick", &s.id, refused)? else {
+            forget(&s.id);
+            return Err(format!(
+                "The Quick login was removed from {}: sign in again on Home.",
+                api::vault_name()
+            ));
+        };
+        let access = v["access_token"]
+            .as_str()
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| format!("{} sent no Quick token.", api::capital(&api::vault_name())))?
+            .to_string();
+        let expires = v["expires_at"].as_i64().unwrap_or(0);
+        let host = v["host"].as_str().unwrap_or("").to_string();
+        update(&s.id, |s| {
+            s.access = access.clone();
+            s.expires_at = expires;
+            if !host.is_empty() {
+                s.host = host;
+            }
+            s.error.clear();
+        });
+        Ok(access)
+    }
+
+    /// The socket's host for the login this thread's requests go through:
+    /// the `tenantUrl` Quick's sign-in reports (its cell's own address), the
+    /// cell Oak was configured with, or the one Quick's desktop app uses for
+    /// this identity store.
     pub fn host() -> Result<String, String> {
-        let stored = STORE.lock().unwrap().host.clone();
+        let id = current().ok_or("No Quick account: sign in on Home.")?;
+        host_of(&id)
+    }
+
+    /// Login `id`'s socket host (as `host`).
+    pub fn host_of(id: &str) -> Result<String, String> {
+        let stored = stored_of(id).map(|s| s.host).unwrap_or_default();
         if !stored.is_empty() {
             return Ok(stored);
         }
         match known_cell() {
             Some(h) => {
-                STORE.lock().unwrap().host = h.clone();
-                save();
+                update(id, |s| s.host = h.clone());
                 Ok(h)
             }
             None => Err(
@@ -414,27 +789,29 @@ pub mod login {
         }
     }
 
-    /// The host Oak saved at sign-in, for the UI.
+    /// The host Oak saved at sign-in for the current login.
+    #[cfg(test)]
     pub fn saved_host() -> String {
-        STORE.lock().unwrap().host.clone()
+        stored().host
     }
 
-    /// Saves this machine's own outpost id (`outpost::id`).
-    pub fn set_outpost(id: &str) {
-        let mut s = STORE.lock().unwrap();
-        s.outpost = id.to_string();
-        drop(s);
-        save();
+    /// Saves this machine's own outpost id for the current login
+    /// (`outpost::id`): each account registers this machine as its own.
+    pub fn set_outpost(outpost: &str) {
+        if let Some(id) = current() {
+            update(&id, |s| s.outpost = outpost.to_string());
+        }
     }
 
-    /// The outpost Quick routes this machine's tools to, saved from the
-    /// sign-in's callback (`outpostId`) or `OAK_QUICK_OUTPOST`.
+    /// The outpost Quick routes this machine's tools to for the current
+    /// login, saved from the sign-in's callback (`outpostId`) or
+    /// `OAK_QUICK_OUTPOST`.
     pub fn saved_outpost() -> String {
         std::env::var("OAK_QUICK_OUTPOST")
             .ok()
             .map(|o| o.trim().to_string())
             .filter(|o| !o.is_empty())
-            .unwrap_or_else(|| STORE.lock().unwrap().outpost.clone())
+            .unwrap_or_else(|| stored().outpost)
     }
 
     /// The cell Oak's Quick login runs on. Quick's sign-in reports it
@@ -536,11 +913,7 @@ pub mod login {
                                 set_state(State::Done);
                                 crate::api::note_signed_in();
                             }
-                            Err(e) => {
-                                STORE.lock().unwrap().error = e.clone();
-                                save();
-                                set_state(State::Failed(e));
-                            }
+                            Err(e) => set_state(State::Failed(e)),
                         }
                     }
                     Ok(None) => return,
@@ -950,41 +1323,38 @@ pub mod login {
         if refresh.is_empty() {
             return Err("Quick's sign-in gave no refresh token, so it couldn't be kept.".into());
         }
-        {
-            let mut s = STORE.lock().unwrap();
-            if !host.is_empty() {
-                s.host = host.to_string();
-            }
-            if !outpost.is_empty() {
-                s.outpost = outpost.to_string();
-            }
-            s.client_id = client_id;
-            s.client_secret = client_secret;
-            s.oidc_region = region;
-            s.token_endpoint = token_endpoint;
-            s.resource = resource;
-            s.access = access.clone();
-            s.refresh = refresh;
-            s.expires_at = crate::api::now_ms() + ttl * 1000;
-            s.error.clear();
-        }
-        if let Some(who) = whoami(&access)
-            && !who.is_empty()
-        {
-            STORE.lock().unwrap().email = who;
-        }
-        save();
-        Ok(())
+        let host = if host.is_empty() { known_cell().unwrap_or_default() } else { host.to_string() };
+        let mut s = Stored {
+            host,
+            outpost: outpost.to_string(),
+            client_id,
+            client_secret,
+            oidc_region: region,
+            token_endpoint,
+            resource,
+            access: access.clone(),
+            refresh,
+            expires_at: crate::api::now_ms() + ttl * 1000,
+            ..Stored::default()
+        };
+        s.email = whoami(&access, &s.host).unwrap_or_default();
+        fill_id(&mut s);
+        // The same account signed in again: its login is renewed in place
+        // (on the vault when it is there).
+        keep_signed_in(s)
     }
 
     /// Who the access token belongs to (best effort, for Home).
-    fn whoami(access: &str) -> Option<String> {
+    fn whoami(access: &str, host: &str) -> Option<String> {
+        if host.is_empty() {
+            return None;
+        }
+        // (A POST, as `usage` reads it: a GET is not found.)
         let resp = api::http()
-            .get(format!(
-                "https://{}/integration/quick-work/user-info",
-                host().ok()?
-            ))
+            .post(format!("https://{host}/integration/quick-work/user-info"))
             .bearer_auth(access)
+            .header("Content-Type", "application/json")
+            .body("{}")
             .timeout(Duration::from_secs(20))
             .send()
             .ok()?;
@@ -1043,6 +1413,8 @@ fn urldecode(s: &str) -> String {
 /// A Quick login as the UI shows it.
 #[derive(Clone, Debug, Default)]
 pub struct Account {
+    /// The login's id (`login::Stored::id`).
+    pub id: String,
     pub email: String,
     /// The refresh token, shortened.
     pub label: String,
@@ -1055,20 +1427,37 @@ pub struct Account {
     pub usage_at: i64,
 }
 
-pub fn account() -> Option<Account> {
-    let s = login::stored();
-    if s.refresh.is_empty() {
-        return None;
-    }
-    let (usage, usage_error, usage_at) = usage::last();
-    Some(Account {
+fn account_of(s: &login::Stored) -> Account {
+    let (usage, usage_error, usage_at) = usage::last_of(&s.id);
+    Account {
+        id: s.id.clone(),
         email: s.email.clone(),
-        label: provider::short_key(&s.refresh),
+        label: if s.remote { s.id.clone() } else { provider::short_key(&s.refresh) },
         error: (!s.error.is_empty()).then(|| s.error.clone()),
         usage,
         usage_error,
         usage_at,
-    })
+    }
+}
+
+/// The login this thread's requests go through (the first, off a turn).
+#[cfg(test)]
+pub fn account() -> Option<Account> {
+    let id = login::current()?;
+    login::stored_of(&id).map(|s| account_of(&s))
+}
+
+/// Every Quick login, as the UI shows them.
+pub fn accounts() -> Vec<Account> {
+    login::all().iter().map(account_of).collect()
+}
+
+/// The login conversation `conv` is on (its seat), else the first.
+pub fn account_of_conv(conv: &str) -> Option<Account> {
+    let all = accounts();
+    let seat = crate::rotation::seat(api::Provider::Quick, conv);
+    seat.and_then(|id| all.iter().find(|a| a.id == id).cloned())
+        .or_else(|| all.into_iter().next())
 }
 
 /// A Quick login is set.
@@ -1076,8 +1465,99 @@ pub fn on() -> bool {
     login::on()
 }
 
-// The login is Oak's own OIDC client (`login`), so nothing here goes on a
-// vault: there is no `sync`.
+/// What of a conversation a login that never had its Quick thread lacks
+/// (it moved there from another login): all of request `messages` but the
+/// newest user turns' text and pictures, which the request sends, as
+/// `agent::unseen_by` gives it when Quick wrote none of it.
+pub(crate) fn all_unseen(messages: &[Value]) -> Vec<Value> {
+    let mut out = messages.to_vec();
+    let last = out.iter().rposition(|m| m["role"] == "assistant").map_or(0, |i| i + 1);
+    for m in &mut out[last..] {
+        if let Some(c) = m["content"].as_array_mut() {
+            c.retain(|b| !oak::is(b, "text") && !oak::is(b, "image"));
+        }
+    }
+    let calls: std::collections::HashSet<String> = out
+        .iter()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|b| oak::is_call(b))
+        .filter_map(|b| b["id"].as_str().map(String::from))
+        .collect();
+    for m in &mut out {
+        if let Some(c) = m["content"].as_array_mut() {
+            c.retain(|b| !oak::is_result(b) || b["call_id"].as_str().is_some_and(|id| calls.contains(id)));
+        }
+    }
+    out.retain(|m| m["content"].as_array().is_none_or(|c| !c.is_empty()));
+    out
+}
+
+/// The logins as rotation weighs them: by what is left of their month and
+/// session window (a used-up one, or one Quick says can't run, waits);
+/// ones on this machine are a fallback once the vault has logins.
+fn candidates(now: i64) -> Vec<crate::rotation::Candidate> {
+    let all = login::all();
+    let any_remote = all.iter().any(|s| s.remote);
+    all.iter()
+        .map(|s| {
+            let (u, _, _) = usage::last_of(&s.id);
+            let (left, usable, resets_at) = match &u {
+                Some(u) => {
+                    let month_live = u.month_resets_at.is_none_or(|r| r > now);
+                    let month = if month_live { u.month_percent } else { 0.0 };
+                    let session_out = u.session_resumes_at.is_some_and(|r| r > now);
+                    let used = month.max(if session_out { 100.0 } else { u.session_percent });
+                    (
+                        (100.0 - used.min(100.0)) as f64,
+                        u.allowed() && !session_out && month < 100.0,
+                        u.month_resets_at.filter(|_| month_live).unwrap_or(i64::MAX),
+                    )
+                }
+                None => (100.0, true, i64::MAX),
+            };
+            crate::rotation::Candidate {
+                id: s.id.clone(),
+                left,
+                usable: usable && s.error.is_empty(),
+                resets_at,
+                preferred: s.remote || !any_remote,
+            }
+        })
+        .collect()
+}
+
+/// The login conversation `conv`'s request goes through, and whether the
+/// conversation was on another before (whose Quick thread this one lacks).
+/// It keeps its login while that one can run; with none that can, it
+/// stays where it is and Quick says why.
+pub(crate) fn login_for(conv: &str) -> Option<(String, bool)> {
+    let now = api::now_ms();
+    let cands = candidates(now);
+    if cands.is_empty() {
+        return None;
+    }
+    let before = crate::rotation::seat(api::Provider::Quick, conv);
+    let held = before.as_ref().and_then(|b| cands.iter().find(|c| &c.id == b));
+    let picked = match held {
+        // Its thread lives on its login: it moves only when that one can't run.
+        Some(c) if c.usable || !cands.iter().any(|c| c.usable) => c.id.clone(),
+        _ => {
+            let usable: Vec<_> = cands.iter().filter(|c| c.usable).cloned().collect();
+            let pool = if usable.is_empty() { &cands } else { &usable };
+            if conv.is_empty() {
+                pool[0].id.clone()
+            } else {
+                crate::rotation::pick(api::Provider::Quick, conv, pool, now, false)
+                    .unwrap_or_else(|| pool[0].id.clone())
+            }
+        }
+    };
+    if !conv.is_empty() {
+        crate::rotation::used(api::Provider::Quick, conv, &picked, 0, now);
+    }
+    let moved = before.is_some_and(|b| b != picked);
+    Some((picked, moved))
+}
 
 // ---------------------------------------------------------------- the frames
 
@@ -2525,6 +3005,61 @@ mod tests {
         assert_eq!(got.1, "cell.example.com");
         assert_eq!(got.2, "dev");
         assert!(got.3.is_none(), "no discovery was needed for a code");
+    }
+
+    #[test]
+    fn a_login_from_before_accounts_reads_as_the_first_with_an_id() {
+        let one = json!({"client_id": "c1", "client_secret": "s1", "refresh": "aor1", "email": "Me@Example.com", "host": "h", "outpost": "o"});
+        let list = login::logins_of(Some(one));
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].id.as_str(), list[0].outpost.as_str()), ("me@example.com", "o"));
+        // Without an email, an id from its client, the same each time.
+        let anon = json!({"client_id": "c2", "client_secret": "", "refresh": "aor2"});
+        let a = login::logins_of(Some(anon.clone()));
+        assert!(a[0].id.starts_with("acct-") && a[0].id == login::logins_of(Some(anon))[0].id);
+        // Several, as Oak keeps them now; a vault's needs no refresh token,
+        // and one with neither is dropped.
+        let many = json!({"logins": [
+            {"id": "a@x.com", "client_id": "c", "client_secret": "", "refresh": "aor"},
+            {"id": "b@x.com", "remote": true, "host": "cell"},
+            {"id": "c@x.com"}
+        ]});
+        let ids: Vec<String> = login::logins_of(Some(many)).into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, ["a@x.com", "b@x.com"]);
+        assert!(login::logins_of(None).is_empty());
+    }
+
+    #[test]
+    fn the_vault_is_given_what_renews_a_login() {
+        let s = login::Stored {
+            id: "me@x.com".into(),
+            client_id: "cid".into(),
+            client_secret: "sec".into(),
+            refresh: "aor".into(),
+            oidc_region: "eu-west-1".into(),
+            host: "cell".into(),
+            ..Default::default()
+        };
+        let v = login::upload_body(&s);
+        for (k, want) in [("account_id", "me@x.com"), ("client_id", "cid"), ("client_secret", "sec"), ("refresh_token", "aor"), ("oidc_region", "eu-west-1"), ("host", "cell")] {
+            assert_eq!(v[k], want, "{k}");
+        }
+    }
+
+    #[test]
+    fn a_login_new_to_the_conversation_is_sent_all_of_it() {
+        let msgs = vec![
+            json!({"role": "user", "content": [{"type": "text", "text": "first"}]}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": "ok"}, {"type": "tool_call", "id": "c1", "name": "READ", "input": {}}]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "call_id": "c1", "content": "file"}, {"type": "text", "text": "newest"}]}),
+        ];
+        let out = all_unseen(&msgs);
+        assert_eq!(out.len(), 3);
+        // The newest turn's text goes as the message itself; its results stay.
+        assert_eq!(out[2]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(out[2]["content"][0]["type"], "tool_result");
+        // A conversation's first message has nothing before it.
+        assert!(all_unseen(&msgs[..1]).is_empty());
     }
 
     #[test]

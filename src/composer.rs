@@ -794,7 +794,7 @@ fn account_box(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &Set
         api::Provider::MuseCode => musecode_panel(ui, t, crate::musecode::account_of_conv(&conv_id).as_ref(), ("This session", spent), None, w)
             .on_hover_text("Meta's Muse models through the Meta Model API, paid per token"),
         // Quick: the account it runs on, and that Quick runs its own agent.
-        api::Provider::Quick => quick_panel(ui, t, crate::quick::account().as_ref(), None, w)
+        api::Provider::Quick => quick_panel(ui, t, crate::quick::account_of_conv(&conv_id).as_ref(), None, w)
             .on_hover_text("AWS Quick, runs its own agent and model; Oak runs the tools it asks for"),
         api::Provider::Claude => {
             let accounts = api::accounts();
@@ -1186,7 +1186,7 @@ pub(crate) fn quick_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::quick::Accou
         } else {
             key_line(ui, &a.email, t.ink3);
         }
-        let no_host = crate::quick::login::saved_host().is_empty();
+        let no_host = crate::quick::login::stored_of(&a.id).is_none_or(|s| s.host.is_empty());
         if no_host {
             key_line(ui, "Workspace address not reported: set OAK_QUICK_HOST", t.ink3);
         }

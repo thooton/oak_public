@@ -110,6 +110,7 @@ fn forget_vault() {
     crate::refuseless::KEYS.forget_remote();
     crate::musecode::KEYS.forget_remote();
     crate::freebuff::forget_remote();
+    crate::quick::login::forget_remote();
 }
 
 /// Brings the list in step with the vault's: its new accounts join, ones

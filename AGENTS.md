@@ -865,9 +865,27 @@ tools, and the picker's models are Quick's three modes (`smart`, `fast`, `balanc
 client for itself (`/client/register`), copies a link to the authorization endpoint with PKCE
 and `prompt=login`, takes the code on a loopback port, and exchanges it for an access token
 (`aoa…`, an hour) and a refresh token (`aor…`). The refresh token is what Oak keeps in
-`quick.json` (beside the client registration and the workspace's host); every request buys a
-fresh access token with it. There is no vault entry: the client is Oak's own registration, not a
-key a vault could share. `OAK_QUICK_HOST` names the socket's host instead of the one the
+`quick.json` (beside the client registration and the workspace's host); a request buys a fresh
+access token with it when the one it has is about to expire.
+
+**Accounts.** Quick has as many logins as were signed in (`quick.json` holds `logins`; a single
+login from before is read as the first). Each has an id: its email, lowercased, else one made from
+its client; signing the same account in again renews it in place. Each keeps this machine's outpost
+for that account. A conversation's Quick thread lives on its login, so a conversation keeps its
+login (`quick::login_for`, a seat in `seats.json` like any provider's) while that one can run, and
+moves only when it can't (its session window or month used up, Quick saying it may not run, or its
+renewal failing); with none that can, it stays and Quick says why. A conversation that moved is
+sent all of itself with the request (`all_unseen`), as a switch from another provider is, since
+the new login's thread has none of it. The turn's login is the thread's (`login::set_using`, which
+its tool threads take with them). Home lists every login, with its month; Quick's provider box
+averages them, and the account box shows the conversation's own.
+
+**On a vault.** Connected to one, a sign-in goes to the vault (kind `quick`) with what renews it:
+the client Oak registered and its secret, the Identity Center region or Gateway endpoint and
+resource, the refresh token, and the workspace's host. The vault alone renews it from then on and
+hands out access tokens, so every machine connected to it has the login; a vault that doesn't keep
+Quick logins leaves it on this machine, saying so. A login on this machine moves there from its
+card's menu. `OAK_QUICK_HOST` names the socket's host instead of the one the
 sign-in's callback reports (a proxy or a stand-in, as `OAK_API_BASE` does for Claude). The sign-in's
 callback doesn't always report the workspace, so Oak falls back to the cell Quick's desktop app
 signs this identity store in to (`DEFAULT_CELL`), and the account box says so when neither is known.

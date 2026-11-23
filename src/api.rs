@@ -248,6 +248,7 @@ fn sync_other_logins() {
     crate::refuseless::KEYS.sync();
     crate::musecode::KEYS.sync();
     crate::freebuff::sync();
+    crate::quick::login::sync();
 }
 
 /// Counts sign-ins (not token refreshes or sign-outs) and accounts that

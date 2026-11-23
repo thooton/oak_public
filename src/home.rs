@@ -484,6 +484,7 @@ impl App {
                         crate::refuseless::KEYS.note(),
                         crate::musecode::KEYS.note(),
                         freebuff::note(),
+                        crate::quick::login::note(),
                     ]
                     .into_iter()
                     .flatten()
@@ -1062,10 +1063,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
         AccountAct::Remove(Provider::NodeClub, id) => crate::nodeclub::KEYS.remove(&id),
         AccountAct::Remove(Provider::Refuseless, id) => crate::refuseless::KEYS.remove(&id),
         AccountAct::Remove(Provider::MuseCode, id) => crate::musecode::KEYS.remove(&id),
-        AccountAct::Remove(Provider::Quick, _) => {
-            crate::quick::login::sign_out();
-            Ok(())
-        }
+        AccountAct::Remove(Provider::Quick, id) => crate::quick::login::sign_out(&id),
         AccountAct::Remove(Provider::Freebuff, id) => freebuff::sign_out(&id),
         AccountAct::Remove(Provider::Local, _) => {
             local::remove();
@@ -1083,9 +1081,8 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
             Provider::Refuseless => crate::refuseless::KEYS.move_to_vault(id),
             Provider::MuseCode => crate::musecode::KEYS.move_to_vault(id),
             Provider::Freebuff => freebuff::move_to_vault(id),
-            // Quick's client is Oak's own registration, not a key a vault
-            // could keep for every machine.
-            Provider::Quick | Provider::Local | Provider::Plugin => Ok(()),
+            Provider::Quick => crate::quick::login::move_to_vault(id),
+            Provider::Local | Provider::Plugin => Ok(()),
         }),
     }
 }
@@ -1443,20 +1440,27 @@ fn account_cards(
             );
         }
         Provider::Quick => {
-            if let Some(a) = crate::quick::account() {
-                let status = on("quick");
+            let remove = if paired {
+                "Sign out (every machine)"
+            } else {
+                "Sign out of Quick"
+            };
+            for a in crate::quick::accounts() {
+                let movable = crate::quick::login::movable(&a.id);
+                let status = status(&a.id, movable);
                 account_card(
                     ui,
                     t,
                     w,
-                    (p, "quick"),
-                    false,
-                    "Sign out of Quick",
+                    (p, &a.id),
+                    movable,
+                    remove,
                     busy,
                     act,
                     |ui, t, w| crate::composer::quick_panel(ui, t, Some(&a), status.as_deref(), w),
                 );
-            } else if let Some(crate::quick::login::State::Waiting { .. }) =
+            }
+            if let Some(crate::quick::login::State::Waiting { .. }) =
                 crate::quick::login::state()
             {
                 ui.horizontal(|ui| {
