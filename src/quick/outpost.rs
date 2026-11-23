@@ -6,6 +6,17 @@
 //! call on the same host as the chat socket: it names the outpost, its kind
 //! and the tools it can run. Oak registers the same tools it answers
 //! (`turn::run_tool`), so what Quick is told it may ask for is what Oak runs.
+//! A tool Quick routes here also needs a policy on the outpost (`policies`):
+//! without one Quick refuses the call as having "no connector id".
+//!
+//! **Files to Quick's workspace** (`upload`): Quick's agent sees a file on this
+//! machine (an image above all) by asking for `file_upload`; the device puts
+//! the file in the thread's workspace, as the app does an attachment, and
+//! answers with its path there. The bytes go to `upload-attachment`, Quick's
+//! data loss prevention scan is waited on (`attachment-dlp-status`), and the
+//! attachment is delivered to the thread (`files/upload/<thread>`), which
+//! answers with the file's path in the workspace. Oak uses the same upload for
+//! the images its own tools return and for those the user attaches.
 
 use super::*;
 
@@ -22,6 +33,7 @@ pub const TOOLS: &[(&str, bool)] = &[
     ("file_type", true),
     ("fdfind", true),
     ("ripgrep", true),
+    ("file_upload", true),
     ("run_python_outpost_local", true),
     ("run_python_outpost_local_with_write", false),
 ];
@@ -58,6 +70,13 @@ pub fn tool_schema(name: &str) -> Value {
             json!(["source", "destination"]),
         ),
         "file_type" => obj(json!({"path": s("Path to the file")}), json!(["path"])),
+        "file_upload" => obj(
+            json!({
+                "path": s("Path of the file on this device"),
+                "session_id": s("The thread whose workspace the file goes to")
+            }),
+            json!(["path"]),
+        ),
         "fdfind" => obj(
             json!({
                 "args": s("fd arguments as a single string (pattern, flags, etc.)."),
@@ -166,7 +185,216 @@ pub fn register_as(outpost: &str) -> Result<(), String> {
             text.chars().take(200).collect::<String>()
         ));
     }
+    // (A tool without a policy is refused; failing here only costs those.)
+    let _ = policies(&token, &host, outpost);
     Ok(())
+}
+
+/// One of Quick's events (`qbs-event`) as the outpost sends it: what it
+/// answered (`eventResponse`), or Err with what was wrong.
+fn event(token: &str, host: &str, kind: &str, body: Value) -> Result<Value, String> {
+    let resp = api::http()
+        .post(format!("https://{host}/integration/quick-work/qbs-event"))
+        .bearer_auth(token)
+        .header("Content-Type", "application/json")
+        .header("X-QuickDsk-mdid", "outpost")
+        .header("x-amzn-quick-atype", "sbg")
+        .json(&json!({"eventType": kind, "eventBody": {kind: body}}))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .map_err(api::network_error)?;
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) || v["errorMessage"].is_string() {
+        return Err(format!(
+            "Quick refused {kind} ({status}): {}",
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+    Ok(v["eventResponse"].clone())
+}
+
+/// Gives each of `TOOLS` that has none a policy on `outpost`: the tool's
+/// group (`connectorId`), and whether it may run without asking (the reading
+/// ones) or asks each time, as Quick sets them for the app's own tools. The
+/// policies the outpost has are kept as they are (the user may have changed
+/// them), and nothing is sent when none is missing.
+fn policies(token: &str, host: &str, outpost: &str) -> Result<(), String> {
+    let got = event(
+        token,
+        host,
+        "batchGetPolicy",
+        json!({"policyType": "OUTPOST", "resourceIds": [outpost]}),
+    )?;
+    let current = &got["batchGetPolicyResponse"]["policies"][0];
+    let mut tools = current["toolPolicies"].as_array().cloned().unwrap_or_default();
+    let had = tools.len();
+    for (name, reads) in TOOLS {
+        if tools.iter().any(|t| t["toolName"] == *name) {
+            continue;
+        }
+        tools.push(json!({
+            "toolName": name,
+            "enabled": true,
+            "connectorId": if name.starts_with("run_python") { "code_execution" } else { "file_operations" },
+            "permissionPolicy": if *reads { "ALWAYS_ALLOW" } else { "ASK_EACH_TIME" },
+            "originPolicy": "ASK_EACH_TIME",
+        }));
+    }
+    if tools.len() == had {
+        return Ok(());
+    }
+    event(
+        token,
+        host,
+        "batchPutPolicy",
+        json!({"policyType": "OUTPOST", "policies": [{
+            "resourceId": outpost,
+            "enabled": current["enabled"].as_bool().unwrap_or(true),
+            "toolPolicies": tools,
+        }]}),
+    )
+    .map(|_| ())
+}
+
+/// The most Quick takes in one attachment (the app's own limit).
+const MAX_UPLOAD: u64 = 95 * 1024 * 1024;
+
+/// The media type a file's name says it is.
+pub fn media_type(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" | "md" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        _ => "application/octet-stream",
+    }
+}
+
+/// `file_upload`: the file at `path`, on this machine, put in thread
+/// `session`'s workspace. Answers as Quick's agent reads it, with the file's
+/// `path` there.
+pub fn upload_file(path: &std::path::Path, session: &str) -> Result<Value, String> {
+    let shown = path.display();
+    let meta = std::fs::metadata(path).map_err(|e| format!("Couldn't read {shown}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{shown} isn't a file."));
+    }
+    if meta.len() > MAX_UPLOAD {
+        return Err(format!("{shown} is too big to upload ({} bytes; Quick takes at most 95 MB).", meta.len()));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read {shown}: {e}"))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let mut v = upload(&bytes, &name, media_type(&name), session)?;
+    v["success"] = json!(true);
+    Ok(v)
+}
+
+/// `bytes`, named `name`, put in thread `session`'s workspace, as Quick's app
+/// does an attachment: what the delivery answers (`name`, `path`,
+/// `workspace_path`, `size`).
+pub fn upload(bytes: &[u8], name: &str, media_type: &str, session: &str) -> Result<Value, String> {
+    if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("Quick named no thread to upload {name} to."));
+    }
+    if bytes.is_empty() {
+        return Err(format!("{name} is empty."));
+    }
+    let token = login::access_token()?;
+    let host = login::host()?;
+    let resp = api::http()
+        .post(format!("https://{host}/integration/quick-work/upload-attachment"))
+        .query(&[
+            ("name", name.to_string()),
+            ("contentType", media_type.to_string()),
+            ("contentLength", bytes.len().to_string()),
+        ])
+        .bearer_auth(&token)
+        .header("Content-Type", "application/octet-stream")
+        .body(bytes.to_vec())
+        .timeout(Duration::from_secs(300))
+        .send()
+        .map_err(api::network_error)?;
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(format!("Quick refused the upload of {name} ({status}): {}", text.chars().take(300).collect::<String>()));
+    }
+    let attachment = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["attachmentId"].as_str().map(String::from));
+    let Some(attachment) = attachment else {
+        return Err(format!("Quick's upload of {name} answered without an attachment: {}", text.chars().take(300).collect::<String>()));
+    };
+    // Quick scans what it is given before the thread may have it.
+    let mut verdict = String::new();
+    for _ in 0..60 {
+        let resp = api::http()
+            .get(format!("https://{host}/integration/quick-work/attachment-dlp-status"))
+            .query(&[("attachmentId", attachment.as_str())])
+            .bearer_auth(&token)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .map_err(api::network_error)?;
+        let v: Value = serde_json::from_str(&resp.text().unwrap_or_default()).unwrap_or(Value::Null);
+        let state = v["dlpJobStatus"].as_str().unwrap_or("").to_ascii_uppercase();
+        match state.as_str() {
+            "COMPLETED" | "SKIPPED" | "NOT_APPLICABLE" => {
+                verdict = v["policyAction"].as_str().unwrap_or("ALLOW").to_ascii_uppercase();
+                break;
+            }
+            "FAILED" | "ERROR" => return Err(format!("Quick's data loss prevention scan of {name} failed.")),
+            _ => std::thread::sleep(Duration::from_millis(1500)),
+        }
+    }
+    match verdict.as_str() {
+        "ALLOW" => {}
+        "" => return Err(format!("Quick's data loss prevention scan of {name} didn't finish.")),
+        v => return Err(format!("Quick's data loss prevention policy kept {name} out of the thread ({v}).")),
+    }
+    let envelope = json!({
+        "eventType": "invokeAgent",
+        "eventBody": {"invokeAgent": {
+            "path": format!("files/upload/{session}"),
+            "queryParams": {"_method": "POST"},
+            "body": json!({"attachmentId": attachment}).to_string(),
+            "outpostId": id(),
+        }}
+    });
+    let resp = api::http()
+        .post(format!("https://{host}/integration/quick-work/qbs-event"))
+        .bearer_auth(&token)
+        .header("Content-Type", "application/json")
+        .header("X-QuickDsk-mdid", "user-conversation")
+        .header("x-amzn-quick-atype", "ufg")
+        .json(&envelope)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .map_err(api::network_error)?;
+    let text = resp.text().unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    // The agent answers in its own envelope: a status and a body, as JSON text.
+    let inner: Value = v["eventResponse"]["invokeAgentResponse"]
+        .as_str()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(Value::Null);
+    let body: Value = inner["body"].as_str().and_then(|b| serde_json::from_str(b).ok()).unwrap_or(Value::Null);
+    let delivered = inner["status"].as_u64().is_some_and(|s| (200..300).contains(&s));
+    if !delivered || !body["path"].is_string() {
+        let why = v["errorMessage"].as_str().map(String::from).unwrap_or_else(|| text.chars().take(300).collect());
+        return Err(format!("Quick didn't put {name} in the thread: {why}"));
+    }
+    Ok(body)
 }
 
 /// Registers `folder` as one this outpost may work in (`graph/folder`), so
@@ -353,6 +581,7 @@ fn describe(name: &str) -> &'static str {
         "file_delete" => "Delete a file or empty folder.",
         "file_copy" => "Copy a file or folder.",
         "file_type" => "Say what kind of file this is, and its size.",
+        "file_upload" => "Put a file from this machine in the thread's workspace, and answer with its path there.",
         "fdfind" => {
             "Find files and folders by name (fd's arguments: a regex, -e, -t, -g, -H, -I, -d), in the paths given or the conversation's folder."
         }

@@ -789,7 +789,14 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     if ctl.aborted().is_some() || ctl.pause_requested() {
         return drop(tx.send(Sse::Done));
     }
-    let user = user_message(&body, &thread, m, outpost.as_deref());
+    let mut user = user_message(&body, &thread, m, outpost.as_deref());
+    // Quick's message takes text only: the images the user attached go to
+    // the thread's workspace, and the message says where.
+    let attached = attached_images(&body, &thread);
+    if !attached.is_empty() {
+        let said = user["payload"]["text"].as_str().unwrap_or("").to_string();
+        user["payload"]["text"] = json!(format!("{said}\n\n{}", attached.join("\n")));
+    }
     if let Err(e) = sock.send(&user) {
         return drop(tx.send(Sse::Err(e)));
     }
@@ -1329,14 +1336,132 @@ fn run_oak_alive(
         }
     }
     forget();
+    let thread = turn.thread.clone();
     let results: Vec<Result<String, String>> = ids
         .iter()
         .map(|id| match got.get(id) {
-            Some(r) => crate::quick::calls::result_text(r),
+            Some(r) => crate::quick::calls::result_text(&images_delivered(r, &thread)),
             None => Err(format!("It didn't finish: {why}.")),
         })
         .collect();
     Ok(crate::quick::calls::answer(oak, &results))
+}
+
+/// An image block's bytes and media type.
+fn image_bytes(b: &Value) -> Option<(Vec<u8>, String)> {
+    let data = crate::blobs::data_of(b)?;
+    let bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data.as_bytes()).ok()?;
+    let media = b["media_type"].as_str().unwrap_or("image/png").to_string();
+    Some((bytes, media))
+}
+
+/// The name an image goes to Quick's workspace by: its file's, or one made
+/// for it (the `k`th of a message).
+fn image_name(b: &Value, media: &str, k: usize) -> String {
+    if let Some(n) = b["_oak_file"].as_str().filter(|n| !n.trim().is_empty()) {
+        return n.to_string();
+    }
+    let ext = match media {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    };
+    format!("oak-image-{}-{k}.{ext}", crate::api::now_ms())
+}
+
+/// Where a file Oak put in Quick's workspace is, as Quick's agent opens it:
+/// the path its file tools take (its sandbox's own, `/outposts/backend/…`),
+/// and the workspace's.
+fn workspace_place(delivered: &Value) -> String {
+    format!(
+        "/outposts/backend{} (`{}`)",
+        delivered["path"].as_str().unwrap_or(""),
+        delivered["workspace_path"].as_str().unwrap_or("")
+    )
+}
+
+/// A call's `tool_result` block with its images put in thread `thread`'s
+/// workspace (`outpost::upload`), each replaced by a note of where it is:
+/// Quick's agent can't be handed an image in a result, but it can open one
+/// in its workspace with its image tool.
+fn images_delivered(r: &Value, thread: &str) -> Value {
+    let Some(blocks) = r["content"].as_array() else {
+        return r.clone();
+    };
+    if !blocks.iter().any(|b| b["type"] == "image") {
+        return r.clone();
+    }
+    let mut k = 0;
+    let content: Vec<Value> = blocks
+        .iter()
+        .map(|b| {
+            if b["type"] != "image" {
+                return b.clone();
+            }
+            k += 1;
+            let Some((bytes, media)) = image_bytes(b) else {
+                return b.clone();
+            };
+            let name = image_name(b, &media, k);
+            let text = match crate::quick::outpost::upload(&bytes, &name, &media, thread) {
+                Ok(v) => format!(
+                    "[An image ({name}): Oak shows it to the user, and put it in your workspace at {}. To see it, open that path with your image-reading tool (file_read_image).]",
+                    workspace_place(&v)
+                ),
+                Err(e) => format!("[An image ({name}): Oak shows it to the user, but couldn't put it in your workspace: {e}]"),
+            };
+            json!({"type": "text", "text": text})
+        })
+        .collect();
+    let mut out = r.clone();
+    out["content"] = Value::Array(content);
+    out
+}
+
+/// The images the user attached since Quick last replied (the user turns
+/// after the newest assistant message, as `new_user_text` reads them), each
+/// put in thread `thread`'s workspace: a line for each, saying where, for the
+/// message that goes to Quick. None for a request with an instruction of its
+/// own (a summary).
+fn attached_images(r: &Request, thread: &str) -> Vec<String> {
+    if r.instruction.as_deref().is_some_and(|i| !i.trim().is_empty()) {
+        return vec![];
+    }
+    let mut turns: Vec<Vec<Value>> = vec![];
+    for m in r.messages.iter().rev() {
+        if m["role"] == "assistant" {
+            break;
+        }
+        if m["role"] != "user" {
+            continue;
+        }
+        let images: Vec<Value> = m["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|b| b["type"] == "image")
+            .cloned()
+            .collect();
+        turns.push(images);
+    }
+    turns.reverse();
+    let mut lines = vec![];
+    for (k, b) in turns.into_iter().flatten().enumerate() {
+        let Some((bytes, media)) = image_bytes(&b) else {
+            continue;
+        };
+        let name = image_name(&b, &media, k + 1);
+        lines.push(match crate::quick::outpost::upload(&bytes, &name, &media, thread) {
+            Ok(v) => format!(
+                "[The user attached an image ({name}). Oak put it in your workspace at {}: open that path with your image-reading tool (file_read_image) to see it.]",
+                workspace_place(&v)
+            ),
+            Err(e) => format!("[The user attached an image ({name}), but Oak couldn't put it in your workspace: {e}]"),
+        });
+    }
+    lines
 }
 
 /// A snippet's Oak calls run here, for a turn no conversation's agent reads
@@ -1854,6 +1979,13 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
             std::fs::copy(&from, &to)
                 .map(|_| format!("Copied {} to {}.", native(&from), native(&to)))
                 .map_err(|e| format!("Couldn't copy: {e}"))
+        }
+        // How Quick's agent sees a file on this machine (an image, to look
+        // at it): put in the thread's workspace, with its path there.
+        "file_upload" => {
+            let p = resolve(folder, args["path"].as_str().unwrap_or(""));
+            let session = args["session_id"].as_str().unwrap_or("");
+            crate::quick::outpost::upload_file(&p, session).map(|v| v.to_string())
         }
         "file_type" => {
             let p = resolve(folder, args["path"].as_str().unwrap_or(""));
