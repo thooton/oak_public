@@ -21,13 +21,18 @@ mod auth;
 mod catalog;
 mod wire;
 
-pub use auth::{AccountView, Login, account, account_for_model, accounts, accounts_detailed, finish_login, forget_remote, load, login_result, movable, move_to_vault, note, on, refresh, remote, sign_out, start_login, sync};
-pub use catalog::{context_window, efforts, max_output, model_name, models, serves};
+pub(crate) use auth::room;
+pub use auth::{
+    AccountView, Login, account, account_for_model, accounts, accounts_detailed, finish_login,
+    forget_remote, load, login_result, movable, move_to_vault, note, on, refresh, remote, sign_out,
+    start_login, sync,
+};
 #[cfg(test)]
 pub use catalog::QuotaPool;
-pub use wire::{preamble, stream};
+pub use catalog::{context_window, efforts, max_output, model_name, models, serves};
 #[cfg(test)]
 pub(crate) use wire::request_body;
+pub use wire::{preamble, stream};
 
 use crate::api;
 use sha2::{Digest, Sha256};
@@ -37,7 +42,8 @@ pub const PREFIX: &str = "antigravity/";
 
 /// Primary and fallback Cloud Code Assist endpoints.
 pub(crate) const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
-pub(crate) const ENDPOINT_FALLBACKS: [&str; 2] = [DEFAULT_ENDPOINT, "https://cloudcode-pa.googleapis.com"];
+pub(crate) const ENDPOINT_FALLBACKS: [&str; 2] =
+    [DEFAULT_ENDPOINT, "https://cloudcode-pa.googleapis.com"];
 
 /// User-Agent matching the official Antigravity CLI wire fingerprint so newer
 /// catalog entries (such as Gemini 4 Argon/Neon) are advertised.
@@ -86,7 +92,10 @@ pub(crate) fn default_project_id(seed: &str) -> String {
 }
 
 /// Applies the standard Antigravity API headers to a request builder.
-pub(crate) fn with_headers(req: reqwest::blocking::RequestBuilder, token: &str) -> reqwest::blocking::RequestBuilder {
+pub(crate) fn with_headers(
+    req: reqwest::blocking::RequestBuilder,
+    token: &str,
+) -> reqwest::blocking::RequestBuilder {
     req.bearer_auth(token)
         .header("Content-Type", "application/json")
         .header("User-Agent", user_agent())

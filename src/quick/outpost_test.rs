@@ -29,8 +29,16 @@ fn quick_outpost_status() {
         .expect("listOutposts");
     let text = resp.text().unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-    if items_empty(&v) { println!("\nRAW (first 900 chars):\n{}", &text.chars().take(900).collect::<String>()); }
-    let items = v["eventResponse"]["listOutpostsResponse"]["items"].as_array().cloned().unwrap_or_default();
+    if items_empty(&v) {
+        println!(
+            "\nRAW (first 900 chars):\n{}",
+            &text.chars().take(900).collect::<String>()
+        );
+    }
+    let items = v["eventResponse"]["listOutpostsResponse"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     // The folders Quick has for this device.
     let fbody = serde_json::json!({
         "eventType": "invokeAgent",
@@ -55,11 +63,18 @@ fn quick_outpost_status() {
     }
 
     // What graph/status says for Oak's own outpost once it is told.
-    println!("\nexpected {}, online now: {:?}", crate::quick::outpost::id(), crate::quick::outpost::is_online(&token, &host));
+    println!(
+        "\nexpected {}, online now: {:?}",
+        crate::quick::outpost::id(),
+        crate::quick::outpost::is_online(&token, &host)
+    );
     println!("brute-forcing the device-state field:");
     for (field, accepted, note) in crate::quick::outpost::put_device_state_report(&token, &host) {
         let now = crate::quick::outpost::is_online(&token, &host).unwrap_or(false);
-        println!("  {field:18} accepted={accepted:5} online={now}{}", if accepted { "" } else { "  <- rejected" });
+        println!(
+            "  {field:18} accepted={accepted:5} online={now}{}",
+            if accepted { "" } else { "  <- rejected" }
+        );
         if now {
             println!("\n*** {field} brings the outpost ONLINE ***");
             break;
@@ -80,7 +95,10 @@ fn quick_outpost_status() {
 }
 
 fn items_empty(v: &serde_json::Value) -> bool {
-    v["eventResponse"]["listOutpostsResponse"]["items"].as_array().map(|a| a.is_empty()).unwrap_or(true)
+    v["eventResponse"]["listOutpostsResponse"]["items"]
+        .as_array()
+        .map(|a| a.is_empty())
+        .unwrap_or(true)
 }
 
 /// Holds this machine's outpost ONLINE: a chat socket that names it, kept open
@@ -98,7 +116,10 @@ fn quick_outpost_stay_online() {
     let host = crate::quick::login::host().expect("host");
     let token = crate::quick::login::access_token().expect("token");
     let outpost = crate::quick::outpost::id();
-    let minutes: u64 = std::env::var("OAK_QUICK_KEEP_MINUTES").ok().and_then(|m| m.parse().ok()).unwrap_or(240);
+    let minutes: u64 = std::env::var("OAK_QUICK_KEEP_MINUTES")
+        .ok()
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(240);
     let end = std::time::Instant::now() + std::time::Duration::from_secs(minutes * 60);
     println!("holding outpost {outpost} ONLINE for up to {minutes} minutes");
     println!("register: {:?}", crate::quick::outpost::register());
@@ -107,7 +128,11 @@ fn quick_outpost_stay_online() {
         let (host, token, outpost) = (host.clone(), token.clone(), outpost.clone());
         std::thread::spawn(move || {
             loop {
-                println!("[{}] listOutposts says {outpost} {}", clock(), status_of(&token, &host, &outpost));
+                println!(
+                    "[{}] listOutposts says {outpost} {}",
+                    clock(),
+                    status_of(&token, &host, &outpost)
+                );
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
         });
@@ -145,7 +170,9 @@ fn quick_outpost_stay_online() {
         home["session_id"] = serde_json::json!("home");
         home["focus_only"] = serde_json::json!(true);
         let _ = sock.send(&serde_json::json!({"type": "session_connect", "payload": home}));
-        let _ = sock.send(&serde_json::json!({"type": "workstreams_summary", "payload": {"workstream_ids": []}}));
+        let _ = sock.send(
+            &serde_json::json!({"type": "workstreams_summary", "payload": {"workstream_ids": []}}),
+        );
         println!("[{}] socket open, outpost named; waiting on Quick", clock());
         // Nothing is done with Quick's frames: any tool it asks for is another
         // client's to run. Reading them is what keeps the socket alive.
@@ -154,7 +181,11 @@ fn quick_outpost_stay_online() {
                 Some(v) => {
                     let kind = v["type"].as_str().unwrap_or("");
                     if kind == "tool_call" {
-                        println!("[{}] Quick asked for a tool ({}); not run by the keeper", clock(), v["payload"]["tool_name"].as_str().unwrap_or("?"));
+                        println!(
+                            "[{}] Quick asked for a tool ({}); not run by the keeper",
+                            clock(),
+                            v["payload"]["tool_name"].as_str().unwrap_or("?")
+                        );
                     }
                 }
                 None => break,
@@ -167,7 +198,10 @@ fn quick_outpost_stay_online() {
 
 /// The time, for a log line.
 fn clock() -> String {
-    let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     format!("{:02}:{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60, s % 60)
 }
 
@@ -255,7 +289,10 @@ fn measure_online(token: &str, host: &str, probe: &str) -> String {
         return "ONLINE once the thread is joined".into();
     }
     drop(sock);
-    format!("never ONLINE; after the socket closed it is {}", status_of(token, host, probe))
+    format!(
+        "never ONLINE; after the socket closed it is {}",
+        status_of(token, host, probe)
+    )
 }
 
 /// Removes a probe outpost from the account, so the list stays the user's.
@@ -293,7 +330,8 @@ fn status_of(token: &str, host: &str, outpost: &str) -> String {
     else {
         return "?".into();
     };
-    let v: serde_json::Value = serde_json::from_str(&r.text().unwrap_or_default()).unwrap_or(serde_json::Value::Null);
+    let v: serde_json::Value =
+        serde_json::from_str(&r.text().unwrap_or_default()).unwrap_or(serde_json::Value::Null);
     v["eventResponse"]["listOutpostsResponse"]["items"]
         .as_array()
         .and_then(|a| a.iter().find(|o| o["id"].as_str() == Some(outpost)))
@@ -307,7 +345,9 @@ fn enc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

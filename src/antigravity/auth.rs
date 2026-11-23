@@ -1,7 +1,10 @@
 //! Antigravity OAuth 2.0 + PKCE sign-in, token renewal, project/tier discovery,
 //! multi-account storage (`antigravity.json`), vault sync and account rotation.
 
-use super::{catalog::{self, QuotaPool}, default_project_id, endpoint_candidates, env_var, error_text, with_headers};
+use super::{
+    catalog::{self, QuotaPool},
+    default_project_id, endpoint_candidates, env_var, error_text, with_headers,
+};
 use crate::api::{self, Limit, Sse};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -37,7 +40,9 @@ const LOGIN_WAIT: Duration = Duration::from_secs(5 * 60);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn decode_b64(s: &str) -> String {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(s).unwrap_or_default();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .unwrap_or_default();
     String::from_utf8(bytes).unwrap_or_default()
 }
 
@@ -50,15 +55,18 @@ pub(crate) fn client_secret() -> String {
 }
 
 fn auth_url() -> String {
-    std::env::var("OAK_ANTIGRAVITY_AUTH_URL").unwrap_or_else(|_| "https://accounts.google.com/o/oauth2/v2/auth".into())
+    std::env::var("OAK_ANTIGRAVITY_AUTH_URL")
+        .unwrap_or_else(|_| "https://accounts.google.com/o/oauth2/v2/auth".into())
 }
 
 fn token_url() -> String {
-    std::env::var("OAK_ANTIGRAVITY_TOKEN_URL").unwrap_or_else(|_| "https://oauth2.googleapis.com/token".into())
+    std::env::var("OAK_ANTIGRAVITY_TOKEN_URL")
+        .unwrap_or_else(|_| "https://oauth2.googleapis.com/token".into())
 }
 
 fn userinfo_url() -> String {
-    std::env::var("OAK_ANTIGRAVITY_USERINFO_URL").unwrap_or_else(|_| "https://www.googleapis.com/oauth2/v1/userinfo?alt=json".into())
+    std::env::var("OAK_ANTIGRAVITY_USERINFO_URL")
+        .unwrap_or_else(|_| "https://www.googleapis.com/oauth2/v1/userinfo?alt=json".into())
 }
 
 // ---------------------------------------------------------------- stored accounts
@@ -98,7 +106,14 @@ struct Acct {
 
 impl Acct {
     fn new(cred: Cred) -> Self {
-        Self { cred, pools: vec![], fetched: false, error: None, usage_at: 0, limited_until: HashMap::new() }
+        Self {
+            cred,
+            pools: vec![],
+            fetched: false,
+            error: None,
+            usage_at: 0,
+            limited_until: HashMap::new(),
+        }
     }
 }
 
@@ -108,7 +123,10 @@ struct State {
     note: Option<String>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { list: Vec::new(), note: None });
+static STATE: Mutex<State> = Mutex::new(State {
+    list: Vec::new(),
+    note: None,
+});
 /// Serializes token refreshes so concurrent requests don't race.
 static RENEWING: Mutex<()> = Mutex::new(());
 
@@ -136,7 +154,9 @@ fn save(s: &State) {
         let _ = std::fs::remove_file(path());
         return;
     }
-    let file = File::Logins { logins: s.list.iter().map(|a| a.cred.clone()).collect() };
+    let file = File::Logins {
+        logins: s.list.iter().map(|a| a.cred.clone()).collect(),
+    };
     let _ = crate::store::write_private_json(&path(), &file);
 }
 
@@ -152,7 +172,13 @@ pub fn load() -> bool {
         .map(|c| {
             old.iter()
                 .find(|a| a.cred.account_id == c.account_id)
-                .map_or_else(|| Acct::new(c.clone()), |a| Acct { cred: c.clone(), ..a.clone() })
+                .map_or_else(
+                    || Acct::new(c.clone()),
+                    |a| Acct {
+                        cred: c.clone(),
+                        ..a.clone()
+                    },
+                )
         })
         .collect();
     !s.list.is_empty()
@@ -165,7 +191,11 @@ pub fn on() -> bool {
 
 fn keep(c: Cred) {
     let mut s = STATE.lock().unwrap();
-    match s.list.iter_mut().find(|a| a.cred.account_id == c.account_id) {
+    match s
+        .list
+        .iter_mut()
+        .find(|a| a.cred.account_id == c.account_id)
+    {
         Some(a) => {
             a.cred = c;
         }
@@ -175,7 +205,13 @@ fn keep(c: Cred) {
 }
 
 pub(crate) fn cred_of(id: &str) -> Option<Cred> {
-    STATE.lock().unwrap().list.iter().find(|a| a.cred.account_id == id).map(|a| a.cred.clone())
+    STATE
+        .lock()
+        .unwrap()
+        .list
+        .iter()
+        .find(|a| a.cred.account_id == id)
+        .map(|a| a.cred.clone())
 }
 
 /// Signs login `id` out: one on the vault is removed there too.
@@ -212,24 +248,58 @@ fn remote_cred(info: &Value, access: Option<(String, i64)>) -> Cred {
     let email = field("email");
     let account_id = {
         let id = field("account_id");
-        if id.is_empty() { email.to_ascii_lowercase() } else { id }
+        if id.is_empty() {
+            email.to_ascii_lowercase()
+        } else {
+            id
+        }
     };
     let project_id = {
         let p = field("project_id");
-        if p.is_empty() { default_project_id(if email.is_empty() { &account_id } else { &email }) } else { p }
+        if p.is_empty() {
+            default_project_id(if email.is_empty() {
+                &account_id
+            } else {
+                &email
+            })
+        } else {
+            p
+        }
     };
-    Cred { access, refresh: String::new(), expires, account_id, project_id, email, plan: field("plan"), remote: true }
+    Cred {
+        access,
+        refresh: String::new(),
+        expires,
+        account_id,
+        project_id,
+        email,
+        plan: field("plan"),
+        remote: true,
+    }
 }
 
 /// Brings logins in step with a connected vault.
 pub fn sync() {
-    let Ok(logins) = api::vault_list("antigravity") else { return };
-    let ids: Vec<&str> = logins.iter().filter_map(|i| i["account_id"].as_str()).filter(|a| !a.is_empty()).collect();
+    let Ok(logins) = api::vault_list("antigravity") else {
+        return;
+    };
+    let ids: Vec<&str> = logins
+        .iter()
+        .filter_map(|i| i["account_id"].as_str())
+        .filter(|a| !a.is_empty())
+        .collect();
     let mut s = STATE.lock().unwrap();
-    let before: Vec<(String, bool)> = s.list.iter().map(|a| (a.cred.account_id.clone(), a.cred.remote)).collect();
-    s.list.retain(|a| !a.cred.remote || ids.contains(&a.cred.account_id.as_str()));
+    let before: Vec<(String, bool)> = s
+        .list
+        .iter()
+        .map(|a| (a.cred.account_id.clone(), a.cred.remote))
+        .collect();
+    s.list
+        .retain(|a| !a.cred.remote || ids.contains(&a.cred.account_id.as_str()));
     for info in &logins {
-        let Some(id) = info["account_id"].as_str().filter(|a| !a.is_empty()) else { continue };
+        let Some(id) = info["account_id"].as_str().filter(|a| !a.is_empty()) else {
+            continue;
+        };
         match s.list.iter_mut().find(|a| a.cred.account_id == id) {
             Some(a) if a.cred.remote => {
                 if let Some(e) = info["email"].as_str().filter(|s| !s.is_empty()) {
@@ -246,7 +316,12 @@ pub fn sync() {
             None => s.list.push(Acct::new(remote_cred(info, None))),
         }
     }
-    if s.list.iter().map(|a| (a.cred.account_id.clone(), a.cred.remote)).collect::<Vec<_>>() != before {
+    if s.list
+        .iter()
+        .map(|a| (a.cred.account_id.clone(), a.cred.remote))
+        .collect::<Vec<_>>()
+        != before
+    {
         save(&s);
     }
 }
@@ -266,15 +341,22 @@ pub fn note() -> Option<String> {
 fn upload(tokens: &Value) -> Result<Cred, String> {
     let info = api::vault_add("antigravity", tokens)?;
     if info["account_id"].as_str().is_none_or(str::is_empty) {
-        return Err(format!("{} didn't say which Antigravity account it took.", api::capital(&api::vault_name())));
+        return Err(format!(
+            "{} didn't say which Antigravity account it took.",
+            api::capital(&api::vault_name())
+        ));
     }
-    let access = tokens["access_token"].as_str().map(|a| (a.to_string(), tokens["expires_at"].as_i64().unwrap_or(0)));
+    let access = tokens["access_token"]
+        .as_str()
+        .map(|a| (a.to_string(), tokens["expires_at"].as_i64().unwrap_or(0)));
     Ok(remote_cred(&info, access))
 }
 
 pub fn move_to_vault(id: &str) -> Result<(), String> {
     let _renewing = RENEWING.lock().unwrap();
-    let c = cred_of(id).filter(|c| !c.remote).ok_or("There is no such Antigravity login on this machine.")?;
+    let c = cred_of(id)
+        .filter(|c| !c.remote)
+        .ok_or("There is no such Antigravity login on this machine.")?;
     let moved = upload(&json!({
         "account_id": c.account_id,
         "refresh_token": c.refresh,
@@ -292,7 +374,9 @@ pub fn move_to_vault(id: &str) -> Result<(), String> {
 // ---------------------------------------------------------------- OAuth & discovery
 
 fn form(pairs: &[(&str, &str)]) -> String {
-    reqwest::Url::parse_with_params("http://x/", pairs).map(|u| u.query().unwrap_or("").to_string()).unwrap_or_default()
+    reqwest::Url::parse_with_params("http://x/", pairs)
+        .map(|u| u.query().unwrap_or("").to_string())
+        .unwrap_or_default()
 }
 
 fn token_request(pairs: &[(&str, &str)]) -> Result<Value, String> {
@@ -317,7 +401,10 @@ fn fetch_user_email(token: &str) -> Option<String> {
         return None;
     }
     let v: Value = resp.json().ok()?;
-    v["email"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
+    v["email"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Extracts a project id from a `loadCodeAssist` or `listCloudAICompanionProjects` payload.
@@ -335,7 +422,11 @@ pub(crate) fn extract_project_id(data: &Value) -> Option<String> {
             if let Some(s) = v.as_str().filter(|s| !s.is_empty()) {
                 return Some(s.to_string());
             }
-            if let Some(s) = v.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some(s) = v
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 return Some(s.to_string());
             }
         }
@@ -375,7 +466,9 @@ fn list_companion_projects(token: &str) -> Option<String> {
     for endpoint in endpoint_candidates() {
         let Ok(resp) = with_headers(
             api::http()
-                .post(format!("{endpoint}/v1internal:listCloudAICompanionProjects"))
+                .post(format!(
+                    "{endpoint}/v1internal:listCloudAICompanionProjects"
+                ))
                 .timeout(DISCOVERY_TIMEOUT)
                 .json(&json!({})),
             token,
@@ -432,7 +525,10 @@ fn account_id_for(email: &str, refresh: &str) -> String {
     if !e.is_empty() {
         return e;
     }
-    format!("account-{}", api::hex(&Sha256::digest(refresh.as_bytes())[..8]))
+    format!(
+        "account-{}",
+        api::hex(&Sha256::digest(refresh.as_bytes())[..8])
+    )
 }
 
 /// Returns `(access_token, project_id)` for login `id`, renewing the token first
@@ -442,7 +538,11 @@ pub(crate) fn access(id: &str, force: bool) -> Result<(String, String), String> 
     let fresh = |c: &Cred| !c.access.is_empty() && c.expires - api::now_ms() > RENEW_EARLY_MS;
     let seen = cred_of(id).ok_or(OUT)?;
     if !force && fresh(&seen) {
-        let project = if seen.project_id.is_empty() { default_project_id(&seen.email) } else { seen.project_id };
+        let project = if seen.project_id.is_empty() {
+            default_project_id(&seen.email)
+        } else {
+            seen.project_id
+        };
         return Ok((seen.access, project));
     }
     if seen.remote {
@@ -450,12 +550,19 @@ pub(crate) fn access(id: &str, force: bool) -> Result<(String, String), String> 
     }
     let _renewing = RENEWING.lock().unwrap();
     let mut c = cred_of(id).ok_or(OUT)?;
-    if let Some(f) = read_file().into_iter().find(|f| f.account_id == id && f.access != c.access) {
+    if let Some(f) = read_file()
+        .into_iter()
+        .find(|f| f.account_id == id && f.access != c.access)
+    {
         keep(f.clone());
         c = f;
     }
     if !force && c.access != seen.access && fresh(&c) {
-        let project = if c.project_id.is_empty() { default_project_id(&c.email) } else { c.project_id };
+        let project = if c.project_id.is_empty() {
+            default_project_id(&c.email)
+        } else {
+            c.project_id
+        };
         return Ok((c.access, project));
     }
     if c.refresh.is_empty() {
@@ -469,7 +576,9 @@ pub(crate) fn access(id: &str, force: bool) -> Result<(String, String), String> 
         ("client_id", &cid),
         ("client_secret", &csec),
     ])
-    .map_err(|e| format!("Couldn't renew the Antigravity sign-in (add the account on Home again): {e}"))?;
+    .map_err(|e| {
+        format!("Couldn't renew the Antigravity sign-in (add the account on Home again): {e}")
+    })?;
     let access_tok = tokens["access_token"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -484,7 +593,13 @@ pub(crate) fn access(id: &str, force: bool) -> Result<(String, String), String> 
     updated.expires = api::now_ms() + expires_in * 1000;
     if updated.project_id.is_empty() {
         let (proj, plan) = load_code_assist(&updated.access);
-        updated.project_id = proj.unwrap_or_else(|| default_project_id(if updated.email.is_empty() { "antigravity-default" } else { &updated.email }));
+        updated.project_id = proj.unwrap_or_else(|| {
+            default_project_id(if updated.email.is_empty() {
+                "antigravity-default"
+            } else {
+                &updated.email
+            })
+        });
         if let Some(p) = plan {
             updated.plan = p;
         }
@@ -498,12 +613,20 @@ fn remote_access(seen: &Cred, force: bool) -> Result<(String, String), String> {
     let id = seen.account_id.as_str();
     let Some(v) = api::vault_token("antigravity", id, refused)? else {
         forget(id);
-        return Err(format!("The Antigravity login was removed from {}: add it again on Home", api::vault_name()));
+        return Err(format!(
+            "The Antigravity login was removed from {}: add it again on Home",
+            api::vault_name()
+        ));
     };
     let access = v["access_token"]
         .as_str()
         .filter(|a| !a.is_empty())
-        .ok_or_else(|| format!("{} sent no Antigravity token.", api::capital(&api::vault_name())))?
+        .ok_or_else(|| {
+            format!(
+                "{} sent no Antigravity token.",
+                api::capital(&api::vault_name())
+            )
+        })?
         .to_string();
     let mut c = seen.clone();
     c.access = access;
@@ -512,7 +635,11 @@ fn remote_access(seen: &Cred, force: bool) -> Result<(String, String), String> {
         c.project_id = p.to_string();
     }
     if c.project_id.is_empty() {
-        c.project_id = default_project_id(if c.email.is_empty() { &c.account_id } else { &c.email });
+        c.project_id = default_project_id(if c.email.is_empty() {
+            &c.account_id
+        } else {
+            &c.email
+        });
     }
     keep(c.clone());
     Ok((c.access, c.project_id))
@@ -542,7 +669,8 @@ impl Drop for Login {
 pub fn start_login() -> Login {
     let bytes: [u8; 32] = rand::random();
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
     let state_bytes: [u8; 32] = rand::random();
     let state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(state_bytes);
     let cid = client_id();
@@ -570,13 +698,24 @@ pub fn start_login() -> Login {
         && listener.set_nonblocking(true).is_ok()
     {
         login.listening = true;
-        let (verifier, state, result, stop) = (login.verifier.clone(), login.state.clone(), login.result.clone(), login.stop.clone());
+        let (verifier, state, result, stop) = (
+            login.verifier.clone(),
+            login.state.clone(),
+            login.result.clone(),
+            login.stop.clone(),
+        );
         std::thread::spawn(move || serve_callback(listener, &verifier, &state, &result, &stop));
     }
     login
 }
 
-fn serve_callback(listener: std::net::TcpListener, verifier: &str, state: &str, result: &Mutex<Option<Result<(), String>>>, stop: &AtomicBool) {
+fn serve_callback(
+    listener: std::net::TcpListener,
+    verifier: &str,
+    state: &str,
+    result: &Mutex<Option<Result<(), String>>>,
+    stop: &AtomicBool,
+) {
     let start = Instant::now();
     while !stop.load(Ordering::SeqCst) && start.elapsed() < LOGIN_WAIT {
         let Ok((mut conn, _)) = listener.accept() else {
@@ -591,21 +730,36 @@ fn serve_callback(listener: std::net::TcpListener, verifier: &str, state: &str, 
             continue;
         }
         let target = line.split_whitespace().nth(1).unwrap_or("");
-        let Ok(url) = reqwest::Url::parse(&format!("http://localhost{target}")) else { continue };
+        let Ok(url) = reqwest::Url::parse(&format!("http://localhost{target}")) else {
+            continue;
+        };
         if url.path() != "/oauth-callback" {
             let _ = conn.write_all(page(404, "Not found", "").as_bytes());
             continue;
         }
-        let get = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
+        let get = |k: &str| {
+            url.query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+        };
         let outcome = match (get("code"), get("state"), get("error")) {
-            (_, _, Some(e)) => Err(format!("The sign-in was refused: {}", get("error_description").unwrap_or(e))),
-            (Some(_), Some(s), _) if s != state => Err("The sign-in came back for another request (state mismatch): try again".into()),
+            (_, _, Some(e)) => Err(format!(
+                "The sign-in was refused: {}",
+                get("error_description").unwrap_or(e)
+            )),
+            (Some(_), Some(s), _) if s != state => {
+                Err("The sign-in came back for another request (state mismatch): try again".into())
+            }
             (Some(_), None, _) => Err("The sign-in came back without a state parameter".into()),
             (Some(code), Some(_), _) => exchange(&code, verifier),
             (None, ..) => Err("The sign-in came back without a code".into()),
         };
         let html = match &outcome {
-            Ok(()) => page(200, "Signed in to Antigravity", "You can close this tab and go back to Oak."),
+            Ok(()) => page(
+                200,
+                "Signed in to Antigravity",
+                "You can close this tab and go back to Oak.",
+            ),
             Err(e) => page(400, "Couldn't sign in", e),
         };
         let _ = conn.write_all(html.as_bytes());
@@ -616,7 +770,12 @@ fn serve_callback(listener: std::net::TcpListener, verifier: &str, state: &str, 
 }
 
 fn page(status: u16, title: &str, text: &str) -> String {
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
     let body = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Oak</title></head>\
          <body style=\"font-family:sans-serif;max-width:32em;margin:5em auto\"><h2>{}</h2><p>{}</p></body></html>",
@@ -661,11 +820,17 @@ pub(crate) fn parse_pasted(text: &str) -> Option<(String, Option<String>)> {
     } else if text.contains("code=") {
         text.trim_start_matches('?').to_string()
     } else {
-        let (code, state) = text.split_once('#').map_or((text, None), |(c, s)| (c, Some(s.to_string())));
+        let (code, state) = text
+            .split_once('#')
+            .map_or((text, None), |(c, s)| (c, Some(s.to_string())));
         return Some((code.to_string(), state));
     };
     let u = reqwest::Url::parse(&format!("http://x/?{query}")).ok()?;
-    let get = |k: &str| u.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
+    let get = |k: &str| {
+        u.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.into_owned())
+    };
     if get("error").is_some() {
         return None;
     }
@@ -698,7 +863,13 @@ fn exchange(code: &str, verifier: &str) -> Result<(), String> {
 
     let email = fetch_user_email(&access_tok).unwrap_or_default();
     let (discovered_project, plan) = load_code_assist(&access_tok);
-    let project_id = discovered_project.unwrap_or_else(|| default_project_id(if email.is_empty() { "antigravity-default" } else { &email }));
+    let project_id = discovered_project.unwrap_or_else(|| {
+        default_project_id(if email.is_empty() {
+            "antigravity-default"
+        } else {
+            &email
+        })
+    });
     let account_id = account_id_for(&email, &refresh_tok);
     let local = Cred {
         access: access_tok,
@@ -774,7 +945,12 @@ fn to_api_account(a: &Acct, paired: bool, limits: Vec<Limit>) -> api::Account {
 /// Summary limits for callers that only expect a flat `api::Account.limits`
 /// (such as gateway JSON): uses the Gemini pool if present, else the first pool.
 fn default_limits(pools: &[QuotaPool]) -> Vec<Limit> {
-    pools.iter().find(|p| p.id == "gemini").or_else(|| pools.first()).map(|p| p.limits.clone()).unwrap_or_default()
+    pools
+        .iter()
+        .find(|p| p.id == "gemini")
+        .or_else(|| pools.first())
+        .map(|p| p.limits.clone())
+        .unwrap_or_default()
 }
 
 /// Antigravity logins with all per-pool quotas, for Home and provider summaries.
@@ -793,19 +969,31 @@ pub fn accounts_detailed() -> Vec<AccountView> {
 
 /// Antigravity logins formatted for generic account lists (`gateway`, counts).
 pub fn accounts() -> Vec<(String, api::Account)> {
-    accounts_detailed().into_iter().map(|v| (v.id, v.account)).collect()
+    accounts_detailed()
+        .into_iter()
+        .map(|v| (v.id, v.account))
+        .collect()
 }
 
 /// Account view for a conversation using `model`: `api::Account.limits` holds
 /// only the `5h` / `Week` limits of the pool serving `model`, alongside the
 /// matched pool and all pools for tooltips.
-pub fn account_for_model(conv: &str, model: &str) -> Option<(api::Account, Option<QuotaPool>, Vec<QuotaPool>)> {
+pub fn account_for_model(
+    conv: &str,
+    model: &str,
+) -> Option<(api::Account, Option<QuotaPool>, Vec<QuotaPool>)> {
     let paired = api::vault_on();
     let seat = crate::rotation::seat(api::Provider::Antigravity, conv);
     let s = STATE.lock().unwrap();
-    let a = seat.as_deref().and_then(|id| s.list.iter().find(|x| x.cred.account_id == id)).or_else(|| s.list.first())?;
+    let a = seat
+        .as_deref()
+        .and_then(|id| s.list.iter().find(|x| x.cred.account_id == id))
+        .or_else(|| s.list.first())?;
     let active = catalog::pool_for_model(&a.pools, model).cloned();
-    let limits = active.as_ref().map(|p| p.limits.clone()).unwrap_or_default();
+    let limits = active
+        .as_ref()
+        .map(|p| p.limits.clone())
+        .unwrap_or_default();
     Some((to_api_account(a, paired, limits), active, a.pools.clone()))
 }
 
@@ -816,13 +1004,20 @@ pub fn account() -> Option<api::Account> {
 
 /// Refreshes each Antigravity account's plan, per-pool quotas, and dynamic model catalog.
 pub fn refresh() {
-    let ids: Vec<String> = STATE.lock().unwrap().list.iter().map(|a| a.cred.account_id.clone()).collect();
+    let ids: Vec<String> = STATE
+        .lock()
+        .unwrap()
+        .list
+        .iter()
+        .map(|a| a.cred.account_id.clone())
+        .collect();
     let mut refreshed_catalog = false;
     for id in ids {
         let r = access(&id, false).and_then(|(token, project_id)| {
             let (discovered_proj, plan) = load_code_assist(&token);
             let effective_project = discovered_proj.unwrap_or(project_id);
-            let (pools, catalog_ok) = catalog::fetch_usage_and_catalog(&token, &effective_project, !refreshed_catalog)?;
+            let (pools, catalog_ok) =
+                catalog::fetch_usage_and_catalog(&token, &effective_project, !refreshed_catalog)?;
             if catalog_ok {
                 refreshed_catalog = true;
             }
@@ -860,7 +1055,9 @@ pub fn refresh() {
                         }
                         if let Some(pool) = a.pools.iter().find(|p| p.id == *pool_key) {
                             let eff = api::effective_limits(&pool.limits, now);
-                            let full = eff.iter().any(|l| l.resets_at.is_none_or(|r| r > now) && l.percent >= 100.0);
+                            let full = eff
+                                .iter()
+                                .any(|l| l.resets_at.is_none_or(|r| r > now) && l.percent >= 100.0);
                             if !eff.is_empty() && !full {
                                 clear_keys.push(pool_key.clone());
                                 freed = true;
@@ -899,11 +1096,28 @@ fn effective_pool_key<'a>(a: &Acct, model: &str) -> &'a str {
 fn candidate_for(a: &Acct, model: &str, now: i64, any_remote: bool) -> crate::rotation::Candidate {
     let pool_key = effective_pool_key(a, model);
     let refused_until = a.limited_until.get(pool_key).copied().unwrap_or(0);
-    let eff = catalog::pool_for_model(&a.pools, model).map(|p| api::effective_limits(&p.limits, now)).unwrap_or_default();
+    let eff = catalog::pool_for_model(&a.pools, model)
+        .map(|p| api::effective_limits(&p.limits, now))
+        .unwrap_or_default();
     let live = |l: &&Limit| l.resets_at.is_none_or(|r| r > now);
-    let used = eff.iter().filter(live).map(|l| l.percent).fold(0.0f32, f32::max);
-    let spent = eff.iter().filter(live).filter(|l| l.percent >= 100.0).filter_map(|l| l.resets_at).max().unwrap_or(0);
-    let next_reset = eff.iter().filter(live).filter_map(|l| l.resets_at).min().unwrap_or(i64::MAX);
+    let used = eff
+        .iter()
+        .filter(live)
+        .map(|l| l.percent)
+        .fold(0.0f32, f32::max);
+    let spent = eff
+        .iter()
+        .filter(live)
+        .filter(|l| l.percent >= 100.0)
+        .filter_map(|l| l.resets_at)
+        .max()
+        .unwrap_or(0);
+    let next_reset = eff
+        .iter()
+        .filter(live)
+        .filter_map(|l| l.resets_at)
+        .min()
+        .unwrap_or(i64::MAX);
     crate::rotation::Candidate {
         id: a.cred.account_id.clone(),
         left: (100.0 - used.min(100.0)) as f64,
@@ -916,7 +1130,15 @@ fn candidate_for(a: &Acct, model: &str, now: i64, any_remote: bool) -> crate::ro
 fn candidates(now: i64, model: &str) -> Vec<crate::rotation::Candidate> {
     let s = STATE.lock().unwrap();
     let any_remote = s.list.iter().any(|a| a.cred.remote);
-    s.list.iter().map(|a| candidate_for(a, model, now, any_remote)).collect()
+    s.list
+        .iter()
+        .map(|a| candidate_for(a, model, now, any_remote))
+        .collect()
+}
+
+/// A login could take a request on `model` now (its pool not used up).
+pub(crate) fn room(model: &str) -> bool {
+    candidates(api::now_ms(), model).iter().any(|c| c.usable)
 }
 
 /// Picks the Antigravity login for conversation `conv` using `model`, or returns an SSE error/limit.
@@ -924,9 +1146,17 @@ pub(crate) fn login_for(conv: &str, model: &str) -> Result<String, Option<Sse>> 
     let now = api::now_ms();
     let cands = candidates(now, model);
     if cands.is_empty() {
-        return Err(Some(Sse::Err("Not signed in to Antigravity: add an Antigravity account on Home".into())));
+        return Err(Some(Sse::Err(
+            "Not signed in to Antigravity: add an Antigravity account on Home".into(),
+        )));
     }
-    match crate::rotation::pick(api::Provider::Antigravity, conv, &cands, now, !api::rotation_on()) {
+    match crate::rotation::pick(
+        api::Provider::Antigravity,
+        conv,
+        &cands,
+        now,
+        !api::rotation_on(),
+    ) {
         Some(id) if cands.iter().any(|c| c.id == id && c.usable) => Ok(id),
         _ => {
             let s = STATE.lock().unwrap();
@@ -940,7 +1170,9 @@ pub(crate) fn login_for(conv: &str, model: &str) -> Result<String, Option<Sse>> 
                         .map(|p| {
                             api::effective_limits(&p.limits, now)
                                 .into_iter()
-                                .filter(|l| l.resets_at.is_none_or(|r| r > now) && l.percent >= 100.0)
+                                .filter(|l| {
+                                    l.resets_at.is_none_or(|r| r > now) && l.percent >= 100.0
+                                })
                                 .filter_map(|l| l.resets_at)
                                 .max()
                                 .unwrap_or(0)
@@ -970,11 +1202,35 @@ pub(crate) fn limited(id: &str, model: &str, until: i64) -> bool {
 }
 
 pub(crate) fn label_of(id: &str) -> String {
-    cred_of(id).map_or_else(|| "Antigravity".into(), |c| if c.email.is_empty() { "Antigravity".into() } else { c.email })
+    cred_of(id).map_or_else(
+        || "Antigravity".into(),
+        |c| {
+            if c.email.is_empty() {
+                "Antigravity".into()
+            } else {
+                c.email
+            }
+        },
+    )
 }
 
 #[cfg(test)]
-pub(crate) fn candidate_for_test(pools: Vec<QuotaPool>, limited_until: HashMap<String, i64>, model: &str, now: i64) -> crate::rotation::Candidate {
-    let a = Acct { cred: Cred { account_id: "a1".into(), ..Default::default() }, pools, fetched: true, error: None, usage_at: now, limited_until };
+pub(crate) fn candidate_for_test(
+    pools: Vec<QuotaPool>,
+    limited_until: HashMap<String, i64>,
+    model: &str,
+    now: i64,
+) -> crate::rotation::Candidate {
+    let a = Acct {
+        cred: Cred {
+            account_id: "a1".into(),
+            ..Default::default()
+        },
+        pools,
+        fetched: true,
+        error: None,
+        usage_at: now,
+        limited_until,
+    };
     candidate_for(&a, model, now, false)
 }

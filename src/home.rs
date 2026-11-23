@@ -4,11 +4,14 @@
 //! Plugins; plugins' links at the row's end) on the left and the accounts on the right.
 
 use super::*;
-pub(crate) use crate::look::{BAR_ROOM, HOME_HEAD, list_rows, row_title_color};
 use crate::api::Provider;
-use crate::widgets::{add_field, clip_width, sign_in_heading, state_dot};
+pub(crate) use crate::look::{BAR_ROOM, HOME_HEAD, list_rows, row_title_color};
+use crate::widgets::{LINK_COPIED, add_field, clip_width, sign_in_heading, state_dot};
 
-use crate::composer::{BOX_W, musecode_panel, nodeclub_panel, openrouter_panel, refuseless_panel, side_box, usage_panel};
+use crate::composer::{
+    BOX_W, musecode_panel, nodeclub_panel, openrouter_panel, refuseless_panel, side_box,
+    usage_panel,
+};
 
 impl App {
     /// Home: the wallpaper (Settings picks it), what plugins draw on it,
@@ -26,7 +29,9 @@ impl App {
             h.home_scene(ui, self);
         }
         if self.home_menu {
-            let opacity = ui.ctx().animate_bool_with_time(Id::unique("home-menu"), true, 0.12);
+            let opacity = ui
+                .ctx()
+                .animate_bool_with_time(Id::unique("home-menu"), true, 0.12);
             let g = home_grid(rect);
             self.home_menu_rect = Some(g.card);
             ui.scope(|ui| {
@@ -34,7 +39,8 @@ impl App {
                 self.home_menu(ui, t, &g);
             });
         } else {
-            ui.ctx().animate_bool_with_time(Id::unique("home-menu"), false, 0.0);
+            ui.ctx()
+                .animate_bool_with_time(Id::unique("home-menu"), false, 0.0);
             self.home_menu_rect = None;
             // Ctrl+F searches the conversations: the menu opens for it.
             if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
@@ -46,10 +52,13 @@ impl App {
         self.home_corner(ui, t, rect);
         self.delete_chat_dialog(ui.ctx(), t);
         self.reset_dialog(ui.ctx(), t);
-        let calm = self.deleting_chat.is_none() && self.reset_dialog.is_none() && self.renaming.is_none();
+        let calm =
+            self.deleting_chat.is_none() && self.reset_dialog.is_none() && self.renaming.is_none();
         if self.home_menu && calm {
             let free = ui.memory(|m| m.focused().is_none());
-            if backdrop.clicked() || (free && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))) {
+            if backdrop.clicked()
+                || (free && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)))
+            {
                 self.home_menu = false;
             }
         }
@@ -80,7 +89,9 @@ impl App {
         cell_heading(ui.painter(), t, g.accounts_head, "Providers");
         version_label(ui, t, g.accounts_head);
         self.chats_cell(ui, t, g.chats);
-        ui.scope_builder(UiBuilder::new().max_rect(g.accounts), |ui| self.account_column(ui, t));
+        ui.scope_builder(UiBuilder::new().max_rect(g.accounts), |ui| {
+            self.account_column(ui, t)
+        });
         // Under the accounts: what 1% of the 5-hour limit buys; a click
         // opens the Usage page.
         if let Some(r) = g.preview
@@ -98,19 +109,42 @@ impl App {
         let gear = menu.translate(vec2(-(CORNER_BTN + 6.0), 0.0));
         self.home_buttons_rect = Some(gear.union(menu));
         let open = self.home_menu;
-        let tip = if open { "Close the menu (Esc)" } else { "Menu: conversations and accounts (Alt+H)" };
+        let tip = if open {
+            "Close the menu (Esc)"
+        } else {
+            "Menu: conversations and accounts (Alt+H)"
+        };
         if corner_button(ui, t, menu, "home-menu-button", tip, |p, r, c| {
             if open {
                 crate::widgets::draw_x(p, r.shrink(4.0), c);
             } else {
-                p.text(r.center(), Align2::CENTER_CENTER, MENU_ICON, markdown::icon_font(15.0), c);
+                p.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    MENU_ICON,
+                    markdown::icon_font(15.0),
+                    c,
+                );
             }
         }) {
             self.home_menu = !open;
         }
-        if corner_button(ui, t, gear, "home-settings-button", "Settings", |p, r, c| {
-            p.text(r.center(), Align2::CENTER_CENTER, crate::composer::GEAR_ICON, markdown::icon_font(15.0), c);
-        }) {
+        if corner_button(
+            ui,
+            t,
+            gear,
+            "home-settings-button",
+            "Settings",
+            |p, r, c| {
+                p.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    crate::composer::GEAR_ICON,
+                    markdown::icon_font(15.0),
+                    c,
+                );
+            },
+        ) {
             self.settings_from = Some(Page::Home);
             self.page = Page::Settings;
         }
@@ -129,8 +163,15 @@ impl App {
             None => {}
         }
         let right = (head.right() - links_w).max(head.left());
-        let update_w = update_tab(ui, t, Rect::from_min_max(head.min, egui::pos2(right, head.bottom())));
-        let tabs_head = Rect::from_min_max(head.min, egui::pos2((right - update_w).max(head.left()), head.bottom()));
+        let update_w = update_tab(
+            ui,
+            t,
+            Rect::from_min_max(head.min, egui::pos2(right, head.bottom())),
+        );
+        let tabs_head = Rect::from_min_max(
+            head.min,
+            egui::pos2((right - update_w).max(head.left()), head.bottom()),
+        );
         if let Some(pick) = home_tabs(ui, t, tabs_head, &self.home_list) {
             self.home_list = pick;
         }
@@ -139,15 +180,27 @@ impl App {
     /// The left cell, in `chats`: the list its tab picks.
     fn chats_cell(&mut self, ui: &mut Ui, t: &Theme, chats: Rect) {
         let key = match self.home_list.as_str() {
-            CLOUD_TAB => ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| cloud_list_view(ui, t, cloud::Provider::OWN)).inner,
+            CLOUD_TAB => {
+                ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| {
+                    cloud_list_view(ui, t, cloud::Provider::OWN)
+                })
+                .inner
+            }
             crate::plugins_view::TAB => {
-                if let Some(id) = ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| crate::plugins_view::show(ui, t, chats)).inner {
+                if let Some(id) = ui
+                    .scope_builder(UiBuilder::new().max_rect(chats), |ui| {
+                        crate::plugins_view::show(ui, t, chats)
+                    })
+                    .inner
+                {
                     self.open_plugin_settings(&id);
                 }
                 None
             }
             crate::mcp_view::TAB => {
-                ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| crate::mcp_view::show(ui, t, chats));
+                ui.scope_builder(UiBuilder::new().max_rect(chats), |ui| {
+                    crate::mcp_view::show(ui, t, chats)
+                });
                 None
             }
             id => match plugin_tab(id) {
@@ -178,15 +231,28 @@ impl App {
             // one is in, the list stays the latest first.
             let scan = crate::scratch::scan(Duration::from_secs(15), ui.ctx());
             if scan.at.is_some() {
-                let sizes: HashMap<&str, u64> = scan.pads.iter().flat_map(|p| p.owners.iter().map(|o| (o.as_str(), p.bytes))).collect();
+                let sizes: HashMap<&str, u64> = scan
+                    .pads
+                    .iter()
+                    .flat_map(|p| p.owners.iter().map(|o| (o.as_str(), p.bytes)))
+                    .collect();
                 sort_by_scratch(&mut rows, |id| sizes.get(id).copied());
             }
         }
         let mut enter = false;
         if !rows.is_empty() || !self.chat_filter.is_empty() {
             let (top, right) = (area.top() + 8.0, area.right() - BAR_ROOM - 8.0);
-            let sort_rect = Rect::from_min_max(egui::pos2((right - SORT_W).max(area.left() + 8.0), top), egui::pos2(right, top + SEARCH_H));
-            let field = Rect::from_min_max(egui::pos2(area.left() + 8.0, top), egui::pos2((sort_rect.left() - 6.0).max(area.left() + 8.0), top + SEARCH_H));
+            let sort_rect = Rect::from_min_max(
+                egui::pos2((right - SORT_W).max(area.left() + 8.0), top),
+                egui::pos2(right, top + SEARCH_H),
+            );
+            let field = Rect::from_min_max(
+                egui::pos2(area.left() + 8.0, top),
+                egui::pos2(
+                    (sort_rect.left() - 6.0).max(area.left() + 8.0),
+                    top + SEARCH_H,
+                ),
+            );
             enter = search_field(ui, t, field, &mut self.chat_filter);
             if let Some(pick) = sort_button(ui, t, sort_rect, sort).filter(|s| *s != sort) {
                 self.settings.chat_sort = pick.setting().into();
@@ -196,10 +262,19 @@ impl App {
         }
         let rows = filter_rows(rows, &self.chat_filter);
         let pick = if rows.is_empty() && !self.chat_filter.trim().is_empty() {
-            ui.painter().text(area.center(), Align2::CENTER_CENTER, "No matching conversations", FontId::proportional(12.5), t.ink3);
+            ui.painter().text(
+                area.center(),
+                Align2::CENTER_CENTER,
+                "No matching conversations",
+                FontId::proportional(12.5),
+                t.ink3,
+            );
             ChatListAction::default()
         } else {
-            ui.scope_builder(UiBuilder::new().max_rect(area), |ui| chat_list(ui, t, &rows, true)).inner
+            ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
+                chat_list(ui, t, &rows, true)
+            })
+            .inner
         };
         // Enter in the search field opens the first match.
         if enter
@@ -227,17 +302,32 @@ impl App {
 
     /// Asks before deleting a conversation, which can't be undone.
     fn delete_chat_dialog(&mut self, ctx: &egui::Context, t: &Theme) {
-        let Some(id) = self.deleting_chat.clone() else { return };
+        let Some(id) = self.deleting_chat.clone() else {
+            return;
+        };
         let Some(s) = self.sessions.get(&id) else {
             self.deleting_chat = None;
             return;
         };
         let title = s.conv.lock().unwrap().title.clone();
-        let title = if title.is_empty() { "Untitled".to_string() } else { title };
+        let title = if title.is_empty() {
+            "Untitled".to_string()
+        } else {
+            title
+        };
         let body = |ui: &mut Ui| {
             ui.label(RichText::new("The conversation, its side chat, its agents and its transcript files go. This can't be undone.").color(t.ink2));
         };
-        let (delete, close) = crate::widgets::confirm_dialog(ctx, t, "chat-delete", &format!("Delete {title}?"), body, None, "Delete", false);
+        let (delete, close) = crate::widgets::confirm_dialog(
+            ctx,
+            t,
+            "chat-delete",
+            &format!("Delete {title}?"),
+            body,
+            None,
+            "Delete",
+            false,
+        );
         if delete {
             self.delete_conversation(&id);
         }
@@ -249,7 +339,9 @@ impl App {
     /// The dialog about an account's usage-limit reset, the only place
     /// one is used (`resets_view`).
     fn reset_dialog(&mut self, ctx: &egui::Context, t: &Theme) {
-        let Some(d) = &mut self.reset_dialog else { return };
+        let Some(d) = &mut self.reset_dialog else {
+            return;
+        };
         let (open, used) = d.show(ctx, t);
         if !open {
             self.reset_dialog = None;
@@ -266,21 +358,41 @@ impl App {
             .iter()
             .filter_map(|(id, s)| {
                 let c = s.conv.lock().unwrap();
-                if c.side_chat_of.is_some() { return None; }
+                if c.side_chat_of.is_some() {
+                    return None;
+                }
                 // (A chat has no folder: it says it is one.)
-                let folder = if c.chat { "Chat".to_string() } else { c.folder.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() };
+                let folder = if c.chat {
+                    "Chat".to_string()
+                } else {
+                    c.folder
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                };
                 Some(ChatRow {
                     id: id.clone(),
-                    title: if c.title.is_empty() { "Untitled".into() } else { c.title.clone() },
+                    title: if c.title.is_empty() {
+                        "Untitled".into()
+                    } else {
+                        c.title.clone()
+                    },
                     // A subagent says so, and which session started it.
                     folder: match c.parent.as_deref().and_then(|p| self.sessions.get(p)) {
                         Some(p) => {
                             let title = p.conv.lock().unwrap().title.clone();
-                            format!("{folder}, agent {} of {}", c.agent_id, if title.is_empty() { "Untitled" } else { &title })
+                            format!(
+                                "{folder}, agent {} of {}",
+                                c.agent_id,
+                                if title.is_empty() { "Untitled" } else { &title }
+                            )
                         }
                         // And a super agent, that it is one.
-                        _ if c.role == crate::agent::prompt::SUPER_ROLE => format!("{folder}, super agent"),
+                        _ if c.role == crate::agent::prompt::SUPER_ROLE => {
+                            format!("{folder}, super agent")
+                        }
                         _ if c.code_mode => format!("{folder}, Code Mode"),
+                        _ if c.mix.is_some() => format!("{folder}, Mix"),
                         _ => folder,
                     },
                     at: c.last_message_at,
@@ -314,61 +426,119 @@ impl App {
             self.account.lock().unwrap().fetched = None; // fetch again now
         }
         let area = ui.max_rect();
-        let foot_h = if self.adding_form_open() { crate::composer::COMPOSER_H } else { 40.0 };
-        let list = Rect::from_min_max(area.min, egui::pos2(area.right(), area.bottom() - foot_h - HOME_GAP));
-        let foot = Rect::from_min_max(egui::pos2(area.left(), area.bottom() - foot_h), egui::pos2(area.right() - 8.0, area.bottom()));
+        let foot_h = if self.adding_form_open() {
+            crate::composer::COMPOSER_H
+        } else {
+            40.0
+        };
+        let list = Rect::from_min_max(
+            area.min,
+            egui::pos2(area.right(), area.bottom() - foot_h - HOME_GAP),
+        );
+        let foot = Rect::from_min_max(
+            egui::pos2(area.left(), area.bottom() - foot_h),
+            egui::pos2(area.right() - 8.0, area.bottom()),
+        );
         let mut act = None;
         let mut reset = None;
         let busy = self.account_job.is_some();
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
-            ScrollArea::vertical().id_salt("home-accounts").auto_shrink([false, false]).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = HOME_GAP;
-                // The boxes stop short of the right edge, where the scroll bar goes.
-                let w = ui.available_width() - 8.0;
-                ui.set_max_width(w);
-                // What plugins say first (a connection's state).
-                for h in &crate::plugins::parts().hooks {
-                    h.providers_top(ui, self);
-                }
-                if let Some(e) = &self.account_note {
-                    crate::widgets::error_note(ui, t, e);
-                }
-                // Logins kept on this machine though meant for the vault.
-                for note in [codex::note(), antigravity::note(), openrouter::KEYS.note(), crate::nodeclub::KEYS.note(), crate::refuseless::KEYS.note(), crate::musecode::KEYS.note(), freebuff::note()].into_iter().flatten() {
-                    caption(ui, &note, t.ink3);
-                }
-                if busy {
-                    crate::widgets::working(ui, t, "Updating accounts…");
-                }
-                for p in Provider::ALL {
-                    let n = providers_view::account_count(p);
-                    if n == 0 {
-                        continue;
+            ScrollArea::vertical()
+                .id_salt("home-accounts")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = HOME_GAP;
+                    // The boxes stop short of the right edge, where the scroll bar goes.
+                    let w = ui.available_width() - 8.0;
+                    ui.set_max_width(w);
+                    // What plugins say first (a connection's state).
+                    for h in &crate::plugins::parts().hooks {
+                        h.providers_top(ui, self);
                     }
-                    let open = self.providers_open.contains(&p);
-                    if providers_view::provider_box(ui, t, p, n, &providers_view::shown(p), open, w).clicked() {
-                        if open {
-                            self.providers_open.retain(|&o| o != p);
+                    if let Some(e) = &self.account_note {
+                        crate::widgets::error_note(ui, t, e);
+                    }
+                    // A copied sign-in link, until that sign-in stops waiting.
+                    if let Some(p) = self.link_copied {
+                        let waiting = match p {
+                            Provider::Quick => matches!(
+                                crate::quick::login::state(),
+                                Some(crate::quick::login::State::Waiting { .. })
+                            ),
+                            _ => freebuff::login_pending(),
+                        };
+                        if waiting {
+                            caption(ui, LINK_COPIED, t.ink3);
                         } else {
-                            self.providers_open.push(p);
+                            self.link_copied = None;
                         }
                     }
-                    if open {
-                        // Its accounts: darker, a little narrower, close
-                        // under it, as a drop-down.
-                        ui.add_space(4.0 - HOME_GAP);
-                        ui.scope(|ui| {
-                            ui.spacing_mut().item_spacing.y = 4.0;
-                            account_cards(ui, t, p, w, busy, &mut act, &mut reset);
-                        });
+                    // Logins kept on this machine though meant for the vault.
+                    for note in [
+                        codex::note(),
+                        antigravity::note(),
+                        openrouter::KEYS.note(),
+                        crate::nodeclub::KEYS.note(),
+                        crate::refuseless::KEYS.note(),
+                        crate::musecode::KEYS.note(),
+                        freebuff::note(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        caption(ui, &note, t.ink3);
                     }
-                }
-                // Room for the fade at the end.
-                ui.add_space(8.0);
-            });
+                    if busy {
+                        crate::widgets::working(ui, t, "Updating accounts…");
+                    }
+                    for p in Provider::ALL {
+                        let n = providers_view::account_count(p);
+                        if n == 0 {
+                            continue;
+                        }
+                        let open = self.providers_open.contains(&p);
+                        if providers_view::provider_box(
+                            ui,
+                            t,
+                            p,
+                            n,
+                            &providers_view::shown(p),
+                            open,
+                            w,
+                        )
+                        .clicked()
+                        {
+                            if open {
+                                self.providers_open.retain(|&o| o != p);
+                            } else {
+                                self.providers_open.push(p);
+                            }
+                        }
+                        if open {
+                            // Its accounts: darker, a little narrower, close
+                            // under it, as a drop-down.
+                            ui.add_space(4.0 - HOME_GAP);
+                            ui.scope(|ui| {
+                                ui.spacing_mut().item_spacing.y = 4.0;
+                                account_cards(ui, t, p, w, busy, &mut act, &mut reset);
+                            });
+                        }
+                    }
+                    // Room for the fade at the end.
+                    ui.add_space(8.0);
+                });
         });
-        providers_view::fade(ui.painter(), Rect::from_min_max(egui::pos2(list.left(), list.bottom() - 22.0), egui::pos2(list.right() - 8.0, list.bottom() + 1.0)), t.panel);
-        ui.scope_builder(UiBuilder::new().max_rect(foot), |ui| self.add_account_box(ui, t));
+        providers_view::fade(
+            ui.painter(),
+            Rect::from_min_max(
+                egui::pos2(list.left(), list.bottom() - 22.0),
+                egui::pos2(list.right() - 8.0, list.bottom() + 1.0),
+            ),
+            t.panel,
+        );
+        ui.scope_builder(UiBuilder::new().max_rect(foot), |ui| {
+            self.add_account_box(ui, t)
+        });
         if let Some((id, grant)) = reset
             && let Some(a) = api::accounts().into_iter().find(|a| a.id == id)
         {
@@ -412,11 +582,32 @@ impl App {
         let hovered = resp.hovered();
         let p = ui.painter();
         p.rect_filled(rect, 0.0, if hovered { t.panel2 } else { t.panel });
-        p.rect_stroke(rect, 0.0, Stroke::new(1.0, if hovered { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
-        p.text(rect.center(), Align2::CENTER_CENTER, "+  Add account", FontId::proportional(13.0), if hovered { t.ink } else { t.ink3 });
+        p.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, if hovered { t.ink3 } else { t.line }),
+            egui::StrokeKind::Inside,
+        );
+        p.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "+  Add account",
+            FontId::proportional(13.0),
+            if hovered { t.ink } else { t.ink3 },
+        );
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-        let pick = egui::Popup::menu(&resp).width(w).show(add_menu).and_then(|r| r.inner);
-        self.account_note = if pick.is_some() { None } else { self.account_note.take() };
+        let pick = egui::Popup::menu(&resp)
+            .width(w)
+            .show(add_menu)
+            .and_then(|r| r.inner);
+        self.account_note = if pick.is_some() {
+            None
+        } else {
+            self.account_note.take()
+        };
+        if pick.is_some() {
+            self.link_copied = None;
+        }
         if let Some(pick) = pick {
             self.start_adding(ui.ctx(), pick);
         }
@@ -450,7 +641,9 @@ impl App {
             }
             return true;
         }
-        let Some(add) = &mut self.adding else { return false };
+        let Some(add) = &mut self.adding else {
+            return false;
+        };
         let (done, cancel) = add_box(ui, t, add, w);
         if cancel {
             self.adding = None;
@@ -466,22 +659,27 @@ impl App {
         true
     }
 
-    /// Starts adding what was picked from "+ Add account".
+    /// Starts adding what was picked from "+ Add account". Sign-in links
+    /// go on the clipboard for the user to paste in their browser.
     fn start_adding(&mut self, ctx: &egui::Context, pick: Add) {
         match pick {
             Add::Claude => {
                 let login = api::start_login();
-                let _ = open::that(&login.url);
-                self.adding = Some(AddAccount { login, code: String::new(), error: None });
+                ctx.copy_text(login.url.clone());
+                self.adding = Some(AddAccount {
+                    login,
+                    code: String::new(),
+                    error: None,
+                });
             }
             Add::Codex => {
                 let login = codex::start_login();
-                let _ = open::that(&login.url);
+                ctx.copy_text(login.url.clone());
                 self.codex_login = Some(login);
             }
             Add::Antigravity => {
                 let login = antigravity::start_login();
-                let _ = open::that(&login.url);
+                ctx.copy_text(login.url.clone());
                 self.antigravity_login = Some(login);
             }
             Add::OpenRouter => self.adding_openrouter.open = true,
@@ -490,7 +688,8 @@ impl App {
             Add::MuseCode => self.adding_musecode.open = true,
             Add::Quick => match crate::quick::login::start() {
                 Ok(url) => {
-                    let _ = open::that(&url);
+                    ctx.copy_text(url);
+                    self.link_copied = Some(Provider::Quick);
                     // Keep polling until the browser approves it.
                     let ctx = ctx.clone();
                     std::thread::spawn(move || {
@@ -518,7 +717,8 @@ impl App {
             Add::Local => self.adding_local = true,
             Add::Freebuff => match freebuff::login_start() {
                 Ok(url) => {
-                    let _ = open::that(&url);
+                    ctx.copy_text(url);
+                    self.link_copied = Some(Provider::Freebuff);
                     // Keep polling until the browser approves it.
                     let ctx = ctx.clone();
                     std::thread::spawn(move || {
@@ -559,28 +759,96 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
     let mut pick = None;
     // With a vault that takes new logins, they go there.
     let shared = api::signing_in_remotely();
-    let tip = if shared { format!("Adds a Claude account to {}, for every machine connected to it", api::vault_name()) } else { "Claude subscription, signed in in the browser".to_string() };
+    let tip = if shared {
+        format!(
+            "Adds a Claude account to {}, for every machine connected to it",
+            api::vault_name()
+        )
+    } else {
+        "Claude subscription, signed in in the browser".to_string()
+    };
     let ctx = ui.ctx().clone();
-    let item = |ui: &mut Ui, p: Provider, label: &str| ui.add(Button::image_and_text(providers_view::logo_image(&ctx, p, 14.0), label));
-    if item(ui, Provider::Claude, "Claude account").on_hover_text(tip).clicked() {
+    let item = |ui: &mut Ui, p: Provider, label: &str| {
+        ui.add(Button::image_and_text(
+            providers_view::logo_image(&ctx, p, 14.0),
+            label,
+        ))
+    };
+    if item(ui, Provider::Claude, "Claude account")
+        .on_hover_text(tip)
+        .clicked()
+    {
         pick = Some(Add::Claude);
     }
-    let remote = if shared { format!(" Shared through {}.", api::vault_name()) } else { String::new() };
+    let remote = if shared {
+        format!(" Shared through {}.", api::vault_name())
+    } else {
+        String::new()
+    };
     for (provider, label, tip, add) in [
-        (Provider::Codex, "Codex account", "ChatGPT plan, Codex models.", Add::Codex),
-        (Provider::Antigravity, "Antigravity account", "Google Antigravity (Gemini, Claude, GPT-OSS), sign in with Google.", Add::Antigravity),
-        (Provider::OpenRouter, "OpenRouter API key", "OpenRouter, pay per token.", Add::OpenRouter),
-        (Provider::MuseCode, "Muse Code API key", "Meta's Muse models (Wonder, Spark, Ember), as Muse Code runs them: a Meta Model API key, pay per token.", Add::MuseCode),
-        (Provider::NodeClub, "NodeClub API key", "NodeClub, OpenAI-compatible API (Qwen).", Add::NodeClub),
-        (Provider::Freebuff, "Freebuff account", "Freebuff, sign in in the browser; its models run a separate system.", Add::Freebuff),
-        (Provider::Refuseless, "Refuseless API key", "Refuseless, abliterated models, pay per token.", Add::Refuseless),
-        (Provider::Quick, "AWS Quick account", "Amazon Quick, sign in in the browser. Its models run Quick's own agent, with the tools Oak runs in your folder.", Add::Quick),
+        (
+            Provider::Codex,
+            "Codex account",
+            "ChatGPT plan, Codex models.",
+            Add::Codex,
+        ),
+        (
+            Provider::Antigravity,
+            "Antigravity account",
+            "Google Antigravity (Gemini, Claude, GPT-OSS), sign in with Google.",
+            Add::Antigravity,
+        ),
+        (
+            Provider::OpenRouter,
+            "OpenRouter API key",
+            "OpenRouter, pay per token.",
+            Add::OpenRouter,
+        ),
+        (
+            Provider::MuseCode,
+            "Muse Code API key",
+            "Meta's Muse models (Wonder, Spark, Ember), as Muse Code runs them: a Meta Model API key, pay per token.",
+            Add::MuseCode,
+        ),
+        (
+            Provider::NodeClub,
+            "NodeClub API key",
+            "NodeClub, OpenAI-compatible API (Qwen).",
+            Add::NodeClub,
+        ),
+        (
+            Provider::Freebuff,
+            "Freebuff account",
+            "Freebuff, sign in in the browser; its models run a separate system.",
+            Add::Freebuff,
+        ),
+        (
+            Provider::Refuseless,
+            "Refuseless API key",
+            "Refuseless, abliterated models, pay per token.",
+            Add::Refuseless,
+        ),
+        (
+            Provider::Quick,
+            "AWS Quick account",
+            "Amazon Quick, sign in in the browser. Its models run Quick's own agent, with the tools Oak runs in your folder.",
+            Add::Quick,
+        ),
     ] {
-        if item(ui, provider, label).on_hover_text(format!("{tip}{remote}")).clicked() {
+        if item(ui, provider, label)
+            .on_hover_text(format!("{tip}{remote}"))
+            .clicked()
+        {
             pick = Some(add);
         }
     }
-    let local = ui.add_enabled(!local::on(), Button::image_and_text(providers_view::logo_image(&ctx, Provider::Local, 14.0), "Local llama.cpp server"));
+    let local = ui.add_enabled(
+        !local::on(),
+        Button::image_and_text(
+            providers_view::logo_image(&ctx, Provider::Local, 14.0),
+            "Local llama.cpp server",
+        ),
+    );
     if local.on_disabled_hover_text("Already added").clicked() {
         pick = Some(Add::Local);
     }
@@ -622,13 +890,39 @@ const MENU_ICON: &str = "\u{f0c9}";
 
 /// A square button over the wallpaper: a solid tile, with `icon` drawn in
 /// it; whether it was clicked.
-fn corner_button(ui: &mut Ui, t: &Theme, rect: Rect, id: &str, tip: &str, icon: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
+fn corner_button(
+    ui: &mut Ui,
+    t: &Theme,
+    rect: Rect,
+    id: &str,
+    tip: &str,
+    icon: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> bool {
     let resp = ui.interact(rect, Id::unique(id), Sense::click());
     let p = ui.painter();
-    p.rect_filled(rect, 4.0, if resp.hovered() { t.tool_hover } else { t.panel });
-    p.rect_stroke(rect, 4.0, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
-    icon(p, rect.shrink(6.0), if resp.hovered() { t.ink } else { t.ink2 });
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked()
+    p.rect_filled(
+        rect,
+        4.0,
+        if resp.hovered() {
+            t.tool_hover
+        } else {
+            t.panel
+        },
+    );
+    p.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0, t.line),
+        egui::StrokeKind::Inside,
+    );
+    icon(
+        p,
+        rect.shrink(6.0),
+        if resp.hovered() { t.ink } else { t.ink2 },
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tip)
+        .clicked()
 }
 
 /// Home's box: the box, its two cells (chats left, accounts right, as wide
@@ -648,36 +942,73 @@ pub(crate) struct HomeGrid {
 
 pub(crate) fn home_grid(area: Rect) -> HomeGrid {
     let room = area.height() - FOOT_H - 8.0;
-    let w = (area.width() * 0.86).min(room * 0.86 * HOME_RATIO).max(460.0f32.min(area.width() - 16.0));
+    let w = (area.width() * 0.86)
+        .min(room * 0.86 * HOME_RATIO)
+        .max(460.0f32.min(area.width() - 16.0));
     let h = w / HOME_RATIO;
     // The box and the button under it are centred together.
     let top = area.center().y - (h + 8.0 + FOOT_H) / 2.0;
     let card = Rect::from_center_size(egui::pos2(area.center().x, top + h / 2.0), vec2(w, h));
     // An account box's width when there is room; in a small window the
     // chats keep the larger share.
-    let acc_w = (w * 0.24).max(BOX_W + 2.0 * HOME_GAP + BAR_ROOM).min(w * 0.45);
+    let acc_w = (w * 0.24)
+        .max(BOX_W + 2.0 * HOME_GAP + BAR_ROOM)
+        .min(w * 0.45);
     let split_x = card.right() - acc_w;
-    let head = |l: f32, r: f32| Rect::from_min_max(egui::pos2(l, card.top()), egui::pos2(r, card.top() + HOME_HEAD));
+    let head = |l: f32, r: f32| {
+        Rect::from_min_max(
+            egui::pos2(l, card.top()),
+            egui::pos2(r, card.top() + HOME_HEAD),
+        )
+    };
     let (chats_head, accounts_head) = (head(card.left(), split_x), head(split_x, card.right()));
-    let body = |h: Rect| Rect::from_min_max(egui::pos2(h.left() + HOME_GAP, h.bottom() + HOME_GAP), egui::pos2(h.right() - 4.0, card.bottom() - 4.0));
-    let chats = Rect::from_min_max(egui::pos2(chats_head.left() + 4.0, chats_head.bottom() + 1.0), egui::pos2(split_x - 4.0, card.bottom() - 1.0));
+    let body = |h: Rect| {
+        Rect::from_min_max(
+            egui::pos2(h.left() + HOME_GAP, h.bottom() + HOME_GAP),
+            egui::pos2(h.right() - 4.0, card.bottom() - 4.0),
+        )
+    };
+    let chats = Rect::from_min_max(
+        egui::pos2(chats_head.left() + 4.0, chats_head.bottom() + 1.0),
+        egui::pos2(split_x - 4.0, card.bottom() - 1.0),
+    );
     let mut accounts = body(accounts_head);
     // The usage preview takes the bottom of the accounts' cell, as wide
     // as an account box, when that leaves room for a couple of accounts.
     let preview = (accounts.height() >= PREVIEW_H + HOME_GAP + 200.0).then(|| {
-        let r = Rect::from_min_max(egui::pos2(accounts.left(), card.bottom() - HOME_GAP - PREVIEW_H), egui::pos2(accounts.right() - 8.0, card.bottom() - HOME_GAP));
+        let r = Rect::from_min_max(
+            egui::pos2(accounts.left(), card.bottom() - HOME_GAP - PREVIEW_H),
+            egui::pos2(accounts.right() - 8.0, card.bottom() - HOME_GAP),
+        );
         accounts.max.y = r.top() - HOME_GAP;
         r
     });
-    HomeGrid { card, split_x, chats_head, accounts_head, chats, accounts, preview }
+    HomeGrid {
+        card,
+        split_x,
+        chats_head,
+        accounts_head,
+        chats,
+        accounts,
+        preview,
+    }
 }
 
 /// The solid box, its heading strip and, `split`, the line between the
 /// chats and the accounts (Settings has one cell).
 fn paint_grid(p: &egui::Painter, t: &Theme, g: &HomeGrid, split: bool) {
     p.rect_filled(g.card, 0.0, t.panel);
-    p.rect_stroke(g.card, 0.0, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
-    p.hline(g.card.x_range(), g.chats_head.bottom() - 0.5, Stroke::new(1.0, t.line));
+    p.rect_stroke(
+        g.card,
+        0.0,
+        Stroke::new(1.0, t.line),
+        egui::StrokeKind::Inside,
+    );
+    p.hline(
+        g.card.x_range(),
+        g.chats_head.bottom() - 0.5,
+        Stroke::new(1.0, t.line),
+    );
     if split {
         p.vline(g.split_x + 0.5, g.card.y_range(), Stroke::new(1.0, t.line));
     }
@@ -685,7 +1016,13 @@ fn paint_grid(p: &egui::Painter, t: &Theme, g: &HomeGrid, split: bool) {
 
 /// A cell's heading, small and quiet.
 fn cell_heading(p: &egui::Painter, t: &Theme, rect: Rect, text: &str) {
-    p.text(egui::pos2(rect.left() + 16.0, rect.center().y), Align2::LEFT_CENTER, text, FontId::proportional(12.5), t.ink2);
+    p.text(
+        egui::pos2(rect.left() + 16.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(12.5),
+        t.ink2,
+    );
 }
 
 /// Signing in another account: the code from the sign-in page goes in
@@ -693,9 +1030,11 @@ fn cell_heading(p: &egui::Painter, t: &Theme, rect: Rect, text: &str) {
 pub(crate) fn add_box(ui: &mut Ui, t: &Theme, add: &mut AddAccount, w: f32) -> (bool, bool) {
     side_box(ui, t, w, |ui| {
         sign_in_heading(ui, t, "Add account", &add.login.url);
-        let edit = TextEdit::singleline(&mut add.code).id(Id::unique("add-account-code")).hint_text("Authorization code");
+        let edit = TextEdit::singleline(&mut add.code)
+            .id(Id::unique("add-account-code"))
+            .hint_text("Authorization code");
         add_field(ui, t, edit, None, add.error.as_ref(), |ui| {
-            caption(ui, "Waiting for sign-in…", t.ink3);
+            caption(ui, LINK_COPIED, t.ink3);
         })
     })
     .inner
@@ -732,7 +1071,9 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
         }
         AccountAct::Remove(Provider::Plugin, _) => Ok(()),
         AccountAct::Move(p, ids) => ids.iter().try_for_each(|id| match p {
-            Provider::Claude => api::move_to_vault(id.parse().map_err(|_| "No such account.".to_string())?),
+            Provider::Claude => {
+                api::move_to_vault(id.parse().map_err(|_| "No such account.".to_string())?)
+            }
             Provider::Codex => codex::move_to_vault(id),
             Provider::Antigravity => antigravity::move_to_vault(id),
             Provider::OpenRouter => openrouter::KEYS.move_to_vault(id),
@@ -772,9 +1113,17 @@ fn account_card(
         ui.add_space(8.0);
         panel(ui, &dark, w - 16.0)
     });
-    let resp = ui.interact(r.inner.rect, Id::unique(("account-card", id.0.id(), id.1)), Sense::click());
+    let resp = ui.interact(
+        r.inner.rect,
+        Id::unique(("account-card", id.0.id(), id.1)),
+        Sense::click(),
+    );
     // (The right-click menu is the only way to move or remove an account.)
-    let resp = resp.on_hover_text(if movable { "On this machine. Right-click to move or remove it." } else { "Right-click for options" });
+    let resp = resp.on_hover_text(if movable {
+        "On this machine. Right-click to move or remove it."
+    } else {
+        "Right-click for options"
+    });
     if busy {
         return;
     }
@@ -785,7 +1134,16 @@ fn account_card(
     let at = menu.with("card-at");
     if egui::Popup::is_id_open(ui.ctx(), menu) {
         let opened_at = ui.ctx().data(|d| d.get_temp::<Rect>(at));
-        let (esc, scrolled) = ui.input(|i| (i.key_pressed(egui::Key::Escape), i.raw.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. })) || i.smooth_scroll_delta != egui::Vec2::ZERO));
+        let (esc, scrolled) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Escape),
+                i.raw
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::MouseWheel { .. }))
+                    || i.smooth_scroll_delta != egui::Vec2::ZERO,
+            )
+        });
         if esc || scrolled || opened_at.is_some_and(|r| r != resp.rect) {
             egui::Popup::close_id(ui.ctx(), menu);
             ui.ctx().data_mut(|d| d.remove::<Rect>(at));
@@ -798,7 +1156,11 @@ fn account_card(
         ui.ctx().data_mut(|d| d.remove::<Rect>(at));
     }
     resp.context_menu(|ui| {
-        if movable && ui.button(format!("Move to {}", api::vault_name())).clicked() {
+        if movable
+            && ui
+                .button(format!("Move to {}", api::vault_name()))
+                .clicked()
+        {
             *act = Some(AccountAct::Move(id.0, vec![id.1.to_string()]));
             ui.close();
         }
@@ -812,21 +1174,44 @@ fn account_card(
 /// Provider `p`'s accounts, under its box. Each says how many conversations
 /// are on it now (`crate::rotation`); under a Claude account, the
 /// usage-limit resets it is offered (`reset`: the one clicked).
-fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &mut Option<AccountAct>, reset: &mut Option<(u64, String)>) {
+fn account_cards(
+    ui: &mut Ui,
+    t: &Theme,
+    p: Provider,
+    w: f32,
+    busy: bool,
+    act: &mut Option<AccountAct>,
+    reset: &mut Option<(u64, String)>,
+) {
     let active = crate::rotation::active(p, api::now_ms());
-    let on = |id: &str| active.get(id).map(|n| if *n == 1 { "1 active".to_string() } else { format!("{n} active") });
+    let on = |id: &str| {
+        active.get(id).map(|n| {
+            if *n == 1 {
+                "1 active".to_string()
+            } else {
+                format!("{n} active")
+            }
+        })
+    };
     // How many conversations are on it, or that it is on this machine only.
-    let status = |id: &str, movable: bool| on(id).or_else(|| movable.then(|| "this machine".to_string()));
+    let status =
+        |id: &str, movable: bool| on(id).or_else(|| movable.then(|| "this machine".to_string()));
     let paired = api::vault_on();
     match p {
         Provider::Claude => {
             let accounts = api::accounts();
             let (main, fallback): (Vec<_>, Vec<_>) = accounts.iter().partition(|a| !a.fallback);
-            let remove = if paired { "Remove shared account (every machine)" } else { "Sign out of this account" };
+            let remove = if paired {
+                "Remove shared account (every machine)"
+            } else {
+                "Sign out of this account"
+            };
             for a in &main {
                 let id = a.id.to_string();
                 let status = on(&id);
-                account_card(ui, t, w, (p, &id), false, remove, busy, act, |ui, t, w| usage_panel(ui, t, Some(a), status.as_deref(), false, w));
+                account_card(ui, t, w, (p, &id), false, remove, busy, act, |ui, t, w| {
+                    usage_panel(ui, t, Some(a), status.as_deref(), false, w)
+                });
                 if let Some(g) = crate::resets_view::rows(ui, t, a, busy) {
                     *reset = Some((a.id, g));
                 }
@@ -834,21 +1219,45 @@ fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &
             if !fallback.is_empty() {
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
-                    caption(ui, "Local fallback accounts", t.ink3).on_hover_text(format!("Accounts on this machine, used when those of {} are unavailable.", api::vault_name()));
+                    caption(ui, "Local fallback accounts", t.ink3).on_hover_text(format!(
+                        "Accounts on this machine, used when those of {} are unavailable.",
+                        api::vault_name()
+                    ));
                 });
                 for a in &fallback {
                     let id = a.id.to_string();
                     let status = status(&id, a.movable);
-                    account_card(ui, t, w, (p, &id), a.movable, "Remove from this machine", busy, act, |ui, t, w| usage_panel(ui, t, Some(a), status.as_deref(), false, w));
+                    account_card(
+                        ui,
+                        t,
+                        w,
+                        (p, &id),
+                        a.movable,
+                        "Remove from this machine",
+                        busy,
+                        act,
+                        |ui, t, w| usage_panel(ui, t, Some(a), status.as_deref(), false, w),
+                    );
                     if let Some(g) = crate::resets_view::rows(ui, t, a, busy) {
                         *reset = Some((a.id, g));
                     }
                 }
-                let movable: Vec<String> = fallback.iter().filter(|a| a.movable).map(|a| a.id.to_string()).collect();
+                let movable: Vec<String> = fallback
+                    .iter()
+                    .filter(|a| a.movable)
+                    .map(|a| a.id.to_string())
+                    .collect();
                 if movable.len() > 1 && !busy {
                     let r = ui.horizontal(|ui| {
                         ui.add_space(8.0);
-                        ui.button(RichText::new(format!("Move all {} to {}", movable.len(), api::vault_name())).small())
+                        ui.button(
+                            RichText::new(format!(
+                                "Move all {} to {}",
+                                movable.len(),
+                                api::vault_name()
+                            ))
+                            .small(),
+                        )
                     });
                     if r.inner.on_hover_text(format!("Transfers logins and token renewal to {}; only access tokens remain locally.", api::vault_name())).clicked() {
                         *act = Some(AccountAct::Move(p, movable));
@@ -857,76 +1266,203 @@ fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &
             }
         }
         Provider::Codex => {
-            let remove = if paired { "Sign out (every machine)" } else { "Sign out" };
+            let remove = if paired {
+                "Sign out (every machine)"
+            } else {
+                "Sign out"
+            };
             for (id, a) in codex::accounts() {
                 let movable = codex::movable(&id);
                 let status = status(&id, movable);
-                account_card(ui, t, w, (p, &id), movable, remove, busy, act, |ui, t, w| usage_panel(ui, t, Some(&a), status.as_deref(), false, w));
+                account_card(
+                    ui,
+                    t,
+                    w,
+                    (p, &id),
+                    movable,
+                    remove,
+                    busy,
+                    act,
+                    |ui, t, w| usage_panel(ui, t, Some(&a), status.as_deref(), false, w),
+                );
             }
         }
         Provider::Antigravity => {
-            let remove = if paired { "Sign out (every machine)" } else { "Sign out" };
+            let remove = if paired {
+                "Sign out (every machine)"
+            } else {
+                "Sign out"
+            };
             for v in antigravity::accounts_detailed() {
                 let movable = antigravity::movable(&v.id);
                 let status = status(&v.id, movable);
-                account_card(ui, t, w, (p, &v.id), movable, remove, busy, act, |ui, t, w| crate::composer::antigravity_panel(ui, t, &v, status.as_deref(), w));
+                account_card(
+                    ui,
+                    t,
+                    w,
+                    (p, &v.id),
+                    movable,
+                    remove,
+                    busy,
+                    act,
+                    |ui, t, w| crate::composer::antigravity_panel(ui, t, &v, status.as_deref(), w),
+                );
             }
         }
         Provider::OpenRouter => {
             for a in openrouter::accounts() {
                 let movable = openrouter::KEYS.movable(&a.id);
                 let status = status(&a.id, movable);
-                let remove = format!("Remove OpenRouter key {}{}", a.label, if a.remote { " (all clients)" } else { "" });
-                account_card(ui, t, w, (p, &a.id), movable, &remove, busy, act, |ui, t, w| openrouter_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w));
+                let remove = format!(
+                    "Remove OpenRouter key {}{}",
+                    a.label,
+                    if a.remote { " (all clients)" } else { "" }
+                );
+                account_card(
+                    ui,
+                    t,
+                    w,
+                    (p, &a.id),
+                    movable,
+                    &remove,
+                    busy,
+                    act,
+                    |ui, t, w| {
+                        openrouter_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w)
+                    },
+                );
             }
         }
         Provider::NodeClub => {
             for a in crate::nodeclub::accounts() {
                 let movable = crate::nodeclub::KEYS.movable(&a.id);
                 let status = status(&a.id, movable);
-                let remove = format!("Remove NodeClub key {}{}", a.label, if a.remote { " (all clients)" } else { "" });
-                account_card(ui, t, w, (p, &a.id), movable, &remove, busy, act, |ui, t, w| nodeclub_panel(ui, t, Some(&a), status.as_deref(), w));
+                let remove = format!(
+                    "Remove NodeClub key {}{}",
+                    a.label,
+                    if a.remote { " (all clients)" } else { "" }
+                );
+                account_card(
+                    ui,
+                    t,
+                    w,
+                    (p, &a.id),
+                    movable,
+                    &remove,
+                    busy,
+                    act,
+                    |ui, t, w| nodeclub_panel(ui, t, Some(&a), status.as_deref(), w),
+                );
             }
         }
         Provider::Refuseless => {
             for a in crate::refuseless::accounts() {
                 let movable = crate::refuseless::KEYS.movable(&a.id);
                 let status = status(&a.id, movable);
-                let remove = format!("Remove Refuseless key {}{}", a.label, if a.remote { " (all clients)" } else { "" });
-                account_card(ui, t, w, (p, &a.id), movable, &remove, busy, act, |ui, t, w| refuseless_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w));
+                let remove = format!(
+                    "Remove Refuseless key {}{}",
+                    a.label,
+                    if a.remote { " (all clients)" } else { "" }
+                );
+                account_card(
+                    ui,
+                    t,
+                    w,
+                    (p, &a.id),
+                    movable,
+                    &remove,
+                    busy,
+                    act,
+                    |ui, t, w| {
+                        refuseless_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w)
+                    },
+                );
             }
         }
         Provider::MuseCode => {
             for a in crate::musecode::accounts() {
                 let movable = crate::musecode::KEYS.movable(&a.id);
                 let status = status(&a.id, movable);
-                let remove = format!("Remove Muse Code key {}{}", a.label, if a.remote { " (all clients)" } else { "" });
-                account_card(ui, t, w, (p, &a.id), movable, &remove, busy, act, |ui, t, w| musecode_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w));
+                let remove = format!(
+                    "Remove Muse Code key {}{}",
+                    a.label,
+                    if a.remote { " (all clients)" } else { "" }
+                );
+                account_card(
+                    ui,
+                    t,
+                    w,
+                    (p, &a.id),
+                    movable,
+                    &remove,
+                    busy,
+                    act,
+                    |ui, t, w| {
+                        musecode_panel(ui, t, Some(&a), ("Spent", a.spent), status.as_deref(), w)
+                    },
+                );
             }
         }
         Provider::Freebuff => {
             for a in freebuff::accounts() {
                 let movable = freebuff::movable(&a.id);
                 let status = status(&a.id, movable);
-                let remove = if a.remote { "Sign out (all clients)" } else { "Sign out" };
-                account_card(ui, t, w, (p, &a.id), movable, remove, busy, act, |ui, t, w| crate::composer::freebuff_panel(ui, t, Some(&a), status.as_deref(), w));
+                let remove = if a.remote {
+                    "Sign out (all clients)"
+                } else {
+                    "Sign out"
+                };
+                account_card(
+                    ui,
+                    t,
+                    w,
+                    (p, &a.id),
+                    movable,
+                    remove,
+                    busy,
+                    act,
+                    |ui, t, w| {
+                        crate::composer::freebuff_panel(ui, t, Some(&a), status.as_deref(), w)
+                    },
+                );
             }
         }
         Provider::Local => {
-            account_card(ui, t, w, (p, "local"), false, "Remove server", busy, act, crate::composer::local_panel);
+            account_card(
+                ui,
+                t,
+                w,
+                (p, "local"),
+                false,
+                "Remove server",
+                busy,
+                act,
+                crate::composer::local_panel,
+            );
         }
         Provider::Quick => {
             if let Some(a) = crate::quick::account() {
                 let status = on("quick");
-                account_card(ui, t, w, (p, "quick"), false, "Sign out of Quick", busy, act, |ui, t, w| {
-                    crate::composer::quick_panel(ui, t, Some(&a), status.as_deref(), w)
-                });
-            } else if let Some(crate::quick::login::State::Waiting { .. }) = crate::quick::login::state() {
+                account_card(
+                    ui,
+                    t,
+                    w,
+                    (p, "quick"),
+                    false,
+                    "Sign out of Quick",
+                    busy,
+                    act,
+                    |ui, t, w| crate::composer::quick_panel(ui, t, Some(&a), status.as_deref(), w),
+                );
+            } else if let Some(crate::quick::login::State::Waiting { .. }) =
+                crate::quick::login::state()
+            {
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     caption(ui, "Waiting for the browser to approve Oak…", t.ink3);
                 });
-            } else if let Some(crate::quick::login::State::Failed(e)) = crate::quick::login::state() {
+            } else if let Some(crate::quick::login::State::Failed(e)) = crate::quick::login::state()
+            {
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     caption(ui, &format!("Quick sign-in failed: {e}"), t.error);
@@ -946,7 +1482,11 @@ pub(crate) struct AddAccount {
 }
 /// A picture built into OAK, as a texture (pixel art: no smoothing).
 /// The forests are placeholders, made by assets/placeholder-forest.py.
-pub(crate) fn picture(ctx: &egui::Context, cache: &mut HashMap<&'static str, egui::TextureHandle>, name: &'static str) -> egui::TextureHandle {
+pub(crate) fn picture(
+    ctx: &egui::Context,
+    cache: &mut HashMap<&'static str, egui::TextureHandle>,
+    name: &'static str,
+) -> egui::TextureHandle {
     cache
         .entry(name)
         .or_insert_with(|| {
@@ -954,9 +1494,15 @@ pub(crate) fn picture(ctx: &egui::Context, cache: &mut HashMap<&'static str, egu
                 "forest-header" => include_bytes!("../assets/forest-header.png"),
                 _ => include_bytes!("../assets/forest-home.png"),
             };
-            let img = image::load_from_memory(bytes).expect("built-in picture decodes").to_rgba8();
+            let img = image::load_from_memory(bytes)
+                .expect("built-in picture decodes")
+                .to_rgba8();
             let size = [img.width() as usize, img.height() as usize];
-            ctx.load_texture(name, egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::NEAREST)
+            ctx.load_texture(
+                name,
+                egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()),
+                egui::TextureOptions::NEAREST,
+            )
         })
         .clone()
 }
@@ -968,10 +1514,16 @@ pub(crate) fn paint_cover(p: &egui::Painter, rect: Rect, tex: &egui::TextureHand
     let (ra, ia) = (rect.width() / rect.height(), w / h);
     let uv = if ra > ia {
         let v = ia / ra;
-        Rect::from_min_max(egui::pos2(0.0, (1.0 - v) / 2.0), egui::pos2(1.0, (1.0 + v) / 2.0))
+        Rect::from_min_max(
+            egui::pos2(0.0, (1.0 - v) / 2.0),
+            egui::pos2(1.0, (1.0 + v) / 2.0),
+        )
     } else {
         let u = ra / ia;
-        Rect::from_min_max(egui::pos2((1.0 - u) / 2.0, 0.0), egui::pos2((1.0 + u) / 2.0, 1.0))
+        Rect::from_min_max(
+            egui::pos2((1.0 - u) / 2.0, 0.0),
+            egui::pos2((1.0 + u) / 2.0, 1.0),
+        )
     };
     p.image(tex.id(), rect, uv, tint);
 }
@@ -1004,7 +1556,11 @@ impl ChatSort {
     const ALL: [ChatSort; 2] = [ChatSort::Recent, ChatSort::Scratchpad];
 
     pub(crate) fn from_setting(s: &str) -> Self {
-        if s == "scratchpad" { ChatSort::Scratchpad } else { ChatSort::Recent }
+        if s == "scratchpad" {
+            ChatSort::Scratchpad
+        } else {
+            ChatSort::Recent
+        }
     }
 
     fn setting(self) -> &'static str {
@@ -1039,22 +1595,56 @@ fn sort_button(ui: &mut Ui, t: &Theme, rect: Rect, now: ChatSort) -> Option<Chat
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     let lit = resp.hovered() || open;
     let p = ui.painter();
-    p.rect_filled(rect, 3.0, if lit { t.tool_hover } else { Color32::TRANSPARENT });
-    p.rect_stroke(rect, 3.0, Stroke::new(1.0, if lit { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
+    p.rect_filled(
+        rect,
+        3.0,
+        if lit {
+            t.tool_hover
+        } else {
+            Color32::TRANSPARENT
+        },
+    );
+    p.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, if lit { t.ink3 } else { t.line }),
+        egui::StrokeKind::Inside,
+    );
     let color = if lit { t.ink } else { t.ink2 };
     let font = FontId::proportional(12.5);
     let text = clip_width(ui, now.label(), &font, rect.width() - 30.0);
-    p.text(egui::pos2(rect.left() + 9.0, rect.center().y), Align2::LEFT_CENTER, text, font, color);
-    crate::widgets::chevron_v(p, egui::pos2(rect.right() - 11.0, rect.center().y), open, color);
+    p.text(
+        egui::pos2(rect.left() + 9.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        font,
+        color,
+    );
+    crate::widgets::chevron_v(
+        p,
+        egui::pos2(rect.right() - 11.0, rect.center().y),
+        open,
+        color,
+    );
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let resp = if open { resp } else { resp.on_hover_text("Sort conversations") };
+    let resp = if open {
+        resp
+    } else {
+        resp.on_hover_text("Sort conversations")
+    };
     egui::Popup::menu(&resp)
         .width(rect.width())
         .show(|ui| {
             caption(ui, "Sort by", t.ink3);
             let mut pick = None;
             for s in ChatSort::ALL {
-                if ui.selectable_label(s == now, RichText::new(s.label()).color(if s == now { t.accent } else { t.ink })).clicked() {
+                if ui
+                    .selectable_label(
+                        s == now,
+                        RichText::new(s.label()).color(if s == now { t.accent } else { t.ink }),
+                    )
+                    .clicked()
+                {
                     pick = Some(s);
                 }
             }
@@ -1085,28 +1675,69 @@ pub(crate) struct ChatListAction {
 /// paused). The rows stop short of the scroll bar. A click opens a
 /// conversation; with `can_delete`, a right-click offers to rename it, clear
 /// its scratchpad or delete it.
-pub(crate) fn chat_list(ui: &mut Ui, t: &Theme, rows: &[ChatRow], can_delete: bool) -> ChatListAction {
+pub(crate) fn chat_list(
+    ui: &mut Ui,
+    t: &Theme,
+    rows: &[ChatRow],
+    can_delete: bool,
+) -> ChatListAction {
     let mut action = ChatListAction::default();
-    list_rows(ui, t, "home-chats", rows.len(), "No conversations", |ui, i, rect, resp| {
-        let row = &rows[i];
-        let p = ui.painter();
-        let y = rect.center().y;
-        let (mut x, right) = (rect.left() + 12.0, rect.right() - 12.0);
-        if row.busy || row.paused {
-            state_dot(p, t, egui::pos2(x + 3.0, y - 9.0), row.paused);
-            x += 12.0;
-        }
-        let big = FontId::proportional(14.5);
-        let title = clip_width(ui, &row.title, &big, right - 90.0 - x);
-        p.text(egui::pos2(x, y - 9.0), Align2::LEFT_CENTER, title, big, row_title_color(t, resp.hovered()));
-        p.text(egui::pos2(x, y + 11.0), Align2::LEFT_CENTER, &row.folder, FontId::proportional(11.5), t.ink3);
-        p.text(egui::pos2(right, y - 9.0), Align2::RIGHT_CENTER, ago(row.at), FontId::proportional(12.5), t.ink3);
-        match row.scratch {
-            Some(n) => p.text(egui::pos2(right, y + 11.0), Align2::RIGHT_CENTER, crate::scratch::fmt_bytes(n), FontId::proportional(11.5), if n > 0 { t.ink2 } else { t.ink4 }),
-            None => p.text(egui::pos2(right, y + 11.0), Align2::RIGHT_CENTER, mdy(row.at), FontId::proportional(11.5), t.ink4),
-        };
-        if can_delete {
-            resp.context_menu(|ui| {
+    list_rows(
+        ui,
+        t,
+        "home-chats",
+        rows.len(),
+        "No conversations",
+        |ui, i, rect, resp| {
+            let row = &rows[i];
+            let p = ui.painter();
+            let y = rect.center().y;
+            let (mut x, right) = (rect.left() + 12.0, rect.right() - 12.0);
+            if row.busy || row.paused {
+                state_dot(p, t, egui::pos2(x + 3.0, y - 9.0), row.paused);
+                x += 12.0;
+            }
+            let big = FontId::proportional(14.5);
+            let title = clip_width(ui, &row.title, &big, right - 90.0 - x);
+            p.text(
+                egui::pos2(x, y - 9.0),
+                Align2::LEFT_CENTER,
+                title,
+                big,
+                row_title_color(t, resp.hovered()),
+            );
+            p.text(
+                egui::pos2(x, y + 11.0),
+                Align2::LEFT_CENTER,
+                &row.folder,
+                FontId::proportional(11.5),
+                t.ink3,
+            );
+            p.text(
+                egui::pos2(right, y - 9.0),
+                Align2::RIGHT_CENTER,
+                ago(row.at),
+                FontId::proportional(12.5),
+                t.ink3,
+            );
+            match row.scratch {
+                Some(n) => p.text(
+                    egui::pos2(right, y + 11.0),
+                    Align2::RIGHT_CENTER,
+                    crate::scratch::fmt_bytes(n),
+                    FontId::proportional(11.5),
+                    if n > 0 { t.ink2 } else { t.ink4 },
+                ),
+                None => p.text(
+                    egui::pos2(right, y + 11.0),
+                    Align2::RIGHT_CENTER,
+                    mdy(row.at),
+                    FontId::proportional(11.5),
+                    t.ink4,
+                ),
+            };
+            if can_delete {
+                resp.context_menu(|ui| {
                 if row.renamable && ui.button("Rename…").clicked() {
                     action.rename = Some(row.id.clone());
                     ui.close();
@@ -1131,11 +1762,12 @@ pub(crate) fn chat_list(ui: &mut Ui, t: &Theme, rows: &[ChatRow], can_delete: bo
                     ui.close();
                 }
             });
-        }
-        if resp.clicked() {
-            action.open = Some(row.id.clone());
-        }
-    });
+            }
+            if resp.clicked() {
+                action.open = Some(row.id.clone());
+            }
+        },
+    );
     action
 }
 
@@ -1154,24 +1786,45 @@ fn search_field(ui: &mut Ui, t: &Theme, rect: Rect, query: &mut String) -> bool 
     if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
         ui.memory_mut(|m| m.request_focus(id));
     }
-    let clear = Rect::from_center_size(egui::pos2(rect.right() - 13.0, rect.center().y), vec2(18.0, 18.0));
+    let clear = Rect::from_center_size(
+        egui::pos2(rect.right() - 13.0, rect.center().y),
+        vec2(18.0, 18.0),
+    );
     let edit = TextEdit::singleline(query)
         .id(id)
         .font(FontId::proportional(12.5))
         .hint_text("Search conversations")
-        .margin(Margin { left: 26, right: 24, top: 6, bottom: 6 })
+        .margin(Margin {
+            left: 26,
+            right: 24,
+            top: 6,
+            bottom: 6,
+        })
         .desired_width(rect.width());
     let resp = crate::text_menu::put(ui, rect, edit);
-    ui.painter().text(egui::pos2(rect.left() + 14.0, rect.center().y), Align2::CENTER_CENTER, SEARCH_ICON, markdown::icon_font(11.0), t.ink3);
+    ui.painter().text(
+        egui::pos2(rect.left() + 14.0, rect.center().y),
+        Align2::CENTER_CENTER,
+        SEARCH_ICON,
+        markdown::icon_font(11.0),
+        t.ink3,
+    );
     if crate::widgets::left_with(ui, &resp, Key::Escape) {
         query.clear();
     }
     if !query.is_empty() {
-        let x = ui.interact(clear, id.with("clear"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Clear search");
+        let x = ui
+            .interact(clear, id.with("clear"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Clear search");
         if x.hovered() {
             ui.painter().rect_filled(clear, 3.0, t.tool_hover);
         }
-        crate::widgets::draw_x(ui.painter(), clear, if x.hovered() { t.ink } else { t.ink3 });
+        crate::widgets::draw_x(
+            ui.painter(),
+            clear,
+            if x.hovered() { t.ink } else { t.ink3 },
+        );
         if x.clicked() {
             query.clear();
             ui.memory_mut(|m| m.request_focus(id));
@@ -1190,7 +1843,9 @@ pub(crate) fn filter_rows(rows: Vec<ChatRow>, query: &str) -> Vec<ChatRow> {
     rows.into_iter()
         .filter(|r| {
             let (title, folder) = (r.title.to_lowercase(), r.folder.to_lowercase());
-            words.iter().all(|w| title.contains(w.as_str()) || folder.contains(w.as_str()))
+            words
+                .iter()
+                .all(|w| title.contains(w.as_str()) || folder.contains(w.as_str()))
         })
         .collect()
 }
@@ -1200,21 +1855,49 @@ pub(crate) fn filter_rows(rows: Vec<ChatRow>, query: &str) -> Vec<ChatRow> {
 #[cfg(test)]
 pub(crate) const DUMMY_CHATS: [(&str, &str, i64); 17] = [
     ("Build a landing page for the forest theme", "oak-site", 42),
-    ("Review the pull request for the auth refactor", "backend", 180),
+    (
+        "Review the pull request for the auth refactor",
+        "backend",
+        180,
+    ),
     ("Profile the slow startup of the desktop app", "oak", 410),
     ("Triage the open issues and write a fix list", "oak", 1_300),
     ("Scrape the docs site into markdown", "docs-mirror", 1_900),
     ("Tidy up the settings page code", "oak", 2_900),
     ("Retry logic for rate-limited requests", "api-client", 4_200),
-    ("Draft the README for the plugin template", "plugin-template", 5_800),
+    (
+        "Draft the README for the plugin template",
+        "plugin-template",
+        5_800,
+    ),
     ("Write a sudoku solver with backtracking", "scratch", 7_400),
     ("Track API spending per conversation", "oak", 9_900),
     ("Benchmark FETCH against curl", "oak", 12_500),
-    ("Map out the codebase for a new contributor", "game-engine", 16_000),
-    ("Hook up email notifications for finished tasks", "notifier", 21_000),
-    ("Set up the Rust toolchain on the new laptop", "dotfiles", 27_000),
-    ("Plan the migration to the new storage format", "backend", 33_000),
-    ("Read through the egui changelog for breaking changes", "oak", 39_000),
+    (
+        "Map out the codebase for a new contributor",
+        "game-engine",
+        16_000,
+    ),
+    (
+        "Hook up email notifications for finished tasks",
+        "notifier",
+        21_000,
+    ),
+    (
+        "Set up the Rust toolchain on the new laptop",
+        "dotfiles",
+        27_000,
+    ),
+    (
+        "Plan the migration to the new storage format",
+        "backend",
+        33_000,
+    ),
+    (
+        "Read through the egui changelog for breaking changes",
+        "oak",
+        39_000,
+    ),
     ("Release v0.2 and write the changelog", "oak", 46_000),
 ];
 /// Home's tab of this machine's conversations (`App::home_list`; also
@@ -1225,7 +1908,10 @@ pub(crate) const CLOUD_TAB: &str = "cloud";
 
 /// The plugin tab with this id, while it is there.
 fn plugin_tab(id: &str) -> Option<&'static Arc<crate::plugins::HomeTab>> {
-    crate::plugins::parts().home_tabs.iter().find(|tab| tab.id() == id && !tab.link() && tab.shown())
+    crate::plugins::parts()
+        .home_tabs
+        .iter()
+        .find(|tab| tab.id() == id && !tab.link() && tab.shown())
 }
 
 /// A tab in the heading of Home's left cell.
@@ -1242,17 +1928,59 @@ struct HomeTabLook {
 /// The left cell's tabs, in order: Conversations, Cloud, the plugins', then
 /// Protocols (`mcp_view`) and Plugins (the manager, `plugins_view`) last.
 fn home_tab_looks() -> Vec<HomeTabLook> {
-    let own = |id: &str, icon: &str, label: &str, tip: &str, order| HomeTabLook { id: id.into(), icon: icon.into(), icon_is_text: false, label: label.into(), tip: tip.into(), order };
+    let own = |id: &str, icon: &str, label: &str, tip: &str, order| HomeTabLook {
+        id: id.into(),
+        icon: icon.into(),
+        icon_is_text: false,
+        label: label.into(),
+        tip: tip.into(),
+        order,
+    };
     let mut tabs = vec![
-        own(LOCAL_TAB, "", "Conversations", "This machine's conversations", 0),
-        own(CLOUD_TAB, crate::cloud_view::CLOUD_ICON, "Cloud", "Claude Code sessions in Anthropic's cloud, on your Claude accounts", 10),
-        own(crate::mcp_view::TAB, crate::mcp_view::ICON, "Protocols", "Programs your conversations can work in, such as Blender and the browser", i32::MAX - 1),
-        own(crate::plugins_view::TAB, crate::plugins_view::ICON, "Plugins", "Plugins, their switches and settings", i32::MAX),
+        own(
+            LOCAL_TAB,
+            "",
+            "Conversations",
+            "This machine's conversations",
+            0,
+        ),
+        own(
+            CLOUD_TAB,
+            crate::cloud_view::CLOUD_ICON,
+            "Cloud",
+            "Claude Code sessions in Anthropic's cloud, on your Claude accounts",
+            10,
+        ),
+        own(
+            crate::mcp_view::TAB,
+            crate::mcp_view::ICON,
+            "Protocols",
+            "Programs your conversations can work in, such as Blender and the browser",
+            i32::MAX - 1,
+        ),
+        own(
+            crate::plugins_view::TAB,
+            crate::plugins_view::ICON,
+            "Plugins",
+            "Plugins, their switches and settings",
+            i32::MAX,
+        ),
     ];
-    for tab in crate::plugins::parts().home_tabs.iter().filter(|tab| !tab.link() && tab.shown()) {
+    for tab in crate::plugins::parts()
+        .home_tabs
+        .iter()
+        .filter(|tab| !tab.link() && tab.shown())
+    {
         let id = tab.id();
         if !id.is_empty() && tabs.iter().all(|x| x.id != id) {
-            tabs.push(HomeTabLook { id, icon: tab.icon(), icon_is_text: tab.icon_is_text(), label: tab.label(), tip: tab.tip(), order: tab.order() });
+            tabs.push(HomeTabLook {
+                id,
+                icon: tab.icon(),
+                icon_is_text: tab.icon_is_text(),
+                label: tab.label(),
+                tip: tab.tip(),
+                order: tab.order(),
+            });
         }
     }
     // (Stable: ties keep the order plugins registered in.)
@@ -1264,7 +1992,10 @@ fn home_tab_looks() -> Vec<HomeTabLook> {
 /// those plugins add), each with its icon, the one shown in ink over an
 /// accent line. Returns the one clicked.
 pub(crate) fn home_tabs(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<String> {
-    ui.scope_builder(UiBuilder::new().max_rect(head), |ui| home_tabs_inner(ui, t, head, on)).inner
+    ui.scope_builder(UiBuilder::new().max_rect(head), |ui| {
+        home_tabs_inner(ui, t, head, on)
+    })
+    .inner
 }
 
 /// How far in from each end the Home tabs fade when more are off-screen.
@@ -1277,7 +2008,10 @@ fn home_tabs_inner(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<Strin
     // Each tab's width, and how far the row scrolls when they don't all fit.
     let widths: Vec<f32> = tabs
         .iter()
-        .map(|tab| 24.0 + if tab.icon.is_empty() { 0.0 } else { 18.0 } + crate::widgets::text_width(ui, &tab.label, &font))
+        .map(|tab| {
+            24.0 + if tab.icon.is_empty() { 0.0 } else { 18.0 }
+                + crate::widgets::text_width(ui, &tab.label, &font)
+        })
         .collect();
     let room = (head.width() - 4.0).max(0.0);
     let max_scroll = (widths.iter().sum::<f32>() - room).max(0.0);
@@ -1288,14 +2022,18 @@ fn home_tabs_inner(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<Strin
     // either way) over the row scrolls it, and the shown tab is brought into
     // view, clear of the faded ends, when it changes or the row resizes.
     let id = ui.scope_id().with("home-tabs-scroll");
-    let (mut scroll, last_idx, last_room) = ui.data(|d| d.get_temp::<(f32, usize, f32)>(id)).unwrap_or((0.0, usize::MAX, -1.0));
+    let (mut scroll, last_idx, last_room) = ui
+        .data(|d| d.get_temp::<(f32, usize, f32)>(id))
+        .unwrap_or((0.0, usize::MAX, -1.0));
     if max_scroll > 0.0 && ui.rect_contains_pointer(head) {
         let d = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta));
         scroll -= d.x + d.y;
     }
     if last_idx != on_idx || last_room != room {
         let left: f32 = widths[..on_idx].iter().sum();
-        scroll = scroll.max(left + widths[on_idx] - room + HOME_TAB_FADE).min(left - HOME_TAB_FADE);
+        scroll = scroll
+            .max(left + widths[on_idx] - room + HOME_TAB_FADE)
+            .min(left - HOME_TAB_FADE);
     }
     scroll = scroll.clamp(0.0, max_scroll);
     ui.data_mut(|d| d.insert_temp(id, (scroll, on_idx, room)));
@@ -1304,23 +2042,52 @@ fn home_tabs_inner(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<Strin
     let mut x = head.left() + 4.0 - scroll;
     let mut picked = None;
     for (i, (tab, w)) in tabs.iter().zip(&widths).enumerate() {
-        let rect = Rect::from_min_max(egui::pos2(x, head.top()), egui::pos2(x + w, head.bottom() - 1.0));
+        let rect = Rect::from_min_max(
+            egui::pos2(x, head.top()),
+            egui::pos2(x + w, head.bottom() - 1.0),
+        );
         x += w;
         if !rect.intersects(head) {
             continue;
         }
         // A tab half scrolled out answers only where it shows.
-        let mut resp = ui.interact(rect.intersect(head), Id::unique(("home-tab", &tab.id)), Sense::click());
+        let mut resp = ui.interact(
+            rect.intersect(head),
+            Id::unique(("home-tab", &tab.id)),
+            Sense::click(),
+        );
         if !tab.tip.is_empty() {
             resp = resp.on_hover_text(&tab.tip);
         }
         let lit = i == on_idx;
         if lit {
-            ui.painter().hline(rect.left() + 6.0..=rect.right() - 6.0, rect.bottom() - 1.0, Stroke::new(2.0, t.accent));
+            ui.painter().hline(
+                rect.left() + 6.0..=rect.right() - 6.0,
+                rect.bottom() - 1.0,
+                Stroke::new(2.0, t.accent),
+            );
         }
-        let color = if lit { t.ink } else if resp.hovered() { t.ink2 } else { t.ink3 };
-        let icon_font = if tab.icon_is_text { FontId::proportional(14.0) } else { icons.clone() };
-        tab_face(ui, t, rect, resp.hovered() && !lit, (&tab.icon, icon_font, if lit { t.accent } else { color }), &tab.label, color);
+        let color = if lit {
+            t.ink
+        } else if resp.hovered() {
+            t.ink2
+        } else {
+            t.ink3
+        };
+        let icon_font = if tab.icon_is_text {
+            FontId::proportional(14.0)
+        } else {
+            icons.clone()
+        };
+        tab_face(
+            ui,
+            t,
+            rect,
+            resp.hovered() && !lit,
+            (&tab.icon, icon_font, if lit { t.accent } else { color }),
+            &tab.label,
+            color,
+        );
         if resp.clicked() && !lit {
             picked = Some(tab.id.clone());
         }
@@ -1328,10 +2095,20 @@ fn home_tabs_inner(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<Strin
     // Faded ends where there are more tabs to scroll to.
     let ends = head.top()..=head.bottom() - 1.0;
     if scroll > 0.5 {
-        crate::widgets::fade(ui.painter(), Rect::from_x_y_ranges(head.left()..=head.left() + HOME_TAB_FADE, ends.clone()), t.panel, true);
+        crate::widgets::fade(
+            ui.painter(),
+            Rect::from_x_y_ranges(head.left()..=head.left() + HOME_TAB_FADE, ends.clone()),
+            t.panel,
+            true,
+        );
     }
     if scroll < max_scroll - 0.5 {
-        crate::widgets::fade(ui.painter(), Rect::from_x_y_ranges(head.right() - HOME_TAB_FADE..=head.right(), ends), t.panel, false);
+        crate::widgets::fade(
+            ui.painter(),
+            Rect::from_x_y_ranges(head.right() - HOME_TAB_FADE..=head.right(), ends),
+            t.panel,
+            false,
+        );
     }
     picked
 }
@@ -1344,8 +2121,18 @@ fn home_tabs_inner(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<Strin
 fn link_tabs(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, Option<(String, bool)>) {
     let font = FontId::proportional(12.5);
     let icons = markdown::icon_font(13.0);
-    let links: Vec<_> = crate::plugins::parts().home_tabs.iter().filter(|tab| tab.link() && tab.shown() && !tab.id().is_empty()).collect();
-    let widths: Vec<f32> = links.iter().map(|tab| 24.0 + if tab.icon().is_empty() { 0.0 } else { 18.0 } + crate::widgets::text_width(ui, &tab.label(), &font)).collect();
+    let links: Vec<_> = crate::plugins::parts()
+        .home_tabs
+        .iter()
+        .filter(|tab| tab.link() && tab.shown() && !tab.id().is_empty())
+        .collect();
+    let widths: Vec<f32> = links
+        .iter()
+        .map(|tab| {
+            24.0 + if tab.icon().is_empty() { 0.0 } else { 18.0 }
+                + crate::widgets::text_width(ui, &tab.label(), &font)
+        })
+        .collect();
     let total: f32 = widths.iter().sum();
     if links.is_empty() || head.width() < total + 160.0 {
         return (0.0, None);
@@ -1353,7 +2140,10 @@ fn link_tabs(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, Option<(String, bool)>
     let mut x = head.right() - 4.0 - total;
     let mut picked = None;
     for (tab, w) in links.iter().zip(widths) {
-        let rect = Rect::from_min_max(egui::pos2(x, head.top()), egui::pos2(x + w, head.bottom() - 1.0));
+        let rect = Rect::from_min_max(
+            egui::pos2(x, head.top()),
+            egui::pos2(x + w, head.bottom() - 1.0),
+        );
         x += w;
         let id = tab.id();
         let mut resp = ui.interact(rect, Id::unique(("home-link", &id)), Sense::click());
@@ -1362,8 +2152,20 @@ fn link_tabs(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, Option<(String, bool)>
             resp = resp.on_hover_text(tip);
         }
         let color = if resp.hovered() { t.ink2 } else { t.ink3 };
-        let icon_font = if tab.icon_is_text() { FontId::proportional(14.0) } else { icons.clone() };
-        tab_face(ui, t, rect, resp.hovered(), (&tab.icon(), icon_font, color), &tab.label(), color);
+        let icon_font = if tab.icon_is_text() {
+            FontId::proportional(14.0)
+        } else {
+            icons.clone()
+        };
+        tab_face(
+            ui,
+            t,
+            rect,
+            resp.hovered(),
+            (&tab.icon(), icon_font, color),
+            &tab.label(),
+            color,
+        );
         if resp.clicked() {
             picked = Some((id, tab.page()));
         }
@@ -1373,19 +2175,43 @@ fn link_tabs(ui: &mut Ui, t: &Theme, head: Rect) -> (f32, Option<(String, bool)>
 
 /// A Home tab's face in `rect`: lit by the pointer (`hover`), its icon
 /// (none when empty: its font and color) and its label.
-fn tab_face(ui: &Ui, t: &Theme, rect: Rect, hover: bool, (icon, icon_font, icon_color): (&str, FontId, Color32), label: &str, color: Color32) {
+fn tab_face(
+    ui: &Ui,
+    t: &Theme,
+    rect: Rect,
+    hover: bool,
+    (icon, icon_font, icon_color): (&str, FontId, Color32),
+    label: &str,
+    color: Color32,
+) {
     let p = ui.painter();
     if hover {
         // Under the box's top border, which the tab's top edge sits on.
-        p.rect_filled(Rect::from_min_max(egui::pos2(rect.left(), rect.top() + 1.0), rect.max), 0.0, t.tool_hover);
+        p.rect_filled(
+            Rect::from_min_max(egui::pos2(rect.left(), rect.top() + 1.0), rect.max),
+            0.0,
+            t.tool_hover,
+        );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let mut tx = rect.left() + 12.0;
     if !icon.is_empty() {
-        p.text(egui::pos2(tx + 6.0, rect.center().y), Align2::CENTER_CENTER, icon, icon_font, icon_color);
+        p.text(
+            egui::pos2(tx + 6.0, rect.center().y),
+            Align2::CENTER_CENTER,
+            icon,
+            icon_font,
+            icon_color,
+        );
         tx += 18.0;
     }
-    p.text(egui::pos2(tx, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.5), color);
+    p.text(
+        egui::pos2(tx, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.5),
+        color,
+    );
 }
 
 /// Nerd Font: an arrow up in a circle, and a turning arrow.
@@ -1406,13 +2232,21 @@ fn update_tab(ui: &mut Ui, t: &Theme, head: Rect) -> f32 {
         Phase::Available(r) => (
             UPDATE_ICON,
             format!("Update available  {current} → {}", r.version),
-            format!("Downloads and installs Oak {}. Restart is manual.{}", r.version, notes_tip(&r.notes)),
+            format!(
+                "Downloads and installs Oak {}. Restart is manual.{}",
+                r.version,
+                notes_tip(&r.notes)
+            ),
             true,
             true,
         ),
         Phase::Downloading(r, f) => (
             UPDATE_ICON,
-            if *f >= 0.0 { format!("Downloading {}…  {:.0}%", r.version, f * 100.0) } else { format!("Downloading {}…", r.version) },
+            if *f >= 0.0 {
+                format!("Downloading {}…  {:.0}%", r.version, f * 100.0)
+            } else {
+                format!("Downloading {}…", r.version)
+            },
             format!("Downloading Oak {}.", r.version),
             false,
             false,
@@ -1420,11 +2254,20 @@ fn update_tab(ui: &mut Ui, t: &Theme, head: Rect) -> f32 {
         Phase::Ready(r) => (
             RESTART_ICON,
             format!("Restart to update  {current} → {}", r.version),
-            format!("Oak {} installed. Active conversations pause for restart, then resume.", r.version),
+            format!(
+                "Oak {} installed. Active conversations pause for restart, then resume.",
+                r.version
+            ),
             true,
             true,
         ),
-        Phase::Failed(r, e) => (UPDATE_ICON, format!("Update to {} failed", r.version), format!("{e}\n\nRetry update"), false, true),
+        Phase::Failed(r, e) => (
+            UPDATE_ICON,
+            format!("Update to {} failed", r.version),
+            format!("{e}\n\nRetry update"),
+            false,
+            true,
+        ),
     };
     let font = FontId::proportional(12.5);
     let icons = markdown::icon_font(12.0);
@@ -1432,14 +2275,38 @@ fn update_tab(ui: &mut Ui, t: &Theme, head: Rect) -> f32 {
     if head.width() < w + 160.0 {
         return 0.0;
     }
-    let rect = Rect::from_min_max(egui::pos2(head.right() - w, head.top()), egui::pos2(head.right(), head.bottom() - 1.0));
-    let sense = if clickable { Sense::click() } else { Sense::hover() };
-    let resp = ui.interact(rect, Id::unique("home-tab-update"), sense).on_hover_text(tip);
+    let rect = Rect::from_min_max(
+        egui::pos2(head.right() - w, head.top()),
+        egui::pos2(head.right(), head.bottom() - 1.0),
+    );
+    let sense = if clickable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let resp = ui
+        .interact(rect, Id::unique("home-tab-update"), sense)
+        .on_hover_text(tip);
     let failed = matches!(s.phase, Phase::Failed(..));
-    let color = if failed { t.error } else if lit { t.accent } else { t.ink3 };
-    tab_face(ui, t, rect, resp.hovered() && clickable, (icon, icons, color), &label, if failed || lit { color } else { t.ink2 });
+    let color = if failed {
+        t.error
+    } else if lit {
+        t.accent
+    } else {
+        t.ink3
+    };
+    tab_face(
+        ui,
+        t,
+        rect,
+        resp.hovered() && clickable,
+        (icon, icons, color),
+        &label,
+        if failed || lit { color } else { t.ink2 },
+    );
     if matches!(s.phase, Phase::Downloading(..)) {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
     }
     if resp.clicked() {
         match s.phase {
@@ -1452,11 +2319,20 @@ fn update_tab(ui: &mut Ui, t: &Theme, head: Rect) -> f32 {
 
 /// The start of a release's notes, for a tooltip.
 fn notes_tip(notes: &str) -> String {
-    let lines: Vec<&str> = notes.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(8).collect();
+    let lines: Vec<&str> = notes
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .take(8)
+        .collect();
     if lines.is_empty() {
         return String::new();
     }
-    let more = if notes.lines().filter(|l| !l.trim().is_empty()).count() > lines.len() { "\n…" } else { "" };
+    let more = if notes.lines().filter(|l| !l.trim().is_empty()).count() > lines.len() {
+        "\n…"
+    } else {
+        ""
+    };
     format!("\n\n{}{more}", lines.join("\n"))
 }
 
@@ -1471,29 +2347,47 @@ fn version_label(ui: &mut Ui, t: &Theme, head: Rect) {
     let font = FontId::proportional(11.5);
     let text = format!("v{}", update::VERSION);
     let w = crate::widgets::text_width(ui, &text, &font);
-    let mut room = head.width() - 16.0 - crate::widgets::text_width(ui, "Providers", &FontId::proportional(12.5)) - 16.0;
+    let mut room = head.width()
+        - 16.0
+        - crate::widgets::text_width(ui, "Providers", &FontId::proportional(12.5))
+        - 16.0;
     if room < w + 12.0 {
         return;
     }
     room -= w + 12.0;
     let s = update::status();
     let p = ui.painter().clone();
-    p.text(egui::pos2(head.right() - 12.0, head.center().y), Align2::RIGHT_CENTER, &text, font, t.ink3);
+    p.text(
+        egui::pos2(head.right() - 12.0, head.center().y),
+        Align2::RIGHT_CENTER,
+        &text,
+        font,
+        t.ink3,
+    );
     // The refresh button.
     const BUTTON: f32 = 20.0;
     if room < BUTTON + 4.0 {
         return;
     }
     let right = head.right() - 12.0 - w - 4.0;
-    let button = Rect::from_center_size(egui::pos2(right - BUTTON / 2.0, head.center().y), vec2(BUTTON, BUTTON));
-    let build = if update::is_release() { "release" } else { "local build" };
+    let button = Rect::from_center_size(
+        egui::pos2(right - BUTTON / 2.0, head.center().y),
+        vec2(BUTTON, BUTTON),
+    );
+    let build = if update::is_release() {
+        "release"
+    } else {
+        "local build"
+    };
     let state = if let Err(why) = update::source() {
         why.to_string()
     } else if s.checking {
         "Looking for an update…".to_string()
     } else {
         match (&s.phase, &s.checked) {
-            (update::Phase::Available(r) | update::Phase::Ready(r), _) => format!("Oak {} is available.", r.version),
+            (update::Phase::Available(r) | update::Phase::Ready(r), _) => {
+                format!("Oak {} is available.", r.version)
+            }
             (_, Some((at, Ok(())))) => format!("Up to date (checked {}).", ago_short(at.elapsed())),
             (_, Some((_, Err(e)))) => format!("Couldn't look for an update: {e}"),
             (_, None) => "Not checked for updates yet.".to_string(),
@@ -1514,11 +2408,13 @@ fn version_label(ui: &mut Ui, t: &Theme, head: Rect) {
     // says why) or an arrow (an update, which appears at the tabs' row's right end).
     const SHOW: std::time::Duration = std::time::Duration::from_secs(4);
     let result = match (&s.checked, s.asked) {
-        (Some((at, r)), Some(asked)) if !s.checking && *at >= asked && at.elapsed() < SHOW => Some(match (r, &s.phase) {
-            (Err(_), _) => ("\u{f00d}", t.error),
-            (Ok(()), update::Phase::None) => ("\u{f00c}", t.accent),
-            (Ok(()), _) => (UPDATE_ICON, t.accent),
-        }),
+        (Some((at, r)), Some(asked)) if !s.checking && *at >= asked && at.elapsed() < SHOW => {
+            Some(match (r, &s.phase) {
+                (Err(_), _) => ("\u{f00d}", t.error),
+                (Ok(()), update::Phase::None) => ("\u{f00c}", t.accent),
+                (Ok(()), _) => (UPDATE_ICON, t.accent),
+            })
+        }
         _ => None,
     };
     let (icon, color) = match result {
@@ -1526,9 +2422,16 @@ fn version_label(ui: &mut Ui, t: &Theme, head: Rect) {
         None if s.checking => (REFRESH_ICON, t.accent),
         None => (REFRESH_ICON, if resp.hovered() { t.ink2 } else { t.ink3 }),
     };
-    p.text(button.center(), Align2::CENTER_CENTER, icon, markdown::icon_font(11.5), color);
+    p.text(
+        button.center(),
+        Align2::CENTER_CENTER,
+        icon,
+        markdown::icon_font(11.5),
+        color,
+    );
     if result.is_some() || s.checking {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
     }
     if resp.clicked() {
         update::check_soon(ui.ctx());
@@ -1550,18 +2453,36 @@ mod search_tests {
     use crate::app_hover_test::{key, run_frame, test_ctx};
 
     fn row(title: &str, folder: &str) -> ChatRow {
-        ChatRow { id: title.into(), title: title.into(), folder: folder.into(), at: 0, busy: false, paused: false, renamable: true, scratch: None }
+        ChatRow {
+            id: title.into(),
+            title: title.into(),
+            folder: folder.into(),
+            at: 0,
+            busy: false,
+            paused: false,
+            renamable: true,
+            scratch: None,
+        }
     }
 
     /// The biggest scratchpad first; equal sizes (and none, counted as
     /// empty) keep the latest-first order, and every row gets its size.
     #[test]
     fn sort_by_scratch_biggest_first() {
-        let mut rows: Vec<ChatRow> = ["a", "b", "c", "d", "e"].iter().map(|n| row(n, "f")).collect();
+        let mut rows: Vec<ChatRow> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|n| row(n, "f"))
+            .collect();
         let sizes = HashMap::from([("b", 10u64), ("c", 500), ("d", 10), ("e", 0)]);
         sort_by_scratch(&mut rows, |id| sizes.get(id).copied());
-        assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["c", "b", "d", "a", "e"]);
-        assert_eq!(rows.iter().map(|r| r.scratch).collect::<Vec<_>>(), [Some(500), Some(10), Some(10), Some(0), Some(0)]);
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["c", "b", "d", "a", "e"]
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.scratch).collect::<Vec<_>>(),
+            [Some(500), Some(10), Some(10), Some(0), Some(0)]
+        );
         // And the setting reads back, anything unknown being the default.
         for s in ChatSort::ALL {
             assert_eq!(ChatSort::from_setting(s.setting()), s);
@@ -1580,7 +2501,14 @@ mod search_tests {
         let rect = Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(SORT_W, SEARCH_H));
         let mut run = |events: Vec<egui::Event>| {
             let mut pick = None;
-            let out = run_frame(&ctx, vec2(600.0, 300.0), &mut time, 1.0 / 60.0, events, |ui| pick = sort_button(ui, &t, rect, ChatSort::Recent));
+            let out = run_frame(
+                &ctx,
+                vec2(600.0, 300.0),
+                &mut time,
+                1.0 / 60.0,
+                events,
+                |ui| pick = sort_button(ui, &t, rect, ChatSort::Recent),
+            );
             (pick, painted(&out))
         };
         let (_, shown) = run(vec![]);
@@ -1588,7 +2516,11 @@ mod search_tests {
         run(vec![egui::Event::PointerMoved(rect.center())]);
         run(click(rect.center(), Primary));
         let (_, shown) = run(vec![]);
-        let item = shown.iter().find(|(s, _)| s == "Scratchpad size").map(|(_, r)| r.center()).expect("no Scratchpad size in the menu");
+        let item = shown
+            .iter()
+            .find(|(s, _)| s == "Scratchpad size")
+            .map(|(_, r)| r.center())
+            .expect("no Scratchpad size in the menu");
         run(vec![egui::Event::PointerMoved(item)]);
         let (pick, _) = run(click(item, Primary));
         assert_eq!(pick, Some(ChatSort::Scratchpad));
@@ -1598,13 +2530,38 @@ mod search_tests {
     /// order is kept, and an empty query keeps every row.
     #[test]
     fn filter_rows_matches_words() {
-        let rows = || DUMMY_CHATS.iter().map(|(t, f, _)| row(t, f)).collect::<Vec<_>>();
-        let titles = |q: &str| filter_rows(rows(), q).into_iter().map(|r| r.title).collect::<Vec<_>>();
+        let rows = || {
+            DUMMY_CHATS
+                .iter()
+                .map(|(t, f, _)| row(t, f))
+                .collect::<Vec<_>>()
+        };
+        let titles = |q: &str| {
+            filter_rows(rows(), q)
+                .into_iter()
+                .map(|r| r.title)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(titles("").len(), DUMMY_CHATS.len());
         assert_eq!(titles("   ").len(), DUMMY_CHATS.len());
-        assert_eq!(titles("SUDOKU"), ["Write a sudoku solver with backtracking"]);
-        assert_eq!(titles("backend"), ["Review the pull request for the auth refactor", "Plan the migration to the new storage format"]);
-        assert_eq!(titles("oak changelog"), ["Read through the egui changelog for breaking changes", "Release v0.2 and write the changelog"]);
+        assert_eq!(
+            titles("SUDOKU"),
+            ["Write a sudoku solver with backtracking"]
+        );
+        assert_eq!(
+            titles("backend"),
+            [
+                "Review the pull request for the auth refactor",
+                "Plan the migration to the new storage format"
+            ]
+        );
+        assert_eq!(
+            titles("oak changelog"),
+            [
+                "Read through the egui changelog for breaking changes",
+                "Release v0.2 and write the changelog"
+            ]
+        );
         assert!(titles("sudoku backend").is_empty());
     }
 
@@ -1617,7 +2574,21 @@ mod search_tests {
         let mut time = 0.0;
         let mut run = |query: &mut String, events: Vec<egui::Event>| {
             let mut enter = false;
-            run_frame(&ctx, vec2(600.0, 200.0), &mut time, 1.0 / 60.0, events, |ui| enter = search_field(ui, &t, Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(400.0, SEARCH_H)), query));
+            run_frame(
+                &ctx,
+                vec2(600.0, 200.0),
+                &mut time,
+                1.0 / 60.0,
+                events,
+                |ui| {
+                    enter = search_field(
+                        ui,
+                        &t,
+                        Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(400.0, SEARCH_H)),
+                        query,
+                    )
+                },
+            );
             enter
         };
         run(&mut query, vec![]);

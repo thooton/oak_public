@@ -3,8 +3,8 @@
 
 use super::*;
 pub(crate) use crate::look::{ROW_H, size_text};
-use crate::widgets::{chevron, clip_width, draw_pencil, draw_x, icon_button, paint_pause};
 use crate::theme::{hex, mix};
+use crate::widgets::{chevron, clip_width, draw_pencil, draw_x, icon_button, paint_pause};
 
 /// Every tool call's result, by call id (`items_at`), hashed with
 /// `QuickHasher`: the map is built every frame.
@@ -40,20 +40,31 @@ const MAX_TEXT_FILE: usize = 500_000;
 /// file's name goes in `_oak_file` (dropped before sending) for the UI.
 pub(crate) fn file_block(path: &std::path::Path, bytes: &[u8]) -> Result<Value, String> {
     use base64::Engine;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
     if images::is_image_path(path) || image_like(bytes) {
         return images::from_bytes(bytes).map(|i| i.block());
     }
     if bytes.starts_with(b"%PDF") && bytes.len() <= MAX_PDF {
         let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-        return Ok(serde_json::json!({"type": "document", "media_type": "application/pdf", "data": data, "title": name, "_oak_file": name}));
+        return Ok(
+            serde_json::json!({"type": "document", "media_type": "application/pdf", "data": data, "title": name, "_oak_file": name}),
+        );
     }
     if bytes.len() <= MAX_TEXT_FILE
         && let Ok(text) = std::str::from_utf8(bytes)
         && !text.contains('\0')
     {
-        let text = if text.trim().is_empty() { "(empty file)" } else { text };
-        return Ok(serde_json::json!({"type": "document", "media_type": "text/plain", "data": text, "title": name, "_oak_file": name}));
+        let text = if text.trim().is_empty() {
+            "(empty file)"
+        } else {
+            text
+        };
+        return Ok(
+            serde_json::json!({"type": "document", "media_type": "text/plain", "data": text, "title": name, "_oak_file": name}),
+        );
     }
     // (Never empty: an empty file is text.)
     let text = format!(
@@ -63,12 +74,19 @@ pub(crate) fn file_block(path: &std::path::Path, bytes: &[u8]) -> Result<Value, 
     );
     // (`_oak_path`, never sent to a model: a plugin's tab may upload the
     // file itself.)
-    Ok(serde_json::json!({"type": "text", "text": text, "_oak_file": name, "_oak_path": path.display().to_string()}))
+    Ok(
+        serde_json::json!({"type": "text", "text": text, "_oak_file": name, "_oak_path": path.display().to_string()}),
+    )
 }
 
 /// An attachment as the UI shows it: an image as a thumbnail `h` tall,
 /// any other file as a chip with its name.
-pub(crate) fn attachment_view(ui: &mut Ui, t: &Theme, block: &Value, h: f32) -> Option<egui::Response> {
+pub(crate) fn attachment_view(
+    ui: &mut Ui,
+    t: &Theme,
+    block: &Value,
+    h: f32,
+) -> Option<egui::Response> {
     if block["type"] == "image" {
         return images::show(ui, block, h);
     }
@@ -77,7 +95,10 @@ pub(crate) fn attachment_view(ui: &mut Ui, t: &Theme, block: &Value, h: f32) -> 
 
 /// A box with a file's name in it.
 fn file_chip(ui: &mut Ui, t: &Theme, block: &Value) -> egui::Response {
-    let name = block["_oak_file"].as_str().or(block["title"].as_str()).unwrap_or("file");
+    let name = block["_oak_file"]
+        .as_str()
+        .or(block["title"].as_str())
+        .unwrap_or("file");
     let icons = markdown::icon_font(14.0);
     let what = match block["media_type"].as_str() {
         Some("application/pdf") => "PDF, sent as a document",
@@ -87,7 +108,12 @@ fn file_chip(ui: &mut Ui, t: &Theme, block: &Value) -> egui::Response {
     egui::Frame::new()
         .fill(t.panel)
         .stroke(Stroke::new(1.0, t.line))
-        .inner_margin(Margin { left: 8, right: 24, top: 6, bottom: 6 })
+        .inner_margin(Margin {
+            left: 8,
+            right: 24,
+            top: 6,
+            bottom: 6,
+        })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -111,24 +137,47 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         // Cloud sessions' Bash calls (Claude Code's names) give theirs as
         // the description.
         "EXECUTE" | "TASK_NEW" | "BASH" | "Bash" => {
-            let summary = if name == "Bash" { s("description") } else { s("summary") };
-            if summary.trim().is_empty() { s("command") } else { crate::tools::one_line(&summary) }
+            let summary = if name == "Bash" {
+                s("description")
+            } else {
+                s("summary")
+            };
+            if summary.trim().is_empty() {
+                s("command")
+            } else {
+                crate::tools::one_line(&summary)
+            }
         }
         // Python a provider's agent runs (Quick's run_python tools): what it
         // says the code does, else the code's first line.
         _ if is_python(name) => {
             let explanation = s("explanation");
-            if explanation.trim().is_empty() { python_line(&s("code")) } else { crate::tools::one_line(&explanation) }
+            if explanation.trim().is_empty() {
+                python_line(&s("code"))
+            } else {
+                crate::tools::one_line(&explanation)
+            }
         }
         "READ" | "WRITE" | "EDIT" | "CD" => s("path"),
         // A Code Mode script: its first line that isn't blank or a comment's start.
         "REPL" => {
             let code = s("code");
-            let line = code.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("//")).or_else(|| code.lines().map(str::trim).find(|l| !l.is_empty())).unwrap_or("");
+            let line = code
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with("//"))
+                .or_else(|| code.lines().map(str::trim).find(|l| !l.is_empty()))
+                .unwrap_or("");
             line.trim_start_matches("// ").to_string()
         }
         // Claude Code's tools, in cloud sessions.
-        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => if input["file_path"].is_string() { s("file_path") } else { s("notebook_path") },
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
+            if input["file_path"].is_string() {
+                s("file_path")
+            } else {
+                s("notebook_path")
+            }
+        }
         "Grep" | "Glob" => s("pattern"),
         "WebFetch" => s("url"),
         "WebSearch" => s("query"),
@@ -136,12 +185,26 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         "TodoWrite" => format!("{} to-dos", input["todos"].as_array().map_or(0, Vec::len)),
         // One image in full: its number on a sheet, or its link.
         "SEARCH" if input["image"].is_string() || input["image"].is_number() => {
-            let image = input["image"].as_str().map_or_else(|| input["image"].to_string(), |i| i.trim().to_string());
-            if image.starts_with("http") { image } else { format!("image {image}") }
+            let image = input["image"]
+                .as_str()
+                .map_or_else(|| input["image"].to_string(), |i| i.trim().to_string());
+            if image.starts_with("http") {
+                image
+            } else {
+                format!("image {image}")
+            }
         }
         "SEARCH" => {
-            let about = if s("objective").is_empty() { input["queries"][0].as_str().unwrap_or("").to_string() } else { s("objective") };
-            if input["images"] == true { format!("images: {about}") } else { about }
+            let about = if s("objective").is_empty() {
+                input["queries"][0].as_str().unwrap_or("").to_string()
+            } else {
+                s("objective")
+            };
+            if input["images"] == true {
+                format!("images: {about}")
+            } else {
+                about
+            }
         }
         "TASK_GET_NEW_OUTPUT" | "TASK_DELETE" => format!("task {}", input["id"]),
         "TASK_WAIT" => format!("task {}, up to {}s", input["id"], input["timeout"]),
@@ -149,9 +212,17 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         "NOTE_UPDATE" => format!("note {}: {}", input["id"], s("text")),
         "SET_TITLE" => s("title"),
         "NOTE_DELETE" => format!("note {}", input["id"]),
-        "HEARTBEAT_START" => format!("every {}: {}", agent::every(input["interval_minutes"].as_u64().unwrap_or(0)), s("message")),
+        "HEARTBEAT_START" => format!(
+            "every {}: {}",
+            agent::every(input["interval_minutes"].as_u64().unwrap_or(0)),
+            s("message")
+        ),
         "HEARTBEAT_STOP" => format!("heartbeat {}", input["id"]),
-        "PROGRESS_SET" => format!("{}, every {}", s("label"), agent::every(input["interval_minutes"].as_u64().unwrap_or(0))),
+        "PROGRESS_SET" => format!(
+            "{}, every {}",
+            s("label"),
+            agent::every(input["interval_minutes"].as_u64().unwrap_or(0))
+        ),
         "PROGRESS_REMOVE" => format!("meter {}", input["id"]),
         "FETCH" | "SCREENSHOT" | "BROWSER_GOTO" => s("url"),
         "BROWSER_OPEN" => {
@@ -168,39 +239,92 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             parts.join(", ")
         }
         "BROWSER_COOKIES" => {
-            let whose = if input["all"] == true { "all".to_string() } else { s("url") };
+            let whose = if input["all"] == true {
+                "all".to_string()
+            } else {
+                s("url")
+            };
             match input["path"].as_str() {
                 Some(p) => format!("{whose} → {p}").trim().to_string(),
                 None => whose,
             }
         }
         "BROWSER_SET_COOKIES" => match input["cookies"].as_array() {
-            Some(c) => c.iter().filter_map(|c| c["name"].as_str()).collect::<Vec<_>>().join(", "),
+            Some(c) => c
+                .iter()
+                .filter_map(|c| c["name"].as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             None => format!("from {}", s("path")),
         },
         "BROWSER_DELETE_COOKIES" => {
-            let scope = [s("name"), s("domain"), s("url")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(", ");
-            if scope.is_empty() && input["all"] == true { "all".into() } else { scope }
+            let scope = [s("name"), s("domain"), s("url")]
+                .into_iter()
+                .filter(|x| !x.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if scope.is_empty() && input["all"] == true {
+                "all".into()
+            } else {
+                scope
+            }
         }
-        "BROWSER_CLEAR_DATA" => [input["what"].as_str().unwrap_or("all").to_string(), s("origin")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(", "),
+        "BROWSER_CLEAR_DATA" => [
+            input["what"].as_str().unwrap_or("all").to_string(),
+            s("origin"),
+        ]
+        .into_iter()
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>()
+        .join(", "),
         "BROWSER_EMULATE" => {
-            let keys: Vec<&str> = input.as_object().into_iter().flatten().map(|(k, _)| k.as_str()).collect();
+            let keys: Vec<&str> = input
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, _)| k.as_str())
+                .collect();
             keys.join(", ")
         }
         "BROWSER_NETWORK" => match input["id"].as_u64() {
-            Some(n) => format!("#{n}{}", input["path"].as_str().map(|p| format!(" → {p}")).unwrap_or_default()),
+            Some(n) => format!(
+                "#{n}{}",
+                input["path"]
+                    .as_str()
+                    .map(|p| format!(" → {p}"))
+                    .unwrap_or_default()
+            ),
             None => s("filter"),
         },
-        "BROWSER_PROFILES" => input["delete"].as_str().map(|d| format!("delete {d}")).unwrap_or_default(),
-        "BROWSER_RESIZE" => format!("{}x{}{}", input["width"], input["height"], if input["mobile"] == true { ", mobile" } else { "" }),
+        "BROWSER_PROFILES" => input["delete"]
+            .as_str()
+            .map(|d| format!("delete {d}"))
+            .unwrap_or_default(),
+        "BROWSER_RESIZE" => format!(
+            "{}x{}{}",
+            input["width"],
+            input["height"],
+            if input["mobile"] == true {
+                ", mobile"
+            } else {
+                ""
+            }
+        ),
         "BROWSER_CLICK" | "BROWSER_HOVER" => {
             let at = match input["ref"].as_u64() {
                 Some(n) => format!("[{n}]"),
                 None => format!("{}, {}", input["x"], input["y"]),
             };
-            match (input["button"].as_str().filter(|b| *b != "left"), input["clicks"].as_u64().filter(|c| *c > 1)) {
+            match (
+                input["button"].as_str().filter(|b| *b != "left"),
+                input["clicks"].as_u64().filter(|c| *c > 1),
+            ) {
                 (None, None) => at,
-                (b, c) => format!("{at} ({}{})", b.map(|b| format!("{b} ")).unwrap_or_default(), c.map_or("click".into(), |c| format!("x{c}"))),
+                (b, c) => format!(
+                    "{at} ({}{})",
+                    b.map(|b| format!("{b} ")).unwrap_or_default(),
+                    c.map_or("click".into(), |c| format!("x{c}"))
+                ),
             }
         }
         "BROWSER_DRAG" => {
@@ -208,7 +332,11 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
                 Some(n) => format!("[{n}]"),
                 None => format!("{}, {}", input[x], input[y]),
             };
-            format!("{} → {}", end("ref", "x", "y"), end("to_ref", "to_x", "to_y"))
+            format!(
+                "{} → {}",
+                end("ref", "x", "y"),
+                end("to_ref", "to_x", "to_y")
+            )
         }
         "BROWSER_WAIT" => match input["text"].as_str() {
             Some(t) if input["gone"] == true => format!("until {t:?} is gone"),
@@ -222,12 +350,20 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         "BROWSER_KEY" => s("key"),
         "BROWSER_EVAL" => crate::tools::one_line(&s("script")),
         "BROWSER_SCROLL" if input["ref"].is_u64() => format!("to [{}]", input["ref"]),
-        "BROWSER_SCROLL" if input["dy"].is_number() || input["dx"].is_number() => match (input["dx"].as_f64(), input["dy"].as_f64()) {
-            (Some(dx), Some(dy)) => format!("{dx}, {dy} px"),
-            (Some(dx), None) => format!("{dx} px across"),
-            (None, dy) => format!("{} px", dy.unwrap_or(0.0)),
-        },
-        "BROWSER_UPLOAD" => input["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(", "),
+        "BROWSER_SCROLL" if input["dy"].is_number() || input["dx"].is_number() => {
+            match (input["dx"].as_f64(), input["dy"].as_f64()) {
+                (Some(dx), Some(dy)) => format!("{dx}, {dy} px"),
+                (Some(dx), None) => format!("{dx} px across"),
+                (None, dy) => format!("{} px", dy.unwrap_or(0.0)),
+            }
+        }
+        "BROWSER_UPLOAD" => input["paths"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
         // A LOAD that loads a kit (one calling a kit's tool is shown as that
         // tool): the kit it loads.
         "LOAD" => s("name").trim().to_string(),
@@ -245,23 +381,85 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         "AGENT_STOP" | "AGENT_DELETE" => format!("agent {}", input["id"]),
         "REQUEST_ASK" => crate::tools::one_line(&s("about")),
         "ASK" => {
-            let qs = input["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
-            let first = qs.first().and_then(|q| q["question"].as_str()).unwrap_or("");
-            if qs.len() > 1 { format!("{first} (+{} more)", qs.len() - 1) } else { first.to_string() }
+            let qs = input["questions"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let first = qs
+                .first()
+                .and_then(|q| q["question"].as_str())
+                .unwrap_or("");
+            if qs.len() > 1 {
+                format!("{first} (+{} more)", qs.len() - 1)
+            } else {
+                first.to_string()
+            }
         }
         // AWS Quick's agent's tools, whether Oak or Quick runs them.
-        "file_read" | "file_read_pdf" | "file_read_docx" | "file_read_pptx" | "file_read_image" | "file_write" | "file_edit" | "file_delete" | "file_type" | "file_get_page_raster" | "folder_list"
-        | "folder_create" | "file_matches" | "open_in_session_tab" => device_path(&s(if input["path"].is_string() { "path" } else { "file_path" })),
-        "file_move" | "file_copy" => format!("{} \u{2192} {}", device_path(&s("source")), device_path(&s("destination"))),
+        "file_read"
+        | "file_read_pdf"
+        | "file_read_docx"
+        | "file_read_pptx"
+        | "file_read_image"
+        | "file_write"
+        | "file_edit"
+        | "file_delete"
+        | "file_type"
+        | "file_get_page_raster"
+        | "folder_list"
+        | "folder_create"
+        | "file_matches"
+        | "open_in_session_tab" => device_path(&s(if input["path"].is_string() {
+            "path"
+        } else {
+            "file_path"
+        })),
+        "file_move" | "file_copy" => format!(
+            "{} \u{2192} {}",
+            device_path(&s("source")),
+            device_path(&s("destination"))
+        ),
         "fdfind" => s("args"),
-        "ripgrep" => input["patterns"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(" | "),
-        "web_search" | "kg_search" | "file_rag_search" | "search_all" | "search_knowledge_bases" | "recall_memories" | "search_tools" => s("query"),
+        "ripgrep" => input["patterns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(" | "),
+        "web_search"
+        | "kg_search"
+        | "file_rag_search"
+        | "search_all"
+        | "search_knowledge_bases"
+        | "recall_memories"
+        | "search_tools" => s("query"),
         "url_fetch" | "download_file" => s("url"),
         "load_skill" => s("skill_name"),
-        "load_tools" => input["tool_names"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(", "),
-        "start_task" => if s("name").is_empty() { crate::tools::one_line(&s("objective")) } else { s("name") },
-        "calendar_lookup" => format!("{}-{:02}", input["year"], input["month"].as_u64().unwrap_or(0)),
-        "convert_timezone" => [s("time"), s("from_timezone"), s("to_timezone")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" \u{2192} "),
+        "load_tools" => input["tool_names"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        "start_task" => {
+            if s("name").is_empty() {
+                crate::tools::one_line(&s("objective"))
+            } else {
+                s("name")
+            }
+        }
+        "calendar_lookup" => format!(
+            "{}-{:02}",
+            input["year"],
+            input["month"].as_u64().unwrap_or(0)
+        ),
+        "convert_timezone" => [s("time"), s("from_timezone"), s("to_timezone")]
+            .into_iter()
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>()
+            .join(" \u{2192} "),
         "message_react" | "ephemeral_react" => s("emoji"),
         _ => String::new(),
     }
@@ -276,7 +474,10 @@ fn copy_corner(ui: &mut Ui, t: &Theme, inner: Rect, text: &str) {
     let now = ui.input(|i| i.time);
     let copied = at.is_some_and(|a| now - a < 1.5);
     let area = inner.expand(10.0);
-    let r = Rect::from_min_size(egui::pos2(area.right() - 52.0, area.top() + 4.0), vec2(48.0, 18.0));
+    let r = Rect::from_min_size(
+        egui::pos2(area.right() - 52.0, area.top() + 4.0),
+        vec2(48.0, 18.0),
+    );
     let resp = ui.interact(r, id, Sense::click());
     if !copied && !ui.rect_contains_pointer(area) {
         return;
@@ -284,21 +485,38 @@ fn copy_corner(ui: &mut Ui, t: &Theme, inner: Rect, text: &str) {
     let p = ui.painter();
     p.rect_filled(r, 3.0, t.panel2);
     p.rect_stroke(r, 3.0, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
-    let color = if copied { t.accent } else if resp.hovered() { t.ink } else { t.ink3 };
-    p.text(r.center(), egui::Align2::CENTER_CENTER, if copied { "copied" } else { "copy" }, egui::FontId::proportional(11.0), color);
+    let color = if copied {
+        t.accent
+    } else if resp.hovered() {
+        t.ink
+    } else {
+        t.ink3
+    };
+    p.text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        if copied { "copied" } else { "copy" },
+        egui::FontId::proportional(11.0),
+        color,
+    );
     if resp.on_hover_text("Copy to clipboard").clicked() {
         ui.ctx().copy_text(text.trim_end().to_string());
         ui.data_mut(|d| d.insert_temp(id, now));
     }
     if copied {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
     }
 }
 
 /// A tool's input or output, set into the tool block in the page color.
 fn code_block(ui: &mut Ui, t: &Theme, text: &str, color: Color32) {
     crate::widgets::inset(ui, t, t.bg, 10, |ui| {
-        ui.label(RichText::new(text.trim_end()).font(markdown::code_font(12.5)).color(color));
+        ui.label(
+            RichText::new(text.trim_end())
+                .font(markdown::code_font(12.5))
+                .color(color),
+        );
         copy_corner(ui, t, ui.min_rect(), text);
     });
 }
@@ -314,8 +532,12 @@ fn search_view(ui: &mut Ui, t: &Theme, hits: &[(String, String, String)]) {
             if i > 0 {
                 ui.add_space(8.0);
             }
-            ui.hyperlink_to(RichText::new(title).strong(), url).on_hover_text(url);
-            let site = url.split_once("://").map_or(url.as_str(), |(_, r)| r).trim_end_matches('/');
+            ui.hyperlink_to(RichText::new(title).strong(), url)
+                .on_hover_text(url);
+            let site = url
+                .split_once("://")
+                .map_or(url.as_str(), |(_, r)| r)
+                .trim_end_matches('/');
             caption(ui, site, t.ink3);
             if !summary.is_empty() {
                 ui.label(RichText::new(summary).color(t.ink2));
@@ -336,7 +558,10 @@ fn output_syntax(command: &str, out: &str) -> Option<highlight::Syntax> {
     let words: Vec<&str> = command.split_whitespace().collect();
     if simple
         && let (Some(first), Some(last)) = (words.first(), words.last())
-        && matches!(*first, "cat" | "head" | "tail" | "type" | "sed" | "bat" | "less" | "more")
+        && matches!(
+            *first,
+            "cat" | "head" | "tail" | "type" | "sed" | "bat" | "less" | "more"
+        )
         && words.len() >= 2
         && let Some(s) = highlight::for_path(last.trim_matches(['"', '\'']))
     {
@@ -359,7 +584,10 @@ fn read_view(ui: &mut Ui, t: &Theme, path: &str, out: &str) -> bool {
     let mut code = String::new();
     let lines: Vec<&str> = body.split('\n').collect();
     for (i, line) in lines.iter().enumerate() {
-        let numbered = line.split_once('\t').map(|(n, rest)| (n.trim_start(), rest)).filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let numbered = line
+            .split_once('\t')
+            .map(|(n, rest)| (n.trim_start(), rest))
+            .filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
         let Some((n, rest)) = numbered else {
             // (The last line may be cut short by the length shown.)
             if i + 1 == lines.len() && i > 0 {
@@ -379,7 +607,14 @@ fn read_view(ui: &mut Ui, t: &Theme, path: &str, out: &str) -> bool {
     let syntax = highlight::for_file(path, &code);
     let font = markdown::code_font(12.5);
     crate::widgets::inset(ui, t, t.bg, 10, |ui| {
-        let mut job = highlight::numbered_job(&gutter, &code, syntax.as_ref(), &font, &highlight::Palette::for_theme(t), t.ink4);
+        let mut job = highlight::numbered_job(
+            &gutter,
+            &code,
+            syntax.as_ref(),
+            &font,
+            &highlight::Palette::for_theme(t),
+            t.ink4,
+        );
         job.wrap.max_width = ui.available_width();
         ui.add(egui::Label::new(job).selectable(true));
         if let Some(note) = note {
@@ -394,16 +629,30 @@ fn read_view(ui: &mut Ui, t: &Theme, path: &str, out: &str) -> bool {
 /// its copy button copies `copy`, else the shown text. Diff parts (an
 /// EDIT's old and new text) get a red or green background across the
 /// block.
-fn code_view(ui: &mut Ui, t: &Theme, syntax: Option<highlight::Syntax>, parts: &[highlight::Part], copy: Option<&str>) {
+fn code_view(
+    ui: &mut Ui,
+    t: &Theme,
+    syntax: Option<highlight::Syntax>,
+    parts: &[highlight::Part],
+    copy: Option<&str>,
+) {
     let font = markdown::code_font(12.5);
     crate::widgets::inset(ui, t, t.bg, 10, |ui| {
-        let (mut job, kinds) = highlight::job(parts, syntax.as_ref(), &font, &highlight::Palette::for_theme(t));
+        let (mut job, kinds) = highlight::job(
+            parts,
+            syntax.as_ref(),
+            &font,
+            &highlight::Palette::for_theme(t),
+        );
         job.wrap.max_width = ui.available_width();
         let galley = ui.painter().layout_job(job);
         // The backgrounds go under the text, so their slot comes first.
         let bg = ui.painter().add(egui::Shape::Noop);
         let resp = ui.add(egui::Label::new(galley.clone()));
-        let (red, green) = (mix(t.bg, hex(DIFF_RED), 0.16), mix(t.bg, hex(DIFF_GREEN), 0.16));
+        let (red, green) = (
+            mix(t.bg, hex(DIFF_RED), 0.16),
+            mix(t.bg, hex(DIFF_GREEN), 0.16),
+        );
         let (left, right) = (ui.min_rect().left() - 10.0, ui.min_rect().right() + 10.0);
         let mut shapes = vec![];
         let mut line = 0;
@@ -411,7 +660,11 @@ fn code_view(ui: &mut Ui, t: &Theme, syntax: Option<highlight::Syntax>, parts: &
             if let Some(Some(added)) = kinds.get(line) {
                 let r = row.rect().translate(resp.rect.min.to_vec2());
                 let r = Rect::from_x_y_ranges(left..=right, r.top()..=r.bottom());
-                shapes.push(egui::Shape::rect_filled(r, 0.0, if *added { green } else { red }));
+                shapes.push(egui::Shape::rect_filled(
+                    r,
+                    0.0,
+                    if *added { green } else { red },
+                ));
             }
             if row.ends_with_newline {
                 line += 1;
@@ -448,14 +701,24 @@ fn key_id(what: &str, key: (usize, usize)) -> Id {
 /// Draws a reply's text as markdown.
 pub(crate) fn markdown(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize)) {
     let id = key_id("markdown", key);
-    crate::select::message(ui, id, || markdown::plain_text(text), |ui| markdown::show(ui, t, text, id));
+    crate::select::message(
+        ui,
+        id,
+        || markdown::plain_text(text),
+        |ui| markdown::show(ui, t, text, id),
+    );
 }
 
 /// Draws a reply's text as markdown, its code blocks colored for their
 /// language (`oak_sdk::ui::markdown_highlighted`: plugins' replies).
 pub(crate) fn markdown_highlighted(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize)) {
     let id = key_id("markdown", key);
-    crate::select::message(ui, id, || markdown::plain_text(text), |ui| markdown::show_highlighted(ui, t, text, id));
+    crate::select::message(
+        ui,
+        id,
+        || markdown::plain_text(text),
+        |ui| markdown::show_highlighted(ui, t, text, id),
+    );
 }
 
 /// One thing the transcript shows, in order.
@@ -463,7 +726,11 @@ pub(crate) enum Item<'a> {
     /// Smart context summarized the conversation here: the summary, the
     /// message it stands in for everything before (the cut), and when it
     /// was made (which tells banners apart).
-    Summary { text: &'a str, cut: usize, time: i64 },
+    Summary {
+        text: &'a str,
+        cut: usize,
+        time: i64,
+    },
     /// A task notification and a heartbeat, as sent to the model, and when
     /// (none from before OAK kept the time).
     Note(&'a str, Option<i64>),
@@ -473,7 +740,13 @@ pub(crate) enum Item<'a> {
     AskReply(&'a str, Option<i64>),
     /// A message from another session (a subagent, or for a subagent the
     /// main session or another agent); `last` marks a final reply.
-    AgentMessage { from: &'a str, last: bool, body: &'a str, key: (usize, usize), at: Option<i64> },
+    AgentMessage {
+        from: &'a str,
+        last: bool,
+        body: &'a str,
+        key: (usize, usize),
+        at: Option<i64>,
+    },
     /// A /goal or /effort taking effect, or a usage limit; never sent.
     Mark(&'a Mark),
     /// What the user wrote; the last item of each message the user sent
@@ -488,7 +761,14 @@ pub(crate) enum Item<'a> {
     /// second (when the provider reported its output token count); true
     /// with Unslop, how its rewrite stands; true when it ends the model's
     /// turn.
-    Text(&'a str, (usize, usize), Option<i64>, Option<f64>, Option<rewrites::State<'a>>, bool),
+    Text(
+        &'a str,
+        (usize, usize),
+        Option<i64>,
+        Option<f64>,
+        Option<rewrites::State<'a>>,
+        bool,
+    ),
     /// A thinking block; true while it is still streaming; with Rewrite
     /// thinking, how its rewrite stands.
     Thinking(&'a Value, (usize, usize), bool, Option<rewrites::Thoughts>),
@@ -509,23 +789,56 @@ pub(crate) struct RevertAt<'a> {
 
 /// `draft`: the reply streaming in will be rewritten (Unslop): its text
 /// once done, its thinking (with Rewrite thinking) as it comes.
-fn push_assistant<'a>(out: &mut Vec<Item<'a>>, b: &'a Value, key: (usize, usize), live: bool, draft: bool) {
-    let [kind, text, name, at, tps, ms, rewrite] = crate::fields(b, ["type", "text", "name", "_oak_at", "_oak_tps", "_oak_ms", rewrites::key()]);
+fn push_assistant<'a>(
+    out: &mut Vec<Item<'a>>,
+    b: &'a Value,
+    key: (usize, usize),
+    live: bool,
+    draft: bool,
+) {
+    let [kind, text, name, at, tps, ms, rewrite] = crate::fields(
+        b,
+        [
+            "type",
+            "text",
+            "name",
+            "_oak_at",
+            "_oak_tps",
+            "_oak_ms",
+            rewrites::key(),
+        ],
+    );
     let text = text.and_then(Value::as_str);
     match kind.and_then(Value::as_str).unwrap_or("") {
         "text" => {
             if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                let rewrite = rewrite.map(rewrites::state_of).or(if draft { Some(rewrites::State::Drafting) } else { None });
-                out.push(Item::Text(text, key, at.and_then(Value::as_i64), tps.and_then(Value::as_f64), rewrite, false));
+                let rewrite = rewrite.map(rewrites::state_of).or(if draft {
+                    Some(rewrites::State::Drafting)
+                } else {
+                    None
+                });
+                out.push(Item::Text(
+                    text,
+                    key,
+                    at.and_then(Value::as_i64),
+                    tps.and_then(Value::as_f64),
+                    rewrite,
+                    false,
+                ));
             }
         }
         "reasoning" => {
             // Thinking streaming in that will be rewritten shows none of
             // itself until its rewrite does.
-            let rewrite = rewrite.and_then(|_| rewrites::thoughts(b, live)).or_else(|| {
-                (draft && rewrites::thinking() && text.is_some_and(|t| !t.trim().is_empty()))
-                    .then(|| rewrites::Thoughts { pending: true, ..Default::default() })
-            });
+            let rewrite = rewrite
+                .and_then(|_| rewrites::thoughts(b, live))
+                .or_else(|| {
+                    (draft && rewrites::thinking() && text.is_some_and(|t| !t.trim().is_empty()))
+                        .then(|| rewrites::Thoughts {
+                            pending: true,
+                            ..Default::default()
+                        })
+                });
             out.push(Item::Thinking(b, key, live && ms.is_none(), rewrite))
         }
         "tool_call" if name.is_some_and(|n| n == "DISPLAY") => out.push(Item::Display(b, key)),
@@ -553,8 +866,34 @@ struct UserBlock<'a> {
 
 impl<'a> UserBlock<'a> {
     fn of(b: &'a Value) -> Self {
-        let [kind, text, file, goal, context, at, call_id, content, is_error, display, calls] =
-            crate::fields(b, ["type", "text", "_oak_file", "_oak_goal", "_oak_context", "_oak_at", "call_id", "content", "is_error", "_oak_display", agent::repl::CALLS_KEY]);
+        let [
+            kind,
+            text,
+            file,
+            goal,
+            context,
+            at,
+            call_id,
+            content,
+            is_error,
+            display,
+            calls,
+        ] = crate::fields(
+            b,
+            [
+                "type",
+                "text",
+                "_oak_file",
+                "_oak_goal",
+                "_oak_context",
+                "_oak_at",
+                "call_id",
+                "content",
+                "is_error",
+                "_oak_display",
+                agent::repl::CALLS_KEY,
+            ],
+        );
         UserBlock {
             kind: kind.and_then(Value::as_str),
             text: text.and_then(Value::as_str),
@@ -571,7 +910,10 @@ impl<'a> UserBlock<'a> {
 
     /// `agent::is_hidden_block`.
     fn hidden(&self) -> bool {
-        self.hidden || self.text.is_some_and(|t| t.starts_with(agent::OLD_GOAL_TAG))
+        self.hidden
+            || self
+                .text
+                .is_some_and(|t| t.starts_with(agent::OLD_GOAL_TAG))
     }
 
     /// `user_authored`.
@@ -581,7 +923,13 @@ impl<'a> UserBlock<'a> {
             Some("text") => {
                 let text = self.text.unwrap_or("");
                 self.file
-                    || !(self.hidden() || text.starts_with(NOTE_TAG) || text.starts_with(agent::ALERT_TAG) || text.starts_with(BEAT_TAG) || text.starts_with(agent::AGENT_TAG) || text.starts_with(agent::ASK_TAG) || text.starts_with(agent::ANSWERS_TAG))
+                    || !(self.hidden()
+                        || text.starts_with(NOTE_TAG)
+                        || text.starts_with(agent::ALERT_TAG)
+                        || text.starts_with(BEAT_TAG)
+                        || text.starts_with(agent::AGENT_TAG)
+                        || text.starts_with(agent::ASK_TAG)
+                        || text.starts_with(agent::ANSWERS_TAG))
             }
             _ => false,
         }
@@ -630,7 +978,10 @@ fn user_messages_of(blocks: &[UserBlock]) -> Vec<std::ops::Range<usize>> {
 /// transcript's length for those after the last message, usize::MAX for
 /// the reply streaming in), and every tool call's result by call id (found
 /// in the same pass: this is built every frame).
-pub(crate) fn items_at<'a>(conv: &'a Conversation, live: &'a Live) -> (Vec<Item<'a>>, Vec<usize>, Results<'a>) {
+pub(crate) fn items_at<'a>(
+    conv: &'a Conversation,
+    live: &'a Live,
+) -> (Vec<Item<'a>>, Vec<usize>, Results<'a>) {
     let (mut out, mut msgs, results) = conv_items(conv);
     push_live(&mut out, &mut msgs, conv, live);
     mark_turn_ends(&mut out, 0, live.busy);
@@ -648,7 +999,12 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
     let legacy = conv
         .rolling
         .active()
-        .filter(|s| !conv.marks.iter().any(|m| m.kind == MarkKind::Summarized && m.done == s.cut as i64))
+        .filter(|s| {
+            !conv
+                .marks
+                .iter()
+                .any(|m| m.kind == MarkKind::Summarized && m.done == s.cut as i64)
+        })
         .map(|s| (s.cut, s.text.as_str(), s.made_at));
     // The marks by where they go (in the order they were added there), so
     // placing them takes one pass rather than a scan per message.
@@ -660,7 +1016,11 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
             next += 1;
             if m.at == at {
                 out.push(match m.kind {
-                    MarkKind::Summarized => Item::Summary { text: &m.text, cut: m.done.max(0) as usize, time: m.time },
+                    MarkKind::Summarized => Item::Summary {
+                        text: &m.text,
+                        cut: m.done.max(0) as usize,
+                        time: m.time,
+                    },
                     _ => Item::Mark(m),
                 });
             }
@@ -675,11 +1035,18 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
         if let Some((at, text, time)) = legacy
             && at == mi
         {
-            out.push(Item::Summary { text, cut: at, time });
+            out.push(Item::Summary {
+                text,
+                cut: at,
+                time,
+            });
         }
         marks(&mut out, mi);
         let [role, content] = crate::fields(m, ["role", "content"]);
-        let content = content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        let content = content
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if role.is_none_or(|r| r != "user") {
             for (bi, b) in content.iter().enumerate() {
                 if b["type"] == "tool_result" {
@@ -696,10 +1063,25 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
         // revert to before that message goes.
         // (A list, not a map: a turn holds a message or two, and most
         // hold none, only tool results.)
-        let ends: Vec<(usize, RevertAt)> = user_messages_of(&blocks).into_iter().map(|r| (r.end - 1, RevertAt { msg: mi, block: r.start, first: &content[r.start] })).collect();
+        let ends: Vec<(usize, RevertAt)> = user_messages_of(&blocks)
+            .into_iter()
+            .map(|r| {
+                (
+                    r.end - 1,
+                    RevertAt {
+                        msg: mi,
+                        block: r.start,
+                        first: &content[r.start],
+                    },
+                )
+            })
+            .collect();
         for (bi, (b, f)) in content.iter().zip(&blocks).enumerate() {
             if f.kind == Some("tool_result") {
-                results.insert(f.call_id.and_then(Value::as_str).unwrap_or(""), tool_out_of(f, &cleared));
+                results.insert(
+                    f.call_id.and_then(Value::as_str).unwrap_or(""),
+                    tool_out_of(f, &cleared),
+                );
             }
             let revert = ends.iter().find(|e| e.0 == bi).map(|e| e.1);
             match f.kind {
@@ -711,17 +1093,27 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
                     if f.hidden() {
                         continue; // shown as its mark
                     }
-                    out.push(if text.starts_with(NOTE_TAG) || text.starts_with(agent::ALERT_TAG) {
-                        Item::Note(text, f.at)
-                    } else if text.starts_with(BEAT_TAG) {
-                        Item::Beat(text, f.at)
-                    } else if text.starts_with(agent::ASK_TAG) || text.starts_with(agent::ANSWERS_TAG) {
-                        Item::AskReply(text, f.at)
-                    } else if let Some((from, last, body)) = agent::parse_agent_message(text) {
-                        Item::AgentMessage { from, last, body, key: (mi, bi), at: f.at }
-                    } else {
-                        Item::UserText(text, revert, f.at, false)
-                    });
+                    out.push(
+                        if text.starts_with(NOTE_TAG) || text.starts_with(agent::ALERT_TAG) {
+                            Item::Note(text, f.at)
+                        } else if text.starts_with(BEAT_TAG) {
+                            Item::Beat(text, f.at)
+                        } else if text.starts_with(agent::ASK_TAG)
+                            || text.starts_with(agent::ANSWERS_TAG)
+                        {
+                            Item::AskReply(text, f.at)
+                        } else if let Some((from, last, body)) = agent::parse_agent_message(text) {
+                            Item::AgentMessage {
+                                from,
+                                last,
+                                body,
+                                key: (mi, bi),
+                                at: f.at,
+                            }
+                        } else {
+                            Item::UserText(text, revert, f.at, false)
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -737,7 +1129,12 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
 /// output stops being cleared (`rolling::State::cleared_until`), when the
 /// output of a call shown before it is: the transcript starts a unit there
 /// (`units_split`) and marks it with a line.
-pub(crate) fn cleared_split(conv: &Conversation, items: &[Item], msgs: &[usize], results: &Results) -> Option<usize> {
+pub(crate) fn cleared_split(
+    conv: &Conversation,
+    items: &[Item],
+    msgs: &[usize],
+    results: &Results,
+) -> Option<usize> {
     let until = conv.rolling.cleared_until(&conv.messages)?;
     let at = msgs.partition_point(|&m| m < until).min(items.len());
     let cleared = |x: &Item| matches!(x, Item::Tool(b, _) | Item::Display(b, _) if results.get(b["id"].as_str().unwrap_or("")).is_some_and(|r| r.cleared));
@@ -746,7 +1143,12 @@ pub(crate) fn cleared_split(conv: &Conversation, items: &[Item], msgs: &[usize],
 
 /// The reply streaming in (`live`), added to the items and messages
 /// `conv_items` gave.
-pub(crate) fn push_live<'a>(out: &mut Vec<Item<'a>>, msgs: &mut Vec<usize>, conv: &Conversation, live: &'a Live) {
+pub(crate) fn push_live<'a>(
+    out: &mut Vec<Item<'a>>,
+    msgs: &mut Vec<usize>,
+    conv: &Conversation,
+    live: &'a Live,
+) {
     let draft = rewrites::applies(conv);
     for (bi, b) in live.blocks.iter().enumerate() {
         push_assistant(out, b, (usize::MAX, bi), true, draft);
@@ -760,7 +1162,9 @@ pub(crate) fn push_live<'a>(out: &mut Vec<Item<'a>>, msgs: &mut Vec<usize>, conv
 pub(crate) fn volatile(x: &Item, results: &Results) -> bool {
     match x {
         Item::Text(.., Some(_), _) | Item::Thinking(.., Some(_)) => true,
-        Item::Tool(b, _) | Item::Display(b, _) => !results.contains_key(b["id"].as_str().unwrap_or("")),
+        Item::Tool(b, _) | Item::Display(b, _) => {
+            !results.contains_key(b["id"].as_str().unwrap_or(""))
+        }
         _ => false,
     }
 }
@@ -780,7 +1184,10 @@ pub(crate) fn refresh<'a>(x: &mut Item<'a>, conv: &'a Conversation) {
 
 /// Whether an item is the model's (its text, thinking or tool calls).
 fn models(x: &Item) -> bool {
-    matches!(x, Item::Text(..) | Item::Thinking(..) | Item::Tool(..) | Item::Display(..))
+    matches!(
+        x,
+        Item::Text(..) | Item::Thinking(..) | Item::Tool(..) | Item::Display(..)
+    )
 }
 /// Whether an item is something the user sent.
 fn users(x: &Item) -> bool {
@@ -830,7 +1237,10 @@ fn turn_text(items: &[Item], end: usize) -> String {
 /// An angular check mark, drawn in a `size` square at `at` (its top left).
 fn paint_check(p: &egui::Painter, at: egui::Pos2, size: f32, color: Color32) {
     let pt = |x: f32, y: f32| at + vec2(x * size, y * size);
-    p.add(egui::Shape::line(vec![pt(0.06, 0.55), pt(0.38, 0.86), pt(0.96, 0.14)], Stroke::new(size * 0.17, color)));
+    p.add(egui::Shape::line(
+        vec![pt(0.06, 0.55), pt(0.38, 0.86), pt(0.96, 0.14)],
+        Stroke::new(size * 0.17, color),
+    ));
 }
 
 /// A transcript line for the user only: what a command changed.
@@ -848,32 +1258,65 @@ pub(crate) fn mark_row(ui: &mut Ui, t: &Theme, m: &Mark) {
     // and Limit are unreachable here (mark_row takes them above); the match
     // must be exhaustive.
     let (text, icon): (String, Option<&'static str>) = match m.kind {
-        MarkKind::GoalContinued => ("goal not finished yet: asked to continue".to_string(), Some(GOAL_ICON)),
+        MarkKind::GoalContinued => (
+            "goal not finished yet: asked to continue".to_string(),
+            Some(GOAL_ICON),
+        ),
         MarkKind::GoalFinished => ("goal finished".to_string(), Some(GOAL_ICON)),
         MarkKind::Goal if m.text.is_empty() => ("goal cleared".to_string(), Some(GOAL_ICON)),
-        MarkKind::Goal if m.sent.starts_with(crate::agent::ENDLESS_GOAL_TAG) => (format!("endless goal set to {}", crate::tools::one_line(&m.text)), Some(GOAL_ICON)),
-        MarkKind::Goal => (format!("goal set to {}", crate::tools::one_line(&m.text)), Some(GOAL_ICON)),
+        MarkKind::Goal if m.sent.starts_with(crate::agent::ENDLESS_GOAL_TAG) => (
+            format!("endless goal set to {}", crate::tools::one_line(&m.text)),
+            Some(GOAL_ICON),
+        ),
+        MarkKind::Goal => (
+            format!("goal set to {}", crate::tools::one_line(&m.text)),
+            Some(GOAL_ICON),
+        ),
         MarkKind::Effort => (format!("effort set to {}", m.text), Some(EFFORT_ICON)),
-        MarkKind::Model => (format!("model set to {}", api::model_name(&m.text)), Some(MODEL_ICON)),
+        MarkKind::Model => (
+            format!("model set to {}", api::model_name(&m.text)),
+            Some(MODEL_ICON),
+        ),
         MarkKind::Rotated => (format!("account rotated to {}", m.text), Some(ROTATED_ICON)),
-        MarkKind::FilesChanged => (format!("changed on disk, not by Oak: {}", m.text), Some(FILES_CHANGED_ICON)),
+        MarkKind::FellBack => (format!("fell back to {}", m.text), Some(MODEL_ICON)),
+        MarkKind::Switched => (format!("switched to {}", m.text), Some(MODEL_ICON)),
+        MarkKind::FilesChanged => (
+            format!("changed on disk, not by Oak: {}", m.text),
+            Some(FILES_CHANGED_ICON),
+        ),
         // Material Design's timer-sand paused / complete.
         MarkKind::FreebuffHour => (m.text.clone(), Some("\u{f051b}")),
-        MarkKind::FreebuffGrace => ("Freebuff grace limit was reached.".to_string(), Some("\u{f0516}")),
-        MarkKind::Heartbeat | MarkKind::Limit | MarkKind::Summarized | MarkKind::Failed => (m.text.clone(), None),
+        MarkKind::FreebuffGrace => (
+            "Freebuff grace limit was reached.".to_string(),
+            Some("\u{f0516}"),
+        ),
+        MarkKind::Heartbeat | MarkKind::Limit | MarkKind::Summarized | MarkKind::Failed => {
+            (m.text.clone(), None)
+        }
         MarkKind::Instructions => (m.text.clone(), Some(INSTRUCTIONS_ICON)),
         MarkKind::Identity => (m.text.clone(), Some(IDENTITY_ICON)),
         MarkKind::Tools => (m.text.clone(), Some(TOOLS_ICON)),
     };
-    let hover = (matches!(m.kind, MarkKind::Goal | MarkKind::Instructions | MarkKind::FilesChanged) && !m.text.is_empty()).then_some(m.text.as_str());
-    let id = ui.scope_id().with(("mark-open", m.at, m.time, m.kind as u8));
+    let hover = (matches!(
+        m.kind,
+        MarkKind::Goal | MarkKind::Instructions | MarkKind::FilesChanged | MarkKind::FellBack
+    ) && !m.text.is_empty())
+    .then_some(m.text.as_str());
+    let id = ui
+        .scope_id()
+        .with(("mark-open", m.at, m.time, m.kind as u8));
     notice_row(ui, t, id, &text, hover, &m.sent, |p, rect| {
         if let Some(icon) = icon {
             // Sized so the glyph's ink is about the checkmark's (11 px),
             // level with the text.
             glyph(p, rect, icon, t);
         } else {
-            paint_check(p, egui::pos2(rect.left() + 2.0, rect.center().y - 6.0), 12.0, t.accent);
+            paint_check(
+                p,
+                egui::pos2(rect.left() + 2.0, rect.center().y - 6.0),
+                12.0,
+                t.accent,
+            );
         }
     });
 }
@@ -898,9 +1341,25 @@ fn addr(s: &str) -> usize {
 /// A transcript line OAK added (`raw`): its tag stripped and its closing
 /// tag trimmed, shown with `glyph`. `first`'s tag goes first; when it is
 /// not there, `second`'s (a task notification, not an alert).
-fn notice(ui: &mut Ui, t: &Theme, raw: &str, key: &str, g: &str, first: (&str, &str), second: Option<(&str, &str)>) {
-    let (tag, end) = if raw.starts_with(first.0) { first } else { second.expect("a tagged line") };
-    let body = raw.strip_prefix(tag).unwrap_or(raw).trim_end_matches(end).trim();
+fn notice(
+    ui: &mut Ui,
+    t: &Theme,
+    raw: &str,
+    key: &str,
+    g: &str,
+    first: (&str, &str),
+    second: Option<(&str, &str)>,
+) {
+    let (tag, end) = if raw.starts_with(first.0) {
+        first
+    } else {
+        second.expect("a tagged line")
+    };
+    let body = raw
+        .strip_prefix(tag)
+        .unwrap_or(raw)
+        .trim_end_matches(end)
+        .trim();
     let id = Id::unique((key, addr(raw), raw.len()));
     notice_row(ui, t, id, body, None, raw, |p, r| glyph(p, r, g, t));
 }
@@ -927,16 +1386,34 @@ fn collapse_row(
 ) {
     let open = active && ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(default_open);
     ui.add_space(4.0);
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), if clickable { Sense::click() } else { Sense::hover() });
+    let (rect, mut resp) = ui.allocate_exact_size(
+        vec2(ui.available_width(), 20.0),
+        if clickable {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
     let lit = clickable && resp.hovered();
     icon(ui.painter(), rect);
     let color = if lit { t.ink } else { t.ink2 };
     let font = egui::TextStyle::Body.resolve(ui.style());
     let shown = clip_width(ui, label, &font, room(rect));
     let cut = shown != label || label.contains('\n');
-    let g = ui.painter().text(egui::pos2(rect.left() + 22.0, mid_y(ui, rect)), Align2::LEFT_CENTER, shown, font, color);
+    let g = ui.painter().text(
+        egui::pos2(rect.left() + 22.0, mid_y(ui, rect)),
+        Align2::LEFT_CENTER,
+        shown,
+        font,
+        color,
+    );
     if active {
-        chevron(ui.painter(), egui::pos2(g.right() + 12.0, mid_y(ui, rect)), open, color);
+        chevron(
+            ui.painter(),
+            egui::pos2(g.right() + 12.0, mid_y(ui, rect)),
+            open,
+            color,
+        );
     }
     if lit && active {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -948,7 +1425,14 @@ fn collapse_row(
         ui.data_mut(|d| d.insert_temp(id, !open));
     }
     if open {
-        egui::Frame::new().inner_margin(Margin { left: 22, right: 0, top: 2, bottom: 2 }).show(ui, |ui| open_body(ui, t));
+        egui::Frame::new()
+            .inner_margin(Margin {
+                left: 22,
+                right: 0,
+                top: 2,
+                bottom: 2,
+            })
+            .show(ui, |ui| open_body(ui, t));
     }
     ui.add_space(4.0);
 }
@@ -956,38 +1440,70 @@ fn collapse_row(
 /// A transcript line from OAK: an icon (`icon` paints it in the row's
 /// rect) and `label`. When the model was told something with it
 /// (`verbatim`), a click opens what it was sent, word for word.
-fn notice_row(ui: &mut Ui, t: &Theme, id: Id, label: &str, hover: Option<&str>, verbatim: &str, icon: impl FnOnce(&egui::Painter, Rect)) {
+fn notice_row(
+    ui: &mut Ui,
+    t: &Theme,
+    id: Id,
+    label: &str,
+    hover: Option<&str>,
+    verbatim: &str,
+    icon: impl FnOnce(&egui::Painter, Rect),
+) {
     let opens = !verbatim.trim().is_empty();
-    collapse_row(ui, t, id, label, |r| r.width() - 22.0 - if opens { 24.0 } else { 0.0 }, opens, opens, false, icon, |open, cut| {
-        match (hover, opens) {
-            (Some(h), true) => Some(format!("{h}\n\nClick for the model view")),
-            (Some(h), false) => Some(h.to_string()),
-            (None, true) if cut => Some(format!("{label}\n\nClick for the model view")),
-            (None, true) => Some("Click for the model view".to_string()),
-            (None, false) if cut => Some(label.to_string()),
-            (None, false) => None,
-        }
-        .filter(|_| !open)
-    }, |ui, t| {
-        caption(ui, "model view", t.ink3);
-        ui.add_space(2.0);
-        for (title, body) in store::split_sent(verbatim) {
-            if !title.is_empty() {
-                ui.add_space(4.0);
-                caption(ui, title, t.ink2);
-                ui.add_space(2.0);
+    collapse_row(
+        ui,
+        t,
+        id,
+        label,
+        |r| r.width() - 22.0 - if opens { 24.0 } else { 0.0 },
+        opens,
+        opens,
+        false,
+        icon,
+        |open, cut| {
+            match (hover, opens) {
+                (Some(h), true) => Some(format!("{h}\n\nClick for the model view")),
+                (Some(h), false) => Some(h.to_string()),
+                (None, true) if cut => Some(format!("{label}\n\nClick for the model view")),
+                (None, true) => Some("Click for the model view".to_string()),
+                (None, false) if cut => Some(label.to_string()),
+                (None, false) => None,
             }
-            verbatim_block(ui, t, body);
-        }
-    });
+            .filter(|_| !open)
+        },
+        |ui, t| {
+            caption(ui, "model view", t.ink3);
+            ui.add_space(2.0);
+            for (title, body) in store::split_sent(verbatim) {
+                if !title.is_empty() {
+                    ui.add_space(4.0);
+                    caption(ui, title, t.ink2);
+                    ui.add_space(2.0);
+                }
+                verbatim_block(ui, t, body);
+            }
+        },
+    );
 }
 
 /// Text as the model got it: in the code font, unformatted, selectable.
 fn verbatim_block(ui: &mut Ui, t: &Theme, text: &str) {
-    let at = text.char_indices().nth(20_000).map(|(i, _)| i).unwrap_or(text.len());
+    let at = text
+        .char_indices()
+        .nth(20_000)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
     let (shown, more) = (&text[..at], at < text.len());
     crate::widgets::inset(ui, t, t.bg, 10, |ui| {
-        ui.add(egui::Label::new(RichText::new(shown.trim_end()).font(markdown::code_font(12.0)).color(t.ink2)).wrap().selectable(true));
+        ui.add(
+            egui::Label::new(
+                RichText::new(shown.trim_end())
+                    .font(markdown::code_font(12.0))
+                    .color(t.ink2),
+            )
+            .wrap()
+            .selectable(true),
+        );
         if more {
             caption(ui, "… (truncated)", t.ink3);
         }
@@ -1006,7 +1522,9 @@ pub(crate) const SUMMARY_OPEN: &str = "oak-summary-open";
 /// place of the messages before `cut`), with a link to that point, which
 /// the minimap marks meanwhile.
 fn summary_banner(ui: &mut Ui, t: &Theme, text: &str, cut: usize, time: i64) {
-    let open = ui.data(|d| d.get_temp::<(i64, usize)>(ui.scope_id().with(SUMMARY_OPEN))).is_some_and(|o| o.0 == time);
+    let open = ui
+        .data(|d| d.get_temp::<(i64, usize)>(ui.scope_id().with(SUMMARY_OPEN)))
+        .is_some_and(|o| o.0 == time);
     ui.add_space(8.0);
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 24.0), Sense::click());
@@ -1025,18 +1543,33 @@ fn summary_banner(ui: &mut Ui, t: &Theme, text: &str, cut: usize, time: i64) {
     let total = cube.size().x + 4.0 + g.size().x;
     let (c, half) = (rect.center(), total / 2.0 + 22.0);
     let y = c.y.round() + 0.5;
-    let line = Stroke::new(1.0, if lit { t.accent.gamma_multiply(0.7) } else { t.line });
+    let line = Stroke::new(
+        1.0,
+        if lit {
+            t.accent.gamma_multiply(0.7)
+        } else {
+            t.line
+        },
+    );
     p.hline(rect.left()..=c.x - half, y, line);
     p.hline(c.x + half..=rect.right(), y, line);
     let left = c.x - total / 2.0;
     let (cw, ch) = (cube.size().x, cube.size().y);
     p.galley(egui::pos2(left, c.y - ch / 2.0), cube, color);
-    p.galley(egui::pos2(left + cw + 4.0, c.y - g.size().y / 2.0), g, color);
+    p.galley(
+        egui::pos2(left + cw + 4.0, c.y - g.size().y / 2.0),
+        g,
+        color,
+    );
     chevron(p, egui::pos2(c.x + half - 12.0, c.y), open, color);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let resp = if open { resp } else { resp.on_hover_text("Context summary") };
+    let resp = if open {
+        resp
+    } else {
+        resp.on_hover_text("Context summary")
+    };
     if resp.clicked() {
         ui.data_mut(|d| {
             if open {
@@ -1067,17 +1600,52 @@ fn summary_banner(ui: &mut Ui, t: &Theme, text: &str, cut: usize, time: i64) {
 /// A message from another session: a line naming the sender (and whether
 /// it is a subagent's final reply) that opens on click to the message.
 /// Short ones start open.
-fn agent_message_row(ui: &mut Ui, t: &Theme, from: &str, last: bool, body: &str, key: (usize, usize)) {
+fn agent_message_row(
+    ui: &mut Ui,
+    t: &Theme,
+    from: &str,
+    last: bool,
+    body: &str,
+    key: (usize, usize),
+) {
     let id = key_id("agent-message", key);
     let short = body.lines().count() <= AGENT_MESSAGE_OPEN_LINES && body.len() <= 800;
-    let head = if last { format!("final reply from {from}") } else { format!("message from {from}") };
-    collapse_row(ui, t, id, &head, |r| r.right() - r.left() - 60.0, true, true, short, |p, rect| glyph(p, rect, AGENT_ICON, t), |open, _| {
-        Some(if open { "Hide the message" } else { "Show the message" }.to_string())
-    }, |ui, t| {
-        crate::widgets::inset(ui, t, Color32::TRANSPARENT, 10, |ui| {
-            crate::select::message(ui, id.with("text"), || markdown::plain_text(body), |ui| markdown::show(ui, t, body, id.with("text")));
-        });
-    });
+    let head = if last {
+        format!("final reply from {from}")
+    } else {
+        format!("message from {from}")
+    };
+    collapse_row(
+        ui,
+        t,
+        id,
+        &head,
+        |r| r.right() - r.left() - 60.0,
+        true,
+        true,
+        short,
+        |p, rect| glyph(p, rect, AGENT_ICON, t),
+        |open, _| {
+            Some(
+                if open {
+                    "Hide the message"
+                } else {
+                    "Show the message"
+                }
+                .to_string(),
+            )
+        },
+        |ui, t| {
+            crate::widgets::inset(ui, t, Color32::TRANSPARENT, 10, |ui| {
+                crate::select::message(
+                    ui,
+                    id.with("text"),
+                    || markdown::plain_text(body),
+                    |ui| markdown::show(ui, t, body, id.with("text")),
+                );
+            });
+        },
+    );
 }
 
 /// Agent messages up to this many lines start open in the transcript.
@@ -1088,11 +1656,37 @@ const AGENT_MESSAGE_OPEN_LINES: usize = 8;
 fn goal_finished_row(ui: &mut Ui, t: &Theme, m: &Mark) {
     let id = ui.scope_id().with(("goal-finished", m.at, m.time));
     let active = !m.text.is_empty();
-    collapse_row(ui, t, id, "goal finished", |_| f32::INFINITY, true, active, false, |p, rect| {
-        paint_check(p, egui::pos2(rect.left() + 2.0, rect.center().y - 6.0), 12.0, t.accent);
-    }, |open, _| active.then(|| (if open { "Hide completion report" } else { "Show completion report" }).to_string()), |ui, t| {
-        markdown::show(ui, t, &m.text, id.with("text"));
-    });
+    collapse_row(
+        ui,
+        t,
+        id,
+        "goal finished",
+        |_| f32::INFINITY,
+        true,
+        active,
+        false,
+        |p, rect| {
+            paint_check(
+                p,
+                egui::pos2(rect.left() + 2.0, rect.center().y - 6.0),
+                12.0,
+                t.accent,
+            );
+        },
+        |open, _| {
+            active.then(|| {
+                (if open {
+                    "Hide completion report"
+                } else {
+                    "Show completion report"
+                })
+                .to_string()
+            })
+        },
+        |ui, t| {
+            markdown::show(ui, t, &m.text, id.with("text"));
+        },
+    );
 }
 
 /// The Nerd Font icon of an account rotation line.
@@ -1127,12 +1721,28 @@ fn limit_box(ui: &mut Ui, t: &Theme, m: &Mark) {
     let waiting = m.text.is_empty();
     let all = api::rotation_on() && api::accounts().len() > 1;
     let detail = match (m.text.as_str(), all) {
-        ("", false) => format!("Resumes at reset: {} (in {}).", clock(m.time), until(m.time)),
-        ("", true) => format!("Resumes at first account reset: {} (in {}).", clock(m.time), until(m.time)),
+        ("", false) => format!(
+            "Resumes at reset: {} (in {}).",
+            clock(m.time),
+            until(m.time)
+        ),
+        ("", true) => format!(
+            "Resumes at first account reset: {} (in {}).",
+            clock(m.time),
+            until(m.time)
+        ),
         ("continued", false) => format!("Resumed after reset at {}.", clock(m.done)),
         ("continued", true) => format!("Resumed after account reset at {}.", clock(m.done)),
-        (_, false) => format!("Oak stopped waiting at {}. The limit resets at {}.", clock(m.done), clock(m.time)),
-        (_, true) => format!("Oak stopped waiting at {}. The first account resets at {}.", clock(m.done), clock(m.time)),
+        (_, false) => format!(
+            "Oak stopped waiting at {}. The limit resets at {}.",
+            clock(m.done),
+            clock(m.time)
+        ),
+        (_, true) => format!(
+            "Oak stopped waiting at {}. The first account resets at {}.",
+            clock(m.done),
+            clock(m.time)
+        ),
     };
     // Only the model's own quota (Fable's weekly allowance): say so, since
     // the plan's 5h and week bars still show room for the other models.
@@ -1140,8 +1750,16 @@ fn limit_box(ui: &mut Ui, t: &Theme, m: &Mark) {
         ("", true) => ("All accounts at usage limit".to_string(), detail),
         ("", false) => ("Usage limit reached".to_string(), detail),
         (s, all) => (
-            if all { format!("All accounts at their {s} limit") } else { format!("{s} limit reached") },
-            if waiting { format!("{detail} Other models have room.") } else { detail },
+            if all {
+                format!("All accounts at their {s} limit")
+            } else {
+                format!("{s} limit reached")
+            },
+            if waiting {
+                format!("{detail} Other models have room.")
+            } else {
+                detail
+            },
         ),
     };
     ui.add_space(6.0);
@@ -1157,7 +1775,11 @@ fn limit_box(ui: &mut Ui, t: &Theme, m: &Mark) {
                 ui.add_space(4.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(RichText::new(title).strong().color(if waiting { t.ink } else { t.ink2 }));
+                    ui.label(RichText::new(title).strong().color(if waiting {
+                        t.ink
+                    } else {
+                        t.ink2
+                    }));
                     caption(ui, &detail, t.ink3);
                 });
             });
@@ -1183,12 +1805,27 @@ fn tool_out<'a>(b: &'a Value, cleared: &rolling::Ids) -> ToolOut<'a> {
 
 fn tool_out_of<'a>(b: &UserBlock<'a>, cleared: &rolling::Ids) -> ToolOut<'a> {
     let error = b.is_error.is_some_and(|e| e == true);
-    let display = b.display.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-    let cleared = !cleared.is_empty() && b.call_id.and_then(Value::as_str).is_some_and(|id| cleared.contains(id));
-    let calls = b.calls.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let display = b
+        .display
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let cleared = !cleared.is_empty()
+        && b.call_id
+            .and_then(Value::as_str)
+            .is_some_and(|id| cleared.contains(id));
+    let calls = b
+        .calls
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     match b.content.unwrap_or(&Value::Null) {
         Value::Array(blocks) => ToolOut {
-            text: match blocks.iter().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>()[..] {
+            text: match blocks
+                .iter()
+                .filter_map(|x| x["text"].as_str())
+                .collect::<Vec<_>>()[..]
+            {
                 [] => "".into(),
                 [one] => one.into(),
                 ref many => many.join("\n").into(),
@@ -1199,7 +1836,14 @@ fn tool_out_of<'a>(b: &UserBlock<'a>, cleared: &rolling::Ids) -> ToolOut<'a> {
             cleared,
             calls,
         },
-        c => ToolOut { text: c.as_str().unwrap_or("").into(), images: vec![], error, display, cleared, calls },
+        c => ToolOut {
+            text: c.as_str().unwrap_or("").into(),
+            images: vec![],
+            error,
+            display,
+            cleared,
+            calls,
+        },
     }
 }
 
@@ -1230,13 +1874,24 @@ pub(crate) fn mid_y(ui: &Ui, rect: Rect) -> f32 {
 }
 
 /// A row that opens and closes on click; returns whether it is open.
-pub(crate) fn row(ui: &mut Ui, t: &Theme, id: Id, clickable: bool, in_block: bool) -> (Rect, bool, bool) {
+pub(crate) fn row(
+    ui: &mut Ui,
+    t: &Theme,
+    id: Id,
+    clickable: bool,
+    in_block: bool,
+) -> (Rect, bool, bool) {
     let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-    let sense = if clickable { Sense::click() } else { Sense::hover() };
+    let sense = if clickable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
     let hovered = clickable && resp.hovered();
     if hovered {
-        ui.painter().rect_filled(rect, 0.0, if in_block { t.tool_hover } else { t.tool_bg });
+        ui.painter()
+            .rect_filled(rect, 0.0, if in_block { t.tool_hover } else { t.tool_bg });
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if clickable && resp.clicked() {
@@ -1267,7 +1922,9 @@ pub(crate) fn shown(b: &Value) -> String {
     if let Some(n) = b["_oak_shown"].as_str() {
         return n.to_string();
     }
-    let partial = b["_oak_partial"].as_str().map(|raw| Value::Object(partial_input(raw)));
+    let partial = b["_oak_partial"]
+        .as_str()
+        .map(|raw| Value::Object(partial_input(raw)));
     let input = partial.as_ref().unwrap_or(&b["input"]);
     tools::shown_name(&tools::canonical_cow(b["name"].as_str().unwrap_or(""), input).0)
 }
@@ -1320,25 +1977,41 @@ fn tool_color(name: &str) -> Color32 {
 /// name first (`DESKTOP-1_folder_list`).
 fn like_oaks(name: &str) -> Option<&'static str> {
     let oak = match name {
-        "file_read" | "read_file" | "file_read_pdf" | "file_read_docx" | "file_read_pptx" | "file_read_image" | "file_type" | "folder_list" | "list_dir" | "list_directory" => "READ",
+        "file_read" | "read_file" | "file_read_pdf" | "file_read_docx" | "file_read_pptx"
+        | "file_read_image" | "file_type" | "folder_list" | "list_dir" | "list_directory" => "READ",
         "file_write" | "write_file" | "folder_create" => "WRITE",
         "file_edit" | "file_move" | "file_copy" => "EDIT",
         "file_delete" => "TASK_DELETE",
         "fdfind" | "fd" | "ripgrep" | "rg" | "grep" | "file_matches" => "Grep",
-        "run_javascript" | "bash" | "shell" | "run_shell" | "run_command" | "execute_command" => "EXECUTE",
+        "run_javascript" | "bash" | "shell" | "run_shell" | "run_command" | "execute_command" => {
+            "EXECUTE"
+        }
         n if is_python(n) => "EXECUTE",
         "web_search" => "SEARCH",
         "url_fetch" | "download_file" | "download_file_from_connector" => "FETCH",
         "file_get_page_raster" => "SCREENSHOT",
         "open_in_session_tab" => "DISPLAY",
-        "kg_search" | "file_rag_search" | "search_all" | "search_knowledge_bases" | "get_full_document" | "recall_memories" | "memory_get_detail" | "save_to_memory" => "NOTE_NEW",
-        "start_task" | "steer_task" | "get_task_result" | "inspect_task" | "list_tasks" | "cancel_task" => "AGENT_NEW",
+        "kg_search"
+        | "file_rag_search"
+        | "search_all"
+        | "search_knowledge_bases"
+        | "get_full_document"
+        | "recall_memories"
+        | "memory_get_detail"
+        | "save_to_memory" => "NOTE_NEW",
+        "start_task" | "steer_task" | "get_task_result" | "inspect_task" | "list_tasks"
+        | "cancel_task" => "AGENT_NEW",
         "load_skill" | "load_tools" | "search_tools" => "CD",
         "get_current_time" | "calendar_lookup" | "convert_timezone" => "PROGRESS_SET",
         "message_react" | "ephemeral_react" | "send_notification" => "HEARTBEAT_START",
         "list_outposts" => "DISPLAY",
         n if n.starts_with("browser") => "BROWSER",
-        n => return n.split_once('_').and_then(|(_, tool)| like_oaks(tool)).filter(|_| n.contains('-')),
+        n => {
+            return n
+                .split_once('_')
+                .and_then(|(_, tool)| like_oaks(tool))
+                .filter(|_| n.contains('-'));
+        }
     };
     Some(oak)
 }
@@ -1346,7 +2019,10 @@ fn like_oaks(name: &str) -> Option<&'static str> {
 /// A path as a device has it: Quick names a device's files under
 /// `/outposts/<device>/` (and a Windows drive as the path's first part).
 fn device_path(path: &str) -> String {
-    match path.strip_prefix("/outposts/").and_then(|rest| rest.split_once('/')) {
+    match path
+        .strip_prefix("/outposts/")
+        .and_then(|rest| rest.split_once('/'))
+    {
         Some((_, rest)) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
         Some((_, rest)) => format!("/{rest}"),
         None => path.to_string(),
@@ -1364,7 +2040,10 @@ pub(crate) fn cut_output(text: &str) -> (String, usize) {
     };
     let end = text[..i].rfind('\n').filter(|&n| n > 0).unwrap_or(i);
     let rest = &text[end..];
-    (text[..end].to_string(), rest.strip_prefix('\n').unwrap_or(rest).lines().count())
+    (
+        text[..end].to_string(),
+        rest.strip_prefix('\n').unwrap_or(rest).lines().count(),
+    )
 }
 
 /// Whether a call of `name` runs a shell command.
@@ -1376,7 +2055,13 @@ fn is_command(name: &str) -> bool {
 fn is_python(name: &str) -> bool {
     matches!(
         name,
-        "run_python" | "python" | "run_python_with_write" | "run_python_outpost_local" | "run_python_outpost_local_with_write" | "run_python_on_device" | "run_python_on_device_with_write"
+        "run_python"
+            | "python"
+            | "run_python_with_write"
+            | "run_python_outpost_local"
+            | "run_python_outpost_local_with_write"
+            | "run_python_on_device"
+            | "run_python_on_device_with_write"
     )
 }
 
@@ -1384,7 +2069,11 @@ fn is_python(name: &str) -> bool {
 /// line when every line is).
 fn python_line(code: &str) -> String {
     let lines = || code.lines().map(str::trim).filter(|l| !l.is_empty());
-    lines().find(|l| !l.starts_with('#')).or_else(|| lines().next()).unwrap_or("").to_string()
+    lines()
+        .find(|l| !l.starts_with('#'))
+        .or_else(|| lines().next())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
@@ -1401,7 +2090,12 @@ fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
     let (rect, open, hovered) = row(ui, t, ui.scope_id().with(("tool-open", id)), true, true);
     let y = mid_y(ui, rect);
     let p = ui.painter();
-    chevron(p, egui::pos2(rect.left() + CHEVRON_X, y), open, if hovered { t.ink } else { t.ink3 });
+    chevron(
+        p,
+        egui::pos2(rect.left() + CHEVRON_X, y),
+        open,
+        if hovered { t.ink } else { t.ink3 },
+    );
     let dot = egui::pos2(rect.left() + DOT_X, y);
     // The tool's color: full on the dot, less on the name, less again on
     // the summary.
@@ -1413,12 +2107,32 @@ fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
     };
     let (name_color, summary_color) = (mix(t.ink2, swatch, 0.75), mix(t.ink2, swatch, 0.40));
     let font = FontId::proportional(13.0);
-    let shown = p.text(egui::pos2(rect.left() + NAME_X, y), Align2::LEFT_CENTER, &shown_name, font.clone(), name_color);
+    let shown = p.text(
+        egui::pos2(rect.left() + NAME_X, y),
+        Align2::LEFT_CENTER,
+        &shown_name,
+        font.clone(),
+        name_color,
+    );
     let x = rect.left() + NAME_X + name_w.max(shown.width()) + 18.0;
     // A command shown as it is (no summary) is code: the code font.
-    let raw_command = (is_command(name) && input[if name == "Bash" { "description" } else { "summary" }].as_str().is_none_or(|s| s.trim().is_empty()))
-        || (is_python(name) && input["explanation"].as_str().is_none_or(|s| s.trim().is_empty()));
-    let font = if raw_command { markdown::code_font(12.5) } else { font };
+    let raw_command = (is_command(name)
+        && input[if name == "Bash" {
+            "description"
+        } else {
+            "summary"
+        }]
+        .as_str()
+        .is_none_or(|s| s.trim().is_empty()))
+        || (is_python(name)
+            && input["explanation"]
+                .as_str()
+                .is_none_or(|s| s.trim().is_empty()));
+    let font = if raw_command {
+        markdown::code_font(12.5)
+    } else {
+        font
+    };
     // After the summary: an EDIT's lines added and removed and READ's lines
     // (the summary is cut short first when there is too little room).
     let lines = line_counts(ui, t, name, input, result);
@@ -1426,20 +2140,37 @@ fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
     let timeout = (name == "EXECUTE")
         .then(|| input["timeout"].as_u64())
         .flatten()
-        .map(|s| ui.painter().layout_no_wrap(format!("timeout {s}s"), FontId::proportional(12.0), t.ink3));
+        .map(|s| {
+            ui.painter()
+                .layout_no_wrap(format!("timeout {s}s"), FontId::proportional(12.0), t.ink3)
+        });
     let end = rect.right() - 10.0 - timeout.as_ref().map_or(0.0, |g| g.size().x + 12.0);
     let room = end - x - lines.as_ref().map_or(0.0, |g| g.size().x + 8.0);
     let summary = clip_width(ui, &tool_summary(name, input), &font, room.max(40.0));
-    let drawn = ui.painter().text(egui::pos2(x, y), Align2::LEFT_CENTER, summary, font, summary_color);
+    let drawn = ui.painter().text(
+        egui::pos2(x, y),
+        Align2::LEFT_CENTER,
+        summary,
+        font,
+        summary_color,
+    );
     if let Some(g) = lines
         && drawn.right() + 8.0 + g.size().x <= end
     {
-        ui.painter().galley(egui::pos2(drawn.right() + 8.0, y - g.size().y / 2.0), g, t.ink3);
+        ui.painter().galley(
+            egui::pos2(drawn.right() + 8.0, y - g.size().y / 2.0),
+            g,
+            t.ink3,
+        );
     }
     if let Some(g) = timeout
         && drawn.right() + 12.0 <= rect.right() - 10.0 - g.size().x
     {
-        ui.painter().galley(egui::pos2(rect.right() - 10.0 - g.size().x, y - g.size().y / 2.0), g, t.ink3);
+        ui.painter().galley(
+            egui::pos2(rect.right() - 10.0 - g.size().x, y - g.size().y / 2.0),
+            g,
+            t.ink3,
+        );
     }
     if !open {
         // A WRITE or EDIT coming in shows its progress under its row (a
@@ -1468,7 +2199,13 @@ fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
 
 /// An EDIT's lines added and removed (in green and red) and READ's lines,
 /// laid out for after a tool row's summary; None for other calls.
-fn line_counts(ui: &Ui, t: &Theme, name: &str, input: &Value, result: Option<&ToolOut>) -> Option<Arc<egui::Galley>> {
+fn line_counts(
+    ui: &Ui,
+    t: &Theme,
+    name: &str,
+    input: &Value,
+    result: Option<&ToolOut>,
+) -> Option<Arc<egui::Galley>> {
     let mut parts: Vec<(String, Color32)> = vec![];
     if let Some((added, removed)) = edit_stats(name, input, result) {
         parts.push((format!("+{added}"), mix(t.ink2, hex(DIFF_GREEN), 0.85)));
@@ -1482,7 +2219,15 @@ fn line_counts(ui: &Ui, t: &Theme, name: &str, input: &Value, result: Option<&To
     }
     let mut job = egui::text::LayoutJob::default();
     for (i, (s, color)) in parts.into_iter().enumerate() {
-        job.append(&s, if i > 0 { 5.0 } else { 0.0 }, egui::TextFormat { font_id: FontId::proportional(12.0), color, ..Default::default() });
+        job.append(
+            &s,
+            if i > 0 { 5.0 } else { 0.0 },
+            egui::TextFormat {
+                font_id: FontId::proportional(12.0),
+                color,
+                ..Default::default()
+            },
+        );
     }
     Some(ui.painter().layout_job(job))
 }
@@ -1497,29 +2242,61 @@ fn tool_input_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
         "WRITE" => {
             // The new file as it is (no diff), colored as code when it is.
             let content: String = input["content"].as_str().unwrap_or("").head(4000);
-            code_view(ui, t, highlight::for_file(path, &content), &[(None, content.trim_end())], None);
+            code_view(
+                ui,
+                t,
+                highlight::for_file(path, &content),
+                &[(None, content.trim_end())],
+                None,
+            );
         }
         "EDIT" => {
             let (old, new) = (cut("old_string"), cut("new_string"));
-            let parts: Vec<highlight::Part> = [(Some(false), old.as_str()), (Some(true), new.as_str())].into_iter().filter(|(_, s)| !s.is_empty()).collect();
+            let parts: Vec<highlight::Part> =
+                [(Some(false), old.as_str()), (Some(true), new.as_str())]
+                    .into_iter()
+                    .filter(|(_, s)| !s.is_empty())
+                    .collect();
             code_view(ui, t, highlight::for_path(path), &parts, None);
         }
         // Code Mode's script, as JavaScript.
         "REPL" => {
             let code = cut("code");
-            ui.push_id("repl-code", |ui| code_view(ui, t, highlight::for_path("script.js"), &[(None, code.trim_end())], Some(input["code"].as_str().unwrap_or(""))));
+            ui.push_id("repl-code", |ui| {
+                code_view(
+                    ui,
+                    t,
+                    highlight::for_path("script.js"),
+                    &[(None, code.trim_end())],
+                    Some(input["code"].as_str().unwrap_or("")),
+                )
+            });
         }
         // Python a provider's agent runs: its code, as Python.
         _ if is_python(name) => {
             let code = cut("code");
-            ui.push_id("python-code", |ui| code_view(ui, t, highlight::for_path("snippet.py"), &[(None, code.trim_end())], Some(input["code"].as_str().unwrap_or(""))));
+            ui.push_id("python-code", |ui| {
+                code_view(
+                    ui,
+                    t,
+                    highlight::for_path("snippet.py"),
+                    &[(None, code.trim_end())],
+                    Some(input["code"].as_str().unwrap_or("")),
+                )
+            });
         }
         _ => {}
     }
     let command = is_command(name);
     let detail = match name {
         _ if command => format!("$ {}", input["command"].as_str().unwrap_or("")),
-        "SEARCH" => input["queries"].as_array().into_iter().flatten().filter_map(|q| q.as_str()).collect::<Vec<_>>().join("\n"),
+        "SEARCH" => input["queries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|q| q.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
         "AGENT_NEW" => cut("prompt"),
         "AGENT_SEND" => cut("message"),
         "ASK" => input["questions"]
@@ -1527,8 +2304,17 @@ fn tool_input_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
             .into_iter()
             .flatten()
             .map(|q| {
-                let opts: Vec<&str> = q["options"].as_array().into_iter().flatten().filter_map(|o| o.as_str()).collect();
-                format!("{}\n  {}", q["question"].as_str().unwrap_or(""), opts.join(", "))
+                let opts: Vec<&str> = q["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|o| o.as_str())
+                    .collect();
+                format!(
+                    "{}\n  {}",
+                    q["question"].as_str().unwrap_or(""),
+                    opts.join(", ")
+                )
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -1536,7 +2322,13 @@ fn tool_input_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
     };
     if command && !detail.is_empty() {
         // The command is shell code.
-        code_view(ui, t, Some(highlight::shell()), &[(None, &detail)], Some(input["command"].as_str().unwrap_or("")));
+        code_view(
+            ui,
+            t,
+            Some(highlight::shell()),
+            &[(None, &detail)],
+            Some(input["command"].as_str().unwrap_or("")),
+        );
     } else if !detail.is_empty() {
         code_block(ui, t, &detail, t.ink2);
     }
@@ -1555,36 +2347,64 @@ fn tool_output_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value, r: &ToolO
     }
     if !r.calls.is_empty() {
         // A REPL script's calls, one line each.
-        caption(ui, &format!("{} call{}", r.calls.len(), crate::plural(r.calls.len())), t.ink3);
+        caption(
+            ui,
+            &format!("{} call{}", r.calls.len(), crate::plural(r.calls.len())),
+            t.ink3,
+        );
         let lines: Vec<String> = r
             .calls
             .iter()
             .take(200)
             .map(|c| {
                 let name = c["name"].as_str().unwrap_or("");
-                let what = if name == "$" { c["input"]["command"].as_str().unwrap_or("").to_string() } else { tool_summary(name, &c["input"]) };
+                let what = if name == "$" {
+                    c["input"]["command"].as_str().unwrap_or("").to_string()
+                } else {
+                    tool_summary(name, &c["input"])
+                };
                 let failed = if c["error"] == true { "  (failed)" } else { "" };
-                format!("{} {}{failed}", crate::tools::shown_name(name), crate::tools::one_line(&what).head(160))
+                format!(
+                    "{} {}{failed}",
+                    crate::tools::shown_name(name),
+                    crate::tools::one_line(&what).head(160)
+                )
             })
             .collect();
         let more = r.calls.len().saturating_sub(200);
-        let text = if more > 0 { format!("{}\n… and {more} more", lines.join("\n")) } else { lines.join("\n") };
+        let text = if more > 0 {
+            format!("{}\n… and {more} more", lines.join("\n"))
+        } else {
+            lines.join("\n")
+        };
         ui.push_id("repl-calls", |ui| code_block(ui, t, &text, t.ink2));
         caption(ui, "output", t.ink3);
     }
     let (out, more) = cut_output(&r.text);
-    let hits = (!r.error && name == "SEARCH").then(|| crate::tools::search_results(&r.text)).flatten();
+    let hits = (!r.error && name == "SEARCH")
+        .then(|| crate::tools::search_results(&r.text))
+        .flatten();
     if let Some(hits) = hits {
         search_view(ui, t, &hits);
-    } else if !r.error && name == "READ" && read_view(ui, t, input["path"].as_str().unwrap_or(""), &out) {
+    } else if !r.error
+        && name == "READ"
+        && read_view(ui, t, input["path"].as_str().unwrap_or(""), &out)
+    {
         // Shown with its line numbers, colored as code when it is.
-    } else if !r.error && is_command(name) && let Some(syntax) = output_syntax(input["command"].as_str().unwrap_or(""), &out) {
+    } else if !r.error
+        && is_command(name)
+        && let Some(syntax) = output_syntax(input["command"].as_str().unwrap_or(""), &out)
+    {
         code_view(ui, t, Some(syntax), &[(None, out.trim_end())], None);
     } else {
         code_block(ui, t, &out, if r.error { t.error } else { t.ink });
     }
     if more > 0 {
-        caption(ui, &format!("{more} more line{}", crate::plural(more)), t.ink3);
+        caption(
+            ui,
+            &format!("{more} more line{}", crate::plural(more)),
+            t.ink3,
+        );
     }
     for img in &r.images {
         images::show(ui, img, 240.0);
@@ -1594,21 +2414,37 @@ fn tool_output_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value, r: &ToolO
 /// An EDIT's lines added and removed, for its row: old_string's and
 /// new_string's lines past the ones they start and end with alike, times
 /// the replacements its result counts. None for a failed edit.
-pub(crate) fn edit_stats(name: &str, input: &Value, result: Option<&ToolOut>) -> Option<(usize, usize)> {
+pub(crate) fn edit_stats(
+    name: &str,
+    input: &Value,
+    result: Option<&ToolOut>,
+) -> Option<(usize, usize)> {
     if !matches!(name, "EDIT" | "Edit") || result.is_some_and(|r| r.error) {
         return None;
     }
     let lines = |k: &str| input[k].as_str().map(|s| s.lines().collect::<Vec<_>>());
-    let (old, new) = (lines("old_string")?, lines("new_string").unwrap_or_default());
+    let (old, new) = (
+        lines("old_string")?,
+        lines("new_string").unwrap_or_default(),
+    );
     let same_start = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
     let room = old.len().min(new.len()) - same_start;
-    let same_end = old.iter().rev().zip(new.iter().rev()).take(room).take_while(|(a, b)| a == b).count();
+    let same_end = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
     // "(3 replacements; …)" with replace_all.
     let times = result
         .and_then(|r| r.text.split_once(" replacements;"))
         .and_then(|(before, _)| before.rsplit('(').next()?.parse::<usize>().ok())
         .unwrap_or(1);
-    Some(((new.len() - same_start - same_end) * times, (old.len() - same_start - same_end) * times))
+    Some((
+        (new.len() - same_start - same_end) * times,
+        (old.len() - same_start - same_end) * times,
+    ))
 }
 
 /// The lines a READ covers, for its row: from its result (the numbered
@@ -1617,7 +2453,10 @@ pub(crate) fn line_span(name: &str, input: &Value, result: Option<&ToolOut>) -> 
     let ok = result.filter(|r| !r.error);
     match name {
         "READ" => {
-            let number = |l: &str| l.split_once('\t').and_then(|(n, _)| n.trim().parse::<u64>().ok());
+            let number = |l: &str| {
+                l.split_once('\t')
+                    .and_then(|(n, _)| n.trim().parse::<u64>().ok())
+            };
             if let Some(r) = ok {
                 let first = r.text.lines().find_map(number)?;
                 // The whole file read: nothing to add to its path.
@@ -1625,7 +2464,11 @@ pub(crate) fn line_span(name: &str, input: &Value, result: Option<&ToolOut>) -> 
                     return None;
                 }
                 let last = r.text.lines().rev().find_map(number)?;
-                return Some(if first == last { format!("line {first}") } else { format!("lines {first}–{last}") });
+                return Some(if first == last {
+                    format!("line {first}")
+                } else {
+                    format!("lines {first}–{last}")
+                });
             }
             let offset = input["offset"].as_u64();
             match (offset, input["limit"].as_u64()) {
@@ -1670,11 +2513,25 @@ fn write_progress(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
     let text = text.unwrap_or("");
     let lines = text.lines().count();
     row_details(ui, NAME_X, |ui| {
-        caption(ui, &format!("{verb}… {lines} line{}, {}", crate::plural(lines), size_text(text.len() as u64)), t.ink3);
+        caption(
+            ui,
+            &format!(
+                "{verb}… {lines} line{}, {}",
+                crate::plural(lines),
+                size_text(text.len() as u64)
+            ),
+            t.ink3,
+        );
         if !text.is_empty() {
             let all: Vec<&str> = text.lines().collect();
             let tail = all[all.len().saturating_sub(PROGRESS_LINES)..].join("\n");
-            code_view(ui, t, highlight::for_path(input["path"].as_str().unwrap_or("")), &[(None, &tail)], None);
+            code_view(
+                ui,
+                t,
+                highlight::for_path(input["path"].as_str().unwrap_or("")),
+                &[(None, &tail)],
+                None,
+            );
         }
     });
 }
@@ -1682,21 +2539,39 @@ fn write_progress(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
 /// A running EXECUTE's output so far, in its open row: how long it has run
 /// and how many lines it printed, then its last lines.
 fn command_output(ui: &mut Ui, t: &Theme, id: &str) {
-    let Some((lines, total, ran)) = crate::tasks::streaming(id, OPEN_COMMAND_LINES) else { return };
-    let count = if total == 0 { "no output yet".to_string() } else { format!("{total} line{}", crate::plural(total)) };
-    caption(ui, &format!("Running… {}, {count}", crate::tasks::fmt_duration(ran)), t.ink3);
+    let Some((lines, total, ran)) = crate::tasks::streaming(id, OPEN_COMMAND_LINES) else {
+        return;
+    };
+    let count = if total == 0 {
+        "no output yet".to_string()
+    } else {
+        format!("{total} line{}", crate::plural(total))
+    };
+    caption(
+        ui,
+        &format!("Running… {}, {count}", crate::tasks::fmt_duration(ran)),
+        t.ink3,
+    );
     if !lines.is_empty() {
         let text = lines.join("\n");
         // The end of it, at most OUTPUT_SHOWN characters from a line start.
         let n = text.chars().count();
-        let text = match text.char_indices().nth(n.saturating_sub(OUTPUT_SHOWN)).map(|(i, _)| i).filter(|&i| i > 0) {
-            Some(i) => text[i..].split_once('\n').map_or(&text[i..], |(_, rest)| rest),
+        let text = match text
+            .char_indices()
+            .nth(n.saturating_sub(OUTPUT_SHOWN))
+            .map(|(i, _)| i)
+            .filter(|&i| i > 0)
+        {
+            Some(i) => text[i..]
+                .split_once('\n')
+                .map_or(&text[i..], |(_, rest)| rest),
             None => text.as_str(),
         };
         code_block(ui, t, text.trim_end(), t.ink2);
     }
     // The time ticks on even while no output comes.
-    ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs(1));
 }
 
 /// The fields of a tool input still streaming in, from its JSON so far:
@@ -1735,15 +2610,25 @@ fn partial_string(it: &mut Chars) -> (String, bool) {
                 Some('f') => s.push('\u{c}'),
                 Some('u') => {
                     let hex: String = it.by_ref().take(4).collect();
-                    let Ok(mut code) = u32::from_str_radix(&hex, 16) else { return (s, false) };
+                    let Ok(mut code) = u32::from_str_radix(&hex, 16) else {
+                        return (s, false);
+                    };
                     if hex.len() < 4 {
                         return (s, false);
                     }
                     if (0xD800..0xDC00).contains(&code) {
                         // A surrogate pair: the low half follows as \uXXXX.
                         let next: String = it.by_ref().take(6).collect();
-                        match next.strip_prefix("\\u").and_then(|h| u32::from_str_radix(h, 16).ok()).filter(|_| next.len() == 6) {
-                            Some(low) => code = 0x10000 + ((code - 0xD800) << 10) + (low.wrapping_sub(0xDC00) & 0x3FF),
+                        match next
+                            .strip_prefix("\\u")
+                            .and_then(|h| u32::from_str_radix(h, 16).ok())
+                            .filter(|_| next.len() == 6)
+                        {
+                            Some(low) => {
+                                code = 0x10000
+                                    + ((code - 0xD800) << 10)
+                                    + (low.wrapping_sub(0xDC00) & 0x3FF)
+                            }
                             None => return (s, false),
                         }
                     }
@@ -1801,14 +2686,20 @@ fn partial_object(it: &mut Chars, out: &mut serde_json::Map<String, Value>) -> b
             Some(c) if c.is_ascii_digit() || matches!(c, '-' | 't' | 'f' | 'n') => {
                 // A number, true, false or null: kept once it has ended.
                 let mut scalar = String::new();
-                while let Some(&c) = it.peek().filter(|c| !matches!(**c, ',' | '}') && !c.is_whitespace()) {
+                while let Some(&c) = it
+                    .peek()
+                    .filter(|c| !matches!(**c, ',' | '}') && !c.is_whitespace())
+                {
                     scalar.push(c);
                     it.next();
                 }
                 if it.peek().is_none() {
                     return false;
                 }
-                if let Ok(v) = serde_json::from_str::<Value>(&scalar).map_err(drop).and_then(|v| if v.is_null() { Err(()) } else { Ok(v) }) {
+                if let Ok(v) = serde_json::from_str::<Value>(&scalar)
+                    .map_err(drop)
+                    .and_then(|v| if v.is_null() { Err(()) } else { Ok(v) })
+                {
                     out.insert(key, v);
                 }
                 continue;
@@ -1818,7 +2709,9 @@ fn partial_object(it: &mut Chars, out: &mut serde_json::Map<String, Value>) -> b
         // An array: skipped to the next field.
         let (mut depth, mut quoted, mut escaped) = (0i32, false, false);
         loop {
-            let Some(c) = it.peek().copied() else { return false };
+            let Some(c) = it.peek().copied() else {
+                return false;
+            };
             if quoted {
                 it.next();
                 match c {
@@ -1845,11 +2738,23 @@ fn partial_object(it: &mut Chars, out: &mut serde_json::Map<String, Value>) -> b
 /// API gave no count, "Thought for Ns"); clicking shows the (summarized)
 /// thinking when there is any, or with Rewrite thinking its rewrite
 /// (sections streaming in, "Rewriting…" while more is to come).
-pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize), streaming: bool, rewrite: Option<&rewrites::Thoughts>, in_block: bool) {
+pub(crate) fn thinking_row(
+    ui: &mut Ui,
+    t: &Theme,
+    b: &Value,
+    key: (usize, usize),
+    streaming: bool,
+    rewrite: Option<&rewrites::Thoughts>,
+    in_block: bool,
+) {
     let label = if streaming {
         "Thinking…".to_string()
     } else if let Some(n) = b["_oak_tokens"].as_u64().filter(|&n| n > 0) {
-        format!("Thought for {} token{}", crate::agent::with_commas(n), crate::plural(n))
+        format!(
+            "Thought for {} token{}",
+            crate::agent::with_commas(n),
+            crate::plural(n)
+        )
     } else if let Some(ms) = b["_oak_ms"].as_u64() {
         format!("Thought for {}s", ms.div_ceil(1000).max(1))
     } else {
@@ -1857,9 +2762,21 @@ pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize
     };
     let text = b["text"].as_str().unwrap_or("").trim();
     let x = if in_block { NAME_X } else { 2.0 };
-    let (rect, open, hovered) = row(ui, t, key_id("thinking-open", key), !text.is_empty(), in_block);
+    let (rect, open, hovered) = row(
+        ui,
+        t,
+        key_id("thinking-open", key),
+        !text.is_empty(),
+        in_block,
+    );
     let color = if hovered { t.ink2 } else { t.ink3 };
-    ui.painter().text(egui::pos2(rect.left() + x, mid_y(ui, rect)), Align2::LEFT_CENTER, label, FontId::proportional(13.0), color);
+    ui.painter().text(
+        egui::pos2(rect.left() + x, mid_y(ui, rect)),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        color,
+    );
     if open && !text.is_empty() {
         row_details(ui, x, |ui| match rewrite {
             None => {
@@ -1880,21 +2797,43 @@ pub(crate) fn thinking_row(ui: &mut Ui, t: &Theme, b: &Value, key: (usize, usize
     }
 }
 
-
 /// Tool calls from outside a conversation (a plugin's chat,
 /// `oak_sdk::ui::work_block`), drawn as a conversation's are: one block,
 /// the thinking before them first.
 /// `results` are the calls' outputs by id, as text (true: failed).
-pub(crate) fn tool_block(ui: &mut Ui, t: &Theme, thinking: Option<(&Value, (usize, usize), bool)>, calls: &[Value], results: &HashMap<String, (String, bool)>) {
+pub(crate) fn tool_block(
+    ui: &mut Ui,
+    t: &Theme,
+    thinking: Option<(&Value, (usize, usize), bool)>,
+    calls: &[Value],
+    results: &HashMap<String, (String, bool)>,
+) {
     let results: Results = results
         .iter()
-        .map(|(id, (text, error))| (id.as_str(), ToolOut { text: text.as_str().into(), images: vec![], error: *error, display: &[], calls: &[], cleared: false }))
+        .map(|(id, (text, error))| {
+            (
+                id.as_str(),
+                ToolOut {
+                    text: text.as_str().into(),
+                    images: vec![],
+                    error: *error,
+                    display: &[],
+                    calls: &[],
+                    cleared: false,
+                },
+            )
+        })
         .collect();
     let mut items: Vec<Item> = vec![];
     if let Some((b, key, streaming)) = thinking {
         items.push(Item::Thinking(b, key, streaming, None));
     }
-    items.extend(calls.iter().enumerate().map(|(i, b)| Item::Tool(b, (usize::MAX, i))));
+    items.extend(
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, b)| Item::Tool(b, (usize::MAX, i))),
+    );
     work_block(ui, t, &items, &results, None);
 }
 
@@ -1903,29 +2842,63 @@ pub(crate) fn tool_block(ui: &mut Ui, t: &Theme, thinking: Option<(&Value, (usiz
 /// conversation's messages (`revert`), each row has the revert menu.
 fn work_block(ui: &mut Ui, t: &Theme, run: &[Item], results: &Results, revert: Option<&[Value]>) {
     let font = FontId::proportional(13.0);
-    let width = |n: &str| ui.fonts_mut(|f| f.layout_no_wrap(n.to_string(), font.clone(), Color32::WHITE).size().x);
+    let width = |n: &str| {
+        ui.fonts_mut(|f| {
+            f.layout_no_wrap(n.to_string(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+    };
     let longest = run
         .iter()
-        .filter_map(|x| if let Item::Tool(b, _) = x { Some(shown(b)) } else { None })
+        .filter_map(|x| {
+            if let Item::Tool(b, _) = x {
+                Some(shown(b))
+            } else {
+                None
+            }
+        })
         .map(|n| width(&n))
         .fold(0.0, f32::max)
         // The summaries line up after the names, but one long name (such as
         // TASK_GET_NEW_OUTPUT) shouldn't push them all far to the right.
         .min(width(&"M".repeat(NAME_COLUMN)) * 0.8);
     ui.add_space(2.0);
-    egui::Frame::new().fill(t.tool_bg).inner_margin(Margin::symmetric(0, 3)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 0.0;
-        for x in run {
-            let (rect, key) = match x {
-                Item::Tool(b, key) => (ui.scope(|ui| tool_row(ui, t, b, results, longest)).response.rect, *key),
-                Item::Thinking(b, key, streaming, rewrite) => (ui.scope(|ui| thinking_row(ui, t, b, *key, *streaming, rewrite.as_ref(), true)).response.rect, *key),
-                _ => continue,
-            };
-            item_menu(ui, rect, key_id("item-menu", key), None, revert.map(|m| (m, key)), None);
-            time_tip(ui, header(rect), key_id("item-time", key), item_at(x));
-        }
-    });
+    egui::Frame::new()
+        .fill(t.tool_bg)
+        .inner_margin(Margin::symmetric(0, 3))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for x in run {
+                let (rect, key) = match x {
+                    Item::Tool(b, key) => (
+                        ui.scope(|ui| tool_row(ui, t, b, results, longest))
+                            .response
+                            .rect,
+                        *key,
+                    ),
+                    Item::Thinking(b, key, streaming, rewrite) => (
+                        ui.scope(|ui| {
+                            thinking_row(ui, t, b, *key, *streaming, rewrite.as_ref(), true)
+                        })
+                        .response
+                        .rect,
+                        *key,
+                    ),
+                    _ => continue,
+                };
+                item_menu(
+                    ui,
+                    rect,
+                    key_id("item-menu", key),
+                    None,
+                    revert.map(|m| (m, key)),
+                    None,
+                );
+                time_tip(ui, header(rect), key_id("item-time", key), item_at(x));
+            }
+        });
     ui.add_space(2.0);
 }
 
@@ -1954,7 +2927,13 @@ pub(crate) fn units_split(items: &[Item], split: Option<usize>) -> Vec<std::ops:
     let mut out = vec![];
     let mut i = 0;
     while i < items.len() {
-        let end = if work(&items[i]) { (i + 1..items.len()).find(|&j| !work(&items[j]) || Some(j) == split).unwrap_or(items.len()) } else { i + 1 };
+        let end = if work(&items[i]) {
+            (i + 1..items.len())
+                .find(|&j| !work(&items[j]) || Some(j) == split)
+                .unwrap_or(items.len())
+        } else {
+            i + 1
+        };
         out.push(i..end);
         i = end;
     }
@@ -1970,24 +2949,58 @@ pub(crate) fn unit_sig(run: &[Item], results: &Results) -> u64 {
         std::mem::discriminant(x).hash(&mut h);
         match x {
             Item::Summary { text, cut, time } => (text.len(), cut, time).hash(&mut h),
-            Item::Note(s, _) | Item::Beat(s, _) | Item::AskReply(s, _) => (addr(s), s.len()).hash(&mut h),
-            Item::AgentMessage { body, key, last, .. } => (body.len(), key, last).hash(&mut h),
-            Item::Mark(m) => (m.at, m.kind as u8, m.text.len(), m.time, m.done, m.sent.len()).hash(&mut h),
-            Item::UserText(s, r, _, end) => (s.len(), r.map(|r| (r.msg, r.block)), end).hash(&mut h),
-            Item::Image(b, r) | Item::File(b, r) => (*b as *const Value as usize, r.map(|r| (r.msg, r.block))).hash(&mut h),
+            Item::Note(s, _) | Item::Beat(s, _) | Item::AskReply(s, _) => {
+                (addr(s), s.len()).hash(&mut h)
+            }
+            Item::AgentMessage {
+                body, key, last, ..
+            } => (body.len(), key, last).hash(&mut h),
+            Item::Mark(m) => (
+                m.at,
+                m.kind as u8,
+                m.text.len(),
+                m.time,
+                m.done,
+                m.sent.len(),
+            )
+                .hash(&mut h),
+            Item::UserText(s, r, _, end) => {
+                (s.len(), r.map(|r| (r.msg, r.block)), end).hash(&mut h)
+            }
+            Item::Image(b, r) | Item::File(b, r) => {
+                (*b as *const Value as usize, r.map(|r| (r.msg, r.block))).hash(&mut h)
+            }
             Item::Text(s, key, _, tps, rewrite, end) => {
                 (s.len(), key, tps.map(f64::to_bits), end).hash(&mut h);
-                rewrite.as_ref().map(|r| (rewrites::no_drafts(), match r {
-                    rewrites::State::Drafting => (0, 0),
-                    rewrites::State::Streaming(t) => (1, t.len()),
-                    rewrites::State::Done(t) => (2, t.len()),
-                    rewrites::State::Failed(e) => (3, e.len()),
-                })).hash(&mut h);
+                rewrite
+                    .as_ref()
+                    .map(|r| {
+                        (
+                            rewrites::no_drafts(),
+                            match r {
+                                rewrites::State::Drafting => (0, 0),
+                                rewrites::State::Streaming(t) => (1, t.len()),
+                                rewrites::State::Done(t) => (2, t.len()),
+                                rewrites::State::Failed(e) => (3, e.len()),
+                            },
+                        )
+                    })
+                    .hash(&mut h);
             }
             Item::Thinking(b, key, streaming, rewrite) => {
                 let [text, ms, tokens] = crate::fields(b, ["text", "_oak_ms", "_oak_tokens"]);
-                (key, streaming, text.and_then(Value::as_str).map_or(0, str::len), ms.and_then(Value::as_u64), tokens.and_then(Value::as_u64)).hash(&mut h);
-                rewrite.as_ref().map(|r| (r.text.len(), r.pending, r.errors.len())).hash(&mut h);
+                (
+                    key,
+                    streaming,
+                    text.and_then(Value::as_str).map_or(0, str::len),
+                    ms.and_then(Value::as_u64),
+                    tokens.and_then(Value::as_u64),
+                )
+                    .hash(&mut h);
+                rewrite
+                    .as_ref()
+                    .map(|r| (r.text.len(), r.pending, r.errors.len()))
+                    .hash(&mut h);
             }
             Item::Tool(b, key) | Item::Display(b, key) => {
                 let [id, partial] = crate::fields(b, ["id", "_oak_partial"]);
@@ -1995,7 +3008,9 @@ pub(crate) fn unit_sig(run: &[Item], results: &Results) -> u64 {
                 (id, key).hash(&mut h);
                 partial.and_then(Value::as_str).map(str::len).hash(&mut h);
                 let result = results.get(id);
-                result.map(|r| (r.error, r.text.len(), r.images.len(), r.display.len())).hash(&mut h);
+                result
+                    .map(|r| (r.error, r.text.len(), r.images.len(), r.display.len()))
+                    .hash(&mut h);
                 // A running command's output, in its open row, grows.
                 if result.is_none() {
                     crate::tasks::streaming_len(id).hash(&mut h);
@@ -2010,7 +3025,16 @@ pub(crate) fn unit_sig(run: &[Item], results: &Results) -> u64 {
 pub(crate) fn tail_sig(conv: &Conversation, live: &Live, editing: &Option<Editing>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
-    (conv.paused, live.pause_queued, live.pause_settled(conv.paused), live.busy, &live.status, live.ask.as_ref().map(|a| a.background), live.queued.len()).hash(&mut h);
+    (
+        conv.paused,
+        live.pause_queued,
+        live.pause_settled(conv.paused),
+        live.busy,
+        &live.status,
+        live.ask.as_ref().map(|a| a.background),
+        live.queued.len(),
+    )
+        .hash(&mut h);
     for q in &live.queued {
         (q.id, q.text.len(), q.images.len()).hash(&mut h);
     }
@@ -2022,18 +3046,38 @@ pub(crate) fn tail_sig(conv: &Conversation, live: &Live, editing: &Option<Editin
 /// it (`item_menu`); with the conversation's messages (`revert`), the
 /// model's items and the messages from other sessions also revert to
 /// before them there.
-pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::ops::Range<usize>, results: &Results, revert: Option<&[Value]>) {
+pub(crate) fn transcript_unit(
+    ui: &mut Ui,
+    t: &Theme,
+    items: &[Item],
+    u: std::ops::Range<usize>,
+    results: &Results,
+    revert: Option<&[Value]>,
+) {
     let run = &items[u.clone()];
-    let menu = |ui: &mut Ui, rect: Rect, key: (usize, usize), message: Option<&dyn Fn() -> String>| {
-        item_menu(ui, rect, key_id("item-menu", key), message, revert.map(|m| (m, key)), None);
-    };
+    let menu =
+        |ui: &mut Ui, rect: Rect, key: (usize, usize), message: Option<&dyn Fn() -> String>| {
+            item_menu(
+                ui,
+                rect,
+                key_id("item-menu", key),
+                message,
+                revert.map(|m| (m, key)),
+                None,
+            );
+        };
     if matches!(run[0], Item::Thinking(..) | Item::Tool(..)) {
         if run.iter().any(|x| matches!(x, Item::Tool(..))) {
             work_block(ui, t, run, results, revert);
         } else {
             for x in run {
                 if let Item::Thinking(b, key, streaming, rewrite) = x {
-                    let r = ui.scope(|ui| thinking_row(ui, t, b, *key, *streaming, rewrite.as_ref(), false)).response.rect;
+                    let r = ui
+                        .scope(|ui| {
+                            thinking_row(ui, t, b, *key, *streaming, rewrite.as_ref(), false)
+                        })
+                        .response
+                        .rect;
                     menu(ui, r, *key, None);
                     time_tip(ui, header(r), key_id("item-time", *key), item_at(x));
                 }
@@ -2044,58 +3088,134 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
     let drawn = ui.scope(|ui| {
         match &run[0] {
             Item::Summary { text, cut, time } => summary_banner(ui, t, text, *cut, *time),
-            Item::Note(note, _) => notice(ui, t, note, "note-open", TASK_NOTE_ICON, (agent::ALERT_TAG, "</usage-alert>"), Some((NOTE_TAG, "</task-notification>"))),
-            Item::Beat(beat, _) => notice(ui, t, beat, "beat-open", HEARTBEAT_ICON, (BEAT_TAG, "</heartbeat>"), None),
+            Item::Note(note, _) => notice(
+                ui,
+                t,
+                note,
+                "note-open",
+                TASK_NOTE_ICON,
+                (agent::ALERT_TAG, "</usage-alert>"),
+                Some((NOTE_TAG, "</task-notification>")),
+            ),
+            Item::Beat(beat, _) => notice(
+                ui,
+                t,
+                beat,
+                "beat-open",
+                HEARTBEAT_ICON,
+                (BEAT_TAG, "</heartbeat>"),
+                None,
+            ),
             Item::AskReply(text, _) => {
                 let body = match text.strip_prefix(agent::ANSWERS_TAG) {
                     Some(b) => b.trim_end_matches("</ask-answers>"),
-                    None => text.strip_prefix(agent::ASK_TAG).unwrap_or(text).trim_end_matches("</ask-request>"),
+                    None => text
+                        .strip_prefix(agent::ASK_TAG)
+                        .unwrap_or(text)
+                        .trim_end_matches("</ask-request>"),
                 }
                 .trim();
                 let label = match body {
                     b if b.starts_with("The user answered") => "your answers to Oak's questions",
                     b if b.starts_with("The user skipped") => "you skipped Oak's questions",
-                    b if b.starts_with("The user accepted") => "you accepted Oak's request to ask you",
-                    b if b.starts_with("The user declined") => "you declined Oak's request to ask you",
+                    b if b.starts_with("The user accepted") => {
+                        "you accepted Oak's request to ask you"
+                    }
+                    b if b.starts_with("The user declined") => {
+                        "you declined Oak's request to ask you"
+                    }
                     _ => "Oak's request to ask you is gone: it asks with ASK now",
                 };
                 let id = Id::unique(("ask-reply-open", addr(text), text.len()));
                 notice_row(ui, t, id, label, Some(body), text, |p, r| {
-                    p.circle_filled(egui::pos2(r.left() + 8.0, r.center().y), 3.5, tool_color("ASK"));
+                    p.circle_filled(
+                        egui::pos2(r.left() + 8.0, r.center().y),
+                        3.5,
+                        tool_color("ASK"),
+                    );
                 });
             }
             Item::Mark(m) => mark_row(ui, t, m),
-            Item::AgentMessage { from, last, body, key, .. } => {
-                let r = ui.scope(|ui| agent_message_row(ui, t, from, *last, body, *key)).response.rect;
+            Item::AgentMessage {
+                from,
+                last,
+                body,
+                key,
+                ..
+            } => {
+                let r = ui
+                    .scope(|ui| agent_message_row(ui, t, from, *last, body, *key))
+                    .response
+                    .rect;
                 menu(ui, r, *key, Some(&|| body.to_string()));
             }
             Item::UserText(text, revert, at, end) => {
                 ui.add_space(6.0);
                 let right = if revert.is_some() { 36 } else { 12 };
                 let select_id = Id::unique(("user-text", addr(text)));
-                let frame = crate::select::message(ui, select_id, || text.to_string(), |ui| egui::Frame::new()
-                    .fill(t.panel)
-                    .stroke(Stroke::new(1.0, t.line))
-                    .inner_margin(Margin { left: 12, right, top: 12, bottom: 12 })
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        if crate::find::active() {
-                            // Matches marked (Ctrl+F).
-                            let job = egui::text::LayoutJob::simple(text.to_string(), egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color(), ui.available_width());
-                            markdown::marked_label(ui, job);
-                        } else {
-                            ui.label(*text);
-                        }
-                    }));
+                let frame = crate::select::message(
+                    ui,
+                    select_id,
+                    || text.to_string(),
+                    |ui| {
+                        egui::Frame::new()
+                            .fill(t.panel)
+                            .stroke(Stroke::new(1.0, t.line))
+                            .inner_margin(Margin {
+                                left: 12,
+                                right,
+                                top: 12,
+                                bottom: 12,
+                            })
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                if crate::find::active() {
+                                    // Matches marked (Ctrl+F).
+                                    let job = egui::text::LayoutJob::simple(
+                                        text.to_string(),
+                                        egui::TextStyle::Body.resolve(ui.style()),
+                                        ui.visuals().text_color(),
+                                        ui.available_width(),
+                                    );
+                                    markdown::marked_label(ui, job);
+                                } else {
+                                    ui.label(*text);
+                                }
+                            })
+                    },
+                );
                 let r = frame.response.rect;
                 let id = Id::unique(("user-menu", addr(text)));
                 // (From before the message: the same place Revert goes back to.)
-                item_menu(ui, r, id, Some(&|| text.to_string()), None, revert.map(|at| agent::RevertTo::Block(at.msg, at.block, at.first.clone())));
+                item_menu(
+                    ui,
+                    r,
+                    id,
+                    Some(&|| text.to_string()),
+                    None,
+                    revert.map(|at| agent::RevertTo::Block(at.msg, at.block, at.first.clone())),
+                );
                 if let Some(at) = revert {
-                    revert_control(ui, t, Rect::from_min_size(egui::pos2(r.right() - 30.0, r.top() + 8.0), vec2(22.0, 22.0)), *at);
+                    revert_control(
+                        ui,
+                        t,
+                        Rect::from_min_size(
+                            egui::pos2(r.right() - 30.0, r.top() + 8.0),
+                            vec2(22.0, 22.0),
+                        ),
+                        *at,
+                    );
                 }
                 if *end {
-                    message_bar(ui, t, r, Id::unique(("user-bar", addr(text))), || turn_text(items, u.start), *at, None);
+                    message_bar(
+                        ui,
+                        t,
+                        r,
+                        Id::unique(("user-bar", addr(text))),
+                        || turn_text(items, u.start),
+                        *at,
+                        None,
+                    );
                 }
             }
             Item::Image(b, revert) => {
@@ -2103,14 +3223,30 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
                 if let Some(r) = images::show(ui, b, 240.0)
                     && let Some(at) = revert
                 {
-                    revert_control(ui, t, Rect::from_min_size(egui::pos2(r.rect.right() + 6.0, r.rect.top()), vec2(22.0, 22.0)), *at);
+                    revert_control(
+                        ui,
+                        t,
+                        Rect::from_min_size(
+                            egui::pos2(r.rect.right() + 6.0, r.rect.top()),
+                            vec2(22.0, 22.0),
+                        ),
+                        *at,
+                    );
                 }
             }
             Item::File(b, revert) => {
                 ui.add_space(4.0);
                 let r = file_chip(ui, t, b);
                 if let Some(at) = revert {
-                    revert_control(ui, t, Rect::from_min_size(egui::pos2(r.rect.right() + 6.0, r.rect.center().y - 11.0), vec2(22.0, 22.0)), *at);
+                    revert_control(
+                        ui,
+                        t,
+                        Rect::from_min_size(
+                            egui::pos2(r.rect.right() + 6.0, r.rect.center().y - 11.0),
+                            vec2(22.0, 22.0),
+                        ),
+                        *at,
+                    );
                 }
             }
             Item::Text(text, key, at, tps, rewrite, end) => {
@@ -2126,7 +3262,15 @@ pub(crate) fn transcript_unit(ui: &mut Ui, t: &Theme, items: &[Item], u: std::op
                 };
                 menu(ui, shown.response.rect, *key, Some(&message));
                 if *end {
-                    message_bar(ui, t, r, key_id("reply-bar", *key), || turn_text(items, u.start), *at, *tps);
+                    message_bar(
+                        ui,
+                        t,
+                        r,
+                        key_id("reply-bar", *key),
+                        || turn_text(items, u.start),
+                        *at,
+                        *tps,
+                    );
                 }
             }
             Item::Display(b, key) => {
@@ -2146,8 +3290,17 @@ fn item_at(x: &Item) -> Option<i64> {
     let at = match x {
         Item::Summary { time, .. } => Some(*time),
         Item::Mark(m) => Some(m.time),
-        Item::Note(_, at) | Item::Beat(_, at) | Item::AskReply(_, at) | Item::AgentMessage { at, .. } | Item::UserText(_, _, at, _) | Item::Text(_, _, at, ..) => *at,
-        Item::Image(b, _) | Item::File(b, _) | Item::Display(b, _) | Item::Tool(b, _) | Item::Thinking(b, ..) => b.get("_oak_at").and_then(Value::as_i64),
+        Item::Note(_, at)
+        | Item::Beat(_, at)
+        | Item::AskReply(_, at)
+        | Item::AgentMessage { at, .. }
+        | Item::UserText(_, _, at, _)
+        | Item::Text(_, _, at, ..) => *at,
+        Item::Image(b, _)
+        | Item::File(b, _)
+        | Item::Display(b, _)
+        | Item::Tool(b, _)
+        | Item::Thinking(b, ..) => b.get("_oak_at").and_then(Value::as_i64),
     };
     at.filter(|&at| at > 0)
 }
@@ -2164,7 +3317,8 @@ pub(crate) fn time_tip(ui: &mut Ui, rect: Rect, id: Id, at: Option<i64>) {
     if let Some(at) = at.filter(|&at| at > 0)
         && ui.rect_contains_pointer(rect)
     {
-        ui.interact(rect, id, Sense::hover()).on_hover_text(full_time(at, local_offset_ms()));
+        ui.interact(rect, id, Sense::hover())
+            .on_hover_text(full_time(at, local_offset_ms()));
     }
 }
 
@@ -2184,16 +3338,37 @@ pub(crate) fn shown_text<'a>(text: &'a str, r: &'a rewrites::State) -> &'a str {
 /// comes). With No drafts, just the rewrite, after "Writing…" while the
 /// model drafts and the rewrite starts. Returns the reply's rect, for its
 /// message bar.
-fn unslop_view(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize), r: &rewrites::State) -> Rect {
+fn unslop_view(
+    ui: &mut Ui,
+    t: &Theme,
+    text: &str,
+    key: (usize, usize),
+    r: &rewrites::State,
+) -> Rect {
     let no_drafts = rewrites::no_drafts();
     if !no_drafts {
         let drafting = matches!(r, rewrites::State::Drafting);
         let (rect, open, hovered) = row(ui, t, key_id("unslop-open", key), true, false);
         let color = if hovered { t.ink2 } else { t.ink3 };
         let p = ui.painter();
-        chevron(p, egui::pos2(rect.left() + 7.0, mid_y(ui, rect)), open, color);
-        let label = if drafting { "Drafting a message…" } else { "Drafted a message" };
-        p.text(egui::pos2(rect.left() + 18.0, mid_y(ui, rect)), Align2::LEFT_CENTER, label, FontId::proportional(13.0), color);
+        chevron(
+            p,
+            egui::pos2(rect.left() + 7.0, mid_y(ui, rect)),
+            open,
+            color,
+        );
+        let label = if drafting {
+            "Drafting a message…"
+        } else {
+            "Drafted a message"
+        };
+        p.text(
+            egui::pos2(rect.left() + 18.0, mid_y(ui, rect)),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(13.0),
+            color,
+        );
         if open {
             row_details(ui, 18.0, |ui| {
                 crate::widgets::inset(ui, t, Color32::TRANSPARENT, 10, |ui| {
@@ -2206,15 +3381,29 @@ fn unslop_view(ui: &mut Ui, t: &Theme, text: &str, key: (usize, usize), r: &rewr
         }
     }
     match r {
-        rewrites::State::Drafting | rewrites::State::Streaming(_) if shown_text(text, r).is_empty() => {
-            ui.label(RichText::new(if no_drafts { "Writing…" } else { "Rewriting…" }).color(t.ink3)).rect
+        rewrites::State::Drafting | rewrites::State::Streaming(_)
+            if shown_text(text, r).is_empty() =>
+        {
+            ui.label(
+                RichText::new(if no_drafts {
+                    "Writing…"
+                } else {
+                    "Rewriting…"
+                })
+                .color(t.ink3),
+            )
+            .rect
         }
         rewrites::State::Failed(e) => {
             let r = ui.scope(|ui| markdown(ui, t, text, key)).response.rect;
             caption(ui, &format!("Rewrite failed: {e}"), t.error);
             r
         }
-        _ => ui.scope(|ui| markdown(ui, t, shown_text(text, r), key)).response.rect,
+        _ => {
+            ui.scope(|ui| markdown(ui, t, shown_text(text, r), key))
+                .response
+                .rect
+        }
     }
 }
 
@@ -2243,9 +3432,21 @@ fn revert_control(ui: &mut Ui, t: &Theme, rect: Rect, at: RevertAt) {
     if asking {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            caption(ui, "Remove this message and all later messages? Files are unchanged.", t.ink2);
-            if ui.add(Button::new(RichText::new("Revert").color(t.accent))).clicked() {
-                ui.data_mut(|d| d.insert_temp(Id::unique(REVERT_REQUEST), (at.msg, at.block, at.first.clone())));
+            caption(
+                ui,
+                "Remove this message and all later messages? Files are unchanged.",
+                t.ink2,
+            );
+            if ui
+                .add(Button::new(RichText::new("Revert").color(t.accent)))
+                .clicked()
+            {
+                ui.data_mut(|d| {
+                    d.insert_temp(
+                        Id::unique(REVERT_REQUEST),
+                        (at.msg, at.block, at.first.clone()),
+                    )
+                });
                 asking = false;
             }
             if ui.button("Cancel").clicked() {
@@ -2274,7 +3475,14 @@ pub(crate) const FORK_REQUEST: &str = "oak-fork-request";
 /// the reply streaming in; choosing it leaves the request for the app,
 /// `REWIND_REQUEST`), and Fork from here (`fork`: where a fork goes back
 /// to; it leaves `FORK_REQUEST`).
-fn item_menu(ui: &mut Ui, rect: Rect, id: Id, message: Option<&dyn Fn() -> String>, revert: Option<(&[Value], (usize, usize))>, fork: Option<agent::RevertTo>) {
+fn item_menu(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    message: Option<&dyn Fn() -> String>,
+    revert: Option<(&[Value], (usize, usize))>,
+    fork: Option<agent::RevertTo>,
+) {
     let target = revert.and_then(|(messages, key)| revert_target(key, messages));
     // (Where a fork goes back to: the item's own place, or `fork`'s.)
     let has_fork = fork.is_some() || target.is_some();
@@ -2297,7 +3505,13 @@ fn item_menu(ui: &mut Ui, rect: Rect, id: Id, message: Option<&dyn Fn() -> Strin
             }
         }
     };
-    crate::copy_menu::show(ui, id, rect, message, (revert.is_some() || has_fork).then_some(&entry as &dyn Fn(&mut Ui)));
+    crate::copy_menu::show(
+        ui,
+        id,
+        rect,
+        message,
+        (revert.is_some() || has_fork).then_some(&entry as &dyn Fn(&mut Ui)),
+    );
 }
 
 /// Where reverting to before the item at `key` goes back to: before its
@@ -2319,21 +3533,36 @@ const BAR_H: f32 = 22.0;
 /// room is kept either way, so nothing moves when it shows. The time is in
 /// words ("3 days ago"); hovering it gives the full date and time. A
 /// reply also shows its output speed (`tps`), only here, never pinned.
-pub(crate) fn message_bar(ui: &mut Ui, t: &Theme, msg: Rect, id: Id, copy_text: impl FnOnce() -> String, at: Option<i64>, tps: Option<f64>) {
+pub(crate) fn message_bar(
+    ui: &mut Ui,
+    t: &Theme,
+    msg: Rect,
+    id: Id,
+    copy_text: impl FnOnce() -> String,
+    at: Option<i64>,
+    tps: Option<f64>,
+) {
     // Tucked right under the message, not a full item gap below it.
     ui.add_space(2.0 - ui.spacing().item_spacing.y);
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
     let now = ui.input(|i| i.time);
     // A copy shows its check mark for a moment, pointer or not.
-    let copied = ui.data(|d| d.get_temp::<f64>(id.with("copied"))).is_some_and(|c| now - c < COPIED_FOR);
+    let copied = ui
+        .data(|d| d.get_temp::<f64>(id.with("copied")))
+        .is_some_and(|c| now - c < COPIED_FOR);
     let over = ui.rect_contains_pointer(msg.union(bar));
-    let shown = ui.ctx().animate_bool_with_time(id.with("shown"), over || copied, 0.12);
+    let shown = ui
+        .ctx()
+        .animate_bool_with_time(id.with("shown"), over || copied, 0.12);
     if shown <= 0.0 {
         return;
     }
     let fade = |c: Color32| c.gamma_multiply(shown);
     let p = ui.painter();
-    let copy = Rect::from_min_size(egui::pos2(bar.left(), bar.center().y - 11.0), vec2(22.0, 22.0));
+    let copy = Rect::from_min_size(
+        egui::pos2(bar.left(), bar.center().y - 11.0),
+        vec2(22.0, 22.0),
+    );
     let resp = ui.interact(copy, id.with("copy"), Sense::click());
     if resp.hovered() {
         p.rect_filled(copy, 0.0, fade(t.panel2));
@@ -2341,11 +3570,15 @@ pub(crate) fn message_bar(ui: &mut Ui, t: &Theme, msg: Rect, id: Id, copy_text: 
     }
     if copied {
         paint_check(p, copy.center() - vec2(5.0, 5.0), 10.0, fade(t.accent));
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(COPIED_FOR));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(COPIED_FOR));
     } else {
         draw_copy(p, copy, fade(if resp.hovered() { t.ink } else { t.ink3 }));
     }
-    if resp.on_hover_text(if copied { "Copied" } else { "Copy" }).clicked() {
+    if resp
+        .on_hover_text(if copied { "Copied" } else { "Copy" })
+        .clicked()
+    {
         ui.ctx().copy_text(copy_text().trim_end().to_string());
         ui.data_mut(|d| d.insert_temp(id.with("copied"), now));
     }
@@ -2356,7 +3589,8 @@ pub(crate) fn message_bar(ui: &mut Ui, t: &Theme, msg: Rect, id: Id, copy_text: 
         let r = Rect::from_min_size(pos, galley.size());
         x = r.right() + 12.0;
         p.galley(pos, galley, fade(t.ink3));
-        ui.interact(r, id.with(key), Sense::hover()).on_hover_text(tip);
+        ui.interact(r, id.with(key), Sense::hover())
+            .on_hover_text(tip);
     };
     if let Some(at) = at {
         let (now_ms, off) = (api::now_ms(), local_offset_ms());
@@ -2377,7 +3611,10 @@ const COPIED_FOR: f64 = 1.5;
 /// Two sheets, one over the other: copy.
 fn draw_copy(p: &egui::Painter, r: Rect, c: Color32) {
     let a = (r.width() * 0.36).round();
-    let front = Rect::from_min_size(r.center() + vec2(-a / 2.0 + 1.5, -a / 2.0 + 1.5), vec2(a, a));
+    let front = Rect::from_min_size(
+        r.center() + vec2(-a / 2.0 + 1.5, -a / 2.0 + 1.5),
+        vec2(a, a),
+    );
     let back = front.translate(vec2(-3.0, -3.0));
     let stroke = Stroke::new(1.3, c);
     p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
@@ -2421,7 +3658,11 @@ fn display_view(ui: &mut Ui, t: &Theme, b: &Value, results: &Results) {
         return;
     };
     if out.error {
-        caption(ui, &format!("Couldn't show the files: {}", out.text), t.error);
+        caption(
+            ui,
+            &format!("Couldn't show the files: {}", out.text),
+            t.error,
+        );
         return;
     }
     for f in out.display {
@@ -2433,18 +3674,50 @@ fn display_view(ui: &mut Ui, t: &Theme, b: &Value, results: &Results) {
         } else if let Some(text) = f["text"].as_str() {
             let lines = f["lines"].as_u64().unwrap_or(0);
             crate::widgets::inset(ui, t, t.panel, 10, |ui| {
-                file_link(ui, t, name, path, &format!("{lines} line{}", crate::plural(lines)));
+                file_link(
+                    ui,
+                    t,
+                    name,
+                    path,
+                    &format!("{lines} line{}", crate::plural(lines)),
+                );
                 ui.add_space(2.0);
                 let shown = text.lines().count() as u64;
-                ui.label(RichText::new(if text.trim().is_empty() { "(empty file)" } else { text.trim_end() }).font(markdown::code_font(12.5)).color(t.ink2));
+                ui.label(
+                    RichText::new(if text.trim().is_empty() {
+                        "(empty file)"
+                    } else {
+                        text.trim_end()
+                    })
+                    .font(markdown::code_font(12.5))
+                    .color(t.ink2),
+                );
                 if lines > shown {
-                    caption(ui, &format!("… {} more line{}", lines - shown, crate::plural(lines - shown)), t.ink3);
+                    caption(
+                        ui,
+                        &format!(
+                            "… {} more line{}",
+                            lines - shown,
+                            crate::plural(lines - shown)
+                        ),
+                        t.ink3,
+                    );
                 }
             });
         } else {
-            egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.line)).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
-                file_link(ui, t, name, path, &size_text(f["bytes"].as_u64().unwrap_or(0)));
-            });
+            egui::Frame::new()
+                .fill(t.panel)
+                .stroke(Stroke::new(1.0, t.line))
+                .inner_margin(Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    file_link(
+                        ui,
+                        t,
+                        name,
+                        path,
+                        &size_text(f["bytes"].as_u64().unwrap_or(0)),
+                    );
+                });
         }
         ui.add_space(6.0);
     }
@@ -2457,7 +3730,8 @@ fn file_link(ui: &mut Ui, t: &Theme, name: &str, path: &str, note: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(RichText::new(FILE_ICON).font(icons).color(t.ink3));
-        let resp = ui.add(egui::Label::new(RichText::new(name).small().color(t.ink2)).sense(Sense::click()));
+        let resp = ui
+            .add(egui::Label::new(RichText::new(name).small().color(t.ink2)).sense(Sense::click()));
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -2474,12 +3748,22 @@ fn file_link(ui: &mut Ui, t: &Theme, name: &str, path: &str, note: &str) {
 /// once the pause has taken hold, and `agents_pausing` (its subagents still
 /// pausing) holds it back too; until then the pause button spins and this
 /// says what OAK is still doing.
-pub(crate) fn transcript_status(ui: &mut Ui, t: &Theme, conv: &Conversation, live: &Live, agents_pausing: bool) {
+pub(crate) fn transcript_status(
+    ui: &mut Ui,
+    t: &Theme,
+    conv: &Conversation,
+    live: &Live,
+    agents_pausing: bool,
+) {
     if live.pause_settled(conv.paused) && !agents_pausing {
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
             paint_pause(ui.painter(), r, t.accent);
-            let what = if live.ultra { "Stopped (ultrapause)" } else { "Paused" };
+            let what = if live.ultra {
+                "Stopped (ultrapause)"
+            } else {
+                "Paused"
+            };
             ui.label(RichText::new(what).color(t.ink2));
         });
     } else if live.busy || conv.paused || live.pause_queued {
@@ -2501,7 +3785,11 @@ pub(crate) fn transcript_status(ui: &mut Ui, t: &Theme, conv: &Conversation, liv
 /// when the user sends the answers.
 pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
     let mut send = false;
-    let title = if a.background { "Questions (Oak keeps working on the goal meanwhile)" } else { "Questions" };
+    let title = if a.background {
+        "Questions (Oak keeps working on the goal meanwhile)"
+    } else {
+        "Questions"
+    };
     ask_card(ui, t, title, |ui| {
         for i in 0..a.questions.len() {
             if i > 0 {
@@ -2543,16 +3831,42 @@ pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             let ready = a.ready();
-            if ui.add_enabled(ready, Button::new(RichText::new("Send answers").color(if ready { t.accent } else { t.ink3 }))).clicked() {
+            if ui
+                .add_enabled(
+                    ready,
+                    Button::new(RichText::new("Send answers").color(if ready {
+                        t.accent
+                    } else {
+                        t.ink3
+                    })),
+                )
+                .clicked()
+            {
                 send = true;
             }
-            let skip = if a.background { "Dismiss the questions without answering; Oak is told." } else { "Continue without answers; queued messages are sent." };
-            if ui.button(RichText::new("Skip").color(t.ink2)).on_hover_text(skip).clicked() {
+            let skip = if a.background {
+                "Dismiss the questions without answering; Oak is told."
+            } else {
+                "Continue without answers; queued messages are sent."
+            };
+            if ui
+                .button(RichText::new("Skip").color(t.ink2))
+                .on_hover_text(skip)
+                .clicked()
+            {
                 a.skipped = true;
             }
             let left = (0..a.questions.len()).filter(|&i| !a.answered(i)).count();
-            let wait = if a.background { "the answers go to Oak when sent" } else { "messages queued until answers are sent or skipped" };
-            let hint = if left > 0 { format!("{left} unanswered, {wait}") } else { wait.into() };
+            let wait = if a.background {
+                "the answers go to Oak when sent"
+            } else {
+                "messages queued until answers are sent or skipped"
+            };
+            let hint = if left > 0 {
+                format!("{left} unanswered, {wait}")
+            } else {
+                wait.into()
+            };
             caption(ui, &hint, t.ink3);
         });
     });
@@ -2563,53 +3877,74 @@ pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
 /// `f` adds.
 fn ask_card(ui: &mut Ui, t: &Theme, title: &str, f: impl FnOnce(&mut Ui)) {
     ui.add_space(6.0);
-    egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.accent)).inner_margin(Margin::same(14)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        caption(ui, title, t.accent);
-        ui.add_space(4.0);
-        f(ui);
-    });
+    egui::Frame::new()
+        .fill(t.panel)
+        .stroke(Stroke::new(1.0, t.accent))
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            caption(ui, title, t.accent);
+            ui.add_space(4.0);
+            f(ui);
+        });
     ui.add_space(6.0);
 }
 
 /// Queued messages, dimmed, below the transcript. Hovering one shows edit
 /// and remove buttons; the one being edited becomes a text box.
-pub(crate) fn queue_view(ui: &mut Ui, t: &Theme, conv: &str, queued: &[agent::Queued], editing: &mut Option<Editing>) -> Option<QueueAction> {
+pub(crate) fn queue_view(
+    ui: &mut Ui,
+    t: &Theme,
+    conv: &str,
+    queued: &[agent::Queued],
+    editing: &mut Option<Editing>,
+) -> Option<QueueAction> {
     let mut action = None;
     for q in queued {
         if let Some(e) = editing.as_mut().filter(|e| e.conv == conv && e.id == q.id) {
-            egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.accent)).inner_margin(Margin::same(10)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                let id = Id::unique(("queue-edit", conv, q.id));
-                let enter = ui.memory(|m| m.has_focus(id))
-                    && ui.input_mut(|i| !i.modifiers.shift && i.consume_key(Modifiers::NONE, Key::Enter));
-                let resp = crate::text_menu::add(
-                    ui,
-                    TextEdit::multiline(&mut e.text)
-                        .id(id)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY)
-                        .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)),
-                );
-                if std::mem::take(&mut e.focus) {
-                    resp.request_focus();
-                }
-                let esc = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape));
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() || enter {
-                        action = Some(QueueAction::Save);
+            egui::Frame::new()
+                .fill(t.panel)
+                .stroke(Stroke::new(1.0, t.accent))
+                .inner_margin(Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let id = Id::unique(("queue-edit", conv, q.id));
+                    let enter = ui.memory(|m| m.has_focus(id))
+                        && ui.input_mut(|i| {
+                            !i.modifiers.shift && i.consume_key(Modifiers::NONE, Key::Enter)
+                        });
+                    let resp = crate::text_menu::add(
+                        ui,
+                        TextEdit::multiline(&mut e.text)
+                            .id(id)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY)
+                            .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)),
+                    );
+                    if std::mem::take(&mut e.focus) {
+                        resp.request_focus();
                     }
-                    if ui.button("Cancel").clicked() || esc {
-                        action = Some(QueueAction::Cancel);
-                    }
+                    let esc = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape));
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() || enter {
+                            action = Some(QueueAction::Save);
+                        }
+                        if ui.button("Cancel").clicked() || esc {
+                            action = Some(QueueAction::Cancel);
+                        }
+                    });
                 });
-            });
             ui.add_space(4.0);
             continue;
         }
         let card = egui::Frame::new()
             .stroke(Stroke::new(1.0, t.line))
-            .inner_margin(Margin { left: 12, right: 72, top: 10, bottom: 10 })
+            .inner_margin(Margin {
+                left: 12,
+                right: 72,
+                top: 10,
+                bottom: 10,
+            })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if !q.images.is_empty() {
@@ -2623,18 +3958,43 @@ pub(crate) fn queue_view(ui: &mut Ui, t: &Theme, conv: &str, queued: &[agent::Qu
                     ui.label(RichText::new(&q.text).color(t.ink3));
                 }
                 // Handed to Quick's running turn: its agent reads it at its next step.
-                let state = if q.steered { "sent to Quick, read at its next step" } else { "queued" };
-                ui.label(RichText::new(state).small().color(t.ink3.gamma_multiply(0.7)));
+                let state = if q.steered {
+                    "sent to Quick, read at its next step"
+                } else {
+                    "queued"
+                };
+                ui.label(
+                    RichText::new(state)
+                        .small()
+                        .color(t.ink3.gamma_multiply(0.7)),
+                );
             });
         let rect = card.response.rect;
         if ui.rect_contains_pointer(rect) {
             let size = vec2(24.0, 24.0);
-            let remove = Rect::from_min_size(egui::pos2(rect.right() - 8.0 - size.x, rect.top() + 8.0), size);
+            let remove = Rect::from_min_size(
+                egui::pos2(rect.right() - 8.0 - size.x, rect.top() + 8.0),
+                size,
+            );
             let edit = remove.translate(vec2(-size.x - 4.0, 0.0));
-            if icon_button(ui, t, edit, Id::unique(("queue-pencil", conv, q.id)), "Edit", draw_pencil) {
+            if icon_button(
+                ui,
+                t,
+                edit,
+                Id::unique(("queue-pencil", conv, q.id)),
+                "Edit",
+                draw_pencil,
+            ) {
                 action = Some(QueueAction::Edit(q.id, q.text.clone()));
             }
-            if icon_button(ui, t, remove, Id::unique(("queue-x", conv, q.id)), "Remove from queue", draw_x) {
+            if icon_button(
+                ui,
+                t,
+                remove,
+                Id::unique(("queue-x", conv, q.id)),
+                "Remove from queue",
+                draw_x,
+            ) {
                 action = Some(QueueAction::Remove(q.id));
             }
         }
@@ -2652,9 +4012,16 @@ mod tests {
     /// code does, else the code's first line.
     #[test]
     fn a_python_call_shows_its_code() {
-        let code = serde_json::json!({"code": "# list the folder\n\nimport os\nprint(os.listdir('.'))"});
+        let code =
+            serde_json::json!({"code": "# list the folder\n\nimport os\nprint(os.listdir('.'))"});
         assert_eq!(tool_summary("run_python_outpost_local", &code), "import os");
-        assert_eq!(tool_summary("run_python", &serde_json::json!({"code": "print(1)", "explanation": "Counting files"})), "Counting files");
+        assert_eq!(
+            tool_summary(
+                "run_python",
+                &serde_json::json!({"code": "print(1)", "explanation": "Counting files"})
+            ),
+            "Counting files"
+        );
         assert_eq!(python_line("# only a comment"), "# only a comment");
         assert!(is_python("run_python_outpost_local_with_write") && !is_command("run_python"));
     }
@@ -2664,17 +4031,41 @@ mod tests {
     #[test]
     fn quicks_tools_look_like_oaks() {
         assert_eq!(tool_color("file_read"), tool_color("READ"));
-        assert_eq!(tool_color("run_python_outpost_local_with_write"), tool_color("EXECUTE"));
+        assert_eq!(
+            tool_color("run_python_outpost_local_with_write"),
+            tool_color("EXECUTE")
+        );
         assert_eq!(tool_color("web_search"), tool_color("SEARCH"));
         assert_eq!(tool_color("url_fetch"), tool_color("FETCH"));
         assert_eq!(tool_color("ripgrep"), tool_color("Grep"));
         assert_eq!(tool_color("kg_search"), tool_color("NOTE_NEW"));
-        assert_eq!(tool_color("DESKTOP-VE88UPH_folder_list"), tool_color("READ"));
+        assert_eq!(
+            tool_color("DESKTOP-VE88UPH_folder_list"),
+            tool_color("READ")
+        );
         assert_eq!(tool_color("no_such_tool"), hex(0xb0b8c1));
-        assert_eq!(tool_summary("file_read", &serde_json::json!({"path": "/outposts/DESKTOP-1/C:/Users/x/a.rs"})), "C:/Users/x/a.rs");
-        assert_eq!(tool_summary("folder_list", &serde_json::json!({"path": "/outposts/backend/app"})), "/app");
-        assert_eq!(tool_summary("web_search", &serde_json::json!({"query": "egui"})), "egui");
-        assert_eq!(tool_summary("ripgrep", &serde_json::json!({"patterns": ["a", "b"]})), "a | b");
+        assert_eq!(
+            tool_summary(
+                "file_read",
+                &serde_json::json!({"path": "/outposts/DESKTOP-1/C:/Users/x/a.rs"})
+            ),
+            "C:/Users/x/a.rs"
+        );
+        assert_eq!(
+            tool_summary(
+                "folder_list",
+                &serde_json::json!({"path": "/outposts/backend/app"})
+            ),
+            "/app"
+        );
+        assert_eq!(
+            tool_summary("web_search", &serde_json::json!({"query": "egui"})),
+            "egui"
+        );
+        assert_eq!(
+            tool_summary("ripgrep", &serde_json::json!({"patterns": ["a", "b"]})),
+            "a | b"
+        );
     }
 
     /// A reply's widgets (its copy bar, text, menu) are its conversation's
@@ -2683,9 +4074,19 @@ mod tests {
     fn reply_ids_belong_to_their_conversation() {
         let key = (3, 1);
         let source = for_conversation("source", || key_id("reply-bar", key));
-        assert_ne!(source, for_conversation("side", || key_id("reply-bar", key)));
-        assert_eq!(source, for_conversation("source", || key_id("reply-bar", key)));
-        assert_ne!(source, key_id("reply-bar", key), "the conversation is let go after drawing");
+        assert_ne!(
+            source,
+            for_conversation("side", || key_id("reply-bar", key))
+        );
+        assert_eq!(
+            source,
+            for_conversation("source", || key_id("reply-bar", key))
+        );
+        assert_ne!(
+            source,
+            key_id("reply-bar", key),
+            "the conversation is let go after drawing"
+        );
     }
 
     /// Long tool outputs are cut after a whole line, counting the lines left.
@@ -2716,15 +4117,28 @@ mod tests {
         ctx.set_pixels_per_point(ppp);
         let mut time = 0.0;
         for i in 0..12 {
-            let out = run_frame(&ctx, vec2(700.0, 200.0), &mut time, 1.0 / 60.0, vec![], |ui| {
-                ui.add_space(10.0 + i as f32 * 0.37);
-                tool_row(ui, &t, &b, &results, 60.0);
-            });
+            let out = run_frame(
+                &ctx,
+                vec2(700.0, 200.0),
+                &mut time,
+                1.0 / 60.0,
+                vec![],
+                |ui| {
+                    ui.add_space(10.0 + i as f32 * 0.37);
+                    tool_row(ui, &t, &b, &results, 60.0);
+                },
+            );
             // Where the tessellator puts each text: on whole pixels.
             let tops: Vec<f32> = out
                 .shapes
                 .iter()
-                .filter_map(|s| if let egui::Shape::Text(x) = &s.shape { Some((x.pos.y * ppp).round() / ppp + x.galley.rows[0].pos.y) } else { None })
+                .filter_map(|s| {
+                    if let egui::Shape::Text(x) = &s.shape {
+                        Some((x.pos.y * ppp).round() / ppp + x.galley.rows[0].pos.y)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             assert!(tops.len() >= 2, "{tops:?}");
             gaps.insert(((tops[1] - tops[0]) * 1000.0).round() as i32);
@@ -2736,13 +4150,21 @@ mod tests {
     /// cut off, escapes decoded; other values skipped.
     #[test]
     fn partial_tool_input() {
-        let p = partial_input(r#"{"path": "src/a.rs", "n": [1, {"x": "}"}], "content": "fn main() {\n    println!(\"h\u00e9"#);
+        let p = partial_input(
+            r#"{"path": "src/a.rs", "n": [1, {"x": "}"}], "content": "fn main() {\n    println!(\"h\u00e9"#,
+        );
         assert_eq!(p["path"], "src/a.rs");
         assert_eq!(p["content"], "fn main() {\n    println!(\"hé");
         assert!(p.get("n").is_none());
         assert!(partial_input(r#"{"pa"#).is_empty());
-        assert_eq!(partial_input(r#"{"content": "a\ud83d\ude00b"}"#)["content"], "a😀b");
-        assert_eq!(partial_input(r#"{"content": "half \u00"#)["content"], "half ");
+        assert_eq!(
+            partial_input(r#"{"content": "a\ud83d\ude00b"}"#)["content"],
+            "a😀b"
+        );
+        assert_eq!(
+            partial_input(r#"{"content": "half \u00"#)["content"],
+            "half "
+        );
     }
 
     /// A kit's tool streaming in through LOAD: its `input` read as far as
@@ -2750,20 +4172,52 @@ mod tests {
     /// its summary streaming; a LOAD that loads a kit stays LOAD.
     #[test]
     fn a_call_through_load_streams_as_its_tool() {
-        let p = partial_input(r#"{"name": "AGENT", "input": {"action": "send", "id": 3, "message": "Work from 900e"#);
-        assert_eq!(Value::Object(p), serde_json::json!({"name": "AGENT", "input": {"action": "send", "id": 3, "message": "Work from 900e"}}));
-        assert_eq!(Value::Object(partial_input(r#"{"id": 31"#)), serde_json::json!({}), "a number still coming");
-        assert_eq!(Value::Object(partial_input(r#"{"a": -1.5,"b":true , "c": null, "d": false}"#)), serde_json::json!({"a": -1.5, "b": true, "d": false}));
-        let p = partial_input(r#"{"input": {"a": {"b": "c"}, "d": "e"}, "name": "BROWSER", "f": "g"}"#);
-        assert_eq!(Value::Object(p), serde_json::json!({"input": {"a": {"b": "c"}, "d": "e"}, "name": "BROWSER", "f": "g"}));
+        let p = partial_input(
+            r#"{"name": "AGENT", "input": {"action": "send", "id": 3, "message": "Work from 900e"#,
+        );
+        assert_eq!(
+            Value::Object(p),
+            serde_json::json!({"name": "AGENT", "input": {"action": "send", "id": 3, "message": "Work from 900e"}})
+        );
+        assert_eq!(
+            Value::Object(partial_input(r#"{"id": 31"#)),
+            serde_json::json!({}),
+            "a number still coming"
+        );
+        assert_eq!(
+            Value::Object(partial_input(
+                r#"{"a": -1.5,"b":true , "c": null, "d": false}"#
+            )),
+            serde_json::json!({"a": -1.5, "b": true, "d": false})
+        );
+        let p =
+            partial_input(r#"{"input": {"a": {"b": "c"}, "d": "e"}, "name": "BROWSER", "f": "g"}"#);
+        assert_eq!(
+            Value::Object(p),
+            serde_json::json!({"input": {"a": {"b": "c"}, "d": "e"}, "name": "BROWSER", "f": "g"})
+        );
         let streaming = |raw: &str| serde_json::json!({"type": "tool_call", "id": "a", "name": "LOAD", "input": {}, "_oak_partial": raw});
-        assert_eq!(shown(&streaming(r#"{"name": "AGENT", "input": {"action": "send", "message": "Wo"#)), "AGENT send");
+        assert_eq!(
+            shown(&streaming(
+                r#"{"name": "AGENT", "input": {"action": "send", "message": "Wo"#
+            )),
+            "AGENT send"
+        );
         assert_eq!(shown(&streaming(r#"{"name": "AGENT"#)), "LOAD");
         assert_eq!(shown(&streaming(r#"{"name": "AGENT"}"#)), "LOAD");
-        assert_eq!(tool_summary("LOAD", &serde_json::json!({"name": "BROWSER"})), "BROWSER", "a LOAD names the kit it loads");
-        let load = Value::Object(partial_input(r#"{"name": "AGENT", "input": {"action": "send", "message": "Work"#));
+        assert_eq!(
+            tool_summary("LOAD", &serde_json::json!({"name": "BROWSER"})),
+            "BROWSER",
+            "a LOAD names the kit it loads"
+        );
+        let load = Value::Object(partial_input(
+            r#"{"name": "AGENT", "input": {"action": "send", "message": "Work"#,
+        ));
         let (name, input) = tools::canonical_cow("LOAD", &load);
-        assert_eq!(tool_summary(&name, &input), tool_summary("AGENT_SEND", &serde_json::json!({"message": "Work"})));
+        assert_eq!(
+            tool_summary(&name, &input),
+            tool_summary("AGENT_SEND", &serde_json::json!({"message": "Work"}))
+        );
         assert!(tool_summary(&name, &input).contains("Work"));
     }
 }

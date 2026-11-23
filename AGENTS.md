@@ -210,7 +210,7 @@ deletes a word), Ctrl+Tab and Ctrl+PageDown go to the next tab and Ctrl+Shift+Ta
 the previous one (round the ends), Ctrl+1 to Ctrl+8 pick one, Ctrl+9 the last, and Ctrl+Shift+T (or
 the tab menu) reopens the tabs closed since Oak started, newest first, in their places. Closing a tab
 never closes its conversation, its draft or its work. A conversation shows its
-transcript with a minimap, the session box (title, folder, provider, model, effort, goal, notes,
+transcript with a minimap, the session box (title, folder, provider, model, effort, fallbacks, goal, notes,
 agents, progress meters) and the message box with the smart context and account boxes (and a
 plugin's box left of its buttons: Unslop's).
 The message box stays docked to the bottom as drafts, attachments and notices change its height,
@@ -298,6 +298,22 @@ can't read.
   refusals retain the early-reset recognition above. Waiting sessions recheck eligibility for their
   current model, including fixed seats, so a stale wait cannot hide available capacity.
   Settings can turn rotation off. The model is never told.
+- Fallbacks (`Conversation::fallbacks`, `agent::pick_fallback`): a conversation can list other
+  models, each with its provider, in order of priority. The session box's fallback row (its
+  hover lists them) opens the list: move up, move down, remove, and Add… with the models the
+  provider row offers, less the conversation's own and those listed. Changes are saved at once;
+  forks and side chats copy the list, subagents start without one. When a request fails for good
+  (after the usual retries, or a rate limit's five minutes) or every account of its provider is
+  at its limit, the conversation moves to the first fallback that is not its model now nor one
+  that failed this turn, that a chat or Code Mode can use, and that can take a request now
+  (`providers::Kind::ready`: signed in; for Claude, Codex and Antigravity an account with room;
+  for a plugin's model its plugin running; other providers are tried as they are). The request
+  goes again there. The move is a switch as the session box makes one (effort kept, cache cold,
+  "Your underlying model is now" for the model), ends a wait for the old provider's limit, and
+  adds a transcript line, "fell back to <model> on <provider>, after: <why>". The conversation
+  stays on the fallback. A reply clears what failed this turn; with no fallback left the turn
+  fails, or waits for the reset, as it did. A model the user picked meanwhile goes first, and a
+  safety classifier's refusal or an interrupt never falls back.
 - A Claude account's plan is read from its profile: Pro, Max, Ultra, Team Standard or Team
   Premium. Max and Ultra are the two sizes of Max (rate-limit tiers `..._max_5x` and `..._max_20x`);
   accounts, the usage log and vaults keep them as "Max 5x" and "Max 20x", the names they had
@@ -592,7 +608,7 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   still waiting for its request when Oak closed. Reverting
   (a message's icon, or right-click inside a reply) takes the conversation back, not the files.
 - A safety classifier's refusal is retried as failed requests are, then every minute and a half;
-  there is no fallback to another model. OpenRouter's built-in models (`openrouter::MODELS`) are
+  there is no fallback to another model (a conversation's fallbacks included). OpenRouter's built-in models (`openrouter::MODELS`) are
   DeepSeek V4.1 Flash 1017, Gemma 4 31B, and the free Gemma 4 31B, Particle-1 and Nemotron 3.5
   Super VL (capped at $0, so they never fall through to a paid provider). Settings' "OpenRouter
   models" row adds more: Add… opens OpenRouter's list (`/models`, fetched without a key; only models
@@ -811,7 +827,7 @@ tools, and the picker's models are Quick's three modes (`smart`, `fast`, `balanc
 `agent_mode`), not model ids.
 
 **Signing in** is Quick's own OIDC flow against AWS IAM Identity Center: Oak registers a public
-client for itself (`/client/register`), opens the browser at the authorization endpoint with PKCE
+client for itself (`/client/register`), copies a link to the authorization endpoint with PKCE
 and `prompt=login`, takes the code on a loopback port, and exchanges it for an access token
 (`aoa…`, an hour) and a refresh token (`aor…`). The refresh token is what Oak keeps in
 `quick.json` (beside the client registration and the workspace's host); every request buys a

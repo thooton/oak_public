@@ -4,7 +4,9 @@
 //! Quick works on the real project rather than on a copy in its sandbox.
 
 use super::*;
-use crate::quick::socket::Socket;
+use crate::quick::socket::{PollFrame, Socket};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// How long one turn may run before Oak gives up on it.
 const TURN_LIMIT: Duration = Duration::from_secs(3_600);
@@ -19,13 +21,198 @@ static LIVE: Threads = std::sync::LazyLock::new(Default::default);
 
 /// Calls of threads no turn here is reading: the first turn to see one runs
 /// it, once.
-static CLAIMED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
+static CLAIMED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Assistant `message_id`s already seen on each thread, so a new request after
+/// an interrupt or pause ignores any trailing frames of an older message.
+static SEEN_MESSAGES: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn note_seen_message(thread: &str, msg: &str) {
+    if !thread.is_empty() && !msg.is_empty() {
+        SEEN_MESSAGES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(thread.to_string())
+            .or_default()
+            .insert(msg.to_string());
+    }
+}
+
+fn seen_messages(thread: &str) -> std::collections::HashSet<String> {
+    SEEN_MESSAGES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(thread)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Why a running Quick turn is being stopped early.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopKind {
+    Interrupt,
+    Pause,
+}
+
+/// Control state shared between Oak's worker and the background thread running
+/// [`stream`] for a conversation's Quick thread.
+#[derive(Default)]
+pub(crate) struct TurnCtl {
+    abort: Mutex<Option<StopKind>>,
+    pause_queued: AtomicBool,
+    done: (Mutex<bool>, Condvar),
+}
+
+impl TurnCtl {
+    pub(crate) fn aborted(&self) -> Option<StopKind> {
+        *self.abort.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn pause_requested(&self) -> bool {
+        self.pause_queued.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_abort(&self, kind: StopKind) {
+        let mut a = self.abort.lock().unwrap_or_else(|e| e.into_inner());
+        if a.is_none() || kind == StopKind::Interrupt {
+            *a = Some(kind);
+        }
+    }
+
+    pub(crate) fn wait_done(&self, timeout: Duration) {
+        let (lock, cvar) = &self.done;
+        let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + timeout;
+        while !*done {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let (next, _) = cvar
+                .wait_timeout(done, left)
+                .unwrap_or_else(|e| e.into_inner());
+            done = next;
+        }
+    }
+}
+
+static CTLS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Arc<TurnCtl>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+thread_local! {
+    static CURRENT_CTL: std::cell::RefCell<Option<Arc<TurnCtl>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn current_abort() -> Option<StopKind> {
+    CURRENT_CTL.with(|c| c.borrow().as_ref().and_then(|ctl| ctl.aborted()))
+}
+
+struct CtlGuard {
+    thread: String,
+    ctl: Arc<TurnCtl>,
+}
+
+impl CtlGuard {
+    fn register(thread: &str) -> (Arc<TurnCtl>, CtlGuard) {
+        let prev = CTLS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(thread)
+            .cloned();
+        if let Some(old) = prev {
+            old.set_abort(StopKind::Interrupt);
+            old.wait_done(Duration::from_secs(3));
+        }
+        let ctl = Arc::new(TurnCtl::default());
+        CTLS.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(thread.to_string(), ctl.clone());
+        (
+            ctl.clone(),
+            CtlGuard {
+                thread: thread.to_string(),
+                ctl,
+            },
+        )
+    }
+}
+
+impl Drop for CtlGuard {
+    fn drop(&mut self) {
+        let (lock, cvar) = &self.ctl.done;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cvar.notify_all();
+        let mut all = CTLS.lock().unwrap_or_else(|e| e.into_inner());
+        if all
+            .get(&self.thread)
+            .is_some_and(|c| Arc::ptr_eq(c, &self.ctl))
+        {
+            all.remove(&self.thread);
+        }
+    }
+}
+
+/// Tells the active Quick turn on `thread` whether a normal pause
+/// (`Session::request_pause`) is waiting to take hold.
+pub(crate) fn set_pause(thread: &str, on: bool) {
+    if let Some(ctl) = CTLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(thread)
+        .cloned()
+    {
+        ctl.pause_queued.store(on, Ordering::SeqCst);
+    }
+}
+
+/// Immediately aborts the active (or parked) Quick turn on `thread`: kills any
+/// running tool child process, cancels pending steers, and sends
+/// `stop_generation` on the socket.
+pub(crate) fn abort(thread: &str, kind: StopKind) {
+    if let Some(ctl) = CTLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(thread)
+        .cloned()
+    {
+        ctl.set_abort(kind);
+    }
+    drop_parked(thread, kind == StopKind::Pause);
+}
+
+/// Waits briefly for the active Quick turn on `thread` to finish cleaning up.
+pub(crate) fn wait_stopped(thread: &str) {
+    if let Some(ctl) = CTLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(thread)
+        .cloned()
+    {
+        ctl.wait_done(Duration::from_secs(3));
+    }
+}
+
+/// Closes any parked turn on `thread`, telling Quick to stop generating on it.
+pub(crate) fn drop_parked(thread: &str, pause: bool) {
+    if let Some(mut p) = PARKED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(thread)
+    {
+        stop_traffic(&mut p.sock, thread, &p.turn.message, pause);
+    }
+}
 
 /// Messages the user typed while a Quick turn of theirs ran, by thread. Oak
 /// hands each to the turn (`steer`), the turn sends it on its socket as
 /// Quick's app does (`steer_message`: `mid_turn`), and Quick says when its
 /// agent took it in (`steering_ingested`, naming its `message_id`).
-static STEERS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<Steer>>>> = std::sync::LazyLock::new(Default::default);
+static STEERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<Steer>>>,
+> = std::sync::LazyLock::new(Default::default);
 
 struct Steer {
     /// Oak's queued message (`agent::Queued::id`); 0 for one it didn't queue.
@@ -35,37 +222,104 @@ struct Steer {
     message: String,
     sent: bool,
     taken: bool,
+    canceled: bool,
 }
 
 /// Hands `text`, the user's queued message `id`, to the Quick turn running
 /// on `thread`: it goes on the socket with the turn's next frame.
 pub(crate) fn steer(thread: &str, id: u64, text: &str) {
     let message = format!("msg-{}", &hex_uuid().replace('-', "")[..8]);
-    let s = Steer { id, text: text.to_string(), message, sent: false, taken: false };
-    STEERS.lock().unwrap_or_else(|e| e.into_inner()).entry(thread.to_string()).or_default().push(s);
+    let s = Steer {
+        id,
+        text: text.to_string(),
+        message,
+        sent: false,
+        taken: false,
+        canceled: false,
+    };
+    STEERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(thread.to_string())
+        .or_default()
+        .push(s);
+}
+
+/// Cancels a queued message `id` that was handed to Quick's running turn
+/// before Quick ingested it (when the user removes or edits it in the queue).
+/// True if it wasn't taken in yet.
+pub(crate) fn cancel_steer(id: u64) -> bool {
+    let mut all = STEERS.lock().unwrap_or_else(|e| e.into_inner());
+    for v in all.values_mut() {
+        if let Some(pos) = v.iter().position(|s| s.id == id) {
+            if v[pos].taken {
+                return false;
+            }
+            if !v[pos].sent {
+                v.remove(pos);
+            } else {
+                v[pos].canceled = true;
+            }
+            return true;
+        }
+    }
+    true
 }
 
 /// The queued messages Quick's agent took in on `thread` in the request that
 /// just ended. The thread's steers are done with: one not taken in goes with
 /// the next request as a message of its own.
 pub(crate) fn take_ingested(thread: &str) -> Vec<u64> {
-    let steers = STEERS.lock().unwrap_or_else(|e| e.into_inner()).remove(thread).unwrap_or_default();
-    steers.into_iter().filter(|s| s.taken).map(|s| s.id).collect()
+    let steers = STEERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(thread)
+        .unwrap_or_default();
+    steers
+        .into_iter()
+        .filter(|s| s.taken && !s.canceled)
+        .map(|s| s.id)
+        .collect()
 }
 
-/// Sends the messages handed to the turn on `thread` that haven't gone yet.
-fn send_steers(sock: &mut Socket, thread: &str, say: &dyn Fn(&str, &str) -> Value) -> Result<(), String> {
-    let due: Vec<(String, String)> = {
+/// Sends the messages handed to the turn on `thread` that haven't gone yet,
+/// and cancels any the user removed or held for editing meanwhile.
+fn send_steers(
+    sock: &mut Socket,
+    thread: &str,
+    say: &dyn Fn(&str, &str) -> Value,
+) -> Result<(), String> {
+    let (due, canceled): (Vec<(String, String)>, Vec<String>) = {
         let mut all = STEERS.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(v) = all.get_mut(thread) else { return Ok(()) };
-        v.iter_mut().filter(|s| !s.sent).map(|s| {
-            s.sent = true;
-            (s.text.clone(), s.message.clone())
-        }).collect()
+        let Some(v) = all.get_mut(thread) else {
+            return Ok(());
+        };
+        let mut due = vec![];
+        let mut canceled = vec![];
+        v.retain_mut(|s| {
+            if s.canceled {
+                if s.sent && !s.taken {
+                    canceled.push(s.message.clone());
+                }
+                return false;
+            }
+            if !s.sent {
+                s.sent = true;
+                due.push((s.text.clone(), s.message.clone()));
+            }
+            true
+        });
+        (due, canceled)
     };
+    if !canceled.is_empty() {
+        sock.send(&json!({"type": "steering_cancel", "payload": {"thread_id": thread, "message_ids": canceled}}))?;
+    }
     for (text, message) in due {
         if std::env::var("OAK_QUICK_DEBUG").is_ok() {
-            eprintln!("STEER sending {message} mid-turn: {}", text.chars().take(80).collect::<String>());
+            eprintln!(
+                "STEER sending {message} mid-turn: {}",
+                text.chars().take(80).collect::<String>()
+            );
         }
         sock.send(&say(&text, &message))?;
     }
@@ -75,13 +329,28 @@ fn send_steers(sock: &mut Socket, thread: &str, say: &dyn Fn(&str, &str) -> Valu
 /// Quick's agent took in messages (`steering_ingested`, payload `p`): marks
 /// the turn's among them, by message id (or text). True when any were.
 fn took_in(thread: &str, p: &Value) -> bool {
-    let ids: Vec<&str> = p["message_ids"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-    let said: Vec<&str> = p["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_str()).map(str::trim).collect();
+    let ids: Vec<&str> = p["message_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let said: Vec<&str> = p["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["content"].as_str())
+        .map(str::trim)
+        .collect();
     let mut all = STEERS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(v) = all.get_mut(thread) else { return false };
+    let Some(v) = all.get_mut(thread) else {
+        return false;
+    };
     let mut any = false;
-    for s in v.iter_mut().filter(|s| s.sent && !s.taken) {
-        if ids.contains(&s.message.as_str()) || said.contains(&s.text.trim()) {
+    for s in v.iter_mut().filter(|s| s.sent && !s.taken && !s.canceled) {
+        let want = s.text.trim();
+        if ids.contains(&s.message.as_str()) || said.iter().any(|m| *m == want || m.ends_with(want))
+        {
             s.taken = true;
             any = true;
         }
@@ -89,12 +358,60 @@ fn took_in(thread: &str, p: &Value) -> bool {
     any
 }
 
+/// Cancels any un-ingested steers sent on `sock`, sends `stop_generation` to
+/// Quick, and waits briefly for `stream_ended` so Quick's backend has stopped
+/// the turn before the next request opens on `thread`.
+fn stop_traffic(sock: &mut Socket, thread: &str, message: &str, pause: bool) {
+    let sent_steers: Vec<String> = {
+        let mut all = STEERS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ids = vec![];
+        if let Some(v) = all.get_mut(thread) {
+            for s in v.iter_mut() {
+                if s.sent && !s.taken {
+                    ids.push(s.message.clone());
+                }
+                s.taken = false;
+            }
+        }
+        ids
+    };
+    if !sent_steers.is_empty() {
+        let _ = sock.send(&json!({
+            "type": "steering_cancel",
+            "payload": {"thread_id": thread, "message_ids": sent_steers}
+        }));
+    }
+    let mut payload = json!({"thread_id": thread});
+    if !message.is_empty() {
+        payload["message_id"] = json!(message);
+        note_seen_message(thread, message);
+    }
+    if pause {
+        payload["explicit_pause"] = json!(true);
+    }
+    if sock
+        .send(&json!({"type": "stop_generation", "payload": payload}))
+        .is_ok()
+    {
+        let until = std::time::Instant::now() + Duration::from_millis(350);
+        for f in sock.wait_for_stop(until) {
+            if let Some(m) = f["message_id"]
+                .as_str()
+                .or(f["payload"]["message_id"].as_str())
+            {
+                note_seen_message(thread, m);
+            }
+        }
+    }
+}
+
 /// Turns left open for Oak's next request, by thread: Quick took in a
 /// message the user typed (`steering_ingested`), so the reply Oak was reading
 /// ended there, and Quick's agent carries on in the same message, which the
 /// next request (the message in the transcript, after the results) reads on
 /// the same socket.
-static PARKED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Parked>>> = std::sync::LazyLock::new(Default::default);
+static PARKED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Parked>>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// How long a parked turn waits for Oak's next request. Oak asks again at
 /// once; one that doesn't come (an interrupt, a pause) leaves it to close.
@@ -113,7 +430,10 @@ struct Parked {
 
 /// The turn parked on `thread`, if it is fresh.
 fn take_parked(thread: &str) -> Option<Parked> {
-    let p = PARKED.lock().unwrap_or_else(|e| e.into_inner()).remove(thread)?;
+    let p = PARKED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(thread)?;
     (p.at.elapsed() < PARK_LIMIT).then_some(p)
 }
 
@@ -122,7 +442,11 @@ pub(crate) struct Live(String);
 
 impl Live {
     pub(crate) fn new(thread: &str) -> Live {
-        *LIVE.lock().unwrap_or_else(|e| e.into_inner()).entry(thread.to_string()).or_default() += 1;
+        *LIVE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(thread.to_string())
+            .or_default() += 1;
         Live(thread.to_string())
     }
 }
@@ -153,7 +477,11 @@ pub(crate) enum Owner {
 /// The thread a tool call is for, as Quick names it in the call.
 pub(crate) fn call_thread(p: &Value) -> &str {
     let q = &p["arguments"]["params"];
-    q["_quickwork"]["offload_session_id"].as_str().filter(|s| !s.is_empty()).or_else(|| q["arguments"]["thread_id"].as_str()).unwrap_or("")
+    q["_quickwork"]["offload_session_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| q["arguments"]["thread_id"].as_str())
+        .unwrap_or("")
 }
 
 /// Who runs call `p` (its frame's payload) and shows it, for a turn of
@@ -163,11 +491,19 @@ pub(crate) fn owner(p: &Value, thread: &str) -> Owner {
     if of.is_empty() || of == thread {
         return Owner::Mine;
     }
-    if LIVE.lock().unwrap_or_else(|e| e.into_inner()).contains_key(of) {
+    if LIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(of)
+    {
         return Owner::Theirs;
     }
     let id = p["tool_call_id"].as_str().unwrap_or("").to_string();
-    if CLAIMED.lock().unwrap_or_else(|e| e.into_inner()).insert(id) { Owner::Orphan } else { Owner::Theirs }
+    if CLAIMED.lock().unwrap_or_else(|e| e.into_inner()).insert(id) {
+        Owner::Orphan
+    } else {
+        Owner::Theirs
+    }
 }
 
 /// Streams one Oak request through Quick's agent, sending its events to
@@ -178,9 +514,20 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     let Some(m) = model(&id) else {
         return drop(tx.send(Sse::Err(format!("Quick doesn't serve {id}."))));
     };
-    let folder = body.folder.clone().filter(|f| !f.is_empty()).map(std::path::PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    let folder = body
+        .folder
+        .clone()
+        .filter(|f| !f.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
     // The thread is the conversation's, so Quick keeps its history there.
-    let thread = body.conv.clone().filter(|c| !c.is_empty()).unwrap_or_else(hex_uuid);
+    let thread = body
+        .conv
+        .clone()
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(hex_uuid);
+    let (ctl, _ctl_guard) = CtlGuard::register(&thread);
     // Quick took in a message typed meanwhile and carries on: this request
     // reads on where the last one stopped, on the same socket. Anything said
     // since that Quick hasn't had goes to it mid-turn too.
@@ -188,8 +535,32 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
         if let Some(text) = new_user_text(&body) {
             steer(&thread, 0, &text);
         }
-        let Parked { sock, turn, calls, resends, live, folder, outpost, .. } = p;
-        return drive(Drive { sock, turn, calls, resends, live, folder, outpost, thread, m, body }, tx);
+        let Parked {
+            sock,
+            turn,
+            calls,
+            resends,
+            live,
+            folder,
+            outpost,
+            ..
+        } = p;
+        return drive(
+            Drive {
+                sock,
+                turn,
+                calls,
+                resends,
+                live,
+                folder,
+                outpost,
+                thread,
+                m,
+                body,
+                ctl,
+            },
+            tx,
+        );
     }
     // This thread's calls are this turn's; another thread's are its turn's.
     let live = Live::new(&thread);
@@ -221,7 +592,13 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     // does) can ask for the missing ones again, and the socket puts them in
     // order (`socket::Replay`). `OAK_QUICK_REPLAY=off` leaves it out.
     if std::env::var("OAK_QUICK_REPLAY").as_deref() != Ok("off") {
-        path = path.replace("&channel=prod", &format!("&replayContext={}&channel=prod", urlencode(&crate::quick::socket::replay_setup())));
+        path = path.replace(
+            "&channel=prod",
+            &format!(
+                "&replayContext={}&channel=prod",
+                urlencode(&crate::quick::socket::replay_setup())
+            ),
+        );
     }
     let mut sock = match Socket::connect(&host, &path) {
         Ok(s) => s,
@@ -242,8 +619,10 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     let _ = crate::quick::outpost::register();
     // Quick routes a folder's tools to the outpost that registered it, so the
     // conversation's folder is registered against this machine.
-    if let (Ok(tok), Ok(h)) = (crate::quick::login::access_token(), crate::quick::login::host())
-        && let Some(f) = folder.to_str()
+    if let (Ok(tok), Ok(h)) = (
+        crate::quick::login::access_token(),
+        crate::quick::login::host(),
+    ) && let Some(f) = folder.to_str()
     {
         let _ = crate::quick::outpost::register_folder(&tok, &h, f);
     }
@@ -252,26 +631,42 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     if let Some(o) = outpost.as_deref() {
         connect["outpostId"] = json!(o);
     }
-    if sock.send(&json!({"type": "session_connect", "payload": connect})).is_err() {
+    if sock
+        .send(&json!({"type": "session_connect", "payload": connect}))
+        .is_err()
+    {
         return drop(tx.send(Sse::Err("Quick closed the socket while connecting.".into())));
     }
     // The app connects to its home session first, federates its sign-in,
     // then joins the thread: Quick binds the machine's outpost to the session
     // that way, and without it the agent is told it has no local device.
-    if sock.send(&json!({"type": "federate_status", "payload": {}})).is_err() {
+    if sock
+        .send(&json!({"type": "federate_status", "payload": {}}))
+        .is_err()
+    {
         return drop(tx.send(Sse::Err("Quick closed the socket while federating.".into())));
     }
     let mut home = base.clone();
     home["session_id"] = json!("home");
     home["focus_only"] = json!(true);
-    if sock.send(&json!({"type": "session_connect", "payload": home})).is_err() {
-        return drop(tx.send(Sse::Err("Quick closed the socket while connecting home.".into())));
+    if sock
+        .send(&json!({"type": "session_connect", "payload": home}))
+        .is_err()
+    {
+        return drop(tx.send(Sse::Err(
+            "Quick closed the socket while connecting home.".into(),
+        )));
     }
     // This connection's workstreams are none (the app sends this before it
     // opens a thread), which is how Quick learns this socket carries none of
     // its own work and may be the courier for the outpost's tools.
-    if sock.send(&json!({"type": "workstreams_summary", "payload": {"workstream_ids": []}})).is_err() {
-        return drop(tx.send(Sse::Err("Quick closed the socket while summarising workstreams.".into())));
+    if sock
+        .send(&json!({"type": "workstreams_summary", "payload": {"workstream_ids": []}}))
+        .is_err()
+    {
+        return drop(tx.send(Sse::Err(
+            "Quick closed the socket while summarising workstreams.".into(),
+        )));
     }
     let mut focus = base.clone();
     focus["session_id"] = json!(thread);
@@ -283,8 +678,13 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
     if let Some(o) = outpost.as_deref() {
         focus["outpostId"] = json!(o);
     }
-    if sock.send(&json!({"type": "session_connect", "payload": focus})).is_err() {
-        return drop(tx.send(Sse::Err("Quick closed the socket while joining the thread.".into())));
+    if sock
+        .send(&json!({"type": "session_connect", "payload": focus}))
+        .is_err()
+    {
+        return drop(tx.send(Sse::Err(
+            "Quick closed the socket while joining the thread.".into(),
+        )));
     }
     // The thread's dock, as the app tells Quick it is: no files open, the
     // sidebar shut. Quick reads a thread with a courier only from a client
@@ -294,20 +694,51 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
         "payload": {"session_id": thread, "files": [], "focused_file": "", "sidebar_open": false, "surfaceType": SURFACE}
     });
     if sock.send(&dock).is_err() {
-        return drop(tx.send(Sse::Err("Quick closed the socket while syncing the dock.".into())));
+        return drop(tx.send(Sse::Err(
+            "Quick closed the socket while syncing the dock.".into(),
+        )));
     }
     // The socket naming the outpost is what marks it ONLINE, and only an
     // ONLINE outpost is handed this turn's tools; so the turn waits for Quick
     // to say so before it asks anything.
-    if let Some(o) = outpost.as_deref() {
+    if let Some(o) = outpost.as_deref()
+        && ctl.aborted().is_none()
+    {
         crate::quick::outpost::await_online(&token, &host, o);
+    }
+    for f in sock.drain_pending() {
+        if let Some(mid) = f["message_id"]
+            .as_str()
+            .or(f["payload"]["message_id"].as_str())
+        {
+            note_seen_message(&thread, mid);
+        }
+    }
+    if ctl.aborted().is_some() || ctl.pause_requested() {
+        return drop(tx.send(Sse::Done));
     }
     let user = user_message(&body, &thread, m, outpost.as_deref());
     if let Err(e) = sock.send(&user) {
         return drop(tx.send(Sse::Err(e)));
     }
-    let turn = Turn::for_message(&thread, "");
-    drive(Drive { sock, turn, calls: Calls::default(), resends: 0, live, folder, outpost, thread, m, body }, tx)
+    let mut turn = Turn::for_message(&thread, "");
+    turn.ignore_messages = seen_messages(&thread);
+    drive(
+        Drive {
+            sock,
+            turn,
+            calls: Calls::default(),
+            resends: 0,
+            live,
+            folder,
+            outpost,
+            thread,
+            m,
+            body,
+            ctl,
+        },
+        tx,
+    )
 }
 
 /// A turn Oak reads: the socket, what it has read, and what it needs to
@@ -323,23 +754,70 @@ struct Drive {
     thread: String,
     m: &'static Model,
     body: Request,
+    ctl: Arc<TurnCtl>,
 }
 
 /// Reads the turn to its end, or until Quick takes in a message the user
 /// typed (then the turn is parked for the next request, `PARKED`).
 fn drive(d: Drive, tx: Sender<Sse>) {
-    let Drive { mut sock, mut turn, mut calls, mut resends, live, folder, outpost, thread, m, body } = d;
+    let Drive {
+        mut sock,
+        mut turn,
+        mut calls,
+        mut resends,
+        live,
+        folder,
+        outpost,
+        thread,
+        m,
+        body,
+        ctl,
+    } = d;
     let say = |text: &str, id: &str| steer_message(&body, text, id, &thread, m, outpost.as_deref());
     loop {
-        match pump(&mut sock, &folder, &mut turn, &mut calls, resends < RESEND_LIMIT, &say, &tx) {
+        match pump(
+            &mut sock,
+            &folder,
+            &mut turn,
+            &mut calls,
+            resends < RESEND_LIMIT,
+            &say,
+            &tx,
+            &ctl,
+        ) {
             // The stream says the turn is over: the reply is whole.
             Ok(Pumped::Done) => return drop(tx.send(Sse::Done)),
             // Quick took in a message the user typed: this reply ends here,
             // and the next request reads on.
             Ok(Pumped::Steered) => {
+                if let Some(kind) = ctl.aborted() {
+                    stop_traffic(
+                        &mut sock,
+                        &turn.thread,
+                        &turn.message,
+                        kind == StopKind::Pause,
+                    );
+                    return drop(tx.send(Sse::Done));
+                }
+                if ctl.pause_requested() {
+                    stop_traffic(&mut sock, &turn.thread, &turn.message, true);
+                    return drop(tx.send(Sse::Done));
+                }
                 turn.resume();
-                let p = Parked { sock, turn, calls, resends, live, folder, outpost, at: std::time::Instant::now() };
-                PARKED.lock().unwrap_or_else(|e| e.into_inner()).insert(thread.clone(), p);
+                let p = Parked {
+                    sock,
+                    turn,
+                    calls,
+                    resends,
+                    live,
+                    folder,
+                    outpost,
+                    at: std::time::Instant::now(),
+                };
+                PARKED
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(thread.clone(), p);
                 return drop(tx.send(Sse::Done));
             }
             // Quick's relay recorded its own error for a call Oak had
@@ -347,14 +825,19 @@ fn drive(d: Drive, tx: Sender<Sse>) {
             // gives it the real results, and its answer is this turn's too.
             Ok(Pumped::Lost(lost)) => {
                 resends += 1;
-                eprintln!("Quick's relay replaced {} tool result(s) with its own error; Oak is giving Quick the real ones", lost.len());
+                eprintln!(
+                    "Quick's relay replaced {} tool result(s) with its own error; Oak is giving Quick the real ones",
+                    lost.len()
+                );
                 for ev in turn.await_resend() {
                     if tx.send(Sse::Event(ev)).is_err() {
                         return;
                     }
                 }
                 let mut again = body.clone();
-                again.messages = vec![json!({"role": "user", "content": [{"type": "text", "text": resend_text(&lost)}]})];
+                again.messages = vec![
+                    json!({"role": "user", "content": [{"type": "text", "text": resend_text(&lost)}]}),
+                ];
                 again.instruction = None;
                 let user = user_message(&again, &thread, m, outpost.as_deref());
                 if let Err(e) = sock.send(&user) {
@@ -381,35 +864,81 @@ pub(crate) enum Pumped {
     Steered,
 }
 
+fn finish_stop(
+    sock: &mut Socket,
+    turn: &mut Turn,
+    tx: &Sender<Sse>,
+    reason: &str,
+    pause: bool,
+) -> Result<Pumped, String> {
+    stop_traffic(sock, &turn.thread, &turn.message, pause);
+    if !turn.blocks().is_empty() {
+        for ev in turn.close(reason) {
+            let _ = tx.send(Sse::Event(ev));
+        }
+    }
+    Ok(Pumped::Done)
+}
+
 /// Reads Quick's frames until the message ends, running the tools it asks
 /// for and answering each on the socket. A message that ends on a result the
 /// relay lost comes back as `Pumped::Lost` when `may_resend` (Oak then gives
 /// Quick the real results); otherwise it ends the turn as it is.
 /// `say` makes the frame for a message the user typed meanwhile, which goes
 /// once the turn has begun.
-fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mut Calls, may_resend: bool, say: &dyn Fn(&str, &str) -> Value, tx: &Sender<Sse>) -> Result<Pumped, String> {
+#[allow(clippy::too_many_arguments)]
+fn pump(
+    sock: &mut Socket,
+    folder: &std::path::Path,
+    turn: &mut Turn,
+    calls: &mut Calls,
+    may_resend: bool,
+    say: &dyn Fn(&str, &str) -> Value,
+    tx: &Sender<Sse>,
+    ctl: &Arc<TurnCtl>,
+) -> Result<Pumped, String> {
     let started = std::time::Instant::now();
     loop {
         if started.elapsed() > TURN_LIMIT {
             return Err("Quick's turn ran too long; it was given up on.".into());
         }
-        let Some(frame) = sock.next() else {
-            // The socket closed: a reply that ended is done; one that
-            // didn't is an error.
-            if !turn.started {
-                return Err("Quick closed the connection before the reply began.".into());
+        if let Some(kind) = ctl.aborted() {
+            let reason = match kind {
+                StopKind::Interrupt => crate::agent::CUT_SHORT,
+                StopKind::Pause => stop::TOOL_CALLS,
+            };
+            return finish_stop(sock, turn, tx, reason, kind == StopKind::Pause);
+        }
+        if ctl.pause_requested() {
+            return finish_stop(sock, turn, tx, stop::TOOL_CALLS, true);
+        }
+        if turn.started {
+            send_steers(sock, &turn.thread, say)?;
+        }
+        let frame = match sock.poll_next(Duration::from_millis(100)) {
+            PollFrame::Frame(f) => f,
+            PollFrame::Idle => continue,
+            PollFrame::Closed => {
+                // The socket closed: a reply that ended is done; one that
+                // didn't is an error.
+                if !turn.started && ctl.aborted().is_none() && !ctl.pause_requested() {
+                    return Err("Quick closed the connection before the reply began.".into());
+                }
+                return Ok(Pumped::Done);
             }
-            return Ok(Pumped::Done);
         };
         // Messages typed meanwhile go between Quick's frames: Quick takes
         // them in at its agent's next step, so that is soon enough.
-        if turn.started {
+        if turn.started && ctl.aborted().is_none() && !ctl.pause_requested() {
             send_steers(sock, &turn.thread, say)?;
         }
         let kind = frame["type"].as_str().unwrap_or("").to_string();
         // Another thread's frames, and older messages' of this one, are not
         // this turn's (the socket carries several threads).
         let mine = turn.accepts(&frame);
+        if mine && !turn.message.is_empty() {
+            note_seen_message(&turn.thread, &turn.message);
+        }
         if std::env::var("OAK_QUICK_DEBUG").is_ok() {
             eprintln!(
                 "FRAME kind={kind:22} thread={:28} msg={:12} accepted={mine}",
@@ -417,7 +946,10 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                 frame["message_id"].as_str().unwrap_or("-")
             );
             if std::env::var("OAK_QUICK_DEBUG").as_deref() == Ok("2") {
-                eprintln!("   {}", frame.to_string().chars().take(600).collect::<String>());
+                eprintln!(
+                    "   {}",
+                    frame.to_string().chars().take(600).collect::<String>()
+                );
             }
         }
         if !mine {
@@ -435,7 +967,10 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
             calls.resent.extend(lost.iter().map(|l| l.call.clone()));
             return Ok(Pumped::Lost(lost));
         }
-        let call = frame["payload"]["tool_call_id"].as_str().unwrap_or("").to_string();
+        let call = frame["payload"]["tool_call_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
         // A call asked for again is in the transcript already.
         let repeat = kind == "tool_call" && calls.knows(&call);
         // Quick hands every socket here each of this machine's calls: another
@@ -452,9 +987,22 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                 Owner::Orphan => true,
             }
         };
+        if kind == "tool_call" && !repeat && !foreign {
+            if let Some(ab) = ctl.aborted() {
+                let reason = match ab {
+                    StopKind::Interrupt => crate::agent::CUT_SHORT,
+                    StopKind::Pause => stop::TOOL_CALLS,
+                };
+                return finish_stop(sock, turn, tx, reason, ab == StopKind::Pause);
+            }
+            if ctl.pause_requested() {
+                return finish_stop(sock, turn, tx, stop::TOOL_CALLS, true);
+            }
+        }
         if !repeat && !foreign {
             for ev in turn.feed(&frame) {
                 if tx.send(Sse::Event(ev)).is_err() {
+                    stop_traffic(sock, &turn.thread, &turn.message, false);
                     return Ok(Pumped::Done);
                 }
             }
@@ -466,7 +1014,11 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                 }
                 let p = &frame["payload"];
                 let name = p["tool_name"].as_str().unwrap_or("").to_string();
-                let args = if p["arguments"]["params"]["arguments"].is_null() { p["arguments"].clone() } else { p["arguments"]["params"]["arguments"].clone() };
+                let args = if p["arguments"]["params"]["arguments"].is_null() {
+                    p["arguments"].clone()
+                } else {
+                    p["arguments"]["params"]["arguments"].clone()
+                };
                 let key = format!("{name}{args}");
                 // Quick asks again for a call Oak has answered when its relay
                 // retries the delivery: the same answer goes again, and
@@ -476,9 +1028,15 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                 let reply = match calls.reply_for(&call, &key) {
                     Some(reply) => reply,
                     None => {
-                        let result = run_tool_alive(sock, &name, &args, folder)?;
+                        let result = run_tool_alive(sock, ctl, &name, &args, folder)?;
                         if std::env::var("OAK_QUICK_DEBUG").is_ok() {
-                            eprintln!("TOOL {name} {args} -> {}", result.as_deref().map(|s| s.chars().take(300).collect::<String>()).unwrap_or_default());
+                            eprintln!(
+                                "TOOL {name} {args} -> {}",
+                                result
+                                    .as_deref()
+                                    .map(|s| s.chars().take(300).collect::<String>())
+                                    .unwrap_or_default()
+                            );
                             if let Err(e) = &result {
                                 eprintln!("TOOL {name} failed: {e}");
                             }
@@ -487,7 +1045,10 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                         // may be offloaded on. Quick's app hands it to its
                         // outpost (`offload_transport_token`) and never sends
                         // it back with the result, so Oak doesn't either.
-                        let transport = p["arguments"]["params"]["_quickwork"]["result_transport_token"].as_str().unwrap_or("");
+                        let transport =
+                            p["arguments"]["params"]["_quickwork"]["result_transport_token"]
+                                .as_str()
+                                .unwrap_or("");
                         let reply = tool_reply(&call, &result, transport);
                         calls.record(&call, &name, &key, &result, reply.clone());
                         if foreign {
@@ -508,23 +1069,37 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                 {
                     std::thread::sleep(Duration::from_millis(n));
                 }
-                sock.send(&reply)?;
+                let _ = sock.send(&reply);
+                for ev in finished {
+                    if tx.send(Sse::Event(ev)).is_err() {
+                        stop_traffic(sock, &turn.thread, &turn.message, false);
+                        return Ok(Pumped::Done);
+                    }
+                }
+                if let Some(ab) = ctl.aborted() {
+                    let reason = match ab {
+                        StopKind::Interrupt => crate::agent::CUT_SHORT,
+                        StopKind::Pause => stop::TOOL_CALLS,
+                    };
+                    return finish_stop(sock, turn, tx, reason, ab == StopKind::Pause);
+                }
+                if ctl.pause_requested() {
+                    return finish_stop(sock, turn, tx, stop::TOOL_CALLS, true);
+                }
                 send_steers(sock, &turn.thread, say)?;
                 // Quick carries the turn on in a new message once it has the
                 // result; that message is this turn's too.
                 if !foreign {
                     turn.awaiting_continuation = true;
                 }
-                for ev in finished {
-                    if tx.send(Sse::Event(ev)).is_err() {
-                        return Ok(Pumped::Done);
-                    }
-                }
             }
             "steering_ingested" => {
                 let p = &frame["payload"];
                 if std::env::var("OAK_QUICK_DEBUG").is_ok() {
-                    eprintln!("STEER Quick took in {} (fallback {})", p["message_ids"], p["fallback"]);
+                    eprintln!(
+                        "STEER Quick took in {} (fallback {})",
+                        p["message_ids"], p["fallback"]
+                    );
                 }
                 if took_in(&turn.thread, p) {
                     for ev in turn.close(stop::STEERED) {
@@ -541,7 +1116,11 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                 return Ok(Pumped::Done);
             }
             "error" => {
-                let why = frame["payload"]["message"].as_str().or(frame["payload"]["error"].as_str()).unwrap_or("Quick reported an error").to_string();
+                let why = frame["payload"]["message"]
+                    .as_str()
+                    .or(frame["payload"]["error"].as_str())
+                    .unwrap_or("Quick reported an error")
+                    .to_string();
                 return Err(format!("Quick: {why}"));
             }
             _ => {}
@@ -555,21 +1134,50 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
 /// call, and then the socket closes under the turn, which ended the chat.
 /// What comes meanwhile is held, in order, for the turn to read after (a call
 /// the relay asks for again among it is answered from `Calls`).
-fn run_tool_alive(sock: &mut Socket, name: &str, args: &Value, folder: &std::path::Path) -> Result<Result<String, String>, String> {
+fn run_tool_alive(
+    sock: &mut Socket,
+    ctl: &Arc<TurnCtl>,
+    name: &str,
+    args: &Value,
+    folder: &std::path::Path,
+) -> Result<Result<String, String>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let (n, a, f) = (name.to_string(), args.clone(), folder.to_path_buf());
+    let (n, a, f, c) = (
+        name.to_string(),
+        args.clone(),
+        folder.to_path_buf(),
+        ctl.clone(),
+    );
     std::thread::Builder::new()
         .name(format!("quick-tool-{name}"))
         .spawn(move || {
-            let _ = tx.send(run_tool(&n, &a, &f));
+            CURRENT_CTL.with(|cell| *cell.borrow_mut() = Some(c));
+            let res = run_tool(&n, &a, &f);
+            CURRENT_CTL.with(|cell| *cell.borrow_mut() = None);
+            let _ = tx.send(res);
         })
         .map_err(|e| format!("Couldn't start {name}: {e}"))?;
+    let mut aborted_at: Option<std::time::Instant> = None;
     loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(result) => return Ok(result),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(Err(format!("{name} stopped without an answer."))),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Ok(Err(format!("{name} stopped without an answer.")));
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if !sock.keep_alive(Duration::from_millis(200)) {
+                if let Some(kind) = ctl.aborted() {
+                    let since = *aborted_at.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= Duration::from_millis(300) {
+                        let why = match kind {
+                            StopKind::Interrupt => "the user interrupted the turn",
+                            StopKind::Pause => "the user paused the session (ultrapause)",
+                        };
+                        return Ok(Err(format!("{name} was stopped because {why}.")));
+                    }
+                    let _ = sock.keep_alive(Duration::from_millis(20));
+                    continue;
+                }
+                if !sock.keep_alive(Duration::from_millis(100)) {
                     return Err(format!("Quick closed the socket while {name} ran."));
                 }
             }
@@ -655,15 +1263,34 @@ impl Calls {
 
     /// The answer Oak gave this call, when it is the same call asked again.
     fn reply_for(&self, call: &str, key: &str) -> Option<Value> {
-        self.answered.iter().find(|a| a.call == call && a.key == key).map(|a| a.reply.clone())
+        self.answered
+            .iter()
+            .find(|a| a.call == call && a.key == key)
+            .map(|a| a.reply.clone())
     }
 
-    fn record(&mut self, call: &str, name: &str, key: &str, result: &Result<String, String>, reply: Value) {
+    fn record(
+        &mut self,
+        call: &str,
+        name: &str,
+        key: &str,
+        result: &Result<String, String>,
+        reply: Value,
+    ) {
         let (content, ok) = match result {
             Ok(s) => (s.clone(), true),
             Err(e) => (e.clone(), false),
         };
-        self.answered.push(Answer { call: call.into(), name: name.into(), key: key.into(), reply, content, ok, settled: false, foreign: false });
+        self.answered.push(Answer {
+            call: call.into(),
+            name: name.into(),
+            key: key.into(),
+            reply,
+            content,
+            ok,
+            settled: false,
+            foreign: false,
+        });
     }
 
     /// Quick's record of a call's result (a `tool_result` frame). It names
@@ -672,18 +1299,29 @@ impl Calls {
     /// error that says the relay failed goes with the newest call of its
     /// name. A call Oak answered that Quick records as failed is lost.
     fn saw_server_result(&mut self, p: &Value) {
-        let id = ["tool_id", "tool_call_id", "tool_use_id", "id"].iter().find_map(|k| p[*k].as_str()).unwrap_or("");
+        let id = ["tool_id", "tool_call_id", "tool_use_id", "id"]
+            .iter()
+            .find_map(|k| p[*k].as_str())
+            .unwrap_or("");
         let name = p["tool_name"].as_str().or(p["name"].as_str()).unwrap_or("");
         let same_name = |a: &Answer| !a.foreign && (name.is_empty() || a.name == name);
         let error = server_error(p);
-        let exact = self.answered.iter().position(|a| !id.is_empty() && a.call == id);
+        let exact = self
+            .answered
+            .iter()
+            .position(|a| !id.is_empty() && a.call == id);
         let relay = error.as_deref().is_some_and(looks_like_relay);
         let at = if exact.is_some() {
             exact
         } else if relay {
-            self.answered.iter().rposition(|a| !a.settled && same_name(a)).or_else(|| self.answered.iter().rposition(|a| same_name(a)))
+            self.answered
+                .iter()
+                .rposition(|a| !a.settled && same_name(a))
+                .or_else(|| self.answered.iter().rposition(|a| same_name(a)))
         } else if !name.is_empty() {
-            self.answered.iter().position(|a| !a.settled && a.name == name)
+            self.answered
+                .iter()
+                .position(|a| !a.settled && a.name == name)
         } else {
             None
         };
@@ -699,7 +1337,12 @@ impl Calls {
         if !a.ok || self.resent.contains(&a.call) || self.lost.iter().any(|l| l.call == a.call) {
             return;
         }
-        self.lost.push(Lost { name: a.name.clone(), call: a.call.clone(), content: a.content.clone(), relay: said });
+        self.lost.push(Lost {
+            name: a.name.clone(),
+            call: a.call.clone(),
+            content: a.content.clone(),
+            relay: said,
+        });
     }
 }
 
@@ -713,7 +1356,12 @@ fn server_error(p: &Value) -> Option<String> {
     };
     said.or_else(|| {
         let failed = p["status"].as_str() == Some("error") || p["is_error"].as_bool() == Some(true);
-        failed.then(|| p["result"].as_str().map(String::from).unwrap_or_else(|| p["result"].to_string()))
+        failed.then(|| {
+            p["result"]
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| p["result"].to_string())
+        })
     })
 }
 
@@ -721,7 +1369,9 @@ fn server_error(p: &Value) -> Option<String> {
 /// outpost invoke error (500)`), rather than a tool's own failure.
 fn looks_like_relay(said: &str) -> bool {
     let s = said.to_lowercase();
-    ["outpost", "relay", "invoke", "courier", "device"].iter().any(|w| s.contains(w))
+    ["outpost", "relay", "invoke", "courier", "device"]
+        .iter()
+        .any(|w| s.contains(w))
 }
 
 /// The follow-up that gives Quick's agent the results its relay lost.
@@ -732,7 +1382,10 @@ fn resend_text(lost: &[Lost]) -> String {
     for l in lost {
         let content: String = l.content.chars().take(40_000).collect();
         let relay: String = l.relay.chars().take(300).collect();
-        s.push_str(&format!("\n{} (call {}); the relay said: {relay}\nResult:\n{content}\n", l.name, l.call));
+        s.push_str(&format!(
+            "\n{} (call {}); the relay said: {relay}\nResult:\n{content}\n",
+            l.name, l.call
+        ));
     }
     s
 }
@@ -761,7 +1414,15 @@ pub(crate) fn unix_ls(command: &str, folder: &std::path::Path) -> Option<Result<
         paths.push(String::new());
     }
     let line = |name: &str, m: &std::fs::Metadata| {
-        if long { format!("{} {:>12} {name}\n", if m.is_dir() { "d" } else { "-" }, m.len()) } else { format!("{name}\n") }
+        if long {
+            format!(
+                "{} {:>12} {name}\n",
+                if m.is_dir() { "d" } else { "-" },
+                m.len()
+            )
+        } else {
+            format!("{name}\n")
+        }
     };
     let mut out = String::new();
     for (n, want) in paths.iter().enumerate() {
@@ -786,7 +1447,12 @@ pub(crate) fn unix_ls(command: &str, folder: &std::path::Path) -> Option<Result<
         };
         let mut entries: Vec<(String, std::fs::Metadata)> = read
             .flatten()
-            .filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), e.metadata().ok()?)))
+            .filter_map(|e| {
+                Some((
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.metadata().ok()?,
+                ))
+            })
             .filter(|(name, _)| all || !name.starts_with('.'))
             .collect();
         entries.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
@@ -842,7 +1508,8 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
                 .to_string());
             }
             let mut entries = vec![];
-            let read = std::fs::read_dir(&path).map_err(|e| format!("Couldn't list {}: {e}", native(&path)))?;
+            let read = std::fs::read_dir(&path)
+                .map_err(|e| format!("Couldn't list {}: {e}", native(&path)))?;
             {
                 for e in read.flatten().take(500) {
                     let p = e.path();
@@ -858,7 +1525,12 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
                     }));
                 }
             }
-            entries.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+            entries.sort_by(|a, b| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["name"].as_str().unwrap_or(""))
+            });
             Ok(json!({
                 "success": true,
                 "path": format!("/{}", native(&path)),
@@ -870,31 +1542,52 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
         "fdfind" | "fd" => fdfind(args, folder),
         "ripgrep" | "rg" | "grep" => ripgrep(args, folder),
         "bash" | "shell" | "run_command" | "execute_command" => {
-            let cmd = args["command"].as_str().or(args["cmd"].as_str()).unwrap_or("").to_string();
+            let cmd = args["command"]
+                .as_str()
+                .or(args["cmd"].as_str())
+                .unwrap_or("")
+                .to_string();
             execute(&json!({"command": cmd}), folder)
         }
         // Quick's own coding tool: Python in the conversation's folder, which
         // is how its agent runs shell commands (`subprocess`) too.
-        "run_python" | "python" | "run_python_outpost_local" | "run_python_outpost_local_with_write" => run_python(args, folder),
+        "run_python"
+        | "python"
+        | "run_python_outpost_local"
+        | "run_python_outpost_local_with_write" => run_python(args, folder),
         // The names the outpost declares (`outpost::TOOLS`), so a call made
         // against this machine's registration runs here too.
         "file_matches" => {
             let want = args["path"].as_str().unwrap_or("");
-            Ok(json!({"matches": match_paths(folder, want), "outside_allowed_folders": false}).to_string())
+            Ok(
+                json!({"matches": match_paths(folder, want), "outside_allowed_folders": false})
+                    .to_string(),
+            )
         }
         "folder_create" => {
             let p = resolve(folder, args["path"].as_str().unwrap_or(""));
-            std::fs::create_dir_all(&p).map(|_| format!("Created {}.", native(&p))).map_err(|e| format!("Couldn't create {}: {e}", native(&p)))
+            std::fs::create_dir_all(&p)
+                .map(|_| format!("Created {}.", native(&p)))
+                .map_err(|e| format!("Couldn't create {}: {e}", native(&p)))
         }
         "file_delete" => {
             let p = resolve(folder, args["path"].as_str().unwrap_or(""));
-            if p.is_dir() { std::fs::remove_dir(&p) } else { std::fs::remove_file(&p) }
-                .map(|_| format!("Deleted {}.", native(&p)))
-                .map_err(|e| format!("Couldn't delete {}: {e}", native(&p)))
+            if p.is_dir() {
+                std::fs::remove_dir(&p)
+            } else {
+                std::fs::remove_file(&p)
+            }
+            .map(|_| format!("Deleted {}.", native(&p)))
+            .map_err(|e| format!("Couldn't delete {}: {e}", native(&p)))
         }
         "file_copy" => {
-            let (from, to) = (resolve(folder, args["source"].as_str().unwrap_or("")), resolve(folder, args["destination"].as_str().unwrap_or("")));
-            std::fs::copy(&from, &to).map(|_| format!("Copied {} to {}.", native(&from), native(&to))).map_err(|e| format!("Couldn't copy: {e}"))
+            let (from, to) = (
+                resolve(folder, args["source"].as_str().unwrap_or("")),
+                resolve(folder, args["destination"].as_str().unwrap_or("")),
+            );
+            std::fs::copy(&from, &to)
+                .map(|_| format!("Copied {} to {}.", native(&from), native(&to)))
+                .map_err(|e| format!("Couldn't copy: {e}"))
         }
         "file_type" => {
             let p = resolve(folder, args["path"].as_str().unwrap_or(""));
@@ -913,7 +1606,11 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
         // Quick's sandbox's other tools (its shell, its browser). Its agent
         // reaches for these when it works locally, so they run here too.
         "run_shell" => {
-            let cmd = args["command"].as_str().or(args["cmd"].as_str()).unwrap_or("").to_string();
+            let cmd = args["command"]
+                .as_str()
+                .or(args["cmd"].as_str())
+                .unwrap_or("")
+                .to_string();
             execute(&json!({ "command": cmd }), folder)
         }
         other => Err(format!(
@@ -945,9 +1642,16 @@ fn resolve(folder: &std::path::Path, path: &str) -> std::path::PathBuf {
     // Quick's own workspace roots are the conversation's folder.
     let bare = real.trim_start_matches("workspace/").trim_end_matches('/');
     let roots = ["artifacts", "agent_files", "attached_files"];
-    if bare.is_empty() || roots.contains(&bare) || roots.iter().any(|r| bare.starts_with(&format!("{r}/"))) {
+    if bare.is_empty()
+        || roots.contains(&bare)
+        || roots.iter().any(|r| bare.starts_with(&format!("{r}/")))
+    {
         let tail = bare.split_once('/').map(|(_, t)| t).unwrap_or("");
-        return if tail.is_empty() { folder.to_path_buf() } else { folder.join(tail) };
+        return if tail.is_empty() {
+            folder.to_path_buf()
+        } else {
+            folder.join(tail)
+        };
     }
     // A real path as Quick sends it back: `C:/…` or with the leading slash
     // its allowed folders carry, `/C:/…`.
@@ -969,7 +1673,8 @@ fn resolve(folder: &std::path::Path, path: &str) -> std::path::PathBuf {
 fn drive_path(s: &str) -> Option<std::path::PathBuf> {
     let t = s.trim_start_matches('/');
     let mut c = t.chars();
-    (c.next().is_some_and(|x| x.is_ascii_alphabetic()) && c.next() == Some(':')).then(|| std::path::PathBuf::from(t))
+    (c.next().is_some_and(|x| x.is_ascii_alphabetic()) && c.next() == Some(':'))
+        .then(|| std::path::PathBuf::from(t))
 }
 
 /// A path as Quick's outpost names it (`C:/Users/…`), for the paths it is
@@ -991,13 +1696,22 @@ pub(crate) fn match_paths(folder: &std::path::Path, want: &str) -> Vec<String> {
     }
     let path = std::path::PathBuf::from(want);
     if path.is_absolute() {
-        return if path.exists() { vec![native(&path)] } else { vec![] };
+        return if path.exists() {
+            vec![native(&path)]
+        } else {
+            vec![]
+        };
     }
-    let needle = want.trim_start_matches("./").replace('\\', "/").to_lowercase();
+    let needle = want
+        .trim_start_matches("./")
+        .replace('\\', "/")
+        .to_lowercase();
     let mut out = vec![];
     let mut stack = vec![folder.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in read.flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_lowercase();
@@ -1023,7 +1737,10 @@ pub(crate) fn match_paths(folder: &std::path::Path, want: &str) -> Vec<String> {
 /// Strings a call gives as a list or as one.
 fn strings_of(v: &Value) -> Vec<String> {
     match v {
-        Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
         Value::String(s) => vec![s.clone()],
         _ => vec![],
     }
@@ -1032,8 +1749,17 @@ fn strings_of(v: &Value) -> Vec<String> {
 /// The paths a search names (`paths`, or `path`), on this machine; the
 /// conversation's folder when it names none.
 fn search_paths(args: &Value, folder: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let named: Vec<std::path::PathBuf> = strings_of(&args["paths"]).into_iter().chain(strings_of(&args["path"])).filter(|p| !p.trim().is_empty()).map(|p| resolve(folder, &p)).collect();
-    if named.is_empty() { vec![folder.to_path_buf()] } else { named }
+    let named: Vec<std::path::PathBuf> = strings_of(&args["paths"])
+        .into_iter()
+        .chain(strings_of(&args["path"]))
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| resolve(folder, &p))
+        .collect();
+    if named.is_empty() {
+        vec![folder.to_path_buf()]
+    } else {
+        named
+    }
 }
 
 /// The ripgrep Oak bundles (`toolbin`), else the one on PATH.
@@ -1046,15 +1772,26 @@ fn rg_program() -> std::path::PathBuf {
 
 /// Runs Oak's ripgrep with `argv` in `folder`, `input` on its stdin, for
 /// `timeout` seconds at most.
-fn run_rg(argv: &[std::ffi::OsString], folder: &std::path::Path, input: Option<Vec<u8>>, timeout: u64) -> Result<Ran, String> {
+fn run_rg(
+    argv: &[std::ffi::OsString],
+    folder: &std::path::Path,
+    input: Option<Vec<u8>>,
+    timeout: u64,
+) -> Result<Ran, String> {
     use std::process::Stdio;
     let mut cmd = no_console(std::process::Command::new(rg_program()));
     cmd.args(argv)
         .current_dir(folder)
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("Couldn't start ripgrep: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Couldn't start ripgrep: {e}"))?;
     if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
         std::thread::spawn(move || {
             use std::io::Write;
@@ -1071,18 +1808,31 @@ fn run_rg(argv: &[std::ffi::OsString], folder: &std::path::Path, input: Option<V
 /// regex (`a|b`) or another folder found nothing, and the agent went on to
 /// search with Python.
 fn ripgrep(args: &Value, folder: &std::path::Path) -> Result<String, String> {
-    let patterns: Vec<String> = strings_of(&args["patterns"]).into_iter().chain(strings_of(&args["pattern"])).filter(|p| !p.is_empty()).collect();
+    let patterns: Vec<String> = strings_of(&args["patterns"])
+        .into_iter()
+        .chain(strings_of(&args["pattern"]))
+        .filter(|p| !p.is_empty())
+        .collect();
     if patterns.is_empty() {
         return Err("ripgrep needs `patterns`.".into());
     }
-    let flags = crate::freebuff_tools::parse_flags(args["options"].as_str().unwrap_or("")).ok_or("ripgrep's `options` leave a quote open.")?;
+    let flags = crate::freebuff_tools::parse_flags(args["options"].as_str().unwrap_or(""))
+        .ok_or("ripgrep's `options` leave a quote open.")?;
     if let Some(no) = crate::freebuff_tools::flag_refusal(&flags) {
         return Err(no);
     }
-    let mut argv: Vec<std::ffi::OsString> = ["--no-config", "--color=never", "--line-number", "--with-filename", "--no-heading", "--max-columns=400", "--max-columns-preview"]
-        .into_iter()
-        .map(Into::into)
-        .collect();
+    let mut argv: Vec<std::ffi::OsString> = [
+        "--no-config",
+        "--color=never",
+        "--line-number",
+        "--with-filename",
+        "--no-heading",
+        "--max-columns=400",
+        "--max-columns-preview",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
     if cfg!(windows) {
         argv.push("--path-separator=/".into());
     }
@@ -1119,13 +1869,21 @@ const FIND_MAX: usize = 2_000;
 /// ripgrep lists the files (`rg --files`, which keeps to .gitignore as fd
 /// does) and matches the names; the folders are those the files are in.
 fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
-    let given = crate::freebuff_tools::parse_flags(args["args"].as_str().unwrap_or("")).ok_or("fdfind's `args` leave a quote open.")?;
+    let given = crate::freebuff_tools::parse_flags(args["args"].as_str().unwrap_or(""))
+        .ok_or("fdfind's `args` leave a quote open.")?;
     // `-HI` is `-H -I`.
     let words: Vec<String> = given
         .into_iter()
         .flat_map(|w| {
-            let short = w.len() > 2 && w.starts_with('-') && !w.starts_with("--") && w[1..].chars().all(|c| "HIuisFgpaL".contains(c));
-            if short { w[1..].chars().map(|c| format!("-{c}")).collect() } else { vec![w] }
+            let short = w.len() > 2
+                && w.starts_with('-')
+                && !w.starts_with("--")
+                && w[1..].chars().all(|c| "HIuisFgpaL".contains(c));
+            if short {
+                w[1..].chars().map(|c| format!("-{c}")).collect()
+            } else {
+                vec![w]
+            }
         })
         .collect();
     let mut list: Vec<std::ffi::OsString> = vec!["--no-config".into(), "--files".into()];
@@ -1133,7 +1891,8 @@ fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
         list.push("--path-separator=/".into());
     }
     let (mut pattern, mut roots, mut exts, mut kinds) = (None::<String>, vec![], vec![], vec![]);
-    let (mut glob, mut full, mut fixed, mut case, mut only_positional) = (false, false, false, None::<bool>, false);
+    let (mut glob, mut full, mut fixed, mut case, mut only_positional) =
+        (false, false, false, None::<bool>, false);
     let mut it = words.into_iter();
     while let Some(w) = it.next() {
         if only_positional || !w.starts_with('-') || w == "-" {
@@ -1148,7 +1907,9 @@ fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
             Some((n, v)) if n.starts_with("--") => (n.to_string(), Some(v.to_string())),
             _ => (w.clone(), None),
         };
-        let value = |it: &mut std::vec::IntoIter<String>| inline.clone().or_else(|| it.next()).unwrap_or_default();
+        let value = |it: &mut std::vec::IntoIter<String>| {
+            inline.clone().or_else(|| it.next()).unwrap_or_default()
+        };
         match name.as_str() {
             "--" => only_positional = true,
             "-H" | "--hidden" => list.push("--hidden".into()),
@@ -1159,10 +1920,14 @@ fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
             "-g" | "--glob" => glob = true,
             "-p" | "--full-path" => full = true,
             "-F" | "--fixed-strings" => fixed = true,
-            "-e" | "--extension" => exts.push(value(&mut it).trim_start_matches('.').to_lowercase()),
+            "-e" | "--extension" => {
+                exts.push(value(&mut it).trim_start_matches('.').to_lowercase())
+            }
             "-t" | "--type" => kinds.push(value(&mut it).to_lowercase()),
             "-d" | "--max-depth" => list.extend(["--max-depth".into(), value(&mut it).into()]),
-            "-E" | "--exclude" => list.extend(["--glob".into(), format!("!{}", value(&mut it)).into()]),
+            "-E" | "--exclude" => {
+                list.extend(["--glob".into(), format!("!{}", value(&mut it)).into()])
+            }
             _ => {}
         }
     }
@@ -1170,10 +1935,23 @@ fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
     if roots.is_empty() {
         roots = search_paths(args, folder);
     } else {
-        roots.extend(strings_of(&args["paths"]).iter().filter(|p| !p.trim().is_empty()).map(|p| resolve(folder, p)));
+        roots.extend(
+            strings_of(&args["paths"])
+                .iter()
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| resolve(folder, p)),
+        );
     }
     if glob && !pattern.is_empty() {
-        list.extend([if case == Some(false) { "--iglob" } else { "--glob" }.into(), pattern.clone().into()]);
+        list.extend([
+            if case == Some(false) {
+                "--iglob"
+            } else {
+                "--glob"
+            }
+            .into(),
+            pattern.clone().into(),
+        ]);
     }
     list.push("--".into());
     list.extend(roots.iter().map(|r| r.clone().into_os_string()));
@@ -1183,22 +1961,41 @@ fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
         return Err(stopped("The search", timeout, &ran.stdout));
     };
     if !status.success() && ran.stdout.trim().is_empty() && status.code() != Some(1) {
-        return Err(format!("Listing files failed ({status}): {}", ran.stderr.trim()));
+        return Err(format!(
+            "Listing files failed ({status}): {}",
+            ran.stderr.trim()
+        ));
     }
-    let files: Vec<String> = ran.stdout.lines().filter(|l| !l.trim().is_empty()).map(|l| l.replace('\\', "/")).collect();
-    let wants = |k: char| kinds.is_empty() || kinds.iter().any(|t| t.starts_with(k) || (k == 'f' && t.starts_with('x')));
+    let files: Vec<String> = ran
+        .stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.replace('\\', "/"))
+        .collect();
+    let wants = |k: char| {
+        kinds.is_empty()
+            || kinds
+                .iter()
+                .any(|t| t.starts_with(k) || (k == 'f' && t.starts_with('x')))
+    };
     let mut entries: Vec<String> = vec![];
     if wants('f') {
         entries.extend(files.iter().cloned());
     }
     if wants('d') && !glob {
-        let tops: Vec<String> = roots.iter().map(|r| native(r).trim_end_matches('/').to_lowercase()).collect();
+        let tops: Vec<String> = roots
+            .iter()
+            .map(|r| native(r).trim_end_matches('/').to_lowercase())
+            .collect();
         let mut dirs = std::collections::BTreeSet::new();
         for f in &files {
             let mut p = f.as_str();
             while let Some((parent, _)) = p.rsplit_once('/') {
                 let low = parent.to_lowercase();
-                if tops.contains(&low) || !tops.iter().any(|t| low.starts_with(&format!("{t}/"))) || !dirs.insert(parent.to_string()) {
+                if tops.contains(&low)
+                    || !tops.iter().any(|t| low.starts_with(&format!("{t}/")))
+                    || !dirs.insert(parent.to_string())
+                {
                     break;
                 }
                 p = parent;
@@ -1208,13 +2005,26 @@ fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
     }
     let base = |e: &str| e.rsplit('/').next().unwrap_or(e).to_string();
     if !exts.is_empty() {
-        entries.retain(|e| base(e).rsplit_once('.').is_some_and(|(_, x)| exts.contains(&x.to_lowercase())));
+        entries.retain(|e| {
+            base(e)
+                .rsplit_once('.')
+                .is_some_and(|(_, x)| exts.contains(&x.to_lowercase()))
+        });
     }
     if !glob && !pattern.is_empty() {
         // The names go through ripgrep, one a line, so the pattern is matched
         // with the regex fd itself uses; a match's line number is its entry.
-        let names: String = entries.iter().map(|e| if full { e.clone() } else { base(e) }).collect::<Vec<_>>().join("\n");
-        let mut argv: Vec<std::ffi::OsString> = vec!["--no-config".into(), "--color=never".into(), "--line-number".into(), "--no-filename".into()];
+        let names: String = entries
+            .iter()
+            .map(|e| if full { e.clone() } else { base(e) })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut argv: Vec<std::ffi::OsString> = vec![
+            "--no-config".into(),
+            "--color=never".into(),
+            "--line-number".into(),
+            "--no-filename".into(),
+        ];
         argv.push(match case {
             Some(true) => "--case-sensitive".into(),
             Some(false) => "--ignore-case".into(),
@@ -1228,8 +2038,17 @@ fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
         if ran.status.and_then(|s| s.code()) == Some(2) {
             return Err(format!("fdfind's pattern: {}", ran.stderr.trim()));
         }
-        let hit: std::collections::BTreeSet<usize> = ran.stdout.lines().filter_map(|l| l.split(':').next()?.parse::<usize>().ok()).collect();
-        entries = entries.into_iter().enumerate().filter(|(i, _)| hit.contains(&(i + 1))).map(|(_, e)| e).collect();
+        let hit: std::collections::BTreeSet<usize> = ran
+            .stdout
+            .lines()
+            .filter_map(|l| l.split(':').next()?.parse::<usize>().ok())
+            .collect();
+        entries = entries
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| hit.contains(&(i + 1)))
+            .map(|(_, e)| e)
+            .collect();
     }
     entries.sort();
     entries.dedup();
@@ -1247,16 +2066,39 @@ fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
 /// most.
 fn timeout_of(args: &Value, default: u64) -> u64 {
     let t = &args["timeout"];
-    let asked = t.as_u64().or_else(|| t.as_f64().filter(|f| *f > 0.0).map(|f| f.ceil() as u64)).or_else(|| t.as_str().and_then(|s| s.trim().parse().ok()));
-    asked.unwrap_or(default).clamp(1, crate::tools::EXECUTE_TIMEOUT_MAX.max(1))
+    let asked = t
+        .as_u64()
+        .or_else(|| t.as_f64().filter(|f| *f > 0.0).map(|f| f.ceil() as u64))
+        .or_else(|| t.as_str().and_then(|s| s.trim().parse().ok()));
+    asked
+        .unwrap_or(default)
+        .clamp(1, crate::tools::EXECUTE_TIMEOUT_MAX.max(1))
 }
 
-/// What a tool says of a program it stopped at its time limit: what the
-/// program printed by then, and how to give it longer.
+/// What a tool says of a program it stopped at its time limit (or when the
+/// user interrupted or ultrapaused the turn): what the program printed by
+/// then, and how to give it longer.
 fn stopped(what: &str, timeout: u64, printed: &str) -> String {
+    if let Some(kind) = current_abort() {
+        let why = match kind {
+            StopKind::Interrupt => "the user interrupted the turn",
+            StopKind::Pause => "the user paused the session (ultrapause)",
+        };
+        let mut s = format!("{what} was stopped because {why}.");
+        if !printed.trim().is_empty() {
+            s.push_str(&format!(
+                " What it printed by then:\n{}",
+                crate::tools::clip(printed)
+            ));
+        }
+        return s;
+    }
     let mut s = format!("{what} ran past its {timeout}s and was stopped.");
     if !printed.trim().is_empty() {
-        s.push_str(&format!(" What it printed by then:\n{}\n", crate::tools::clip(printed)));
+        s.push_str(&format!(
+            " What it printed by then:\n{}\n",
+            crate::tools::clip(printed)
+        ));
     }
     s.push_str(&format!(" Give it a longer `timeout` (up to {}s), or start long work in the background and check on it.", crate::tools::EXECUTE_TIMEOUT_MAX));
     s
@@ -1276,8 +2118,9 @@ const OUTPUT_CAP: usize = 8 * 1024 * 1024;
 
 /// Waits on `child` for `timeout`, reading its output as it comes: a program
 /// whose pipe fills while nobody reads it stops until somebody does, and sat
-/// out its whole time limit that way. One that runs past `timeout` is
-/// stopped, with what it started, and what it printed by then is kept.
+/// out its whole time limit that way. One that runs past `timeout` (or while
+/// the turn is aborted) is stopped, with what it started, and what it printed
+/// by then is kept.
 fn wait_for(mut child: std::process::Child, timeout: Duration) -> Result<Ran, String> {
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
@@ -1285,7 +2128,7 @@ fn wait_for(mut child: std::process::Child, timeout: Duration) -> Result<Ran, St
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
-            Ok(None) if std::time::Instant::now() >= deadline => {
+            Ok(None) if std::time::Instant::now() >= deadline || current_abort().is_some() => {
                 kill_tree(&mut child);
                 break None;
             }
@@ -1298,8 +2141,17 @@ fn wait_for(mut child: std::process::Child, timeout: Duration) -> Result<Ran, St
     };
     // A program it started and left running may hold the pipes open: the
     // output is taken for a moment more, not until they close.
-    let grace = std::time::Instant::now() + Duration::from_secs(2);
-    Ok(Ran { status, stdout: gather(&out, grace), stderr: gather(&err, grace) })
+    let grace = std::time::Instant::now()
+        + if current_abort().is_some() {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(2)
+        };
+    Ok(Ran {
+        status,
+        stdout: gather(&out, grace),
+        stderr: gather(&err, grace),
+    })
 }
 
 /// Reads `pipe` on a thread of its own, handing on what it reads.
@@ -1378,9 +2230,15 @@ fn execute(input: &Value, folder: &std::path::Path) -> Result<String, String> {
         c.arg("-lc").arg(command);
         c
     };
-    cmd.current_dir(folder).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = cmd.spawn().map_err(|e| format!("Couldn't run `{command}`: {e}"))?;
-    let ran = wait_for(child, Duration::from_secs(timeout)).map_err(|e| format!("`{command}` failed: {e}"))?;
+    cmd.current_dir(folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Couldn't run `{command}`: {e}"))?;
+    let ran = wait_for(child, Duration::from_secs(timeout))
+        .map_err(|e| format!("`{command}` failed: {e}"))?;
     let mut text = ran.stdout;
     if text.trim().is_empty() {
         text = ran.stderr;
@@ -1403,7 +2261,11 @@ fn execute(input: &Value, folder: &std::path::Path) -> Result<String, String> {
 /// say.
 fn run_python(args: &Value, folder: &std::path::Path) -> Result<String, String> {
     use std::process::Stdio;
-    let code = args["code"].as_str().or(args["script"].as_str()).or(args["source"].as_str()).unwrap_or("");
+    let code = args["code"]
+        .as_str()
+        .or(args["script"].as_str())
+        .or(args["source"].as_str())
+        .unwrap_or("");
     if code.trim().is_empty() {
         return Err("run_python needs `code`.".into());
     }
@@ -1415,9 +2277,17 @@ fn run_python(args: &Value, folder: &std::path::Path) -> Result<String, String> 
     let file = dir.join(format!("quick-{}.py", crate::api::now_ms()));
     std::fs::write(&file, code).map_err(|e| format!("Couldn't write the snippet: {e}"))?;
     let mut python = python_command();
-    python.arg(&file).current_dir(folder).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = python.spawn().map_err(|e| format!("Couldn't start Python: {e}"))?;
-    let ran = wait_for(child, Duration::from_secs(timeout)).map_err(|e| format!("Python failed: {e}"))?;
+    python
+        .arg(&file)
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = python
+        .spawn()
+        .map_err(|e| format!("Couldn't start Python: {e}"))?;
+    let ran =
+        wait_for(child, Duration::from_secs(timeout)).map_err(|e| format!("Python failed: {e}"))?;
     let mut text = ran.stdout;
     if !ran.stderr.trim().is_empty() {
         if !text.trim().is_empty() {
@@ -1495,7 +2365,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -1512,13 +2384,34 @@ mod tests {
     #[test]
     fn a_path_quick_sends_resolves_to_this_machine() {
         let folder = std::path::Path::new("C:/work/project");
-        assert_eq!(resolve(folder, "src/main.rs"), std::path::PathBuf::from("C:/work/project/src/main.rs"));
-        assert_eq!(resolve(folder, "/C:/work/project/src/main.rs"), std::path::PathBuf::from("C:/work/project/src/main.rs"));
-        assert_eq!(resolve(folder, "C:/work/project/src/main.rs"), std::path::PathBuf::from("C:/work/project/src/main.rs"));
-        assert_eq!(resolve(folder, "/outposts/DESKTOP/C:/work/project/src/main.rs"), std::path::PathBuf::from("C:/work/project/src/main.rs"));
-        assert_eq!(resolve(folder, "/outposts/DESKTOP//C:/work/project/src/main.rs"), std::path::PathBuf::from("C:/work/project/src/main.rs"));
-        assert_eq!(resolve(folder, "artifacts/out.txt"), std::path::PathBuf::from("C:/work/project/out.txt"));
-        assert_eq!(resolve(folder, "/C:/work/project"), std::path::PathBuf::from("C:/work/project"));
+        assert_eq!(
+            resolve(folder, "src/main.rs"),
+            std::path::PathBuf::from("C:/work/project/src/main.rs")
+        );
+        assert_eq!(
+            resolve(folder, "/C:/work/project/src/main.rs"),
+            std::path::PathBuf::from("C:/work/project/src/main.rs")
+        );
+        assert_eq!(
+            resolve(folder, "C:/work/project/src/main.rs"),
+            std::path::PathBuf::from("C:/work/project/src/main.rs")
+        );
+        assert_eq!(
+            resolve(folder, "/outposts/DESKTOP/C:/work/project/src/main.rs"),
+            std::path::PathBuf::from("C:/work/project/src/main.rs")
+        );
+        assert_eq!(
+            resolve(folder, "/outposts/DESKTOP//C:/work/project/src/main.rs"),
+            std::path::PathBuf::from("C:/work/project/src/main.rs")
+        );
+        assert_eq!(
+            resolve(folder, "artifacts/out.txt"),
+            std::path::PathBuf::from("C:/work/project/out.txt")
+        );
+        assert_eq!(
+            resolve(folder, "/C:/work/project"),
+            std::path::PathBuf::from("C:/work/project")
+        );
     }
 
     /// `file_matches` answers a path it is given whole, and finds a relative
@@ -1532,8 +2425,16 @@ mod tests {
         std::fs::write(dir.join("readme.md"), b"x").unwrap();
         let whole = format!("/{}", native(&dir.join("src/quick/turn.rs")));
         assert_eq!(match_paths(&dir, &whole).len(), 1);
-        assert_eq!(match_paths(&dir, "src/quick/turn.rs").len(), 1, "a relative path matches by its tail");
-        assert_eq!(match_paths(&dir, "turn.rs").len(), 1, "a name matches by name");
+        assert_eq!(
+            match_paths(&dir, "src/quick/turn.rs").len(),
+            1,
+            "a relative path matches by its tail"
+        );
+        assert_eq!(
+            match_paths(&dir, "turn.rs").len(),
+            1,
+            "a name matches by name"
+        );
         assert!(match_paths(&dir, "nothing-here.txt").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1543,19 +2444,35 @@ mod tests {
     /// (an echoed token is a result Quick's relay looks for elsewhere).
     #[test]
     fn a_tool_result_is_shaped_as_quicks_app_sends_it() {
-        let text = tool_reply("c1", &Ok("C:/x/turn.rs: file, 42 bytes.".into()), "0123456789abcdef0123456789abcdef");
+        let text = tool_reply(
+            "c1",
+            &Ok("C:/x/turn.rs: file, 42 bytes.".into()),
+            "0123456789abcdef0123456789abcdef",
+        );
         assert_eq!(text["type"], "tool_result");
         assert_eq!(text["payload"]["tool_call_id"], "c1");
-        assert!(text["payload"]["result"].is_object(), "a bare string is a result Quick can't read: {text}");
-        assert_eq!(text["payload"]["result"]["output"], "C:/x/turn.rs: file, 42 bytes.");
+        assert!(
+            text["payload"]["result"].is_object(),
+            "a bare string is a result Quick can't read: {text}"
+        );
+        assert_eq!(
+            text["payload"]["result"]["output"],
+            "C:/x/turn.rs: file, 42 bytes."
+        );
         assert!(text["payload"]["error"].is_null());
-        assert!(text["payload"].get("result_transport_token").is_none(), "the token isn't sent back: {text}");
+        assert!(
+            text["payload"].get("result_transport_token").is_none(),
+            "the token isn't sent back: {text}"
+        );
         let listing = tool_reply("c2", &Ok(r#"{"success":true,"entries":[]}"#.into()), "");
         assert_eq!(listing["payload"]["result"]["success"], true);
         let failed = tool_reply("c3", &Err("no such file".into()), "");
         assert_eq!(failed["payload"]["result"]["success"], false);
         assert_eq!(failed["payload"]["result"]["error"], "no such file");
-        assert!(failed["payload"]["error"].is_null(), "`error` is the relay's, not the tool's");
+        assert!(
+            failed["payload"]["error"].is_null(),
+            "`error` is the relay's, not the tool's"
+        );
     }
 
     /// Quick's relay records its own error for a call Oak answered: that
@@ -1565,9 +2482,17 @@ mod tests {
     fn a_result_the_relay_replaced_is_known_as_lost() {
         let mut calls = Calls::default();
         let ok = Ok(json!({"success": true, "size_bytes": 34711}).to_string());
-        calls.record("call-1", "file_type", "file_type{}", &ok, tool_reply("call-1", &ok, ""));
+        calls.record(
+            "call-1",
+            "file_type",
+            "file_type{}",
+            &ok,
+            tool_reply("call-1", &ok, ""),
+        );
         // Another tool's own failure isn't one of Oak's results lost.
-        calls.saw_server_result(&json!({"tool_id": "tooluse_x", "tool_name": "web_search", "error": "rate limited"}));
+        calls.saw_server_result(
+            &json!({"tool_id": "tooluse_x", "tool_name": "web_search", "error": "rate limited"}),
+        );
         assert!(calls.lost.is_empty());
         calls.saw_server_result(&json!({
             "tool_id": "tooluse_abc", "tool_name": "file_type", "status": "error",
@@ -1577,11 +2502,16 @@ mod tests {
         assert_eq!(calls.lost[0].call, "call-1");
         assert!(calls.lost[0].content.contains("34711"));
         let text = resend_text(&calls.lost);
-        assert!(text.contains("34711") && text.contains("SNCS outpost invoke error"), "{text}");
+        assert!(
+            text.contains("34711") && text.contains("SNCS outpost invoke error"),
+            "{text}"
+        );
         // Given back once: the same error again doesn't lose it twice.
         calls.resent.push("call-1".into());
         calls.lost.clear();
-        calls.saw_server_result(&json!({"tool_id": "call-1", "error": "SNCS outpost invoke error (500)"}));
+        calls.saw_server_result(
+            &json!({"tool_id": "call-1", "error": "SNCS outpost invoke error (500)"}),
+        );
         assert!(calls.lost.is_empty());
     }
 
@@ -1598,7 +2528,10 @@ mod tests {
         for s in STEERS.lock().unwrap().get_mut(thread).unwrap() {
             s.sent = true;
         }
-        assert!(took_in(thread, &json!({"message_ids": [id], "messages": [{"content": "NO TESTING"}]})));
+        assert!(took_in(
+            thread,
+            &json!({"message_ids": [id], "messages": [{"content": "NO TESTING"}]})
+        ));
         assert_eq!(take_ingested(thread), vec![7]);
         assert!(take_ingested(thread).is_empty());
     }
@@ -1607,8 +2540,16 @@ mod tests {
     fn a_call_that_failed_here_is_not_given_back() {
         let mut calls = Calls::default();
         let failed = Err("no such file".to_string());
-        calls.record("call-2", "file_type", "k", &failed, tool_reply("call-2", &failed, ""));
-        calls.saw_server_result(&json!({"tool_id": "call-2", "error": "SNCS outpost invoke error (500)"}));
+        calls.record(
+            "call-2",
+            "file_type",
+            "k",
+            &failed,
+            tool_reply("call-2", &failed, ""),
+        );
+        calls.saw_server_result(
+            &json!({"tool_id": "call-2", "error": "SNCS outpost invoke error (500)"}),
+        );
         assert!(calls.lost.is_empty());
         // A call asked again is answered with the same reply, not run again.
         assert!(calls.reply_for("call-2", "k").is_some());
@@ -1625,13 +2566,40 @@ mod tests {
         };
         let _a = Live::new("oak-test-thread-a");
         let _b = Live::new("oak-test-thread-b");
-        assert!(matches!(owner(&call("x1", "oak-test-thread-a"), "oak-test-thread-a"), Owner::Mine));
-        assert!(matches!(owner(&call("x2", "oak-test-thread-b"), "oak-test-thread-a"), Owner::Theirs), "a live thread's call is its turn's");
-        assert!(matches!(owner(&call("x3", ""), "oak-test-thread-a"), Owner::Mine), "a call naming no thread is the turn's");
-        assert!(matches!(owner(&call("x4", "oak-test-thread-gone"), "oak-test-thread-a"), Owner::Orphan));
-        assert!(matches!(owner(&call("x4", "oak-test-thread-gone"), "oak-test-thread-b"), Owner::Theirs), "an orphan is run once");
+        assert!(matches!(
+            owner(&call("x1", "oak-test-thread-a"), "oak-test-thread-a"),
+            Owner::Mine
+        ));
+        assert!(
+            matches!(
+                owner(&call("x2", "oak-test-thread-b"), "oak-test-thread-a"),
+                Owner::Theirs
+            ),
+            "a live thread's call is its turn's"
+        );
+        assert!(
+            matches!(owner(&call("x3", ""), "oak-test-thread-a"), Owner::Mine),
+            "a call naming no thread is the turn's"
+        );
+        assert!(matches!(
+            owner(&call("x4", "oak-test-thread-gone"), "oak-test-thread-a"),
+            Owner::Orphan
+        ));
+        assert!(
+            matches!(
+                owner(&call("x4", "oak-test-thread-gone"), "oak-test-thread-b"),
+                Owner::Theirs
+            ),
+            "an orphan is run once"
+        );
         drop(_b);
-        assert!(matches!(owner(&call("x5", "oak-test-thread-b"), "oak-test-thread-a"), Owner::Orphan), "a turn that ended reads its thread no more");
+        assert!(
+            matches!(
+                owner(&call("x5", "oak-test-thread-b"), "oak-test-thread-a"),
+                Owner::Orphan
+            ),
+            "a turn that ended reads its thread no more"
+        );
     }
 
     /// A snippet runs with no console window on the user's desktop, and so
@@ -1666,17 +2634,53 @@ mod tests {
         std::fs::write(dir.join("a.txt"), b"hello").unwrap();
         std::fs::write(dir.join(".hidden"), b"x").unwrap();
         let ls = unix_ls("ls", &dir).unwrap().unwrap();
-        assert!(ls.contains("a.txt") && ls.contains("sub") && !ls.contains(".hidden"), "{ls}");
+        assert!(
+            ls.contains("a.txt") && ls.contains("sub") && !ls.contains(".hidden"),
+            "{ls}"
+        );
         let la = unix_ls("ls -la sub a.txt", &dir).unwrap().unwrap();
         assert!(la.contains("a.txt") && la.contains("sub:"), "{la}");
-        assert!(unix_ls("ls | sort", &dir).is_none(), "a pipe goes to the shell");
+        assert!(
+            unix_ls("ls | sort", &dir).is_none(),
+            "a pipe goes to the shell"
+        );
         assert!(unix_ls("ls missing", &dir).unwrap().is_err());
-        let listed: Value = serde_json::from_str(&run_tool("folder_list", &json!({"path": native(&dir)}), &dir).unwrap()).unwrap();
-        let names: Vec<&str> = listed["entries"].as_array().unwrap().iter().filter_map(|e| e["name"].as_str()).collect();
-        assert!(names.contains(&"a.txt") && names.contains(&"sub"), "{listed}");
-        assert!(!listed["path"].as_str().unwrap().starts_with("/outposts/"), "paths go in the wire form: {listed}");
-        assert!(run_tool("folder_list", &json!({"path": native(&dir.join("missing"))}), &dir).is_err(), "a missing folder isn't an empty one");
-        let kind: Value = serde_json::from_str(&run_tool("file_type", &json!({"path": format!("/{}", native(&dir.join("a.txt")))}), &dir).unwrap()).unwrap();
+        let listed: Value = serde_json::from_str(
+            &run_tool("folder_list", &json!({"path": native(&dir)}), &dir).unwrap(),
+        )
+        .unwrap();
+        let names: Vec<&str> = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"a.txt") && names.contains(&"sub"),
+            "{listed}"
+        );
+        assert!(
+            !listed["path"].as_str().unwrap().starts_with("/outposts/"),
+            "paths go in the wire form: {listed}"
+        );
+        assert!(
+            run_tool(
+                "folder_list",
+                &json!({"path": native(&dir.join("missing"))}),
+                &dir
+            )
+            .is_err(),
+            "a missing folder isn't an empty one"
+        );
+        let kind: Value = serde_json::from_str(
+            &run_tool(
+                "file_type",
+                &json!({"path": format!("/{}", native(&dir.join("a.txt")))}),
+                &dir,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(kind["size_bytes"], 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1690,7 +2694,10 @@ mod tests {
         assert_eq!(timeout_of(&json!({"timeout": 5}), 120), 5);
         assert_eq!(timeout_of(&json!({"timeout": "7"}), 120), 7);
         assert_eq!(timeout_of(&json!({"timeout": 0}), 120), 1);
-        assert_eq!(timeout_of(&json!({"timeout": 1_000_000}), 120), crate::tools::EXECUTE_TIMEOUT_MAX);
+        assert_eq!(
+            timeout_of(&json!({"timeout": 1_000_000}), 120),
+            crate::tools::EXECUTE_TIMEOUT_MAX
+        );
         let dir = std::env::temp_dir().join(format!("oak-quick-timeout-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let code = "import subprocess, sys, time\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\nprint('started', flush=True)\ntime.sleep(60)";
@@ -1703,13 +2710,23 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&dir);
                 return;
             }
-            Err(e) => assert!(e.contains("ran past its 2s") && e.contains("started"), "{e}"),
+            Err(e) => assert!(
+                e.contains("ran past its 2s") && e.contains("started"),
+                "{e}"
+            ),
             Ok(o) => panic!("a snippet past its time isn't a result: {o}"),
         }
-        assert!(took < Duration::from_secs(15), "stopped at its time, not when its pipes closed: {took:?}");
+        assert!(
+            took < Duration::from_secs(15),
+            "stopped at its time, not when its pipes closed: {took:?}"
+        );
         let start = std::time::Instant::now();
         let big = run_python(&json!({"code": "import sys\nsys.stdout.write('x' * 3_000_000)\nprint('done')", "timeout": 60}), &dir).unwrap();
-        assert!(big.contains("xxxx") && big.contains("done"), "{}", &big[..big.len().min(200)]);
+        assert!(
+            big.contains("xxxx") && big.contains("done"),
+            "{}",
+            &big[..big.len().min(200)]
+        );
         assert!(start.elapsed() < Duration::from_secs(30));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1729,7 +2746,10 @@ mod tests {
             let v: Value = serde_json::from_str(&r.unwrap()).unwrap();
             v["output"].as_str().unwrap_or("").to_string()
         };
-        let first = ripgrep(&json!({"patterns": [r"time(out)?\(", "deadline"], "paths": [format!("/outposts/DESKTOP/{src}")]}), &dir);
+        let first = ripgrep(
+            &json!({"patterns": [r"time(out)?\(", "deadline"], "paths": [format!("/outposts/DESKTOP/{src}")]}),
+            &dir,
+        );
         if let Err(e) = &first
             && e.starts_with("Couldn't start ripgrep")
         {
@@ -1738,12 +2758,27 @@ mod tests {
             return;
         }
         let found = out(first);
-        assert!(found.contains("a.rs:1:") && found.contains("a.rs:2:") && !found.contains("b.txt"), "{found}");
-        assert_eq!(out(ripgrep(&json!({"patterns": ["nothing-like-this"], "paths": [src]}), &dir)), "");
-        let both = out(ripgrep(&json!({"patterns": ["timeout"], "options": "-i -l"}), &dir));
+        assert!(
+            found.contains("a.rs:1:") && found.contains("a.rs:2:") && !found.contains("b.txt"),
+            "{found}"
+        );
+        assert_eq!(
+            out(ripgrep(
+                &json!({"patterns": ["nothing-like-this"], "paths": [src]}),
+                &dir
+            )),
+            ""
+        );
+        let both = out(ripgrep(
+            &json!({"patterns": ["timeout"], "options": "-i -l"}),
+            &dir,
+        ));
         assert!(both.contains("a.rs") && both.contains("b.txt"), "{both}");
         assert!(ripgrep(&json!({"patterns": ["x"], "options": "--pre=cat"}), &dir).is_err());
-        let rs = out(fdfind(&json!({"args": "-e rs", "paths": [native(&dir)]}), &dir));
+        let rs = out(fdfind(
+            &json!({"args": "-e rs", "paths": [native(&dir)]}),
+            &dir,
+        ));
         assert!(rs.contains("a.rs") && !rs.contains("b.txt"), "{rs}");
         let b = out(fdfind(&json!({"args": r"^b\."}), &dir));
         assert!(b.ends_with("other/b.txt") && !b.contains("a.rs"), "{b}");
@@ -1752,5 +2787,66 @@ mod tests {
         let txt = out(fdfind(&json!({"args": "-g '*.txt'"}), &dir));
         assert!(txt.ends_with("b.txt") && !txt.contains("a.rs"), "{txt}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_running_tool_stops_at_once_on_interrupt_or_ultrapause() {
+        let dir = std::env::temp_dir().join(format!("oak-quick-abort-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (kind, expected) in [
+            (StopKind::Interrupt, "the user interrupted the turn"),
+            (StopKind::Pause, "the user paused the session (ultrapause)"),
+        ] {
+            let ctl = Arc::new(TurnCtl::default());
+            let ctl2 = ctl.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                ctl2.set_abort(kind);
+            });
+            let start = std::time::Instant::now();
+            CURRENT_CTL.with(|c| *c.borrow_mut() = Some(ctl));
+            let res = run_python(
+                &json!({"code": "import time\nprint('before', flush=True)\ntime.sleep(60)", "timeout": 60}),
+                &dir,
+            );
+            CURRENT_CTL.with(|c| *c.borrow_mut() = None);
+            let took = start.elapsed();
+            match res {
+                Err(e) if e.starts_with("Couldn't start Python") => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                }
+                Err(e) => {
+                    assert!(e.contains(expected) && e.contains("before"), "{e}");
+                    assert!(took < Duration::from_secs(5), "aborted promptly: {took:?}");
+                }
+                Ok(o) => panic!("expected abort error, got: {o}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_steered_message_can_be_canceled_before_ingest() {
+        let thread = "steer-cancel-thread";
+        steer(thread, 101, "cancel me before send");
+        assert!(cancel_steer(101));
+        assert!(STEERS.lock().unwrap()[thread].is_empty());
+
+        steer(thread, 102, "cancel me after send");
+        STEERS.lock().unwrap().get_mut(thread).unwrap()[0].sent = true;
+        assert!(cancel_steer(102));
+        assert!(STEERS.lock().unwrap()[thread][0].canceled);
+        assert!(take_ingested(thread).is_empty());
+    }
+
+    #[test]
+    fn a_new_turn_ignores_messages_from_an_interrupted_one() {
+        let mut t = Turn::for_message("th-ignore", "");
+        t.ignore_messages.insert("old-msg-1".into());
+        let old = json!({"type": "message_start", "payload": {"role": "assistant"}, "thread_id": "th-ignore", "message_id": "old-msg-1"});
+        assert!(!t.accepts(&old));
+        let fresh = json!({"type": "message_start", "payload": {"role": "assistant"}, "thread_id": "th-ignore", "message_id": "new-msg-2"});
+        assert!(t.accepts(&fresh));
     }
 }

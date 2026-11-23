@@ -11,7 +11,7 @@
 use crate::tools::Head;
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -38,7 +38,10 @@ fn timezone() -> Option<String> {
         return Some(tz.trim().to_string());
     }
     let zone = iana_time_zone::get_timezone().ok()?;
-    let utc = matches!(zone.as_str(), "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT" | "Etc/UCT");
+    let utc = matches!(
+        zone.as_str(),
+        "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT" | "Etc/UCT"
+    );
     (!utc).then_some(zone)
 }
 
@@ -52,7 +55,8 @@ fn tz_header(req: Wire) -> Wire {
 /// The client identity the service expects on the AI-SDK call. The runtime
 /// token is the host runtime's UA, lowercase: a Bun build says
 /// `runtime/bun/1.3.14`.
-const AI_SDK_UA: &str = "ai-sdk/openai-compatible/0.0.0-test/codebuff ai-sdk/provider-utils/3.0.25 runtime/bun/1.3.14";
+const AI_SDK_UA: &str =
+    "ai-sdk/openai-compatible/0.0.0-test/codebuff ai-sdk/provider-utils/3.0.25 runtime/bun/1.3.14";
 
 /// A request written the way Bun's `fetch` writes one: the caller's headers
 /// sorted by byte order, then `Connection`, `User-Agent` (when the caller set
@@ -67,7 +71,13 @@ struct Wire {
 
 impl Wire {
     fn new(method: reqwest::Method, url: impl Into<String>) -> Wire {
-        Wire { method, url: url.into(), headers: Vec::new(), body: None, timeout: None }
+        Wire {
+            method,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+            timeout: None,
+        }
     }
     fn get(url: impl Into<String>) -> Wire {
         Wire::new(reqwest::Method::GET, url)
@@ -106,7 +116,9 @@ impl Wire {
         };
         let mut user = self.headers.clone();
         user.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-        let has_ua = user.iter().any(|(k, _)| k.eq_ignore_ascii_case("user-agent"));
+        let has_ua = user
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"));
         let mut out = user;
         out.push(("Connection".into(), "keep-alive".into()));
         if !has_ua {
@@ -116,9 +128,18 @@ impl Wire {
         out.push(("Host".into(), host));
         out.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
         let needs_len = self.body.is_some()
-            || matches!(self.method, reqwest::Method::POST | reqwest::Method::DELETE | reqwest::Method::PUT | reqwest::Method::PATCH);
+            || matches!(
+                self.method,
+                reqwest::Method::POST
+                    | reqwest::Method::DELETE
+                    | reqwest::Method::PUT
+                    | reqwest::Method::PATCH
+            );
         if needs_len {
-            out.push(("Content-Length".into(), self.body.as_ref().map(|b| b.len()).unwrap_or(0).to_string()));
+            out.push((
+                "Content-Length".into(),
+                self.body.as_ref().map(|b| b.len()).unwrap_or(0).to_string(),
+            ));
         }
         out
     }
@@ -128,7 +149,10 @@ impl Wire {
         let url = reqwest::Url::parse(&self.url).expect("valid freebuff url");
         let mut map = HeaderMap::new();
         for (k, v) in self.headers() {
-            if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(&v)) {
+            if let (Ok(n), Ok(v)) = (
+                HeaderName::from_bytes(k.as_bytes()),
+                HeaderValue::from_str(&v),
+            ) {
                 map.append(n, v);
             }
         }
@@ -162,15 +186,13 @@ pub struct Model {
     pub efforts: &'static [&'static str],
 }
 
-pub const MODELS: &[Model] = &[
-    Model {
-        id: "deepseek/deepseek-v4-flash",
-        name: "DeepSeek V4.1 Flash 1017",
-        agent: "base3-free-deepseek-flash",
-        context: 1_048_576,
-        efforts: &["low", "high", "max"],
-    },
-];
+pub const MODELS: &[Model] = &[Model {
+    id: "deepseek/deepseek-v4-flash",
+    name: "DeepSeek V4.1 Flash 1017",
+    agent: "base3-free-deepseek-flash",
+    context: 1_048_576,
+    efforts: &["low", "high", "max"],
+}];
 
 pub fn model(id: &str) -> Option<&'static Model> {
     MODELS.iter().find(|m| m.id == id)
@@ -213,7 +235,17 @@ struct Acct {
 
 impl Acct {
     fn new(cred: Cred, remote: bool) -> Acct {
-        Acct { cred, remote, catalog: None, catalog_until: 0, session: None, session_at: 0, hour_started: None, grace_until: None, error: None }
+        Acct {
+            cred,
+            remote,
+            catalog: None,
+            catalog_until: 0,
+            session: None,
+            session_at: 0,
+            hour_started: None,
+            grace_until: None,
+            error: None,
+        }
     }
 }
 
@@ -238,7 +270,9 @@ thread_local! {
 fn with_acct<T>(f: impl FnOnce(&mut Acct) -> T) -> Option<T> {
     let using = USING.with(|u| u.borrow().clone());
     let mut s = STATE.lock().unwrap();
-    let i = using.and_then(|id| s.list.iter().position(|a| a.cred.id == id)).unwrap_or(0);
+    let i = using
+        .and_then(|id| s.list.iter().position(|a| a.cred.id == id))
+        .unwrap_or(0);
     s.list.get_mut(i).map(f)
 }
 
@@ -248,8 +282,7 @@ fn with_acct<T>(f: impl FnOnce(&mut Acct) -> T) -> Option<T> {
 
 fn profile() -> Value {
     let path = crate::store::dir().join("freebuff-device.json");
-    if let Some(v) = crate::store::read_json::<Value>(&path)
-    {
+    if let Some(v) = crate::store::read_json::<Value>(&path) {
         return v;
     }
     let mut seed = [0u8; 32];
@@ -261,7 +294,9 @@ fn profile() -> Value {
         h.update(seed);
         h.update(label.as_bytes());
         let d = h.finalize();
-        (0..n).map(|i| alphabet[d[i % d.len()] as usize % alphabet.len()] as char).collect()
+        (0..n)
+            .map(|i| alphabet[d[i % d.len()] as usize % alphabet.len()] as char)
+            .collect()
     };
     let up = b"0123456789ABCDEF";
     let alnum = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -309,8 +344,8 @@ fn key_record(create: bool) -> Option<Value> {
     let public = B64.encode(signing.verifying_key().as_bytes());
     // PKCS#8 v1 around the raw Ed25519 seed, the reference client's format.
     let mut der = vec![
-        0x30u8, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
-        0x04, 0x20,
+        0x30u8, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
     ];
     der.extend_from_slice(&signing.to_bytes());
     let record = json!({
@@ -319,7 +354,10 @@ fn key_record(create: bool) -> Option<Value> {
         "privateKey": B64.encode(der),
         "registrations": {},
     });
-    let _ = crate::store::write_private(&key_path(), serde_json::to_string(&record).unwrap_or_default());
+    let _ = crate::store::write_private(
+        &key_path(),
+        serde_json::to_string(&record).unwrap_or_default(),
+    );
     Some(record)
 }
 
@@ -344,8 +382,12 @@ fn device_headers(
     fetch_id: Option<&str>,
     register: bool,
 ) -> Vec<(String, String)> {
-    let Some(mut record) = key_record(register) else { return vec![] };
-    let Some(key) = signing_key(&record) else { return vec![] };
+    let Some(mut record) = key_record(register) else {
+        return vec![];
+    };
+    let Some(key) = signing_key(&record) else {
+        return vec![];
+    };
     let scope = format!("{API} user:{}", cred.id);
     let key_id = match record["registrations"][&scope].as_str().map(String::from) {
         Some(id) => id,
@@ -360,17 +402,26 @@ fn device_headers(
             if !resp.status().is_success() {
                 return vec![];
             }
-            let Ok(v) = resp.json::<Value>() else { return vec![] };
-            let Some(id) = v["keyId"].as_str().map(String::from) else { return vec![] };
+            let Ok(v) = resp.json::<Value>() else {
+                return vec![];
+            };
+            let Some(id) = v["keyId"].as_str().map(String::from) else {
+                return vec![];
+            };
             record["registrations"][&scope] = json!(id);
-            let _ = crate::store::write_private(&key_path(), serde_json::to_string(&record).unwrap_or_default());
+            let _ = crate::store::write_private(
+                &key_path(),
+                serde_json::to_string(&record).unwrap_or_default(),
+            );
             id
         }
         None => return vec![],
     };
     let ts = crate::api::now_ms();
     let body_sha = crate::api::hex(&Sha256::digest(body.unwrap_or(b"")));
-    let path = reqwest::Url::parse(url).map(|u| u.path().to_string()).unwrap_or_default();
+    let path = reqwest::Url::parse(url)
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
     let payload = format!(
         "freebuff-device-v1\n{}\n{}\n{}\n{}\n{}",
         method.to_uppercase(),
@@ -409,11 +460,20 @@ fn cred_path() -> std::path::PathBuf {
 
 /// freebuff.json: the accounts (one, from before there could be more).
 fn read_file() -> Vec<(Cred, bool)> {
-    let Some(v) = crate::store::read_json::<Value>(&cred_path()) else { return vec![] };
+    let Some(v) = crate::store::read_json::<Value>(&cred_path()) else {
+        return vec![];
+    };
     let one = |v: &Value| {
         let token = v["token"].as_str().filter(|t| !t.is_empty())?;
         let field = |k: &str| v[k].as_str().unwrap_or("").to_string();
-        Some((Cred { token: token.to_string(), id: field("id"), email: field("email") }, v["remote"] == true))
+        Some((
+            Cred {
+                token: token.to_string(),
+                id: field("id"),
+                email: field("email"),
+            },
+            v["remote"] == true,
+        ))
     };
     match v["accounts"].as_array() {
         Some(list) => list.iter().filter_map(one).collect(),
@@ -437,9 +497,17 @@ pub fn load() -> bool {
     let old = std::mem::take(&mut s.list);
     s.list = creds
         .into_iter()
-        .map(|(c, remote)| match old.iter().find(|a| a.cred.id == c.id && a.cred.token == c.token) {
-            Some(a) => Acct { remote, ..a.clone() },
-            None => Acct::new(c, remote),
+        .map(|(c, remote)| {
+            match old
+                .iter()
+                .find(|a| a.cred.id == c.id && a.cred.token == c.token)
+            {
+                Some(a) => Acct {
+                    remote,
+                    ..a.clone()
+                },
+                None => Acct::new(c, remote),
+            }
         })
         .collect();
     !s.list.is_empty()
@@ -461,18 +529,40 @@ pub struct Account {
 
 /// The accounts, in order.
 pub fn accounts() -> Vec<Account> {
-    STATE.lock().unwrap().list.iter().map(|a| Account { id: a.cred.id.clone(), email: a.cred.email.clone(), remote: a.remote, error: a.error.clone() }).collect()
+    STATE
+        .lock()
+        .unwrap()
+        .list
+        .iter()
+        .map(|a| Account {
+            id: a.cred.id.clone(),
+            email: a.cred.email.clone(),
+            remote: a.remote,
+            error: a.error.clone(),
+        })
+        .collect()
 }
 
 /// The first account's email and id.
 pub fn account() -> Option<(String, String)> {
-    STATE.lock().unwrap().list.first().map(|a| (a.cred.email.clone(), a.cred.id.clone()))
+    STATE
+        .lock()
+        .unwrap()
+        .list
+        .first()
+        .map(|a| (a.cred.email.clone(), a.cred.id.clone()))
 }
 
 /// Signs account `id` out: one on the vault is removed there,
 /// for every OAK (when it can't be reached, it stays, and Err says why).
 pub fn sign_out(id: &str) -> Result<(), String> {
-    let remote = STATE.lock().unwrap().list.iter().find(|a| a.cred.id == id).map(|a| (a.remote, a.cred.token.clone()));
+    let remote = STATE
+        .lock()
+        .unwrap()
+        .list
+        .iter()
+        .find(|a| a.cred.id == id)
+        .map(|a| (a.remote, a.cred.token.clone()));
     if let Some((true, token)) = remote {
         crate::api::vault_remove("freebuff", &crate::provider::key_id(&token))?;
     }
@@ -488,7 +578,10 @@ fn forget(id: &str) {
     s.note = None;
     save(&s);
     drop(s);
-    TURNS.lock().unwrap().retain(|k, _| !k.starts_with(&format!("{id}\n")));
+    TURNS
+        .lock()
+        .unwrap()
+        .retain(|k, _| !k.starts_with(&format!("{id}\n")));
     crate::rotation::forget_account(crate::api::Provider::Freebuff, id);
 }
 
@@ -511,7 +604,11 @@ fn remote_accounts() -> Result<Vec<Cred>, String> {
         .iter()
         .filter_map(|k| {
             let token = k["key"].as_str().filter(|t| !t.is_empty())?;
-            Some(Cred { token: token.into(), id: k["user"].as_str().unwrap_or("").into(), email: k["label"].as_str().unwrap_or("").into() })
+            Some(Cred {
+                token: token.into(),
+                id: k["user"].as_str().unwrap_or("").into(),
+                email: k["label"].as_str().unwrap_or("").into(),
+            })
         })
         .collect())
 }
@@ -520,15 +617,25 @@ fn remote_accounts() -> Result<Vec<Cred>, String> {
 pub fn sync() {
     let Ok(list) = remote_accounts() else { return };
     let mut s = STATE.lock().unwrap();
-    let before: Vec<(String, bool)> = s.list.iter().map(|a| (a.cred.id.clone(), a.remote)).collect();
-    s.list.retain(|a| !a.remote || list.iter().any(|c| c.token == a.cred.token));
+    let before: Vec<(String, bool)> = s
+        .list
+        .iter()
+        .map(|a| (a.cred.id.clone(), a.remote))
+        .collect();
+    s.list
+        .retain(|a| !a.remote || list.iter().any(|c| c.token == a.cred.token));
     for c in list {
         match s.list.iter_mut().find(|a| a.cred.token == c.token) {
             Some(a) => a.remote = true,
             None => s.list.push(Acct::new(c, true)),
         }
     }
-    if s.list.iter().map(|a| (a.cred.id.clone(), a.remote)).collect::<Vec<_>>() != before {
+    if s.list
+        .iter()
+        .map(|a| (a.cred.id.clone(), a.remote))
+        .collect::<Vec<_>>()
+        != before
+    {
         save(&s);
     }
 }
@@ -544,12 +651,22 @@ pub fn forget_remote() {
 }
 
 fn upload(c: &Cred) -> Result<(), String> {
-    crate::api::vault_add("freebuff", &json!({"key": c.token, "label": c.email, "user": c.id})).map(|_| ())
+    crate::api::vault_add(
+        "freebuff",
+        &json!({"key": c.token, "label": c.email, "user": c.id}),
+    )
+    .map(|_| ())
 }
 
 /// Account `id` is on this machine while a vault is connected.
 pub fn movable(id: &str) -> bool {
-    crate::api::vault_on() && STATE.lock().unwrap().list.iter().any(|a| a.cred.id == id && !a.remote)
+    crate::api::vault_on()
+        && STATE
+            .lock()
+            .unwrap()
+            .list
+            .iter()
+            .any(|a| a.cred.id == id && !a.remote)
 }
 
 /// Why an account stayed on this machine, when it was meant for the
@@ -560,7 +677,14 @@ pub fn note() -> Option<String> {
 
 /// Puts account `id` on the vault, for every OAK.
 pub fn move_to_vault(id: &str) -> Result<(), String> {
-    let c = STATE.lock().unwrap().list.iter().find(|a| a.cred.id == id).map(|a| a.cred.clone()).ok_or("There is no such Freebuff account.")?;
+    let c = STATE
+        .lock()
+        .unwrap()
+        .list
+        .iter()
+        .find(|a| a.cred.id == id)
+        .map(|a| a.cred.clone())
+        .ok_or("There is no such Freebuff account.")?;
     upload(&c)?;
     keep(c, true);
     STATE.lock().unwrap().note = None;
@@ -577,18 +701,29 @@ pub fn login_start() -> Result<String, String> {
         .timeout(Duration::from_secs(20))
         .send()
         .map_err(|_| "Couldn't reach Freebuff.".to_string())?;
-    let v: Value = resp.json().map_err(|_| "Freebuff sent an invalid login answer.".to_string())?;
-    let Some(url) = v["loginUrl"].as_str() else { return Err("Freebuff sent an invalid login answer.".into()) };
+    let v: Value = resp
+        .json()
+        .map_err(|_| "Freebuff sent an invalid login answer.".to_string())?;
+    let Some(url) = v["loginUrl"].as_str() else {
+        return Err("Freebuff sent an invalid login answer.".into());
+    };
     let pending = Pending {
         fingerprint,
         hash: v["fingerprintHash"].as_str().unwrap_or("").to_string(),
         expires: {
             let e = &v["expiresAt"];
-            e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())
+            e.as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| e.to_string())
         },
     };
     STATE.lock().unwrap().pending = Some(pending);
     Ok(url.to_string())
+}
+
+/// A browser login is waiting to be approved.
+pub fn login_pending() -> bool {
+    STATE.lock().unwrap().pending.is_some()
 }
 
 /// One poll of the login; on success the token is saved and `true` returned.
@@ -601,14 +736,34 @@ pub fn login_poll() -> bool {
         crate::web::percent(&p.hash),
         crate::web::percent(&p.expires)
     );
-    let Ok(resp) = Wire::get(url).timeout(Duration::from_secs(15)).send() else { return false };
-    let Ok(v) = resp.json::<Value>() else { return false };
-    let Some(user) = v["user"].as_object() else { return false };
-    let Some(token) = user.get("authToken").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) else { return false };
+    let Ok(resp) = Wire::get(url).timeout(Duration::from_secs(15)).send() else {
+        return false;
+    };
+    let Ok(v) = resp.json::<Value>() else {
+        return false;
+    };
+    let Some(user) = v["user"].as_object() else {
+        return false;
+    };
+    let Some(token) = user
+        .get("authToken")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+    else {
+        return false;
+    };
     let cred = Cred {
         token: token.to_string(),
-        id: user.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        email: user.get("email").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        id: user
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        email: user
+            .get("email")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
     };
     STATE.lock().unwrap().pending = None;
     // Connected to a vault, the account goes there; one from
@@ -643,7 +798,12 @@ pub fn error() -> Option<String> {
 /// returns it alongside the rows). The signature binds it, and the request
 /// names it in `x-freebuff-catalog-fetch`.
 fn fetch_id() -> Option<String> {
-    with_acct(|a| a.catalog.as_ref().and_then(|c| c["fetchId"].as_str().map(String::from))).flatten()
+    with_acct(|a| {
+        a.catalog
+            .as_ref()
+            .and_then(|c| c["fetchId"].as_str().map(String::from))
+    })
+    .flatten()
 }
 
 /// Whether a catalog is held: the CLI only signs (and registers its device
@@ -657,7 +817,9 @@ fn catalog_headers(req: Wire) -> Wire {
     match with_acct(|a| a.catalog.clone()).flatten() {
         None => req,
         Some(c) => match c["fetchId"].as_str() {
-            Some(f) => req.header("x-freebuff-catalog-protocol", "1").header("x-freebuff-catalog-fetch", f),
+            Some(f) => req
+                .header("x-freebuff-catalog-protocol", "1")
+                .header("x-freebuff-catalog-fetch", f),
             None => req.header("x-freebuff-catalog-protocol", "1"),
         },
     }
@@ -681,7 +843,12 @@ fn sign(req: Wire, cred: &Cred, method: &str, url: &str, body: Option<&[u8]>) ->
 /// free picker; the first fetch carries no device headers, because the CLI
 /// only signs while it already holds a catalog.
 pub fn catalog() -> Option<Value> {
-    let held = with_acct(|a| a.catalog.clone().filter(|_| crate::api::now_ms() < a.catalog_until)).flatten();
+    let held = with_acct(|a| {
+        a.catalog
+            .clone()
+            .filter(|_| crate::api::now_ms() < a.catalog_until)
+    })
+    .flatten();
     held.or_else(fetch_catalog)
 }
 
@@ -723,13 +890,21 @@ pub fn wire_model(id: &str) -> String {
     if std::env::var("OAK_FREEBUFF_LEGACY").is_ok() {
         return id.to_string();
     }
-    catalog_row(id).and_then(|r| r["handle"].as_str().map(String::from)).unwrap_or_else(|| id.to_string())
+    catalog_row(id)
+        .and_then(|r| r["handle"].as_str().map(String::from))
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// The stored session payload (`GET /api/v1/freebuff/session`), refreshed at
 /// most every 8 seconds.
 pub fn session() -> Option<Value> {
-    if let Some(v) = with_acct(|s| s.session.clone().filter(|_| crate::api::now_ms() - s.session_at < SESSION_TTL)).flatten() {
+    if let Some(v) = with_acct(|s| {
+        s.session
+            .clone()
+            .filter(|_| crate::api::now_ms() - s.session_at < SESSION_TTL)
+    })
+    .flatten()
+    {
         return Some(v);
     }
     refresh_session();
@@ -740,7 +915,8 @@ pub fn refresh_session() {
     let Some(cred) = cred() else { return };
     let url = format!("{API}/api/v1/freebuff/session");
     let req = session_call(reqwest::Method::GET, &url, &cred, 20, |r| {
-        r.header("x-freebuff-heartbeat", "1").header("x-freebuff-include-unused-rate-limits", "1")
+        r.header("x-freebuff-heartbeat", "1")
+            .header("x-freebuff-include-unused-rate-limits", "1")
     });
     let Ok(resp) = req.send() else { return };
     if !resp.status().is_success() {
@@ -777,16 +953,24 @@ fn load_instance() -> String {
 fn save_instance() -> String {
     let id = format!("cli:{}", crate::api::new_uuid());
     let path = crate::store::dir().join("freebuff-instance.json");
-    let _ = crate::store::write_private(&path, serde_json::to_string(&json!({"instanceId": id})).unwrap_or_default());
+    let _ = crate::store::write_private(
+        &path,
+        serde_json::to_string(&json!({"instanceId": id})).unwrap_or_default(),
+    );
     id
 }
 
 /// `cli:` plus a version-4 UUID, the claim format the server accepts.
 fn valid_instance(id: &str) -> bool {
-    let Some(u) = id.strip_prefix("cli:") else { return false };
+    let Some(u) = id.strip_prefix("cli:") else {
+        return false;
+    };
     let g: Vec<&str> = u.split('-').collect();
     g.len() == 5
-        && [8, 4, 4, 4, 12].iter().zip(&g).all(|(n, p)| p.len() == *n && p.chars().all(|c| c.is_ascii_hexdigit()))
+        && [8, 4, 4, 4, 12]
+            .iter()
+            .zip(&g)
+            .all(|(n, p)| p.len() == *n && p.chars().all(|c| c.is_ascii_hexdigit()))
         && g[2].starts_with('4')
         && matches!(g[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b')
 }
@@ -797,7 +981,10 @@ fn instance() -> String {
 }
 
 fn attempt() -> String {
-    instance().strip_prefix("cli:").map(String::from).unwrap_or_else(instance)
+    instance()
+        .strip_prefix("cli:")
+        .map(String::from)
+        .unwrap_or_else(instance)
 }
 
 /// The server retired our claim: persist a new id before trying again.
@@ -811,7 +998,13 @@ fn reset_instance() -> String {
 /// every one carries: the client's environment, instance and version, the
 /// time zone and the catalog's headers, `own` adding its own, then signed.
 /// (Wire sorts the headers, so their order here doesn't matter.)
-fn session_call(method: reqwest::Method, url: &str, cred: &Cred, secs: u64, own: impl FnOnce(Wire) -> Wire) -> Wire {
+fn session_call(
+    method: reqwest::Method,
+    url: &str,
+    cred: &Cred,
+    secs: u64,
+    own: impl FnOnce(Wire) -> Wire,
+) -> Wire {
     let req = Wire::new(method.clone(), url)
         .bearer(&cred.token)
         .header("x-freebuff-env", CLIENT_ENV)
@@ -820,13 +1013,22 @@ fn session_call(method: reqwest::Method, url: &str, cred: &Cred, secs: u64, own:
         .header("x-freebuff-instance-id", instance())
         .header("x-freebuff-client-version", CLIENT_VERSION)
         .timeout(Duration::from_secs(secs));
-    sign(catalog_headers(tz_header(own(req))), cred, method.as_str(), url, None)
+    sign(
+        catalog_headers(tz_header(own(req))),
+        cred,
+        method.as_str(),
+        url,
+        None,
+    )
 }
 
 /// The admission request for `wire`, taking over from `holder` when given.
 fn admission(cred: &Cred, url: &str, wire: &str, holder: Option<&str>) -> Wire {
     session_call(reqwest::Method::POST, url, cred, 30, |r| {
-        let r = r.header("x-freebuff-desktop-attempt-id", attempt()).header("x-freebuff-model", wire).header("x-freebuff-wallet-spend-limit", "session");
+        let r = r
+            .header("x-freebuff-desktop-attempt-id", attempt())
+            .header("x-freebuff-model", wire)
+            .header("x-freebuff-wallet-spend-limit", "session");
         match holder {
             Some(h) => r.header("x-freebuff-takeover-instance-id", h),
             None => r,
@@ -837,7 +1039,11 @@ fn admission(cred: &Cred, url: &str, wire: &str, holder: Option<&str>) -> Wire {
 /// `DELETE /api/v1/freebuff/session/attempt`: this instance's claim.
 fn delete_attempt(cred: &Cred) -> Option<reqwest::blocking::Response> {
     let url = format!("{API}/api/v1/freebuff/session/attempt");
-    session_call(reqwest::Method::DELETE, &url, cred, 10, |r| r.header("x-freebuff-desktop-attempt-id", attempt())).send().ok()
+    session_call(reqwest::Method::DELETE, &url, cred, 10, |r| {
+        r.header("x-freebuff-desktop-attempt-id", attempt())
+    })
+    .send()
+    .ok()
 }
 
 /// Starts an hour on `model`. Returns the server's answer.
@@ -879,7 +1085,9 @@ fn admit_locked(model: &str) -> Result<Value, String> {
         let _ = delete_attempt(&cred);
     }
     let url = format!("{API}/api/v1/freebuff/session/admission");
-    let resp = admission(&cred, &url, &wire, None).send().map_err(|_| "Couldn't reach Freebuff.".to_string())?;
+    let resp = admission(&cred, &url, &wire, None)
+        .send()
+        .map_err(|_| "Couldn't reach Freebuff.".to_string())?;
     let mut status = resp.status();
     let mut v: Value = resp.json().unwrap_or(Value::Null);
     // A session held by another instance (an Oak that died mid-hour, another
@@ -893,7 +1101,8 @@ fn admit_locked(model: &str) -> Result<Value, String> {
     if closed {
         reset_instance();
     }
-    if (status.as_u16() == 409 || status.as_u16() == 410) && (holder.is_some() || closed)
+    if (status.as_u16() == 409 || status.as_u16() == 410)
+        && (holder.is_some() || closed)
         && let Ok(r) = admission(&cred, &url, &wire, holder.as_deref()).send()
     {
         status = r.status();
@@ -909,11 +1118,22 @@ fn admit_locked(model: &str) -> Result<Value, String> {
     }
     if !status.is_success() {
         if let Some(hours) = v["availableHours"].as_str() {
-            let name = crate::freebuff::model(model).map(|m| m.name).unwrap_or(model);
-            return Err(format!("{name} can't be started on this Freebuff plan: {hours}."));
+            let name = crate::freebuff::model(model)
+                .map(|m| m.name)
+                .unwrap_or(model);
+            return Err(format!(
+                "{name} can't be started on this Freebuff plan: {hours}."
+            ));
         }
-        let msg = v["error"].as_str().or(v["message"].as_str()).unwrap_or("Freebuff refused the session.");
-        return Err(format!("{msg} ({} {})", status.as_u16(), v.to_string().head(200)));
+        let msg = v["error"]
+            .as_str()
+            .or(v["message"].as_str())
+            .unwrap_or("Freebuff refused the session.");
+        return Err(format!(
+            "{msg} ({} {})",
+            status.as_u16(),
+            v.to_string().head(200)
+        ));
     }
     Ok(v)
 }
@@ -962,7 +1182,13 @@ fn catalog_row(id: &str) -> Option<Value> {
         return Some(r.clone());
     }
     let digest = legacy_digest(id);
-    rows.iter().find(|r| r["legacyDigests"].as_array().is_some_and(|a| a.iter().any(|d| d.as_str() == Some(&digest)))).cloned()
+    rows.iter()
+        .find(|r| {
+            r["legacyDigests"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|d| d.as_str() == Some(&digest)))
+        })
+        .cloned()
 }
 
 /// When a model opens on this account, if it is not open yet.
@@ -982,7 +1208,14 @@ pub fn premium(id: &str) -> bool {
 pub fn hour() -> Hour {
     let now = crate::api::now_ms();
     let server = session().unwrap_or(Value::Null);
-    let expires = server["expiresAt"].as_str().and_then(crate::time::parse_time).or_else(|| server["session"]["expiresAt"].as_str().and_then(crate::time::parse_time));
+    let expires = server["expiresAt"]
+        .as_str()
+        .and_then(crate::time::parse_time)
+        .or_else(|| {
+            server["session"]["expiresAt"]
+                .as_str()
+                .and_then(crate::time::parse_time)
+        });
     // A desktop purchase carries the real end of the hour: it is what the
     // server counts down, so the timer cannot outlive the session.
     let purchase = server["desktopPurchases"].as_array().and_then(|a| {
@@ -994,14 +1227,20 @@ pub fn hour() -> Hour {
     let started = with_acct(|s| s.hour_started).flatten();
     let active = server["status"].as_str() == Some("active");
     if active || started.is_some() {
-        let end = expires.or(purchase).or_else(|| started.map(|s| s + HOUR_MS));
+        let end = expires
+            .or(purchase)
+            .or_else(|| started.map(|s| s + HOUR_MS));
         if let Some(end) = end {
             if end > now {
                 return Hour::Active { left_ms: end - now };
             }
-            let grace = with_acct(|s| s.grace_until).flatten().unwrap_or(end + GRACE_MS);
+            let grace = with_acct(|s| s.grace_until)
+                .flatten()
+                .unwrap_or(end + GRACE_MS);
             if grace > now {
-                return Hour::Grace { left_ms: grace - now };
+                return Hour::Grace {
+                    left_ms: grace - now,
+                };
             }
         }
     }
@@ -1021,7 +1260,10 @@ use std::sync::mpsc::Sender;
 /// It is the compiled base3 prompt with its two per-run values filled in:
 /// the date, and the model name the prompt tells the model it is.
 pub fn system_prompt(model: &str) -> String {
-    fill_prompt(include_str!("../assets/freebuff-system.txt"), &prompt_label(model))
+    fill_prompt(
+        include_str!("../assets/freebuff-system.txt"),
+        &prompt_label(model),
+    )
 }
 
 fn fill_prompt(base: &str, label: &str) -> String {
@@ -1053,20 +1295,36 @@ fn fill_prompt(base: &str, label: &str) -> String {
 fn current_date() -> String {
     use chrono::Datelike;
     const MONTHS: [&str; 12] = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     let now = chrono::Local::now();
-    format!("{} {}, {}", MONTHS[now.month0() as usize], now.day(), now.year())
+    format!(
+        "{} {}, {}",
+        MONTHS[now.month0() as usize],
+        now.day(),
+        now.year()
+    )
 }
 
 /// The name the prompt says the model runs on: the catalog row's display name
 /// in catalog mode (`freebuffCatalogRootAgent`), else the compiled model id.
 fn prompt_label(model: &str) -> String {
     if let Some(row) = catalog_row(model)
-        && let Some(name) = row["displayName"].as_str().filter(|n| !n.is_empty()) {
-            return name.to_string();
-        }
+        && let Some(name) = row["displayName"].as_str().filter(|n| !n.is_empty())
+    {
+        return name.to_string();
+    }
     model.to_string()
 }
 
@@ -1085,11 +1343,18 @@ fn cli_tools() -> Vec<Value> {
 pub(crate) fn chat_messages(msgs: &[Value]) -> Vec<Value> {
     use crate::freebuff_tools::{self as ft, Origin, Part};
     let blocks = |m: &Value| m["content"].as_array().cloned().unwrap_or_default();
-    let (mut origins, mut results) = (std::collections::HashMap::new(), std::collections::HashMap::new());
+    let (mut origins, mut results) = (
+        std::collections::HashMap::new(),
+        std::collections::HashMap::new(),
+    );
     for b in msgs.iter().flat_map(blocks) {
         match b["type"].as_str() {
-            Some("tool_call") => drop(origins.insert(b["id"].as_str().unwrap_or("").to_string(), ft::origin(&b))),
-            Some("tool_result") => drop(results.insert(b["call_id"].as_str().unwrap_or("").to_string(), b)),
+            Some("tool_call") => {
+                drop(origins.insert(b["id"].as_str().unwrap_or("").to_string(), ft::origin(&b)))
+            }
+            Some("tool_result") => {
+                drop(results.insert(b["call_id"].as_str().unwrap_or("").to_string(), b))
+            }
             _ => {}
         }
     }
@@ -1116,11 +1381,27 @@ pub(crate) fn chat_messages(msgs: &[Value]) -> Vec<Value> {
                 "tool_result" => {
                     let id = b["call_id"].as_str().unwrap_or("");
                     // A part's answer goes with its call's; one without a call is dropped.
-                    let Some(Origin::Call(c)) = origins.get(id) else { continue };
-                    let parts = (0..c.parts.max(1)).map(|k| results.get(&if k == 0 { id.to_string() } else { format!("{id}_{k}") }).map(Part::of)).collect();
+                    let Some(Origin::Call(c)) = origins.get(id) else {
+                        continue;
+                    };
+                    let parts = (0..c.parts.max(1))
+                        .map(|k| {
+                            results
+                                .get(&if k == 0 {
+                                    id.to_string()
+                                } else {
+                                    format!("{id}_{k}")
+                                })
+                                .map(Part::of)
+                        })
+                        .collect();
                     let (content, images) = ft::answer(c, parts);
                     answers.push(json!({"role": "tool", "tool_call_id": id, "content": content}));
-                    media.extend(images.into_iter().map(|i| json!({"role": "user", "content": [i]})));
+                    media.extend(
+                        images
+                            .into_iter()
+                            .map(|i| json!({"role": "user", "content": [i]})),
+                    );
                 }
                 _ => {}
             }
@@ -1149,7 +1430,10 @@ fn restart_session(model: &str) -> Result<(), String> {
     let _one = ADMITTING.lock().unwrap_or_else(|e| e.into_inner());
     // Another request (a subagent's) restarted it a moment ago: that hour
     // is the fresh one, not to be released again.
-    if with_acct(|s| s.hour_started).flatten().is_some_and(|t| crate::api::now_ms() - t < 60_000) {
+    if with_acct(|s| s.hour_started)
+        .flatten()
+        .is_some_and(|t| crate::api::now_ms() - t < 60_000)
+    {
         return Ok(());
     }
     release();
@@ -1191,7 +1475,11 @@ fn start_run_once(agent: &str) -> Result<String, String> {
     let text = resp.text().unwrap_or_default();
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     v["runId"].as_str().map(String::from).ok_or_else(|| {
-        let msg = v["message"].as_str().or(v["error"].as_str()).map(String::from).unwrap_or_else(|| text.head(160));
+        let msg = v["message"]
+            .as_str()
+            .or(v["error"].as_str())
+            .map(String::from)
+            .unwrap_or_else(|| text.head(160));
         format!("{status}: {msg}")
     })
 }
@@ -1219,7 +1507,11 @@ fn finish_run(run: &str, steps: Vec<Value>) {
 const CATALOG_ROOT_AGENT: &str = "base3-free-catalog";
 
 fn run_agent(m: &Model) -> &'static str {
-    if catalog_row(m.id).is_some() { CATALOG_ROOT_AGENT } else { m.agent }
+    if catalog_row(m.id).is_some() {
+        CATALOG_ROOT_AGENT
+    } else {
+        m.agent
+    }
 }
 
 #[derive(Clone)]
@@ -1280,7 +1572,9 @@ fn random_base36(n: usize) -> String {
     use rand::RngExt;
     const CH: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut r = rand::rng();
-    (0..n).map(|_| CH[r.random_range(0..CH.len())] as char).collect()
+    (0..n)
+        .map(|_| CH[r.random_range(0..CH.len())] as char)
+        .collect()
 }
 
 /// A UUID-shaped id derived from a seed (the CLI keeps one trace id per
@@ -1294,7 +1588,14 @@ fn seeded_uuid(seed: &str) -> String {
         _ => '8',
     };
     let s: String = b.into_iter().collect();
-    format!("{}-{}-{}-{}-{}", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &s[0..8],
+        &s[8..12],
+        &s[12..16],
+        &s[16..20],
+        &s[20..32]
+    )
 }
 
 /// Starts the turn's run (or continues it) and gives the request its metadata.
@@ -1310,10 +1611,11 @@ fn begin_turn(body: &Request, m: &Model) -> Result<Turn, String> {
     let previous = {
         let mut turns = TURNS.lock().unwrap();
         if let Some(t) = turns.get_mut(&chat)
-            && t.key == key {
-                t.step += 1;
-                return Ok(t.clone());
-            }
+            && t.key == key
+        {
+            t.step += 1;
+            return Ok(t.clone());
+        }
         turns.remove(&chat)
     };
     if let Some(t) = previous {
@@ -1321,7 +1623,8 @@ fn begin_turn(body: &Request, m: &Model) -> Result<Turn, String> {
     }
     let profile = last.as_deref().and_then(take_input_profile);
     let snapshot = repo_snapshot(body.folder.as_deref());
-    let run = start_run_why(run_agent(m)).map_err(|e| format!("Freebuff didn't register this run ({e}). Try again."))?;
+    let run = start_run_why(run_agent(m))
+        .map_err(|e| format!("Freebuff didn't register this run ({e}). Try again."))?;
     let turn = Turn {
         key,
         run,
@@ -1341,7 +1644,10 @@ fn begin_turn(body: &Request, m: &Model) -> Result<Turn, String> {
 fn chat_key(body: &Request) -> String {
     let (_, first, _) = prompts(body);
     let account = cred().map(|c| c.id).unwrap_or_default();
-    format!("{account}\n{}", hash_hex(&format!("chat\n{}", first.unwrap_or_default())))
+    format!(
+        "{account}\n{}",
+        hash_hex(&format!("chat\n{}", first.unwrap_or_default()))
+    )
 }
 
 fn add_step(chat: &str, run: &str, step: Value) {
@@ -1492,24 +1798,38 @@ fn take_input_profile(text: &str) -> Option<String> {
 /// this project. Cached for ten minutes (the CLI collects it once per thread).
 fn repo_snapshot(root: Option<&str>) -> Option<String> {
     let root = root.filter(|r| !r.is_empty())?;
-    static CACHE: LazyLock<Mutex<Option<(String, i64, String)>>> = LazyLock::new(|| Mutex::new(None));
+    static CACHE: LazyLock<Mutex<Option<(String, i64, String)>>> =
+        LazyLock::new(|| Mutex::new(None));
     let now = crate::api::now_ms();
     if let Some((r, at, s)) = CACHE.lock().unwrap().as_ref()
-        && r == root && now - *at < 10 * 60_000
+        && r == root
+        && now - *at < 10 * 60_000
     {
         return Some(s.clone());
     }
     let root = std::path::Path::new(root);
     let git = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git").arg("-C").arg(root).args(args).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
     let available = git(&["rev-parse", "--is-inside-work-tree"]).is_some();
     if !available {
         return None;
     }
     let files: Vec<String> = git(&["ls-files", "--cached", "--others", "--exclude-standard"])
-        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).collect())
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string())
+                .collect()
+        })
         .unwrap_or_default();
     let mut changed: Vec<String> = Vec::new();
     for args in [
@@ -1526,12 +1846,22 @@ fn repo_snapshot(root: Option<&str>) -> Option<String> {
         }
     }
     changed.sort();
-    let commit_count = git(&["rev-list", "--count", "HEAD"]).and_then(|s| s.trim().parse::<u64>().ok());
-    let shallow = git(&["rev-parse", "--is-shallow-repository"]).map(|s| s.trim() == "true").unwrap_or(false);
-    let log = git(&["log", "--use-mailmap", "--format=%aN%x09%aE%x09%cs%x09%s", "HEAD"]);
+    let commit_count =
+        git(&["rev-list", "--count", "HEAD"]).and_then(|s| s.trim().parse::<u64>().ok());
+    let shallow = git(&["rev-parse", "--is-shallow-repository"])
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+    let log = git(&[
+        "log",
+        "--use-mailmap",
+        "--format=%aN%x09%aE%x09%cs%x09%s",
+        "HEAD",
+    ]);
     let mut dates: Vec<String> = Vec::new();
-    let (mut humans, mut bots): (std::collections::HashSet<String>, std::collections::HashSet<String>) =
-        (Default::default(), Default::default());
+    let (mut humans, mut bots): (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    ) = (Default::default(), Default::default());
     let mut prs: std::collections::HashSet<String> = Default::default();
     for line in log.as_deref().unwrap_or("").lines() {
         let mut it = line.splitn(4, '\t');
@@ -1547,15 +1877,30 @@ fn repo_snapshot(root: Option<&str>) -> Option<String> {
         }
         let who = format!("{name} <{email}>");
         let lower = who.to_lowercase();
-        if lower.contains("[bot]") || lower.contains("bot@") || lower.contains("-bot") || lower.contains("(bot)") {
+        if lower.contains("[bot]")
+            || lower.contains("bot@")
+            || lower.contains("-bot")
+            || lower.contains("(bot)")
+        {
             bots.insert(who);
         } else {
             humans.insert(who);
         }
-        if (subject.starts_with("Merge pull request #") || (subject.contains("(#") && subject.ends_with(')')))
-            && let Some(hash) = subject.split('#').nth(1).map(|s| s.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("").to_string()).filter(|s| !s.is_empty()) {
-                prs.insert(hash);
-            }
+        if (subject.starts_with("Merge pull request #")
+            || (subject.contains("(#") && subject.ends_with(')')))
+            && let Some(hash) = subject
+                .split('#')
+                .nth(1)
+                .map(|s| {
+                    s.split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .filter(|s| !s.is_empty())
+        {
+            prs.insert(hash);
+        }
     }
     dates.sort();
     let pick = |p: f64| -> Option<String> {
@@ -1570,7 +1915,10 @@ fn repo_snapshot(root: Option<&str>) -> Option<String> {
     m.insert("repositoryVisibility".into(), json!("unknown"));
     m.insert("fileCount".into(), json!(files.len()));
     m.insert("fileCountIsLowerBound".into(), json!(false));
-    m.insert("testFileCount".into(), json!(files.iter().filter(|f| is_test_file(f)).count()));
+    m.insert(
+        "testFileCount".into(),
+        json!(files.iter().filter(|f| is_test_file(f)).count()),
+    );
     if let Some(c) = commit_count {
         m.insert("commitCount".into(), json!(c));
     }
@@ -1579,7 +1927,10 @@ fn repo_snapshot(root: Option<&str>) -> Option<String> {
     if let (Some(p0), Some(p25), Some(p50), Some(p75), Some(p100)) =
         (pick(0.0), pick(0.25), pick(0.5), pick(0.75), pick(1.0))
     {
-        m.insert("commitDatePercentiles".into(), json!({"p0": p0, "p25": p25, "p50": p50, "p75": p75, "p100": p100}));
+        m.insert(
+            "commitDatePercentiles".into(),
+            json!({"p0": p0, "p25": p25, "p50": p50, "p75": p75, "p100": p100}),
+        );
     }
     m.insert("mergedPullRequestCount".into(), json!(prs.len()));
     m.insert("humanContributorCount".into(), json!(humans.len()));
@@ -1606,7 +1957,13 @@ fn is_test_file(rel: &str) -> bool {
 }
 
 fn request_body(body: &Request, m: &Model, turn: &Turn) -> Value {
-    build_request(body, &wire_model(m.id), &prompt_label(m.id), explicit_effort(body, m.id), turn)
+    build_request(
+        body,
+        &wire_model(m.id),
+        &prompt_label(m.id),
+        explicit_effort(body, m.id),
+        turn,
+    )
 }
 
 /// The CLI reports an effort only when the user picked one for this model
@@ -1618,8 +1975,16 @@ fn explicit_effort(body: &Request, model: &str) -> Option<String> {
     (default.as_deref() != Some(effort)).then(|| effort.to_string())
 }
 
-fn build_request(body: &Request, wire: &str, label: &str, effort: Option<String>, turn: &Turn) -> Value {
-    let mut msgs = vec![json!({"role": "system", "content": fill_prompt(include_str!("../assets/freebuff-system.txt"), label)})];
+fn build_request(
+    body: &Request,
+    wire: &str,
+    label: &str,
+    effort: Option<String>,
+    turn: &Turn,
+) -> Value {
+    let mut msgs = vec![
+        json!({"role": "system", "content": fill_prompt(include_str!("../assets/freebuff-system.txt"), label)}),
+    ];
     msgs.extend(chat_messages(&body.messages_with_instruction()));
     let mut meta = json!({
         "freebuff_instance_id": instance(),
@@ -1658,7 +2023,11 @@ fn build_request(body: &Request, wire: &str, label: &str, effort: Option<String>
 /// Says a retry is coming (the client's own event), and how long it waits.
 fn retry_event(tx: &Sender<Sse>, tries: u32) -> u64 {
     let wait = crate::api::retry_wait(tries);
-    let _ = tx.send(Sse::Event(Event::Retry { attempt: tries, wait, reason: String::new() }));
+    let _ = tx.send(Sse::Event(Event::Retry {
+        attempt: tries,
+        wait,
+        reason: String::new(),
+    }));
     wait
 }
 
@@ -1710,9 +2079,14 @@ fn open(req: &Value, tx: &Sender<Sse>) -> Result<reqwest::blocking::Response, Op
         let code = v["error"].as_str().unwrap_or("");
         let msg = v["message"].as_str().unwrap_or("");
         if status == 403 && code == "free_mode_cli_required" {
-            return Err(Some(Sse::Err(format!("Freebuff refused this session: {msg}"))));
+            return Err(Some(Sse::Err(format!(
+                "Freebuff refused this session: {msg}"
+            ))));
         }
-        if status == 409 && (code == "freebuff_catalog_stale" || v["status"].as_str() == Some("freebuff_catalog_stale")) {
+        if status == 409
+            && (code == "freebuff_catalog_stale"
+                || v["status"].as_str() == Some("freebuff_catalog_stale"))
+        {
             return Err(Some(Sse::Err("freebuff_catalog_stale".into())));
         }
         if matches!(status, 408 | 429 | 500..=599) && tries < crate::api::RETRIES {
@@ -1721,7 +2095,11 @@ fn open(req: &Value, tx: &Sender<Sse>) -> Result<reqwest::blocking::Response, Op
             std::thread::sleep(Duration::from_secs(wait));
             continue;
         }
-        let reason = if msg.is_empty() { text.head(300) } else { msg.to_string() };
+        let reason = if msg.is_empty() {
+            text.head(300)
+        } else {
+            msg.to_string()
+        };
         return Err(Some(Sse::Err(format!("Freebuff: {reason}"))));
     }
 }
@@ -1769,24 +2147,40 @@ impl Blocks {
         }
         for choice in ev["choices"].as_array().into_iter().flatten() {
             let d = &choice["delta"];
-            if let Some(t) = d["reasoning_content"].as_str().or(d["reasoning"].as_str()).filter(|t| !t.is_empty()) {
+            if let Some(t) = d["reasoning_content"]
+                .as_str()
+                .or(d["reasoning"].as_str())
+                .filter(|t| !t.is_empty())
+            {
                 if self.think.is_none() {
                     let i = self.index();
                     self.think = Some(i);
-                    out.push(Event::Block { index: i as usize, block: json!({"type": "reasoning", "text": "", "by": "freebuff"}) });
+                    out.push(Event::Block {
+                        index: i as usize,
+                        block: json!({"type": "reasoning", "text": "", "by": "freebuff"}),
+                    });
                 }
                 self.count.thought(t);
-                out.push(Event::Reasoning { index: self.think.unwrap() as usize, text: t.into() });
+                out.push(Event::Reasoning {
+                    index: self.think.unwrap() as usize,
+                    text: t.into(),
+                });
             }
             if let Some(t) = d["content"].as_str().filter(|t| !t.is_empty()) {
                 stop(&mut self.think, &mut out);
                 if self.text.is_none() {
                     let i = self.index();
                     self.text = Some(i);
-                    out.push(Event::Block { index: i as usize, block: oak::text("") });
+                    out.push(Event::Block {
+                        index: i as usize,
+                        block: oak::text(""),
+                    });
                 }
                 self.count.wrote(t);
-                out.push(Event::Text { index: self.text.unwrap() as usize, text: t.into() });
+                out.push(Event::Text {
+                    index: self.text.unwrap() as usize,
+                    text: t.into(),
+                });
             }
             for tc in d["tool_calls"].as_array().into_iter().flatten() {
                 let n = tc["index"].as_u64().unwrap_or(0) as usize;
@@ -1799,12 +2193,23 @@ impl Blocks {
                     Some(p) => p,
                     None => {
                         let block = self.index();
-                        let id = if id.is_empty() { format!("call_{n}") } else { id.to_string() };
+                        let id = if id.is_empty() {
+                            format!("call_{n}")
+                        } else {
+                            id.to_string()
+                        };
                         let early = crate::freebuff_tools::early_name(name);
                         if let Some(oak) = early {
                             out.push(tool_start(block, &id, oak, name));
                         }
-                        self.tools.push(Tool { n, block, id, name: name.to_string(), args: String::new(), opened: early.is_some() });
+                        self.tools.push(Tool {
+                            n,
+                            block,
+                            id,
+                            name: name.to_string(),
+                            args: String::new(),
+                            opened: early.is_some(),
+                        });
                         self.tools.len() - 1
                     }
                 };
@@ -1825,11 +2230,25 @@ impl Blocks {
                 };
                 let u = &ev["usage"];
                 let input = u["prompt_tokens"].as_u64().unwrap_or(0);
-                let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0).min(input);
+                let cached = u["prompt_tokens_details"]["cached_tokens"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .min(input);
                 let output = u["completion_tokens"].as_u64().unwrap_or(0);
-                let thought = self.count.tokens(crate::nodeclub::reported_thinking(u), output);
-                out.push(Event::Usage(oak::Usage { input: input - cached, cache_read: cached, output, reasoning: (thought > 0).then_some(thought), ..Default::default() }));
-                out.push(Event::Stop { reason: stop.into(), detail: None });
+                let thought = self
+                    .count
+                    .tokens(crate::nodeclub::reported_thinking(u), output);
+                out.push(Event::Usage(oak::Usage {
+                    input: input - cached,
+                    cache_read: cached,
+                    output,
+                    reasoning: (thought > 0).then_some(thought),
+                    ..Default::default()
+                }));
+                out.push(Event::Stop {
+                    reason: stop.into(),
+                    detail: None,
+                });
             }
         }
         out
@@ -1837,7 +2256,10 @@ impl Blocks {
 }
 
 fn tool_start(index: i64, id: &str, oak: &str, shown: &str) -> Event {
-    Event::Block { index: index as usize, block: json!({"type": "tool_call", "id": id, "name": oak, "_oak_shown": shown, "input": {}}) }
+    Event::Block {
+        index: index as usize,
+        block: json!({"type": "tool_call", "id": id, "name": oak, "_oak_shown": shown, "input": {}}),
+    }
 }
 
 /// Ends the block `open` names.
@@ -1854,13 +2276,21 @@ fn close_all(b: &mut Blocks, out: &mut Vec<Event>) {
     stop(&mut b.text, out);
     stop(&mut b.think, out);
     for t in std::mem::take(&mut b.tools) {
-        for (k, (id, oak, input)) in crate::freebuff_tools::to_oak(&t.id, &t.name, &t.args).into_iter().enumerate() {
+        for (k, (id, oak, input)) in crate::freebuff_tools::to_oak(&t.id, &t.name, &t.args)
+            .into_iter()
+            .enumerate()
+        {
             let index = if k == 0 { t.block } else { b.index() };
             if k > 0 || !t.opened {
                 out.push(tool_start(index, &id, &oak, &t.name));
             }
-            out.push(Event::Input { index: index as usize, json: input.to_string() });
-            out.push(Event::BlockEnd { index: index as usize });
+            out.push(Event::Input {
+                index: index as usize,
+                json: input.to_string(),
+            });
+            out.push(Event::BlockEnd {
+                index: index as usize,
+            });
         }
     }
 }
@@ -1876,11 +2306,29 @@ pub fn stream(body: Request, tx: Sender<Sse>) {
         .unwrap()
         .list
         .iter()
-        .map(|a| crate::rotation::Candidate { id: a.cred.id.clone(), left: 100.0, usable: true, resets_at: i64::MAX, preferred: true })
+        .map(|a| crate::rotation::Candidate {
+            id: a.cred.id.clone(),
+            left: 100.0,
+            usable: true,
+            resets_at: i64::MAX,
+            preferred: true,
+        })
         .collect();
-    let id = crate::rotation::pick(crate::api::Provider::Freebuff, &conv, &cands, now, !crate::api::rotation_on());
+    let id = crate::rotation::pick(
+        crate::api::Provider::Freebuff,
+        &conv,
+        &cands,
+        now,
+        !crate::api::rotation_on(),
+    );
     if let Some(id) = &id {
-        crate::rotation::used(crate::api::Provider::Freebuff, &conv, id, crate::oak::Ttl::FiveMinutes.ms(), now);
+        crate::rotation::used(
+            crate::api::Provider::Freebuff,
+            &conv,
+            id,
+            crate::oak::Ttl::FiveMinutes.ms(),
+            now,
+        );
     }
     USING.with(|u| *u.borrow_mut() = id);
     stream_once(body, tx, 0);
@@ -1908,21 +2356,35 @@ fn stream_once(body: Request, tx: Sender<Sse>, attempt: u8) {
     };
     // A request that fails, or is dropped (a stopped or deleted agent), ends
     // its turn's run: an unfinished run holds one of the account's tabs.
-    let mut guard = TurnGuard { chat: chat.clone(), keep: false };
+    let mut guard = TurnGuard {
+        chat: chat.clone(),
+        keep: false,
+    };
     let step_started = iso_now();
-    let Some(resp) = open_turn(&body, m, &chat, &mut turn, &tx, attempt) else { return };
+    let Some(resp) = open_turn(&body, m, &chat, &mut turn, &tx, attempt) else {
+        return;
+    };
     let mut b = Blocks::default();
     for line in std::io::BufReader::new(resp).lines() {
-        let Ok(line) = line else { return drop(tx.send(Sse::Err("Stream broke.".into()))) };
-        let Some(data) = line.strip_prefix("data:") else { continue };
+        let Ok(line) = line else {
+            return drop(tx.send(Sse::Err("Stream broke.".into())));
+        };
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
         let data = data.trim();
         if data == "[DONE]" {
             break;
         }
-        let Ok(ev) = serde_json::from_str::<Value>(data) else { continue };
+        let Ok(ev) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
         if !b.started {
             b.started = true;
-            let _ = tx.send(Sse::Event(Event::Start { id: ev["id"].as_str().unwrap_or("").into(), model: id.clone() }));
+            let _ = tx.send(Sse::Event(Event::Start {
+                id: ev["id"].as_str().unwrap_or("").into(),
+                model: id.clone(),
+            }));
         }
         if let Some(e) = ev.get("error") {
             let msg = e["message"].as_str().unwrap_or("unknown error").to_string();
@@ -1933,7 +2395,11 @@ fn stream_once(body: Request, tx: Sender<Sse>, attempt: u8) {
                 guard.keep = true;
                 return stream_once(body.clone(), tx, attempt + 1);
             }
-            if msg.contains("free session has ended") && attempt < 2 && empty && restart_session(m.id).is_ok() {
+            if msg.contains("free session has ended")
+                && attempt < 2
+                && empty
+                && restart_session(m.id).is_ok()
+            {
                 guard.keep = true;
                 return stream_once(body.clone(), tx, attempt + 1);
             }
@@ -1984,7 +2450,14 @@ fn stream_once(body: Request, tx: Sender<Sse>, attempt: u8) {
 /// says the hour ended, the run was lost or the catalog's handle is stale
 /// (the turn then runs again under a new run or handle). None when it
 /// failed, said on `tx`, or the request was dropped.
-fn open_turn(body: &Request, m: &Model, chat: &str, turn: &mut Turn, tx: &Sender<Sse>, attempt: u8) -> Option<reqwest::blocking::Response> {
+fn open_turn(
+    body: &Request,
+    m: &Model,
+    chat: &str,
+    turn: &mut Turn,
+    tx: &Sender<Sse>,
+    attempt: u8,
+) -> Option<reqwest::blocking::Response> {
     let mut req = request_body(body, m, turn);
     let mut tries = 0;
     loop {
@@ -2017,7 +2490,9 @@ fn open_turn(body: &Request, m: &Model, chat: &str, turn: &mut Turn, tx: &Sender
                 }
                 // The old run belonged to the session that just ended.
                 let Some(t) = new_run_for_turn(chat, m) else {
-                    let _ = tx.send(Sse::Err("Freebuff didn't register this run. Try again.".into()));
+                    let _ = tx.send(Sse::Err(
+                        "Freebuff didn't register this run. Try again.".into(),
+                    ));
                     return None;
                 };
                 *turn = t;
@@ -2044,7 +2519,11 @@ impl Drop for TurnGuard {
         if self.keep {
             return;
         }
-        let turn = TURNS.lock().map(|mut t| t.remove(&self.chat)).ok().flatten();
+        let turn = TURNS
+            .lock()
+            .map(|mut t| t.remove(&self.chat))
+            .ok()
+            .flatten();
         if let Some(t) = turn {
             finish_run(&t.run, t.steps);
         }
@@ -2065,7 +2544,8 @@ pub enum Alert {
 
 /// What the monitor has seen so far, so each change is reported once.
 /// 0 = no hour seen, 1 = running, 2 = in grace.
-static ALERT_STATE: LazyLock<Mutex<(u8, Vec<Alert>)>> = LazyLock::new(|| Mutex::new((0, Vec::new())));
+static ALERT_STATE: LazyLock<Mutex<(u8, Vec<Alert>)>> =
+    LazyLock::new(|| Mutex::new((0, Vec::new())));
 
 /// Checks the hour and queues the lines it crossed. Called while a Freebuff
 /// turn is running; the agent loop drains it with `take_alerts`.
@@ -2135,7 +2615,13 @@ mod tests {
     #[test]
     fn metadata_is_the_cli_set() {
         *INSTANCE.lock().unwrap() = "cli:test".into();
-        let req = build_request(&body(), "fbm1.handle", "DeepSeek V4.1 Flash 10/17", Some("high".into()), &turn());
+        let req = build_request(
+            &body(),
+            "fbm1.handle",
+            "DeepSeek V4.1 Flash 10/17",
+            Some("high".into()),
+            &turn(),
+        );
         let meta = req["codebuff_metadata"].as_object().unwrap();
         let mut keys: Vec<&str> = meta.keys().map(|k| k.as_str()).collect();
         keys.sort();
@@ -2171,7 +2657,13 @@ mod tests {
         t.snapshot = None;
         let mut b = body();
         b.effort = None;
-        let req = build_request(&b, "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash", None, &t);
+        let req = build_request(
+            &b,
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-flash",
+            None,
+            &t,
+        );
         let meta = req["codebuff_metadata"].as_object().unwrap();
         assert!(!meta.contains_key("freebuff_input_profile"));
         assert!(!meta.contains_key("repo_snapshot"));
@@ -2183,7 +2675,10 @@ mod tests {
 
     #[test]
     fn the_prompt_has_todays_date_and_the_row_name() {
-        let p = fill_prompt(include_str!("../assets/freebuff-system.txt"), "DeepSeek V4.1 Flash 10/17");
+        let p = fill_prompt(
+            include_str!("../assets/freebuff-system.txt"),
+            "DeepSeek V4.1 Flash 10/17",
+        );
         assert!(p.contains(&format!("Current date: {}.", current_date())));
         assert!(p.contains("You are running on the DeepSeek V4.1 Flash 10/17 model."));
         assert!(!p.contains("November 3, 2026"));
@@ -2221,9 +2716,18 @@ mod tests {
 
     #[test]
     fn a_set_user_agent_is_not_replaced() {
-        let head = Wire::get("https://www.codebuff.com/x").header("user-agent", AI_SDK_UA).headers();
-        assert!(head.iter().any(|(k, v)| k.eq_ignore_ascii_case("user-agent") && v == AI_SDK_UA));
-        assert!(!head.iter().any(|(k, v)| k.eq_ignore_ascii_case("user-agent") && v == BUN_UA));
+        let head = Wire::get("https://www.codebuff.com/x")
+            .header("user-agent", AI_SDK_UA)
+            .headers();
+        assert!(
+            head.iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("user-agent") && v == AI_SDK_UA)
+        );
+        assert!(
+            !head
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("user-agent") && v == BUN_UA)
+        );
     }
 
     #[test]

@@ -5,7 +5,9 @@
 use serde::{Deserialize, Serialize};
 
 /// A provider.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     #[default]
@@ -63,7 +65,19 @@ pub enum Metered {
 
 impl Kind {
     /// Every provider, in the order pickers and Home list them.
-    pub const ALL: [Kind; 11] = [Kind::Claude, Kind::Codex, Kind::Antigravity, Kind::OpenRouter, Kind::MuseCode, Kind::NodeClub, Kind::Freebuff, Kind::Refuseless, Kind::Quick, Kind::Local, Kind::Plugin];
+    pub const ALL: [Kind; 11] = [
+        Kind::Claude,
+        Kind::Codex,
+        Kind::Antigravity,
+        Kind::OpenRouter,
+        Kind::MuseCode,
+        Kind::NodeClub,
+        Kind::Freebuff,
+        Kind::Refuseless,
+        Kind::Quick,
+        Kind::Local,
+        Kind::Plugin,
+    ];
 
     /// Signed in to it: a login or key (for Claude, an account here or a
     /// vault, which has them).
@@ -81,6 +95,21 @@ impl Kind {
             Kind::Quick => crate::quick::on(),
             Kind::Plugin => crate::provided::on(),
         }
+    }
+
+    /// Could take conversation `conv`'s next request on `model` now:
+    /// signed in, and where Oak tracks the limits (Claude, Codex,
+    /// Antigravity) with an account that has room. A plugin's model needs
+    /// its plugin running. The rest are tried as they are.
+    pub fn ready(self, conv: &str, model: &str) -> bool {
+        self.on()
+            && match self {
+                Kind::Claude => crate::api::room_for(conv, model),
+                Kind::Codex => crate::codex::room(),
+                Kind::Antigravity => crate::antigravity::room(model),
+                Kind::Plugin => crate::provided::serves(model),
+                _ => true,
+            }
     }
 
     /// Its id in stored data ("claude", "openrouter", …).
@@ -128,6 +157,23 @@ impl Kind {
             Kind::OpenRouter | Kind::Refuseless => Metered::Credits,
             Kind::MuseCode => Metered::Spent,
             Kind::NodeClub | Kind::Freebuff | Kind::Local | Kind::Plugin => Metered::Free,
+        }
+    }
+
+    /// A model's name as the pickers show it, whoever serves it; else its id.
+    pub fn model_name(id: &str) -> String {
+        let served = [
+            crate::openrouter::model(id).map(|m| m.name),
+            crate::codex::model(id).map(|m| m.name),
+            crate::freebuff::model(id).map(|m| m.name),
+            crate::nodeclub::model(id).map(|m| m.name),
+            crate::refuseless::model(id).map(|m| m.name),
+            crate::musecode::model(id).map(|m| m.name),
+            crate::quick::model(id).map(|m| m.name),
+        ];
+        match served.into_iter().flatten().next() {
+            Some(name) => name.to_string(),
+            None => crate::api::model_name(id),
         }
     }
 

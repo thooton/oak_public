@@ -21,14 +21,14 @@ fn limit_over(left: i64, freed_then: u64, freed_now: u64) -> bool {
     left <= 0 || freed_now != freed_then
 }
 
-use crate::tools::Head;
 use crate::api;
-use crate::oak;
-use crate::rolling::{self, Measure, Plan, Summary};
 use crate::changes;
 use crate::instructions;
+use crate::oak;
+use crate::rolling::{self, Measure, Plan, Summary};
 use crate::store::{self, Conversation, Heartbeat, Mark, MarkKind, Memory, Note};
 use crate::tasks::{self, Proc, Tasks, fmt_duration};
+use crate::tools::Head;
 use crate::tools::{self, MAX_OUTPUT, TASK_WAIT_MAX};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -40,20 +40,24 @@ use std::time::{Duration, Instant};
 
 mod alerts;
 mod memory;
-pub(crate) mod pulse;
 pub(crate) mod prompt;
-mod reply;
+pub(crate) mod pulse;
 pub(crate) mod repl;
+mod reply;
 mod rewrite;
 mod subagents;
 pub(crate) mod title;
 mod tool_calls;
-use prompt::scratchpad;
-pub(crate) use prompt::SCRATCH_ROOT;
-pub use memory::{notes_alert_on, notes_alert_tokens, notes_limit, notes_tokens, set_notes_alert, set_notes_limit, with_commas, DEFAULT_NOTES_LIMIT, NOTES_LIMITS};
 use memory::memory_tool;
+pub use memory::{
+    DEFAULT_NOTES_LIMIT, NOTES_LIMITS, notes_alert_on, notes_alert_tokens, notes_limit,
+    notes_tokens, set_notes_alert, set_notes_limit, with_commas,
+};
+pub(crate) use prompt::SCRATCH_ROOT;
+use prompt::scratchpad;
 use title::title_for;
 use tool_calls::Batch;
+pub(crate) use tool_calls::CUT_SHORT;
 
 pub const NOTE_TAG: &str = "<task-notification>";
 /// A heartbeat the model started, arriving.
@@ -81,7 +85,11 @@ pub const ASK_TAG: &str = "<ask-request>";
 /// user: the user was never asked, and ASK asks them now.
 fn request_ask_retired(about: &str) -> String {
     let about = about.trim();
-    let what = if about.is_empty() { String::new() } else { format!(" (about: {about})") };
+    let what = if about.is_empty() {
+        String::new()
+    } else {
+        format!(" (about: {about})")
+    };
     format!(
         "{ANSWERS_TAG}Oak was updated: REQUEST_ASK is gone, and your request{what} was never answered. To ask the user, call ASK: while a goal is active it returns at once and their answers come later in a message.</ask-answers>"
     )
@@ -97,8 +105,15 @@ pub fn agent_label(id: u64, name: &str) -> String {
 
 /// A message from `from` for another session's model.
 pub(crate) fn agent_message(from: &str, final_reply: bool, body: &str) -> String {
-    let kind = if final_reply { " type=\"final reply\"" } else { "" };
-    format!("{AGENT_TAG} from=\"{from}\"{kind}>\n{}\n</agent-message>", body.trim())
+    let kind = if final_reply {
+        " type=\"final reply\""
+    } else {
+        ""
+    };
+    format!(
+        "{AGENT_TAG} from=\"{from}\"{kind}>\n{}\n</agent-message>",
+        body.trim()
+    )
 }
 
 /// An agent message's sender, whether it is a final reply, and its text.
@@ -112,11 +127,17 @@ pub fn parse_agent_message(text: &str) -> Option<(&str, bool, &str)> {
 
 /// Every session OAK runs, by conversation id, so that sessions can send
 /// each other messages.
-static SESSIONS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Session>>> = std::sync::LazyLock::new(Default::default);
+static SESSIONS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Session>>> =
+    std::sync::LazyLock::new(Default::default);
 /// Oak is closing at once (`gpu::recover`): every session at work is
 /// ultrapaused, its background tasks left running. Their ids.
 pub(crate) fn ultrapause_all_keeping_tasks() -> Vec<String> {
-    let sessions: Vec<(String, Session)> = SESSIONS.lock().unwrap().iter().map(|(id, s)| (id.clone(), s.clone())).collect();
+    let sessions: Vec<(String, Session)> = SESSIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, s)| (id.clone(), s.clone()))
+        .collect();
     let mut ids = vec![];
     for (id, s) in sessions {
         if s.active() {
@@ -132,14 +153,20 @@ pub(crate) fn ultrapause_all_keeping_tasks() -> Vec<String> {
 /// Whether the sessions `ids` have all settled into their pause.
 pub(crate) fn all_settled(ids: &[String]) -> bool {
     let sessions = SESSIONS.lock().unwrap();
-    ids.iter().all(|id| sessions.get(id).is_none_or(|s| s.pause_settled() || !s.pause_on()))
+    ids.iter().all(|id| {
+        sessions
+            .get(id)
+            .is_none_or(|s| s.pause_settled() || !s.pause_on())
+    })
 }
 
 /// Subagents started since the app last took them (`take_spawned`).
-static SPAWNED: std::sync::LazyLock<Mutex<Vec<(String, Session)>>> = std::sync::LazyLock::new(Default::default);
+static SPAWNED: std::sync::LazyLock<Mutex<Vec<(String, Session)>>> =
+    std::sync::LazyLock::new(Default::default);
 /// Conversations AGENT_DELETE removed since the app last took them
 /// (`take_deleted`).
-static DELETED: std::sync::LazyLock<Mutex<Vec<String>>> = std::sync::LazyLock::new(Default::default);
+static DELETED: std::sync::LazyLock<Mutex<Vec<String>>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Every conversation's scratchpad, for `crate::scratch`.
 pub fn scratch_owners() -> Vec<crate::scratch::Owner> {
@@ -150,7 +177,13 @@ pub fn scratch_owners() -> Vec<crate::scratch::Owner> {
             let busy = s.live.lock().unwrap().busy || s.tasks.running() > 0;
             let c = s.conv.lock().unwrap();
             // (A chat has no folder, so no scratchpad.)
-            (!c.deleted && !c.chat).then(|| crate::scratch::Owner { id: c.id.clone(), folder: c.folder.clone(), scratch: c.scratch.clone(), last_ms: c.last_message_at, in_use: busy })
+            (!c.deleted && !c.chat).then(|| crate::scratch::Owner {
+                id: c.id.clone(),
+                folder: c.folder.clone(),
+                scratch: c.scratch.clone(),
+                last_ms: c.last_message_at,
+                in_use: busy,
+            })
         })
         .collect()
 }
@@ -225,7 +258,11 @@ fn context_block(text: &str) -> Value {
 /// the rest of the block (`transcript::UserBlock::hidden`).
 #[cfg(test)]
 pub fn is_hidden_block(b: &Value) -> bool {
-    b.get("_oak_goal").is_some() || b.get("_oak_context").is_some() || b["text"].as_str().is_some_and(|t| t.starts_with(OLD_GOAL_TAG))
+    b.get("_oak_goal").is_some()
+        || b.get("_oak_context").is_some()
+        || b["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with(OLD_GOAL_TAG))
 }
 
 /// What goal notes began with before they were marked `_oak_goal`.
@@ -280,10 +317,16 @@ pub fn efforts(model: &str) -> Vec<&'static str> {
         return crate::local::EFFORTS.to_vec();
     }
     if crate::provided::serves(model) {
-        return crate::provided::model(model).map(|m| m.efforts).unwrap_or_default();
+        return crate::provided::model(model)
+            .map(|m| m.efforts)
+            .unwrap_or_default();
     }
     match api::claude_efforts(model) {
-        Some(levels) => EFFORTS.iter().copied().filter(|e| levels.iter().any(|l| l == e)).collect(),
+        Some(levels) => EFFORTS
+            .iter()
+            .copied()
+            .filter(|e| levels.iter().any(|l| l == e))
+            .collect(),
         None => STANDARD_EFFORTS.to_vec(),
     }
 }
@@ -300,7 +343,8 @@ pub fn effort_for(model: &str, effort: &str) -> String {
     let rank = |e: &str| EFFORTS.iter().position(|x| *x == e);
     let want = rank(effort).unwrap_or(2);
     let up = levels.iter().find(|l| rank(l).is_some_and(|r| r >= want));
-    up.or(levels.last()).map_or(String::new(), |l| l.to_string())
+    up.or(levels.last())
+        .map_or(String::new(), |l| l.to_string())
 }
 
 /// Where a revert goes back to: everything from there on is removed.
@@ -411,7 +455,15 @@ impl Live {
     pub fn plugin_phase(&self) -> (&'static str, String) {
         // The blocks are Oak's own (`reasoning`, `text`, `tool_call`), not
         // a provider's.
-        let last_tool = || self.blocks.iter().rev().find(|b| b["type"] == "tool_call").and_then(|b| b["name"].as_str()).unwrap_or("").to_string();
+        let last_tool = || {
+            self.blocks
+                .iter()
+                .rev()
+                .find(|b| b["type"] == "tool_call")
+                .and_then(|b| b["name"].as_str())
+                .unwrap_or("")
+                .to_string()
+        };
         if !self.busy {
             return ("idle", String::new());
         }
@@ -422,10 +474,22 @@ impl Live {
             return ("retrying", String::new());
         }
         if self.tools > 0 {
-            return ("tool", self.status.strip_prefix("Running ").unwrap_or(&last_tool()).to_string());
+            return (
+                "tool",
+                self.status
+                    .strip_prefix("Running ")
+                    .unwrap_or(&last_tool())
+                    .to_string(),
+            );
         }
         if self.waiting > 0 || self.waits_for_answers() {
-            return ("waiting", self.status.strip_prefix("Running ").unwrap_or("").to_string());
+            return (
+                "waiting",
+                self.status
+                    .strip_prefix("Running ")
+                    .unwrap_or("")
+                    .to_string(),
+            );
         }
         if self.compacting && !self.requesting {
             return ("compacting", String::new());
@@ -454,7 +518,9 @@ impl Live {
     /// Whether a pause has taken hold: paused, no pause waiting for a
     /// request, and the worker idle, holding, or only waiting on something.
     pub fn pause_settled(&self, paused: bool) -> bool {
-        paused && !self.pause_queued && (!self.busy || self.held || (self.tools > 0 && self.tools <= self.waiting))
+        paused
+            && !self.pause_queued
+            && (!self.busy || self.held || (self.tools > 0 && self.tools <= self.waiting))
     }
 
     /// Whether a pause is under way but hasn't taken hold yet.
@@ -464,7 +530,9 @@ impl Live {
 
     /// Takes the queued messages that are ready to send, leaving held ones.
     fn take_queued(&mut self) -> Vec<Queued> {
-        let (ready, held): (Vec<Queued>, Vec<Queued>) = std::mem::take(&mut self.queued).into_iter().partition(|q| !q.held);
+        let (ready, held): (Vec<Queued>, Vec<Queued>) = std::mem::take(&mut self.queued)
+            .into_iter()
+            .partition(|q| !q.held);
         self.queued = held;
         ready
     }
@@ -515,7 +583,10 @@ pub struct Question {
 impl Ask {
     /// The questions of an ASK input, or why they can't be asked.
     pub fn new(input: &Value) -> Result<Ask, String> {
-        let qs = input["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let qs = input["questions"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if qs.is_empty() || qs.len() > 6 {
             return Err("Ask 1 to 6 questions.".into());
         }
@@ -525,15 +596,28 @@ impl Ask {
             if text.is_empty() {
                 return Err("Each question needs a `question` text.".into());
             }
-            let options: Vec<String> =
-                q["options"].as_array().into_iter().flatten().filter_map(|o| o.as_str()).map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect();
+            let options: Vec<String> = q["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|o| o.as_str())
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect();
             if options.len() > 10 {
                 return Err("At most 10 options per question.".into());
             }
-            questions.push(Question { text, options, multiple: q["multiple"].as_bool().unwrap_or(false) });
+            questions.push(Question {
+                text,
+                options,
+                multiple: q["multiple"].as_bool().unwrap_or(false),
+            });
         }
         Ok(Ask {
-            picked: questions.iter().map(|q| vec![false; q.options.len()]).collect(),
+            picked: questions
+                .iter()
+                .map(|q| vec![false; q.options.len()])
+                .collect(),
             other: questions.iter().map(|_| (String::new(), false)).collect(),
             questions,
             sent: false,
@@ -544,21 +628,36 @@ impl Ask {
 
     /// The questions as the model asked them, numbered, one per line.
     pub fn listed(&self) -> String {
-        self.questions.iter().enumerate().map(|(i, q)| format!("{}. {}\n", i + 1, q.text)).collect()
+        self.questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| format!("{}. {}\n", i + 1, q.text))
+            .collect()
     }
 
     /// Whether these are the questions of ASK input `input`.
     pub fn same_questions(&self, input: &Value) -> bool {
-        Ask::new(input).is_ok_and(|a| a.questions.iter().map(|q| &q.text).eq(self.questions.iter().map(|q| &q.text)))
+        Ask::new(input).is_ok_and(|a| {
+            a.questions
+                .iter()
+                .map(|q| &q.text)
+                .eq(self.questions.iter().map(|q| &q.text))
+        })
     }
 
     /// The message that brings the model the user's answers to questions
     /// asked during a goal (or says they skipped them), with the questions.
     pub fn answers_message(&self) -> String {
         if self.sent {
-            format!("{ANSWERS_TAG}The user answered the questions you asked with ASK:\n{}</ask-answers>", self.answers())
+            format!(
+                "{ANSWERS_TAG}The user answered the questions you asked with ASK:\n{}</ask-answers>",
+                self.answers()
+            )
         } else {
-            format!("{ANSWERS_TAG}The user skipped the questions you asked with ASK, without answering them:\n{}</ask-answers>", self.listed())
+            format!(
+                "{ANSWERS_TAG}The user skipped the questions you asked with ASK, without answering them:\n{}</ask-answers>",
+                self.listed()
+            )
         }
     }
 
@@ -593,7 +692,13 @@ impl Ask {
     pub fn answers(&self) -> String {
         let mut out = String::new();
         for (i, q) in self.questions.iter().enumerate() {
-            let mut picks: Vec<String> = q.options.iter().zip(&self.picked[i]).filter(|(_, p)| **p).map(|(o, _)| o.clone()).collect();
+            let mut picks: Vec<String> = q
+                .options
+                .iter()
+                .zip(&self.picked[i])
+                .filter(|(_, p)| **p)
+                .map(|(o, _)| o.clone())
+                .collect();
             let (other, on) = &self.other[i];
             if *on && !other.trim().is_empty() {
                 picks.push(format!("Other: {}", other.trim()));
@@ -658,7 +763,6 @@ impl Queued {
     }
 }
 
-
 /// A pause that was waiting for a request when OAK closed holds: the
 /// conversation starts paused. True when it changed.
 fn hold_queued_pause(conv: &mut Conversation) -> bool {
@@ -688,12 +792,17 @@ impl Session {
 
     /// `start`, with the conversation's tasks already read (`Tasks::open`:
     /// at Oak's start, for every conversation at once, on every core).
-    pub fn start_with(mut conv: Conversation, ctx: eframe::egui::Context, tasks: Arc<Tasks>) -> Session {
+    pub fn start_with(
+        mut conv: Conversation,
+        ctx: eframe::egui::Context,
+        tasks: Arc<Tasks>,
+    ) -> Session {
         // Closed while a tool ran: its call has no result, which the API
         // refuses, so it gets one saying so. But a TASK wait on a task Oak
         // still knows carries on (`Worker::carry_on_waits`): its result
         // comes when it ends, as it would have without the restart.
-        let (mut changed, waits) = answer_lost_calls_but(&mut conv, |call| waits_on_known_task(call, &tasks));
+        let (mut changed, waits) =
+            answer_lost_calls_but(&mut conv, |call| waits_on_known_task(call, &tasks));
         changed |= carry_waits(&mut conv, &waits, tasks.closed_ms(), api::now_ms());
         changed |= hold_queued_pause(&mut conv);
         changed |= retire_request_ask(&mut conv);
@@ -708,7 +817,10 @@ impl Session {
         // (A copy of a running session's conversation gets watchers of its own.)
         conv.meters.iter_mut().for_each(|m| m.watched = false);
         // Questions asked during a goal wait for the user again.
-        let pending = Ask::new(&conv.pending_ask).ok().map(|a| Ask { background: true, ..a });
+        let pending = Ask::new(&conv.pending_ask).ok().map(|a| Ask {
+            background: true,
+            ..a
+        });
         let (s, w) = Session::with_worker(conv, ctx, resume, tasks);
         s.live.lock().unwrap().ask = pending;
         *w.open_waits.lock().unwrap() = waits;
@@ -725,7 +837,12 @@ impl Session {
     }
 
     /// A session for `conv` and the worker sharing its state, not running yet.
-    fn with_worker(conv: Conversation, ctx: eframe::egui::Context, resume: bool, tasks: Arc<Tasks>) -> (Session, Worker) {
+    fn with_worker(
+        conv: Conversation,
+        ctx: eframe::egui::Context,
+        resume: bool,
+        tasks: Arc<Tasks>,
+    ) -> (Session, Worker) {
         let (wake, wake_rx) = channel();
         let s = Session {
             paused: Arc::new(AtomicBool::new(conv.paused)),
@@ -823,7 +940,11 @@ impl Session {
         let waiting = !self.conv.lock().unwrap().inbox.is_empty();
         let l = self.live.lock().unwrap();
         if l.busy {
-            if l.status.is_empty() { "working".into() } else { format!("working ({})", l.status.to_lowercase()) }
+            if l.status.is_empty() {
+                "working".into()
+            } else {
+                format!("working ({})", l.status.to_lowercase())
+            }
         } else if waiting || l.ready_count() > 0 {
             "starting on new messages".into()
         } else if l.error.is_some() {
@@ -853,22 +974,40 @@ impl Session {
     pub fn send(&self, text: String, images: Vec<Value>) {
         let mut l = self.live.lock().unwrap();
         let id = l.next_queued_id();
-        l.queued.push(Queued { id, text, images, held: false, steered: false });
+        l.queued.push(Queued {
+            id,
+            text,
+            images,
+            held: false,
+            steered: false,
+        });
         l.error = None;
         drop(l);
         self.wake();
     }
 
-    /// Takes a message out of the queue unsent (one handed to Quick's turn
-    /// is sent already, and stays).
+    /// Takes a message out of the queue unsent (or cancels a Quick steer
+    /// that hasn't been ingested yet).
     pub fn unqueue(&self, id: u64) {
-        self.live.lock().unwrap().queued.retain(|q| q.id != id || q.steered);
+        self.live
+            .lock()
+            .unwrap()
+            .queued
+            .retain(|q| q.id != id || (q.steered && !crate::quick::turn::cancel_steer(id)));
     }
 
-    /// Holds a queued message for editing. False if it was already sent.
+    /// Holds a queued message for editing. False if it was already ingested.
     pub fn hold(&self, id: u64) -> bool {
         let mut l = self.live.lock().unwrap();
-        l.queued.iter_mut().find(|q| q.id == id && !q.steered).map(|q| q.held = true).is_some()
+        let Some(q) = l.queued.iter_mut().find(|q| q.id == id) else {
+            return false;
+        };
+        if q.steered && !crate::quick::turn::cancel_steer(id) {
+            return false;
+        }
+        q.steered = false;
+        q.held = true;
+        true
     }
 
     /// Releases a held message, with new text if it was edited (empty text
@@ -896,6 +1035,7 @@ impl Session {
 
     pub fn interrupt(&self) {
         self.interrupt.store(true, Ordering::SeqCst);
+        self.wake();
     }
 
     /// Pauses or resumes the session. Paused, nothing is sent: a reply
@@ -1002,7 +1142,13 @@ impl Session {
 
     /// The conversation ids of the subagents this session started.
     pub fn agent_convs(&self) -> Vec<String> {
-        self.conv.lock().unwrap().agents.iter().map(|a| a.conv.clone()).collect()
+        self.conv
+            .lock()
+            .unwrap()
+            .agents
+            .iter()
+            .map(|a| a.conv.clone())
+            .collect()
     }
 
     /// Whether this session is a subagent.
@@ -1029,6 +1175,16 @@ impl Session {
     }
 
     /// Queues a /goal, /effort or model change for the next request.
+    /// Replaces the conversation's fallbacks (the session box's list), saved
+    /// at once. The next failure reads them; nothing is sent.
+    pub fn set_fallbacks(&self, list: Vec<store::Fallback>) {
+        let mut c = self.conv.lock().unwrap();
+        if c.fallbacks != list {
+            c.fallbacks = list;
+            c.save();
+        }
+    }
+
     pub fn command(&self, cmd: Command) {
         let mut l = self.live.lock().unwrap();
         l.commands.push(cmd);
@@ -1039,20 +1195,26 @@ impl Session {
 
     /// The user stopped one of the model's heartbeats.
     pub fn stop_heartbeat(&self, id: u64) {
-        self.forget(|c| {
-            let before = c.heartbeats.len();
-            c.heartbeats.retain(|h| h.id != id);
-            c.heartbeats.len() != before
-        }, format!("heartbeat {id} stopped"));
+        self.forget(
+            |c| {
+                let before = c.heartbeats.len();
+                c.heartbeats.retain(|h| h.id != id);
+                c.heartbeats.len() != before
+            },
+            format!("heartbeat {id} stopped"),
+        );
     }
 
     /// The user removed one of the model's progress meters.
     pub fn remove_meter(&self, id: u64) {
-        self.forget(|c| {
-            let before = c.meters.len();
-            c.meters.retain(|m| m.id != id);
-            c.meters.len() != before
-        }, format!("progress meter {id} removed"));
+        self.forget(
+            |c| {
+                let before = c.meters.len();
+                c.meters.retain(|m| m.id != id);
+                c.meters.len() != before
+            },
+            format!("progress meter {id} removed"),
+        );
     }
 
     /// Drops something the model set up (`remove` says whether it was
@@ -1062,7 +1224,13 @@ impl Session {
         if !remove(&mut c) {
             return;
         }
-        add_mark(&mut c, MarkKind::Heartbeat, text, String::new(), api::now_ms());
+        add_mark(
+            &mut c,
+            MarkKind::Heartbeat,
+            text,
+            String::new(),
+            api::now_ms(),
+        );
         c.save();
     }
 }
@@ -1153,7 +1321,10 @@ pub(crate) fn forget_messages(conv: &store::Shared, live: &Mutex<Live>) {
     if l.busy {
         return;
     }
-    let shown = l.shown.filter(|(at, _)| at.elapsed() < SHOWN_HOLD).map(|(_, m)| m);
+    let shown = l
+        .shown
+        .filter(|(at, _)| at.elapsed() < SHOWN_HOLD)
+        .map(|(_, m)| m);
     drop(l);
     let Some(mut c) = conv.try_lock() else { return };
     match shown {
@@ -1163,9 +1334,14 @@ pub(crate) fn forget_messages(conv: &store::Shared, live: &Mutex<Live>) {
             }
         }
         Some(first) => {
-            let k = first.saturating_sub(2 * store::WINDOW_MIN).min(c.messages.tail_start());
+            let k = first
+                .saturating_sub(2 * store::WINDOW_MIN)
+                .min(c.messages.tail_start());
             // (Only enough to be worth reading again.)
-            if c.messages.forgettable(k).is_some_and(|k| k >= c.messages.base() + store::WINDOW_MIN) {
+            if c.messages
+                .forgettable(k)
+                .is_some_and(|k| k >= c.messages.base() + store::WINDOW_MIN)
+            {
                 c.messages.forget_before(k);
             }
         }
@@ -1180,7 +1356,13 @@ fn last_is(c: &Conversation, role: &str) -> bool {
 /// The text of the model's last reply, if the transcript ends in one.
 pub(crate) fn reply_text(c: &Conversation) -> Option<String> {
     let m = c.messages.last().filter(|m| m["role"] == "assistant")?;
-    let texts: Vec<&str> = m["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect();
+    let texts: Vec<&str> = m["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .collect();
     Some(texts.join("\n\n"))
 }
 
@@ -1199,9 +1381,18 @@ fn ms_since(t: Instant) -> f64 {
 
 /// Puts a line at the transcript's end: `text` for the user, `sent` what
 /// the model was sent with it (empty for none).
-fn add_mark(c: &mut Conversation, kind: MarkKind, text: String, sent: String, time: i64) -> &mut Mark {
+fn add_mark(
+    c: &mut Conversation,
+    kind: MarkKind,
+    text: String,
+    sent: String,
+    time: i64,
+) -> &mut Mark {
     let at = c.messages.len();
-    c.marks.push(Mark { sent, ..Mark::new(at, kind, text, time) });
+    c.marks.push(Mark {
+        sent,
+        ..Mark::new(at, kind, text, time)
+    });
     c.marks.last_mut().unwrap()
 }
 
@@ -1233,7 +1424,11 @@ impl Worker {
             }
             let (users, notes, goal_resume) = {
                 let mut l = self.live.lock().unwrap();
-                (l.take_queued(), std::mem::take(&mut l.notes), std::mem::take(&mut l.goal_resume))
+                (
+                    l.take_queued(),
+                    std::mem::take(&mut l.notes),
+                    std::mem::take(&mut l.goal_resume),
+                )
             };
             // (Saved: the push below saves them in the transcript instead.)
             let inbox = std::mem::take(&mut self.conv.lock().unwrap().inbox);
@@ -1242,10 +1437,20 @@ impl Worker {
             // The goal resumed after the model's turn ended while it was
             // paused: the carry-on it would have got then. (Not when the
             // user writes: their message leads.)
-            let carry_on = (goal_resume && users.is_empty() && goal.is_empty()).then(|| self.goal_carry_on()).flatten();
+            let carry_on = (goal_resume && users.is_empty() && goal.is_empty())
+                .then(|| self.goal_carry_on())
+                .flatten();
             // A turn cut off by closing OAK while paused, now resumed.
-            let resume = self.resume.swap(false, Ordering::SeqCst) && last_is(&self.conv.lock().unwrap(), "user");
-            if users.is_empty() && notes.is_empty() && inbox.is_empty() && beats.is_empty() && goal.is_empty() && !resume && carry_on.is_none() {
+            let resume = self.resume.swap(false, Ordering::SeqCst)
+                && last_is(&self.conv.lock().unwrap(), "user");
+            if users.is_empty()
+                && notes.is_empty()
+                && inbox.is_empty()
+                && beats.is_empty()
+                && goal.is_empty()
+                && !resume
+                && carry_on.is_none()
+            {
                 // An /effort (or a model) while idle needs no request: it
                 // is set now. A goal's line waits for a reply that shows
                 // the model got it.
@@ -1304,7 +1509,11 @@ impl Worker {
     /// had it not been paused then.
     fn goal_carry_on(&self) -> Option<Value> {
         let mut c = self.conv.lock().unwrap();
-        let block = if last_is(&c, "assistant") && !c.goal.is_empty() { after_turn(&mut c, false, api::now_ms()) } else { None };
+        let block = if last_is(&c, "assistant") && !c.goal.is_empty() {
+            after_turn(&mut c, false, api::now_ms())
+        } else {
+            None
+        };
         if block.is_some() {
             c.save();
         }
@@ -1322,11 +1531,29 @@ impl Worker {
             self.keep_warm();
             ping = self.keep_alive_due();
         }
-        let beat = self.conv.lock().unwrap().heartbeats.iter().map(|h| h.next_at).min();
+        let beat = self
+            .conv
+            .lock()
+            .unwrap()
+            .heartbeats
+            .iter()
+            .map(|h| h.next_at)
+            .min();
         let next = [beat, ping].into_iter().flatten().min();
         let woke = match next {
-            Some(at) => self.wake_rx.lock().unwrap().recv_timeout(Duration::from_millis((at - api::now_ms()).clamp(0, 60_000) as u64)),
-            None => self.wake_rx.lock().unwrap().recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(at) => self
+                .wake_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_millis(
+                    (at - api::now_ms()).clamp(0, 60_000) as u64
+                )),
+            None => self
+                .wake_rx
+                .lock()
+                .unwrap()
+                .recv()
+                .map_err(|_| RecvTimeoutError::Disconnected),
         };
         woke != Err(RecvTimeoutError::Disconnected)
     }
@@ -1338,7 +1565,9 @@ impl Worker {
         if c.title.is_empty() {
             let line = first.text.lines().next().unwrap_or("").head(60);
             c.title = match first.images.first() {
-                Some(b) if line.trim().is_empty() => b["_oak_file"].as_str().map_or("Image".into(), |n| n.to_string()),
+                Some(b) if line.trim().is_empty() => b["_oak_file"]
+                    .as_str()
+                    .map_or("Image".into(), |n| n.to_string()),
                 _ => line,
             };
         }
@@ -1460,15 +1689,26 @@ impl Worker {
             let at = c.messages.len();
             match a {
                 crate::freebuff::Alert::Grace { left_ms } => {
-                    let text = format!("Freebuff hour limit was reached, grace period activated for {}m", (left_ms / 60_000).max(1));
-                    c.marks.push(Mark::new(at, MarkKind::FreebuffHour, text, now));
+                    let text = format!(
+                        "Freebuff hour limit was reached, grace period activated for {}m",
+                        (left_ms / 60_000).max(1)
+                    );
+                    c.marks
+                        .push(Mark::new(at, MarkKind::FreebuffHour, text, now));
                 }
                 crate::freebuff::Alert::GraceOver => {
-                    c.marks.push(Mark::new(at, MarkKind::FreebuffGrace, String::new(), now));
+                    c.marks
+                        .push(Mark::new(at, MarkKind::FreebuffGrace, String::new(), now));
                     drop(c);
                     let mut l = self.live.lock().unwrap();
                     let id = l.next_queued_id();
-                    l.queued.push(Queued { id, text: "Continue where you left off.".into(), images: vec![], held: false, steered: false });
+                    l.queued.push(Queued {
+                        id,
+                        text: "Continue where you left off.".into(),
+                        images: vec![],
+                        held: false,
+                        steered: false,
+                    });
                 }
             }
         }
@@ -1489,7 +1729,22 @@ impl Worker {
         // Its last progress (`pulse`): a reply, or a result of a call in the
         // last reply.
         let names: Vec<(String, String)> = match role {
-            "user" => c.messages.iter().rev().find(|m| m["role"] == "assistant").and_then(|m| m["content"].as_array()).into_iter().flatten().filter(|b| oak::is_call(b)).map(|b| (b["id"].as_str().unwrap_or_default().to_string(), b["name"].as_str().unwrap_or_default().to_string())).collect(),
+            "user" => c
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m["role"] == "assistant")
+                .and_then(|m| m["content"].as_array())
+                .into_iter()
+                .flatten()
+                .filter(|b| oak::is_call(b))
+                .map(|b| {
+                    (
+                        b["id"].as_str().unwrap_or_default().to_string(),
+                        b["name"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect(),
             _ => vec![],
         };
         if let Some(what) = pulse::progress_of(role, &content, &names) {
@@ -1497,7 +1752,10 @@ impl Worker {
         }
         // (Looked at first: changing the last message redoes its saved JSON.)
         match c.messages.last().filter(|last| last["role"] == role) {
-            Some(_) => c.messages.last_mut().unwrap()["content"].as_array_mut().unwrap().append(&mut content),
+            Some(_) => c.messages.last_mut().unwrap()["content"]
+                .as_array_mut()
+                .unwrap()
+                .append(&mut content),
             None => c.messages.push(json!({"role": role, "content": content})),
         }
         c.last_message_at = now;
@@ -1517,7 +1775,14 @@ impl Worker {
         if users.is_empty() {
             return false;
         }
-        self.push("user", users.into_iter().flat_map(Queued::content).collect());
+        // A Mix's executor may call for help again (`crate::mix`).
+        if let Some(mix) = self.conv.lock().unwrap().mix.as_mut() {
+            mix.helps = 0;
+        }
+        self.push(
+            "user",
+            users.into_iter().flat_map(Queued::content).collect(),
+        );
         true
     }
 
@@ -1543,7 +1808,9 @@ impl Worker {
     /// the session that started it, unless that session stopped it.
     fn report_to_parent(&self) {
         let c = self.conv.lock().unwrap();
-        let Some(parent) = c.parent.clone() else { return };
+        let Some(parent) = c.parent.clone() else {
+            return;
+        };
         let from = agent_label(c.agent_id, &c.title);
         let reply = reply_text(&c);
         drop(c);
@@ -1580,14 +1847,22 @@ impl Worker {
             // A chat has no goals and no Freebuff (whatever sent them).
             let refused = match &cmd {
                 Command::Goal(..) => c.chat,
-                Command::Model(p, _) => chat_refuses_provider(c.chat, *p).or_else(|| code_mode_refuses_provider(c.code_mode, *p)).is_some(),
+                Command::Model(p, _) => chat_refuses_provider(c.chat, *p)
+                    .or_else(|| code_mode_refuses_provider(c.code_mode, *p))
+                    .or_else(|| mix_refuses_provider(c.mix.is_some(), *p))
+                    .is_some(),
                 Command::Effort(_) => false,
             };
             if refused {
                 continue;
             }
             let (block, mark) = apply_command(&mut c, cmd);
-            let sent = block.as_ref().and_then(|b| b["text"].as_str()).map(String::from).or_else(|| c.held.last().cloned()).unwrap_or_default();
+            let sent = block
+                .as_ref()
+                .and_then(|b| b["text"].as_str())
+                .map(String::from)
+                .or_else(|| c.held.last().cloned())
+                .unwrap_or_default();
             blocks.extend(block);
             if let Some(mark) = mark {
                 self.marks.lock().unwrap().push((mark.0, mark.1, sent));
@@ -1645,7 +1920,11 @@ impl Worker {
     /// message from another session). Tools that wait on something use it,
     /// so a pause, an interrupt or a new message ends their wait at once.
     fn wait_a_bit(&self, ms: u64) {
-        let _ = self.wake_rx.lock().unwrap().recv_timeout(Duration::from_millis(ms));
+        let _ = self
+            .wake_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_millis(ms));
     }
 
     /// Notes that the usage limit was reached: a line in the transcript
@@ -1655,14 +1934,24 @@ impl Worker {
     fn record_limit(&self, at: i64) {
         let mut c = self.conv.lock().unwrap();
         c.limit_wait = Some(at);
-        let scope = if c.provider() == api::Provider::Claude { api::limit_scope(&c.id, &c.model).unwrap_or_default() } else { "" };
-        match c.marks.iter_mut().rev().find(|m| m.kind == MarkKind::Limit && m.text.is_empty()) {
+        let scope = if c.provider() == api::Provider::Claude {
+            api::limit_scope(&c.id, &c.model).unwrap_or_default()
+        } else {
+            ""
+        };
+        match c
+            .marks
+            .iter_mut()
+            .rev()
+            .find(|m| m.kind == MarkKind::Limit && m.text.is_empty())
+        {
             Some(m) => {
                 m.time = at;
                 m.scope = scope.into();
             }
             None => {
-                add_mark(&mut c, MarkKind::Limit, String::new(), String::new(), at).scope = scope.into();
+                add_mark(&mut c, MarkKind::Limit, String::new(), String::new(), at).scope =
+                    scope.into();
             }
         }
         self.save(c);
@@ -1686,10 +1975,70 @@ impl Worker {
         }
     }
 
+    /// The model failed (`why`: its error after the retries, or every
+    /// account at its limit): the conversation moves to the first of its
+    /// fallbacks that can take the request now (`pick_fallback`), and the
+    /// request goes again there, with a line in the transcript. A model the
+    /// user picked meanwhile goes first. False when no fallback can.
+    fn fall_back(&self, why: &str, tried: &mut Vec<(api::Provider, String)>) -> bool {
+        self.fall_back_if(why, tried, |conv, p, m| p.ready(conv, m))
+    }
+
+    /// `fall_back`, with `ready` saying whether a provider could take the
+    /// conversation's (`conv`) request on a model now.
+    fn fall_back_if(
+        &self,
+        why: &str,
+        tried: &mut Vec<(api::Provider, String)>,
+        ready: impl Fn(&str, api::Provider, &str) -> bool,
+    ) -> bool {
+        if self.queued_model().is_some() {
+            return false;
+        }
+        let mut c = self.conv.lock().unwrap();
+        if c.fallbacks.is_empty() {
+            return false;
+        }
+        let current = (c.provider(), c.model.clone());
+        if !tried.contains(&current) {
+            tried.push(current);
+        }
+        let id = c.id.clone();
+        let Some(next) = pick_fallback(&c, tried, |p, m| ready(&id, p, m)) else {
+            return false;
+        };
+        tried.push((next.provider, next.model.clone()));
+        // As a switch in the session box: the effort stays, the cache is cold.
+        apply_command(&mut c, Command::Model(next.provider, next.model.clone()));
+        // A wait for the old provider's limit is over.
+        c.limit_wait = None;
+        let to = format!(
+            "{} on {}",
+            api::Provider::model_name(&next.model),
+            next.provider.name()
+        );
+        add_mark(
+            &mut c,
+            MarkKind::FellBack,
+            format!("{to}, after: {}", fallback_reason(why)),
+            String::new(),
+            api::now_ms(),
+        );
+        self.save(c);
+        self.set(|l| l.status = format!("Falling back to {to}"));
+        true
+    }
+
     /// The account rotated: a line in the transcript (never sent).
     fn note_rotation(&self, label: String) {
         let mut c = self.conv.lock().unwrap();
-        add_mark(&mut c, MarkKind::Rotated, label, String::new(), api::now_ms());
+        add_mark(
+            &mut c,
+            MarkKind::Rotated,
+            label,
+            String::new(),
+            api::now_ms(),
+        );
         c.save();
         drop(c);
         self.set(|l| l.status = "Waiting for the model".into());
@@ -1700,7 +2049,11 @@ impl Worker {
         let mut c = self.conv.lock().unwrap();
         let now = api::now_ms();
         let mut changed = false;
-        for m in c.marks.iter_mut().filter(|m| m.kind == MarkKind::Limit && m.text.is_empty()) {
+        for m in c
+            .marks
+            .iter_mut()
+            .filter(|m| m.kind == MarkKind::Limit && m.text.is_empty())
+        {
             m.text = how.into();
             m.done = now;
             changed = true;
@@ -1712,16 +2065,24 @@ impl Worker {
 
     /// The model the last queued model change picks, if one is queued.
     fn queued_model(&self) -> Option<(api::Provider, String)> {
-        self.live.lock().unwrap().commands.iter().rev().find_map(|cmd| match cmd {
-            Command::Model(p, m) => Some((*p, m.clone())),
-            _ => None,
-        })
+        self.live
+            .lock()
+            .unwrap()
+            .commands
+            .iter()
+            .rev()
+            .find_map(|cmd| match cmd {
+                Command::Model(p, m) => Some((*p, m.clone())),
+                _ => None,
+            })
     }
 
     /// Waits until a usage limit resets, if one was hit. False if the user
     /// interrupted meanwhile (then OAK stops waiting).
     fn wait_for_limit(&self) -> bool {
-        let Some(at) = self.conv.lock().unwrap().limit_wait else { return true };
+        let Some(at) = self.conv.lock().unwrap().limit_wait else {
+            return true;
+        };
         self.set(|l| {
             l.blocks.clear();
             l.status = "Waiting for the usage limit to reset".into();
@@ -1772,6 +2133,8 @@ impl Worker {
         if !self.paused.load(Ordering::SeqCst) {
             return true;
         }
+        let id = self.conv.lock().unwrap().id.clone();
+        crate::quick::turn::drop_parked(&id, true);
         self.set(|l| {
             l.blocks.clear();
             l.status = "Paused".into();
@@ -1819,10 +2182,18 @@ impl Worker {
         self.finish_limit("stopped");
         if crate::bench::on() {
             let c = self.conv.lock().unwrap();
-            let (id, parent, text) = (c.id.clone(), c.parent.clone(), reply_text(&c).unwrap_or_default());
+            let (id, parent, text) = (
+                c.id.clone(),
+                c.parent.clone(),
+                reply_text(&c).unwrap_or_default(),
+            );
             drop(c);
             let error = self.live.lock().unwrap().error.clone();
-            crate::bench::log(&id, "turn_end", json!({"parent": parent, "text": text, "error": error}));
+            crate::bench::log(
+                &id,
+                "turn_end",
+                json!({"parent": parent, "text": text, "error": error}),
+            );
         }
         self.report_to_parent();
     }
@@ -1832,12 +2203,20 @@ impl Worker {
         let mut failures = 0;
         let mut refusals = 0;
         let mut overflowed = false;
+        // The models that failed this turn (`fall_back`), till one replies.
+        let mut tried: Vec<(api::Provider, String)> = vec![];
         loop {
             if self.reverting() {
+                let id = self.conv.lock().unwrap().id.clone();
+                crate::quick::turn::drop_parked(&id, false);
                 return;
             }
-            if self.interrupted() && !self.absorb_queued() {
-                return;
+            if self.interrupted() {
+                let id = self.conv.lock().unwrap().id.clone();
+                crate::quick::turn::drop_parked(&id, false);
+                if !self.absorb_queued() {
+                    return;
+                }
             }
             if !self.wait_for_limit() && !self.absorb_queued() {
                 return;
@@ -1849,6 +2228,7 @@ impl Worker {
             let mut batch = Batch::new(self, scope);
             let (blocks, stop) = match self.ask(&mut batch) {
                 Reply::Done(b, s, usage) => {
+                    tried.clear();
                     self.finish_limit("continued");
                     self.add_marks(true);
                     self.after_reply(usage);
@@ -1862,7 +2242,11 @@ impl Worker {
                 }
                 Reply::Paused => continue,
                 Reply::Limited(at) => {
-                    self.record_limit(at);
+                    // A fallback with room takes the request; else Oak
+                    // waits for the reset.
+                    if !self.fall_back("usage limit reached", &mut tried) {
+                        self.record_limit(at);
+                    }
                     continue;
                 }
                 Reply::Failed(e) if e.contains("prompt is too long") && !overflowed => {
@@ -1871,7 +2255,12 @@ impl Worker {
                     overflowed = true;
                     match self.summarize_now(&e) {
                         Ok(()) => continue,
-                        Err(why) => return self.set(|l| l.error = Some(format!("{e}\n(Couldn't make room by summarizing: {why})"))),
+                        Err(why) => {
+                            return self.set(|l| {
+                                l.error =
+                                    Some(format!("{e}\n(Couldn't make room by summarizing: {why})"))
+                            });
+                        }
                     }
                 }
                 Reply::Failed(e) => {
@@ -1880,6 +2269,10 @@ impl Worker {
                     if failures < 4 && (e.contains("verloaded") || e.starts_with("Stream")) {
                         self.set(|l| l.status = format!("Retrying after: {e}"));
                         std::thread::sleep(Duration::from_secs(3 * failures));
+                        continue;
+                    }
+                    if self.fall_back(&e, &mut tried) {
+                        failures = 0;
                         continue;
                     }
                     return self.set(|l| l.error = Some(e));
@@ -1908,6 +2301,14 @@ impl Worker {
                 continue;
             }
             if !done && calls.is_empty() {
+                if self.paused.load(Ordering::SeqCst)
+                    || (stop == tool_calls::CUT_SHORT && self.absorb_queued())
+                {
+                    continue;
+                }
+                if stop == tool_calls::CUT_SHORT {
+                    return;
+                }
                 // A goal that isn't finished keeps the model going.
                 if self.goal_step() {
                     continue;
@@ -1929,7 +2330,10 @@ impl Worker {
                 continue;
             }
             // Files OAK's own commands changed aren't news to the model.
-            if calls.iter().any(|b| matches!(b["name"].as_str(), Some("EXECUTE" | "TASK_NEW")) || (b["name"] == "TASK" && b["input"]["action"] == "new")) {
+            if calls.iter().any(|b| {
+                matches!(b["name"].as_str(), Some("EXECUTE" | "TASK_NEW"))
+                    || (b["name"] == "TASK" && b["input"]["action"] == "new")
+            }) {
                 let t = Instant::now();
                 self.files.lock().unwrap().refresh();
                 self.bench("files_refresh", json!({"ms": ms_since(t)}));
@@ -1964,10 +2368,22 @@ impl Worker {
     /// when the turn ends instead.
     fn wait_after_refusal(&self, refusals: u32, detail: &str) -> bool {
         let why = detail.trim();
-        let why = if why.is_empty() { String::new() } else { format!(" ({why})") };
+        let why = if why.is_empty() {
+            String::new()
+        } else {
+            format!(" ({why})")
+        };
         let wait = api::retry_wait(refusals);
-        let of = if refusals <= api::RETRIES { format!("{refusals}/{}", api::RETRIES) } else { refusals.to_string() };
-        self.set(|l| l.status = format!("Retry {of} in {wait}s after: a safety classifier declined the request{why}"));
+        let of = if refusals <= api::RETRIES {
+            format!("{refusals}/{}", api::RETRIES)
+        } else {
+            refusals.to_string()
+        };
+        self.set(|l| {
+            l.status = format!(
+                "Retry {of} in {wait}s after: a safety classifier declined the request{why}"
+            )
+        });
         self.retry_sleep(Duration::from_secs(wait)) || self.absorb_queued()
     }
 
@@ -1980,8 +2396,11 @@ impl Worker {
             b.as_object_mut().unwrap().remove("_oak_raw");
         }
         if !blocks.is_empty() {
-            let unslop = crate::rewrites::applies(&self.conv.lock().unwrap()) && crate::rewrites::mark(&mut blocks);
-            let rewrote = blocks.iter().any(|b| b.get(crate::rewrites::key()).is_some());
+            let unslop = crate::rewrites::applies(&self.conv.lock().unwrap())
+                && crate::rewrites::mark(&mut blocks);
+            let rewrote = blocks
+                .iter()
+                .any(|b| b.get(crate::rewrites::key()).is_some());
             self.push("assistant", blocks);
             if unslop {
                 crate::rewrites::start(&self.conv, &self.ctx);
@@ -1992,7 +2411,6 @@ impl Worker {
         }
         calls
     }
-
 }
 
 /// A tool call's result block.
@@ -2012,9 +2430,13 @@ fn result_block(call: &Value, content: Value, is_error: bool) -> Value {
 /// conversation then ends where it can take a new message from the user.
 /// (A fork goes back this far too: `crate::fork`.)
 pub(crate) fn revert_to(c: &mut Conversation, msg: usize, block: usize, was: &Value) -> bool {
-    let Some(m) = c.messages.get_mut(msg) else { return false };
+    let Some(m) = c.messages.get_mut(msg) else {
+        return false;
+    };
     let user = m["role"] == "user";
-    let Some(content) = m["content"].as_array_mut() else { return false };
+    let Some(content) = m["content"].as_array_mut() else {
+        return false;
+    };
     let matches = match content.get(block) {
         Some(b) if user => b == was,
         Some(b) => same_block(b, was),
@@ -2029,17 +2451,32 @@ pub(crate) fn revert_to(c: &mut Conversation, msg: usize, block: usize, was: &Va
             content.pop();
         }
     }
-    let calls: Vec<Value> = content.iter().filter(|b| oak::is_call(b)).cloned().collect();
+    let calls: Vec<Value> = content
+        .iter()
+        .filter(|b| oak::is_call(b))
+        .cloned()
+        .collect();
     let keep = !content.is_empty();
     // The kept calls' results, from the user turn after the reply (a call
     // whose result never came gets the one a stopped call gets).
     let results: Vec<Value> = if user || calls.is_empty() {
         vec![]
     } else {
-        let next: Vec<Value> = c.messages.get(msg + 1).filter(|m| m["role"] == "user").and_then(|m| m["content"].as_array()).cloned().unwrap_or_default();
+        let next: Vec<Value> = c
+            .messages
+            .get(msg + 1)
+            .filter(|m| m["role"] == "user")
+            .and_then(|m| m["content"].as_array())
+            .cloned()
+            .unwrap_or_default();
         calls
             .iter()
-            .map(|call| next.iter().find(|r| oak::is_result(r) && r["call_id"] == call["id"]).cloned().unwrap_or_else(|| result_block(call, json!(STOPPED_RESULT), true)))
+            .map(|call| {
+                next.iter()
+                    .find(|r| oak::is_result(r) && r["call_id"] == call["id"])
+                    .cloned()
+                    .unwrap_or_else(|| result_block(call, json!(STOPPED_RESULT), true))
+            })
             .collect()
     };
     cut_messages(c, if keep { msg + 1 } else { msg }, msg);
@@ -2065,7 +2502,12 @@ const EARLIER_KEPT: usize = 8;
 
 /// Puts a summary in force, keeping what requests went with until then for
 /// a revert to before its cut (`cut_messages`).
-pub(crate) fn install_summary(c: &mut Conversation, summary: Summary, saved: u64, cost: rolling::Cost) {
+pub(crate) fn install_summary(
+    c: &mut Conversation,
+    summary: Summary,
+    saved: u64,
+    cost: rolling::Cost,
+) {
     let earlier = store::Earlier {
         summary: c.rolling.summary.clone(),
         cold: c.rolling.cold,
@@ -2114,7 +2556,9 @@ fn cut_messages(c: &mut Conversation, n: usize, changed: usize) {
 /// its own fields to a reply's blocks after the fact (a rewrite, token
 /// counts), so only what the model sent counts.
 fn same_block(b: &Value, was: &Value) -> bool {
-    ["type", "id", "text", "sig", "data", "input"].iter().all(|k| b.get(k) == was.get(k))
+    ["type", "id", "text", "sig", "data", "input"]
+        .iter()
+        .all(|k| b.get(k) == was.get(k))
 }
 
 /// The result of a call that a revert keeps but whose result never came.
@@ -2148,7 +2592,9 @@ fn lost_calls_in(messages: &[&[u8]]) -> Option<Option<usize>> {
     let read = |m: &[u8]| -> Option<(Value, Vec<Block>)> {
         let m: Message = serde_json::from_slice(m).ok()?;
         let blocks = match m.content {
-            Some(c) if c.get().trim_start().starts_with('[') => serde_json::from_str(c.get()).ok()?,
+            Some(c) if c.get().trim_start().starts_with('[') => {
+                serde_json::from_str(c.get()).ok()?
+            }
             _ => vec![],
         };
         Some((m.role, blocks))
@@ -2161,7 +2607,12 @@ fn lost_calls_in(messages: &[&[u8]]) -> Option<Option<usize>> {
         let mut calls = blocks.iter().filter(|b| b.kind == "tool_call").peekable();
         if role == "assistant" && calls.peek().is_some() {
             let answered: Option<Vec<&Value>> = match &next {
-                Some((role, next)) if *role == "user" => Some(next.iter().filter(|b| b.kind == "tool_result").map(|b| &b.call_id).collect()),
+                Some((role, next)) if *role == "user" => Some(
+                    next.iter()
+                        .filter(|b| b.kind == "tool_result")
+                        .map(|b| &b.call_id)
+                        .collect(),
+                ),
                 Some(_) => None, // two replies in a row: not something it mends
                 None => Some(vec![]),
             };
@@ -2196,7 +2647,10 @@ pub(crate) fn answer_lost_calls(c: &mut Conversation) -> bool {
 /// `answer_lost_calls`, except for the calls of the turn under way (the
 /// last reply, with at most its results after it) that `carry_on` picks:
 /// they stay unanswered, to run again, and are returned.
-pub(crate) fn answer_lost_calls_but(c: &mut Conversation, carry_on: impl Fn(&Value) -> bool) -> (bool, Vec<Value>) {
+pub(crate) fn answer_lost_calls_but(
+    c: &mut Conversation,
+    carry_on: impl Fn(&Value) -> bool,
+) -> (bool, Vec<Value>) {
     // Not yet read from its file, and none found there (every conversation
     // is looked at, at every start): nothing is read. Otherwise, what is
     // held is looked at, and the messages on disk from the first found.
@@ -2222,7 +2676,13 @@ pub(crate) fn answer_lost_calls_but(c: &mut Conversation, carry_on: impl Fn(&Val
         if m["role"] != "assistant" {
             continue;
         }
-        let calls = || m["content"].as_array().into_iter().flatten().filter(|b| oak::is_call(b));
+        let calls = || {
+            m["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|b| oak::is_call(b))
+        };
         if calls().next().is_none() {
             continue;
         }
@@ -2237,10 +2697,14 @@ pub(crate) fn answer_lost_calls_but(c: &mut Conversation, carry_on: impl Fn(&Val
             Some(_) => continue, // two replies in a row: not something this can mend
             None => vec![],
         };
-        let (carried, lost): (Vec<&Value>, Vec<&Value>) =
-            calls().filter(|call| !answered.contains(&&call["id"])).partition(|call| under_way == Some(i) && carry_on(call));
+        let (carried, lost): (Vec<&Value>, Vec<&Value>) = calls()
+            .filter(|call| !answered.contains(&&call["id"]))
+            .partition(|call| under_way == Some(i) && carry_on(call));
         kept.extend(carried.into_iter().cloned());
-        let lost: Vec<Value> = lost.into_iter().map(|call| result_block(call, json!(LOST_RESULT), true)).collect();
+        let lost: Vec<Value> = lost
+            .into_iter()
+            .map(|call| result_block(call, json!(LOST_RESULT), true))
+            .collect();
         if lost.is_empty() {
             continue;
         }
@@ -2277,11 +2741,20 @@ fn carry_waits(c: &mut Conversation, waits: &[Value], closed_ms: Option<i64>, no
         let id = call["id"].as_str().unwrap_or("");
         let was = c.task_waits.iter().find(|w| w.call == id).cloned();
         // (Without a record: since the call came in.)
-        let was = was.unwrap_or_else(|| store::TaskWait { call: id.into(), since: call["_oak_at"].as_i64().unwrap_or(now).min(now), ..Default::default() });
+        let was = was.unwrap_or_else(|| store::TaskWait {
+            call: id.into(),
+            since: call["_oak_at"].as_i64().unwrap_or(now).min(now),
+            ..Default::default()
+        });
         // (After a crash the records may predate the wait: then none of it
         // counts as waited.)
         let closed = closed_ms.unwrap_or(was.since).clamp(was.since, now);
-        carried.push(store::TaskWait { call: was.call, since: now, waited_ms: was.waited_ms + (closed - was.since), closed_ms: was.closed_ms + (now - closed) });
+        carried.push(store::TaskWait {
+            call: was.call,
+            since: now,
+            waited_ms: was.waited_ms + (closed - was.since),
+            closed_ms: was.closed_ms + (now - closed),
+        });
     }
     let changed = carried != c.task_waits;
     c.task_waits = carried;
@@ -2295,11 +2768,51 @@ fn carry_waits(c: &mut Conversation, waits: &[Value], closed_ms: Option<i64>, no
 /// folder), and a plugin's models (`crate::provided`) serve normal
 /// conversations only. None for every other provider, and for every
 /// conversation that isn't a chat.
+/// The fallback `c` moves to when its model fails: the first of its
+/// fallbacks, in order, that is not its model now nor one `tried` this turn,
+/// that a chat or Code Mode can use, and that `ready` says can take a
+/// request now (`providers::Kind::ready`).
+pub(crate) fn pick_fallback(
+    c: &Conversation,
+    tried: &[(api::Provider, String)],
+    ready: impl Fn(api::Provider, &str) -> bool,
+) -> Option<store::Fallback> {
+    let now = (c.provider(), c.model.as_str());
+    c.fallbacks
+        .iter()
+        .find(|f| {
+            (f.provider, f.model.as_str()) != now
+                && !tried.iter().any(|(p, m)| *p == f.provider && *m == f.model)
+                && chat_refuses_provider(c.chat, f.provider).is_none()
+                && code_mode_refuses_provider(c.code_mode, f.provider).is_none()
+                && mix_refuses_provider(c.mix.is_some(), f.provider).is_none()
+                && ready(f.provider, &f.model)
+        })
+        .cloned()
+}
+
+/// Why a model failed, as a fallback's transcript line has it: one line,
+/// clipped.
+fn fallback_reason(why: &str) -> String {
+    let line = tools::one_line(why);
+    if line.chars().count() <= 200 {
+        line
+    } else {
+        format!("{}…", line.head(199))
+    }
+}
+
 pub(crate) fn chat_refuses_provider(chat: bool, provider: api::Provider) -> Option<String> {
     match provider {
         _ if !chat => None,
-        api::Provider::Freebuff => Some("Freebuff can't serve a chat: its agent works on a project. Switch to another model.".to_string()),
-        api::Provider::Plugin => Some(format!("{} serves normal conversations only, not chats. Switch to another model.", crate::provided::name())),
+        api::Provider::Freebuff => Some(
+            "Freebuff can't serve a chat: its agent works on a project. Switch to another model."
+                .to_string(),
+        ),
+        api::Provider::Plugin => Some(format!(
+            "{} serves normal conversations only, not chats. Switch to another model.",
+            crate::provided::name()
+        )),
         _ => None,
     }
 }
@@ -2307,18 +2820,48 @@ pub(crate) fn chat_refuses_provider(chat: bool, provider: api::Provider) -> Opti
 /// Why a Code Mode conversation can't be served by `provider`: Freebuff
 /// sends its own agent's tools, not REPL, and a plugin's models serve
 /// normal conversations only.
-pub(crate) fn code_mode_refuses_provider(code_mode: bool, provider: api::Provider) -> Option<String> {
+pub(crate) fn code_mode_refuses_provider(
+    code_mode: bool,
+    provider: api::Provider,
+) -> Option<String> {
     match provider {
         _ if !code_mode => None,
-        api::Provider::Freebuff => Some("Freebuff can't serve Code Mode: its agent has its own tools. Switch to another model.".to_string()),
-        api::Provider::Plugin => Some(format!("{} serves normal conversations only, not Code Mode. Switch to another model.", crate::provided::name())),
+        api::Provider::Freebuff => Some(
+            "Freebuff can't serve Code Mode: its agent has its own tools. Switch to another model."
+                .to_string(),
+        ),
+        api::Provider::Plugin => Some(format!(
+            "{} serves normal conversations only, not Code Mode. Switch to another model.",
+            crate::provided::name()
+        )),
+        _ => None,
+    }
+}
+
+/// Why a Mix conversation (`crate::mix`) can't be served by `provider`:
+/// Freebuff sends its own agent's tools, without SWITCH, and a plugin's
+/// models serve normal conversations only.
+pub(crate) fn mix_refuses_provider(mix: bool, provider: api::Provider) -> Option<String> {
+    match provider {
+        _ if !mix => None,
+        api::Provider::Freebuff => Some(
+            "Freebuff can't serve a Mix: its agent has its own tools. Switch to another model."
+                .to_string(),
+        ),
+        api::Provider::Plugin => Some(format!(
+            "{} serves normal conversations only, not a Mix. Switch to another model.",
+            crate::provided::name()
+        )),
         _ => None,
     }
 }
 
 /// Does `cmd` to `c`: the block telling the model about a new goal, if any,
 /// and the transcript line to show for it, if any.
-fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, Option<(MarkKind, String)>) {
+fn apply_command(
+    c: &mut Conversation,
+    cmd: Command,
+) -> (Option<Value>, Option<(MarkKind, String)>) {
     match cmd {
         Command::Goal(goal, endless) => {
             let cleared = goal.is_empty();
@@ -2345,13 +2888,18 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, Option<(
             c.goal_justification.clear();
             c.goal_finished = false;
             c.goal_paused = false;
-            ((!cleared).then(|| goal_block(&note)), Some((MarkKind::Goal, goal)))
+            (
+                (!cleared).then(|| goal_block(&note)),
+                Some((MarkKind::Goal, goal)),
+            )
         }
         Command::Effort(e) => {
             // Claude's effort is part of its cache key: the next request
             // writes it all, which makes it a moment to bring the prefix up
             // to date. Unless it can change per message (`crate::prefix`).
-            let per_message = crate::prefix::mode(c.provider(), &c.model) == Some(crate::prefix::Mode::Claude) && crate::prefix::supports_effort(&c.model);
+            let per_message = crate::prefix::mode(c.provider(), &c.model)
+                == Some(crate::prefix::Mode::Claude)
+                && crate::prefix::supports_effort(&c.model);
             if e != c.effort && c.provider() == api::Provider::Claude && !per_message {
                 c.cache.cold();
             }
@@ -2369,6 +2917,12 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, Option<(
                 // Another model may be served elsewhere on OpenRouter.
                 c.served_by.clear();
             }
+            // In a Mix, the model picked (in the session box, or a fallback)
+            // takes the place of the one it is on, planner or executor.
+            if let Some(mix) = c.mix.as_mut() {
+                let now = mix.current_mut();
+                (now.provider, now.model) = (p, m.clone());
+            }
             c.provider = Some(p);
             (None, None)
         }
@@ -2378,8 +2932,16 @@ fn apply_command(c: &mut Conversation, cmd: Command) -> (Option<Value>, Option<(
 /// How long the cache of `c`'s next request (`messages` long) should live:
 /// the setting's, or with it on auto the conversation's own pick
 /// (`cache_ttl`). Only Claude has the choice.
-fn cache_choice(c: &Conversation, provider: api::Provider, messages: usize, now: i64) -> crate::cache_ttl::Choice {
-    let five = crate::cache_ttl::Choice { ttl: oak::Ttl::FiveMinutes, anchor: None };
+fn cache_choice(
+    c: &Conversation,
+    provider: api::Provider,
+    messages: usize,
+    now: i64,
+) -> crate::cache_ttl::Choice {
+    let five = crate::cache_ttl::Choice {
+        ttl: oak::Ttl::FiveMinutes,
+        anchor: None,
+    };
     if provider != api::Provider::Claude {
         return five;
     }
@@ -2393,10 +2955,19 @@ fn cache_choice(c: &Conversation, provider: api::Provider, messages: usize, now:
     }
     // The context rolls over at the trigger, or else fills the window.
     let window = api::context_window(&c.model).unwrap_or(200_000);
-    let limit = if c.rolling.off { window } else { rolling::config_for(&c.model).trigger.min(window) };
-    let choice = c.cache.choose(now, c.rolling.context, c.rolling.base(), limit);
+    let limit = if c.rolling.off {
+        window
+    } else {
+        rolling::config_for(&c.model).trigger.min(window)
+    };
+    let choice = c
+        .cache
+        .choose(now, c.rolling.context, c.rolling.base(), limit);
     // An anchor past the messages (they changed) is no anchor.
-    crate::cache_ttl::Choice { anchor: choice.anchor.filter(|&i| i + 1 < messages), ..choice }
+    crate::cache_ttl::Choice {
+        anchor: choice.anchor.filter(|&i| i + 1 < messages),
+        ..choice
+    }
 }
 
 /// The transcript as `provider` can take it: reasoning another provider
@@ -2406,8 +2977,14 @@ fn cache_choice(c: &Conversation, provider: api::Provider, messages: usize, now:
 /// as Codex models do. A reply left with nothing says so in a line, so the
 /// turn still has content. Borrowed as it is when nothing is left out.
 fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow<'_, [Value]> {
-    let foreign = |b: &Value| oak::is_reasoning(b) && b["by"].as_str().is_some_and(|by| by != provider.id());
-    let has = |m: &Value| m["role"] == "assistant" && m["content"].as_array().is_some_and(|c| c.iter().any(foreign));
+    let foreign =
+        |b: &Value| oak::is_reasoning(b) && b["by"].as_str().is_some_and(|by| by != provider.id());
+    let has = |m: &Value| {
+        m["role"] == "assistant"
+            && m["content"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(foreign))
+    };
     if !messages.iter().any(has) {
         return std::borrow::Cow::Borrowed(messages);
     }
@@ -2489,10 +3066,17 @@ fn loaded_line(paths: &[String], skipped: &[PathBuf], folder: &Path) -> String {
         }
     };
     let list: Vec<String> = paths.iter().map(short).collect();
-    let mut s = if paths.is_empty() { "no instruction files any more".to_string() } else { format!("instructions loaded: {}", list.join(", ")) };
+    let mut s = if paths.is_empty() {
+        "no instruction files any more".to_string()
+    } else {
+        format!("instructions loaded: {}", list.join(", "))
+    };
     if !skipped.is_empty() {
         let list: Vec<String> = skipped.iter().map(|p| p.display().to_string()).collect();
-        s += &format!(" (left out imports outside the folder: {})", list.join(", "));
+        s += &format!(
+            " (left out imports outside the folder: {})",
+            list.join(", ")
+        );
     }
     s
 }
@@ -2506,31 +3090,72 @@ fn loaded_line(paths: &[String], skipped: &[PathBuf], folder: &Path) -> String {
 /// `memory_for_request` just put in at `from`, folded into this one); then
 /// the tool definitions.
 fn start_marks(c: &mut Conversation, from: usize, p: &api::Preamble, context: &str, at: usize) {
-    let files = c.marks.drain(from.min(c.marks.len())..).find(|m| m.kind == MarkKind::Instructions);
+    let files = c
+        .marks
+        .drain(from.min(c.marks.len())..)
+        .find(|m| m.kind == MarkKind::Instructions);
     let now = api::now_ms();
-    let mark = |kind, text: String, sent: String| Mark { sent, ..Mark::new(at, kind, text, now) };
+    let mark = |kind, text: String, sent: String| Mark {
+        sent,
+        ..Mark::new(at, kind, text, now)
+    };
     if let Some([billing, identity]) = &p.identity {
         let sent = store::sent_parts(&[("billing header", billing), ("identity", identity)]);
-        c.marks.push(mark(MarkKind::Identity, "Claude Code identity and billing header".into(), sent));
+        c.marks.push(mark(
+            MarkKind::Identity,
+            "Claude Code identity and billing header".into(),
+            sent,
+        ));
     }
-    let listed = files.as_ref().and_then(|m| m.text.strip_prefix("instructions loaded: ")).map(|rest| format!(", {rest}")).unwrap_or_default();
+    let listed = files
+        .as_ref()
+        .and_then(|m| m.text.strip_prefix("instructions loaded: "))
+        .map(|rest| format!(", {rest}"))
+        .unwrap_or_default();
     let mut parts = vec![("system prompt", p.system.as_str())];
     if !context.is_empty() {
         parts.push(("start of the first message", context));
     }
     // How much of the context each takes, roughly.
-    let tokens = |chars: usize| format!("{} tokens", crate::rolling::fmt_tokens(crate::rolling::estimate(chars)));
+    let tokens = |chars: usize| {
+        format!(
+            "{} tokens",
+            crate::rolling::fmt_tokens(crate::rolling::estimate(chars))
+        )
+    };
     let instructions = tokens(parts.iter().map(|(_, t)| t.len()).sum());
     let label = if crate::freebuff::serves(&c.model) {
         format!("instructions loaded: Freebuff system prompt{listed} ({instructions})")
     } else {
-        let name = if c.chat { "Chat" } else { prompt::role(&c.role).name };
-        let code = if c.code_mode && !c.chat { " with Code Mode" } else { "" };
+        let name = if c.chat {
+            "Chat"
+        } else {
+            prompt::role(&c.role).name
+        };
+        let code = if c.code_mode && !c.chat {
+            " with Code Mode"
+        } else if c.mix.is_some() && !c.chat {
+            " with Mix"
+        } else {
+            ""
+        };
         format!("instructions loaded: {name} system prompt{code}{listed} ({instructions})")
     };
-    c.marks.push(mark(MarkKind::Instructions, label, store::sent_parts(&parts)));
+    c.marks.push(mark(
+        MarkKind::Instructions,
+        label,
+        store::sent_parts(&parts),
+    ));
     let tool_chars = p.tools.iter().map(|t| t.to_string().len()).sum();
-    c.marks.push(mark(MarkKind::Tools, format!("tools loaded: {} tools ({})", p.tools.len(), tokens(tool_chars)), tools_sent(p)));
+    c.marks.push(mark(
+        MarkKind::Tools,
+        format!(
+            "tools loaded: {} tools ({})",
+            p.tools.len(),
+            tokens(tool_chars)
+        ),
+        tools_sent(p),
+    ));
 }
 
 /// The tools line's text when opened: each definition, under its name.
@@ -2538,7 +3163,16 @@ fn tools_sent(p: &api::Preamble) -> String {
     let list: Vec<(String, String)> = p
         .tools
         .iter()
-        .map(|t| (t["name"].as_str().or(t["function"]["name"].as_str()).unwrap_or("").to_string(), serde_json::to_string_pretty(t).unwrap_or_default()))
+        .map(|t| {
+            (
+                t["name"]
+                    .as_str()
+                    .or(t["function"]["name"].as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                serde_json::to_string_pretty(t).unwrap_or_default(),
+            )
+        })
         .collect();
     let parts: Vec<(&str, &str)> = list.iter().map(|(n, d)| (n.as_str(), d.as_str())).collect();
     store::sent_parts(&parts)
@@ -2551,9 +3185,16 @@ fn tools_sent(p: &api::Preamble) -> String {
 /// list follows the providers that are connected), which is no switch.
 fn preamble_changed(c: &Conversation, p: &api::Preamble) -> bool {
     let last = |k| c.marks.iter().rev().find(|m| m.kind == k);
-    let Some(t) = last(MarkKind::Tools) else { return false };
+    let Some(t) = last(MarkKind::Tools) else {
+        return false;
+    };
     let identity = last(MarkKind::Identity).is_some_and(|m| m.at == t.at && m.time == t.time);
-    let names = |sent: &str| store::split_sent(sent).into_iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>();
+    let names = |sent: &str| {
+        store::split_sent(sent)
+            .into_iter()
+            .map(|(n, _)| n.to_string())
+            .collect::<Vec<_>>()
+    };
     identity != p.identity.is_some() || names(&t.sent) != names(&tools_sent(p))
 }
 
@@ -2586,7 +3227,10 @@ fn memory_context(c: &Conversation) -> &str {
 /// `messages` (the start of the transcript) as a request sends them: in
 /// the rolling view, fit for the model, with the context block.
 fn request_messages(c: &Conversation, messages: &[Value]) -> Vec<Value> {
-    with_context(c.rolling.view(&for_provider(messages, c.provider())), memory_context(c))
+    with_context(
+        c.rolling.view(&for_provider(messages, c.provider())),
+        memory_context(c),
+    )
 }
 
 /// What a summary of the transcript before `cut` is sent: those messages
@@ -2628,7 +3272,12 @@ fn summary_messages(c: &Conversation, provider: api::Provider, n: usize, cut: us
 /// conversation breakpoint is a five-minute one whatever `body` had: an
 /// entry a chat request wrote at the cut is read either way, and its own is
 /// read only by a retry of it.
-fn summary_request_for(c: &Conversation, body: &oak::Request, n: usize, cut: usize) -> oak::Request {
+fn summary_request_for(
+    c: &Conversation,
+    body: &oak::Request,
+    n: usize,
+    cut: usize,
+) -> oak::Request {
     let mut request = body.clone();
     request.messages = summary_messages(c, body.provider, n, cut);
     if request.ttl == oak::Ttl::OneHour {
@@ -2644,15 +3293,32 @@ fn plan_summary(c: &mut Conversation, n: usize, base: usize, total: u64) -> Opti
     c.messages.load_from(base);
     let cleared = c.rolling.cleared_to();
     let keep = rolling::config_for(&c.model).keep;
-    rolling::plan(&c.messages[..n.min(c.messages.len())], base, cleared, total, &c.rolling.measured, keep, rolling::least_for(&c.model), true)
+    rolling::plan(
+        &c.messages[..n.min(c.messages.len())],
+        base,
+        cleared,
+        total,
+        &c.rolling.measured,
+        keep,
+        rolling::least_for(&c.model),
+        true,
+    )
 }
 
 /// Writes a summary (`rolling::summarize`), with its benchmark events.
-fn summarize(conv: &store::Shared, request: oak::Request, blocking: bool) -> Result<(String, rolling::Cost), String> {
+fn summarize(
+    conv: &store::Shared,
+    request: oak::Request,
+    blocking: bool,
+) -> Result<(String, rolling::Cost), String> {
     bench(conv, "summary_start", json!({"blocking": blocking}));
     let t = Instant::now();
     let result = rolling::summarize(request);
-    bench(conv, "summary_end", json!({"ok": result.is_ok(), "ms": ms_since(t), "blocking": blocking}));
+    bench(
+        conv,
+        "summary_end",
+        json!({"ok": result.is_ok(), "ms": ms_since(t), "blocking": blocking}),
+    );
     result
 }
 
@@ -2660,16 +3326,29 @@ fn summarize(conv: &store::Shared, request: oak::Request, blocking: bool) -> Res
 /// and the context block.
 fn overhead(req: &oak::Request) -> u64 {
     let first = req.messages.first().map(|m| &m["content"][0]["text"]);
-    let context = first.and_then(Value::as_str).filter(|t| t.starts_with("<system-reminder>\nAs you answer")).map_or(0, str::len);
+    let context = first
+        .and_then(Value::as_str)
+        .filter(|t| t.starts_with("<system-reminder>\nAs you answer"))
+        .map_or(0, str::len);
     let p = api::preamble(&req.model, &req.system, &Value::Array(req.tools.clone()));
     let identity = p.identity.map_or(0, |[b, i]| b.len() + i.len());
-    rolling::estimate(identity + p.system.len() + Value::Array(p.tools).to_string().len() + context + 300)
+    rolling::estimate(
+        identity + p.system.len() + Value::Array(p.tools).to_string().len() + context + 300,
+    )
 }
 
 /// Installs a finished summary, unless the conversation moved on to another
 /// one meanwhile (or was reverted: `reverts` is the count it began at), and
 /// records a failure so it isn't retried at once.
-fn finish_summary(conv: &store::Shared, live: &Mutex<Live>, base: usize, plan: Plan, overhead: u64, reverts: u64, result: Result<(String, rolling::Cost), String>) {
+fn finish_summary(
+    conv: &store::Shared,
+    live: &Mutex<Live>,
+    base: usize,
+    plan: Plan,
+    overhead: u64,
+    reverts: u64,
+    result: Result<(String, rolling::Cost), String>,
+) {
     match result {
         Ok((text, cost)) => {
             let mut c = conv.lock().unwrap();
@@ -2682,8 +3361,25 @@ fn finish_summary(conv: &store::Shared, live: &Mutex<Live>, base: usize, plan: P
                 let made_at = api::now_ms();
                 // The transcript only grows: the line goes where it stands
                 // now, and points back at the cut.
-                add_mark(&mut c, MarkKind::Summarized, text.clone(), String::new(), made_at).done = plan.cut as i64;
-                install_summary(&mut c, Summary { cut: plan.cut, text, made_at, clear: plan.clear }, saved, cost);
+                add_mark(
+                    &mut c,
+                    MarkKind::Summarized,
+                    text.clone(),
+                    String::new(),
+                    made_at,
+                )
+                .done = plan.cut as i64;
+                install_summary(
+                    &mut c,
+                    Summary {
+                        cut: plan.cut,
+                        text,
+                        made_at,
+                        clear: plan.clear,
+                    },
+                    saved,
+                    cost,
+                );
                 c.save();
             }
             live.lock().unwrap().rolling_failed = None;
@@ -2691,7 +3387,11 @@ fn finish_summary(conv: &store::Shared, live: &Mutex<Live>, base: usize, plan: P
         Err(e) => {
             // A refused summary is tried again after a minute and a half
             // (its quick retries are done), anything else after five.
-            let wait = Duration::from_secs(if e.contains("stop reason: refusal") { api::retry_wait(api::RETRIES + 1) } else { 300 });
+            let wait = Duration::from_secs(if e.contains("stop reason: refusal") {
+                api::retry_wait(api::RETRIES + 1)
+            } else {
+                300
+            });
             let mut c = conv.lock().unwrap();
             c.rolling.last_error = Some(e);
             c.save();
@@ -2703,7 +3403,12 @@ fn finish_summary(conv: &store::Shared, live: &Mutex<Live>, base: usize, plan: P
 
 /// Makes a streamed reply fit to send back: empty text blocks are never valid.
 fn finish_blocks(blocks: Vec<Value>) -> Vec<Value> {
-    blocks.into_iter().filter(|b| !(b.is_null() || (b["type"] == "text" && b["text"].as_str().unwrap_or("").is_empty()))).collect()
+    blocks
+        .into_iter()
+        .filter(|b| {
+            !(b.is_null() || (b["type"] == "text" && b["text"].as_str().unwrap_or("").is_empty()))
+        })
+        .collect()
 }
 
 /// Puts a reply's output speed (tokens per second, from the provider's

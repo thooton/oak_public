@@ -7,8 +7,8 @@
 use super::*;
 use crate::widgets::{add_field, clip_width, page_card, sign_in_heading};
 
-use crate::theme::hex;
 use crate::composer::{GEAR_ICON, side_box};
+use crate::theme::hex;
 
 impl App {
     /// Settings, opened from the gear in a conversation's bottom left
@@ -17,23 +17,51 @@ impl App {
     pub(crate) fn settings_page(&mut self, ui: &mut Ui, t: &Theme) {
         let (card, head, closed) = page_card(ui, t, 780.0, None, "settings-close");
         let p = ui.painter();
-        p.text(egui::pos2(head.left() + 14.0, head.center().y), Align2::LEFT_CENTER, GEAR_ICON, markdown::icon_font(13.0), t.ink3);
-        p.text(egui::pos2(head.left() + 34.0, head.center().y), Align2::LEFT_CENTER, "Settings", FontId::proportional(13.0), t.ink);
+        p.text(
+            egui::pos2(head.left() + 14.0, head.center().y),
+            Align2::LEFT_CENTER,
+            GEAR_ICON,
+            markdown::icon_font(13.0),
+            t.ink3,
+        );
+        p.text(
+            egui::pos2(head.left() + 34.0, head.center().y),
+            Align2::LEFT_CENTER,
+            "Settings",
+            FontId::proportional(13.0),
+            t.ink,
+        );
         // Esc with a picker open closes only the picker.
         if closed && (self.wallpaper_picker || self.or_picker.is_some()) {
             self.wallpaper_picker = false;
             self.wallpaper_hover = None;
             self.or_picker = None;
         } else if closed {
-            self.page = self.settings_from.take().filter(|p| *p != Page::Settings).unwrap_or(Page::Chats);
+            self.page = self
+                .settings_from
+                .take()
+                .filter(|p| *p != Page::Settings)
+                .unwrap_or(Page::Chats);
         }
-        let body = Rect::from_min_max(egui::pos2(card.left() + 1.0, head.bottom() + 1.0), card.max - vec2(1.0, 1.0));
+        let body = Rect::from_min_max(
+            egui::pos2(card.left() + 1.0, head.bottom() + 1.0),
+            card.max - vec2(1.0, 1.0),
+        );
         ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
-            ScrollArea::vertical().id_salt("settings-scroll").auto_shrink([false, false]).show(ui, |ui| {
-                egui::Frame::new().inner_margin(Margin::symmetric(16, 16)).show(ui, |ui| {
-                    egui::Grid::new("settings-grid").num_columns(2).spacing(vec2(28.0, 14.0)).min_col_width(70.0).show(ui, |ui| self.settings_rows(ui, t));
+            ScrollArea::vertical()
+                .id_salt("settings-scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(Margin::symmetric(16, 16))
+                        .show(ui, |ui| {
+                            egui::Grid::new("settings-grid")
+                                .num_columns(2)
+                                .spacing(vec2(28.0, 14.0))
+                                .min_col_width(70.0)
+                                .show(ui, |ui| self.settings_rows(ui, t));
+                        });
                 });
-            });
         });
     }
 
@@ -54,36 +82,64 @@ impl App {
     pub(crate) fn plugin_settings_page(&mut self, ui: &mut Ui, t: &Theme) {
         let id = self.plugin_settings.clone();
         let sections = crate::plugins::parts().settings_of(&id);
-        let name = crate::plugins::found().iter().filter_map(|f| f.info.as_ref()).find(|i| i.id == id).map(crate::plugins::name_of);
+        let name = crate::plugins::found()
+            .iter()
+            .filter_map(|f| f.info.as_ref())
+            .find(|i| i.id == id)
+            .map(crate::plugins::name_of);
         let (card, head, closed) = page_card(ui, t, 640.0, None, "plugin-settings-close");
         // (Its plugin stopped, or never had any.)
         if closed || sections.is_empty() {
-            self.page = self.plugin_settings_from.take().filter(|p| *p != Page::PluginSettings).unwrap_or(Page::Home);
+            self.page = self
+                .plugin_settings_from
+                .take()
+                .filter(|p| *p != Page::PluginSettings)
+                .unwrap_or(Page::Home);
             return;
         }
         let name = name.unwrap_or_else(|| id.clone());
         let p = ui.painter();
-        p.text(egui::pos2(head.left() + 14.0, head.center().y), Align2::LEFT_CENTER, crate::plugins_view::ICON, markdown::icon_font(13.0), t.ink3);
+        p.text(
+            egui::pos2(head.left() + 14.0, head.center().y),
+            Align2::LEFT_CENTER,
+            crate::plugins_view::ICON,
+            markdown::icon_font(13.0),
+            t.ink3,
+        );
         let title = clip_width(ui, &name, &FontId::proportional(13.0), head.width() - 80.0);
-        p.text(egui::pos2(head.left() + 34.0, head.center().y), Align2::LEFT_CENTER, title, FontId::proportional(13.0), t.ink);
-        let body = Rect::from_min_max(egui::pos2(card.left() + 1.0, head.bottom() + 1.0), card.max - vec2(1.0, 1.0));
+        p.text(
+            egui::pos2(head.left() + 34.0, head.center().y),
+            Align2::LEFT_CENTER,
+            title,
+            FontId::proportional(13.0),
+            t.ink,
+        );
+        let body = Rect::from_min_max(
+            egui::pos2(card.left() + 1.0, head.bottom() + 1.0),
+            card.max - vec2(1.0, 1.0),
+        );
         let titled = sections.len() > 1 || sections[0].title() != name;
         ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
-            ScrollArea::vertical().id_salt(("plugin-settings-scroll", &id)).auto_shrink([false, false]).show(ui, |ui| {
-                egui::Frame::new().inner_margin(Margin::symmetric(16, 16)).show(ui, |ui| {
-                    ui.set_max_width(560.0);
-                    for (i, section) in sections.iter().enumerate() {
-                        if i > 0 {
-                            ui.add_space(18.0);
-                        }
-                        if titled {
-                            caption(ui, &section.title(), t.ink3);
-                            ui.add_space(6.0);
-                        }
-                        ui.vertical(|ui| section.show(ui, self));
-                    }
+            ScrollArea::vertical()
+                .id_salt(("plugin-settings-scroll", &id))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(Margin::symmetric(16, 16))
+                        .show(ui, |ui| {
+                            ui.set_max_width(560.0);
+                            for (i, section) in sections.iter().enumerate() {
+                                if i > 0 {
+                                    ui.add_space(18.0);
+                                }
+                                if titled {
+                                    caption(ui, &section.title(), t.ink3);
+                                    ui.add_space(6.0);
+                                }
+                                ui.vertical(|ui| section.show(ui, self));
+                            }
+                        });
                 });
-            });
         });
     }
 
@@ -98,7 +154,18 @@ impl App {
         ui.end_row();
 
         let tip = "Cache writes: 5 minutes 1.25× input price; 1 hour 2×. Reads: 0.1×. Auto uses conversation timing.";
-        if option_row(ui, t, "Prompt cache", &mut self.settings.cache, [("auto".to_string(), "Auto"), ("5m".to_string(), "5 minutes"), ("1h".to_string(), "1 hour")], Some(tip)) {
+        if option_row(
+            ui,
+            t,
+            "Prompt cache",
+            &mut self.settings.cache,
+            [
+                ("auto".to_string(), "Auto"),
+                ("5m".to_string(), "5 minutes"),
+                ("1h".to_string(), "1 hour"),
+            ],
+            Some(tip),
+        ) {
             api::set_cache_mode(&self.settings.cache);
             store::save_settings(&self.settings);
         }
@@ -106,26 +173,53 @@ impl App {
         self.on_off_row(ui, t, "Keep cache warm", |s| &mut s.keep_alive, api::set_keep_alive, "Claude: rereads an idle conversation's 5-minute cache just before it expires (0.05× input each time), up to 30 minutes. With Auto, the cache is then always 5 minutes.");
         self.on_off_row(ui, t, "Cache diagnostics", |s| &mut s.cache_diagnostics, api::set_diagnostics, "Claude: each request names the previous one, and the API says why a request missed the cache (system, tools or messages changed). Logged in usage.jsonl.");
 
-        if option_row(ui, t, "Title model", &mut self.settings.title_model, openrouter::TITLE_CHOICES.iter().map(|(id, name)| (id.to_string(), *name)), Some("Requires an OpenRouter key. Nemotron is free; Gemma costs a fraction of a cent per title. Each is the other's fallback.")) {
+        if option_row(
+            ui,
+            t,
+            "Title model",
+            &mut self.settings.title_model,
+            openrouter::TITLE_CHOICES
+                .iter()
+                .map(|(id, name)| (id.to_string(), *name)),
+            Some(
+                "Requires an OpenRouter key. Nemotron is free; Gemma costs a fraction of a cent per title. Each is the other's fallback.",
+            ),
+        ) {
             openrouter::set_title_model(&self.settings.title_model);
             store::save_settings(&self.settings);
         }
 
-        if option_row(ui, t, "OpenRouter routing", &mut self.settings.or_routing, openrouter::Routing::ALL.map(|r| (r.id().to_string(), r.label())), Some(
-            "Which provider serves an OpenRouter model. Balanced: cost times the square root of time. \
+        if option_row(
+            ui,
+            t,
+            "OpenRouter routing",
+            &mut self.settings.or_routing,
+            openrouter::Routing::ALL.map(|r| (r.id().to_string(), r.label())),
+            Some(
+                "Which provider serves an OpenRouter model. Balanced: cost times the square root of time. \
              Cheapest: cost per request, counting cache reads (most of an agent's input). Fastest: first token plus reply time. \
              OpenRouter: its own routing within OAK's price ceiling. A conversation stays with its provider while it is within 1.3× of the best, to keep its cache.",
-        )) {
+            ),
+        ) {
             openrouter::set_routing(&self.settings.or_routing);
             store::save_settings(&self.settings);
         }
         self.or_models_row(ui, t);
 
-        if option_row(ui, t, "Local summaries", &mut self.settings.local_summarizer, rolling::Summarizer::ALL.map(|s| (s.id().to_string(), s.label())), Some(
-            "Local summaries stay on your server and pause the session. DeepSeek sends context to OpenRouter; \
+        if option_row(
+            ui,
+            t,
+            "Local summaries",
+            &mut self.settings.local_summarizer,
+            rolling::Summarizer::ALL.map(|s| (s.id().to_string(), s.label())),
+            Some(
+                "Local summaries stay on your server and pause the session. DeepSeek sends context to OpenRouter; \
              Haiku to Claude. Requires the corresponding account; falls back to local.",
-        )) {
-            rolling::set_summarizer(rolling::Summarizer::from_id(&self.settings.local_summarizer));
+            ),
+        ) {
+            rolling::set_summarizer(rolling::Summarizer::from_id(
+                &self.settings.local_summarizer,
+            ));
             store::save_settings(&self.settings);
         }
 
@@ -147,7 +241,14 @@ impl App {
         self.on_off_row(ui, t, "Account rotation", |s| &mut s.rotation, api::set_rotation, "Switches to the account with the most remaining usage at a limit. Off: waits for the selected account to reset.");
         let tip = "Hard limit on a session's notes, all together. At it, the model must shorten or delete notes before adding or lengthening one; \
                    notes already over it are kept. Running sessions are told of a change in a message.";
-        if option_row(ui, t, "Notes limit", &mut self.settings.notes_limit, crate::agent::NOTES_LIMITS, Some(tip)) {
+        if option_row(
+            ui,
+            t,
+            "Notes limit",
+            &mut self.settings.notes_limit,
+            crate::agent::NOTES_LIMITS,
+            Some(tip),
+        ) {
             crate::agent::set_notes_limit(self.settings.notes_limit);
             store::save_settings(&self.settings);
         }
@@ -157,13 +258,26 @@ impl App {
         ui.horizontal(|ui| self.scratch_row(ui, t));
         ui.end_row();
 
-        if option_row(ui, t, "Image zoom", &mut self.settings.click_zoom, [(false, "Scroll"), (true, "Click")], Some("Scroll: wheel to zoom, right-drag to pan. Click: toggle zoom, drag to pan.")) {
+        if option_row(
+            ui,
+            t,
+            "Image zoom",
+            &mut self.settings.click_zoom,
+            [(false, "Scroll"), (true, "Click")],
+            Some("Scroll: wheel to zoom, right-drag to pan. Click: toggle zoom, drag to pan."),
+        ) {
             store::save_settings(&self.settings);
         }
 
         if cfg!(all(unix, not(target_os = "macos"))) {
             caption(ui, "Touchpad scroll", t.ink3);
-            let r = ui.add(egui::Slider::new(&mut self.settings.touchpad_speed, 1.0..=8.0).step_by(0.5).suffix("×")).on_hover_text("Touchpad sensitivity; mouse wheel unchanged.");
+            let r = ui
+                .add(
+                    egui::Slider::new(&mut self.settings.touchpad_speed, 1.0..=8.0)
+                        .step_by(0.5)
+                        .suffix("×"),
+                )
+                .on_hover_text("Touchpad sensitivity; mouse wheel unchanged.");
             // Saved once a drag ends, not on every frame of it.
             if r.drag_stopped() || (r.changed() && !r.dragged()) {
                 store::save_settings(&self.settings);
@@ -174,7 +288,15 @@ impl App {
 
     /// An Off/On row for the switch `field`, which `apply` puts in force
     /// (and which is saved) when flipped.
-    fn on_off_row(&mut self, ui: &mut Ui, t: &Theme, label: &str, field: fn(&mut Settings) -> &mut bool, apply: fn(bool), tip: &str) {
+    fn on_off_row(
+        &mut self,
+        ui: &mut Ui,
+        t: &Theme,
+        label: &str,
+        field: fn(&mut Settings) -> &mut bool,
+        apply: fn(bool),
+        tip: &str,
+    ) {
         if option_row(ui, t, label, field(&mut self.settings), OFF_ON, Some(tip)) {
             apply(*field(&mut self.settings));
             store::save_settings(&self.settings);
@@ -186,7 +308,11 @@ impl App {
     fn theme_row(&mut self, ui: &mut Ui, t: &Theme) {
         let themes = crate::theme::themes();
         // One whose plugin isn't loaded stays the setting; Oak's shows.
-        let now = if themes.iter().any(|(id, _)| *id == self.settings.theme) { self.settings.theme.clone() } else { crate::theme::OAK.to_string() };
+        let now = if themes.iter().any(|(id, _)| *id == self.settings.theme) {
+            self.settings.theme.clone()
+        } else {
+            crate::theme::OAK.to_string()
+        };
         if themes.len() < 2 {
             return;
         }
@@ -213,12 +339,29 @@ impl App {
         let name = now.map_or("Forest", |w| &w.name).to_string();
         let tex = match now {
             Some(w) => crate::wallpaper::thumbnail(ui.ctx(), w),
-            None => Some(crate::home::picture(ui.ctx(), &mut self.pictures, "forest-home")),
+            None => Some(crate::home::picture(
+                ui.ctx(),
+                &mut self.pictures,
+                "forest-home",
+            )),
         };
         let (rect, resp) = ui.allocate_exact_size(vec2(260.0, 40.0), Sense::click());
         let p = ui.painter();
-        p.rect_filled(rect, 4.0, if resp.hovered() { t.tool_hover } else { t.panel2 });
-        p.rect_stroke(rect, 4.0, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+        p.rect_filled(
+            rect,
+            4.0,
+            if resp.hovered() {
+                t.tool_hover
+            } else {
+                t.panel2
+            },
+        );
+        p.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0, t.line),
+            egui::StrokeKind::Inside,
+        );
         let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(57.0, 32.0));
         match &tex {
             Some(tex) => crate::home::paint_cover(p, thumb, tex, Color32::WHITE),
@@ -226,9 +369,24 @@ impl App {
                 p.rect_filled(thumb, 2.0, t.bg);
             }
         }
-        p.text(egui::pos2(thumb.right() + 10.0, rect.center().y), Align2::LEFT_CENTER, name, FontId::proportional(13.0), t.ink);
-        p.text(egui::pos2(rect.right() - 10.0, rect.center().y), Align2::RIGHT_CENTER, "Change", FontId::proportional(12.0), t.ink3);
-        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        p.text(
+            egui::pos2(thumb.right() + 10.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::proportional(13.0),
+            t.ink,
+        );
+        p.text(
+            egui::pos2(rect.right() - 10.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            "Change",
+            FontId::proportional(12.0),
+            t.ink3,
+        );
+        if resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
             self.wallpaper_picker = true;
         }
         ui.end_row();
@@ -240,7 +398,12 @@ impl App {
     /// The wallpapers as a grid, three to a row: the forest, then the
     /// folder's; the one under the pointer plays. A click picks one and
     /// closes it, as do Esc, the X and a click outside.
-    fn wallpaper_picker(&mut self, ctx: &egui::Context, t: &Theme, list: &[crate::wallpaper::Wallpaper]) {
+    fn wallpaper_picker(
+        &mut self,
+        ctx: &egui::Context,
+        t: &Theme,
+        list: &[crate::wallpaper::Wallpaper],
+    ) {
         const TILE: egui::Vec2 = vec2(224.0, 126.0);
         const GAP: f32 = 12.0;
         let mut pick = None;
@@ -309,7 +472,9 @@ impl App {
         });
         // The one under the pointer plays; the player goes with the pointer.
         match hovered {
-            Some(file) if self.wallpaper_hover.as_ref().is_none_or(|p| p.file != file) => self.wallpaper_hover = Some(crate::wallpaper::Player::new(&file)),
+            Some(file) if self.wallpaper_hover.as_ref().is_none_or(|p| p.file != file) => {
+                self.wallpaper_hover = Some(crate::wallpaper::Player::new(&file))
+            }
             None => self.wallpaper_hover = None,
             _ => {}
         }
@@ -365,9 +530,15 @@ impl App {
     /// show as such. Closed by Esc, the X or a click outside.
     fn or_model_picker(&mut self, ctx: &egui::Context, t: &Theme) {
         const ROW: f32 = 40.0;
-        let Some(mut query) = self.or_picker.take() else { return };
+        let Some(mut query) = self.or_picker.take() else {
+            return;
+        };
         let cat = openrouter::catalog(ctx);
-        let words: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
+        let words: Vec<String> = query
+            .to_lowercase()
+            .split_whitespace()
+            .map(String::from)
+            .collect();
         let shown: Vec<&openrouter::Listed> = cat
             .list
             .iter()
@@ -384,22 +555,35 @@ impl App {
                 ui.label(RichText::new("OpenRouter models").size(16.0).color(t.ink));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let (x, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
-                    crate::widgets::draw_x(ui.painter(), x.shrink(7.0), if resp.hovered() { t.ink } else { t.ink3 });
-                    close |= resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                    crate::widgets::draw_x(
+                        ui.painter(),
+                        x.shrink(7.0),
+                        if resp.hovered() { t.ink } else { t.ink3 },
+                    );
+                    close |= resp
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked();
                     if cat.loading {
                         ui.add(egui::Spinner::new().size(12.0).color(t.ink3));
                     }
                 });
             });
             ui.add_space(8.0);
-            let edit = TextEdit::singleline(&mut query).id(Id::unique("or-model-search")).hint_text("Search").desired_width(f32::INFINITY);
+            let edit = TextEdit::singleline(&mut query)
+                .id(Id::unique("or-model-search"))
+                .hint_text("Search")
+                .desired_width(f32::INFINITY);
             let field = crate::text_menu::add(ui, edit);
             if !field.has_focus() && ui.memory(|m| m.focused().is_none()) {
                 field.request_focus();
             }
             ui.add_space(6.0);
             if let Some(e) = &cat.error {
-                crate::widgets::error_note(ui, t, &format!("Couldn't load OpenRouter's models: {e}"));
+                crate::widgets::error_note(
+                    ui,
+                    t,
+                    &format!("Couldn't load OpenRouter's models: {e}"),
+                );
             } else if cat.list.is_empty() {
                 caption(ui, "Loading…", t.ink3);
             } else if shown.is_empty() {
@@ -407,40 +591,89 @@ impl App {
             }
             let max_h = (ctx.content_rect().height() * 0.7 - 90.0).max(ROW * 4.0);
             let full = shown.len() as f32 * ROW;
-            ScrollArea::vertical().id_salt("or-model-list").max_height(max_h).min_scrolled_height(full.min(max_h)).auto_shrink([false, true]).show_rows(ui, ROW, shown.len(), |ui, range| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for l in &shown[range] {
-                    let a = &l.added;
-                    let built = openrouter::MODELS.iter().any(|m| m.id == a.id);
-                    let added = self.settings.or_models.iter().any(|m| m.id == a.id);
-                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), if built { Sense::hover() } else { Sense::click() });
-                    let hover = resp.hovered() && !built;
-                    let p = ui.painter();
-                    if hover {
-                        p.rect_filled(rect, 3.0, t.tool_hover);
+            ScrollArea::vertical()
+                .id_salt("or-model-list")
+                .max_height(max_h)
+                .min_scrolled_height(full.min(max_h))
+                .auto_shrink([false, true])
+                .show_rows(ui, ROW, shown.len(), |ui, range| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for l in &shown[range] {
+                        let a = &l.added;
+                        let built = openrouter::MODELS.iter().any(|m| m.id == a.id);
+                        let added = self.settings.or_models.iter().any(|m| m.id == a.id);
+                        let (rect, resp) = ui.allocate_exact_size(
+                            vec2(ui.available_width(), ROW),
+                            if built {
+                                Sense::hover()
+                            } else {
+                                Sense::click()
+                            },
+                        );
+                        let hover = resp.hovered() && !built;
+                        let p = ui.painter();
+                        if hover {
+                            p.rect_filled(rect, 3.0, t.tool_hover);
+                        }
+                        let right = rect.right() - 10.0;
+                        let (status, color) = match (built, added) {
+                            (true, _) => ("Built in", t.ink3),
+                            (_, true) => ("Added", t.accent),
+                            _ => ("", t.ink3),
+                        };
+                        p.text(
+                            egui::pos2(right, rect.center().y),
+                            Align2::RIGHT_CENTER,
+                            status,
+                            FontId::proportional(12.0),
+                            color,
+                        );
+                        let price = if a.free {
+                            "free".to_string()
+                        } else {
+                            format!("${} / ${} per M", per_m(l.price.0), per_m(l.price.1))
+                        };
+                        let facts = format!(
+                            "{price}, {}k context{}",
+                            a.context / 1000,
+                            if a.reasoning { "" } else { ", no thinking" }
+                        );
+                        let facts_x = right - 70.0;
+                        p.text(
+                            egui::pos2(facts_x, rect.center().y),
+                            Align2::RIGHT_CENTER,
+                            facts,
+                            FontId::proportional(11.5),
+                            t.ink3,
+                        );
+                        let w = (facts_x - rect.left() - 190.0).max(120.0);
+                        let name = clip_width(ui, &a.name, &FontId::proportional(13.0), w);
+                        let id = clip_width(ui, &a.id, &FontId::proportional(11.0), w);
+                        let p = ui.painter();
+                        p.text(
+                            egui::pos2(rect.left() + 8.0, rect.top() + 13.0),
+                            Align2::LEFT_CENTER,
+                            name,
+                            FontId::proportional(13.0),
+                            if added || hover { t.ink } else { t.ink2 },
+                        );
+                        p.text(
+                            egui::pos2(rect.left() + 8.0, rect.top() + 29.0),
+                            Align2::LEFT_CENTER,
+                            id,
+                            FontId::proportional(11.0),
+                            t.ink3,
+                        );
+                        if !built
+                            && resp
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(if added { "Remove" } else { "Add" })
+                                .clicked()
+                        {
+                            toggle = Some(a.clone());
+                        }
                     }
-                    let right = rect.right() - 10.0;
-                    let (status, color) = match (built, added) {
-                        (true, _) => ("Built in", t.ink3),
-                        (_, true) => ("Added", t.accent),
-                        _ => ("", t.ink3),
-                    };
-                    p.text(egui::pos2(right, rect.center().y), Align2::RIGHT_CENTER, status, FontId::proportional(12.0), color);
-                    let price = if a.free { "free".to_string() } else { format!("${} / ${} per M", per_m(l.price.0), per_m(l.price.1)) };
-                    let facts = format!("{price}, {}k context{}", a.context / 1000, if a.reasoning { "" } else { ", no thinking" });
-                    let facts_x = right - 70.0;
-                    p.text(egui::pos2(facts_x, rect.center().y), Align2::RIGHT_CENTER, facts, FontId::proportional(11.5), t.ink3);
-                    let w = (facts_x - rect.left() - 190.0).max(120.0);
-                    let name = clip_width(ui, &a.name, &FontId::proportional(13.0), w);
-                    let id = clip_width(ui, &a.id, &FontId::proportional(11.0), w);
-                    let p = ui.painter();
-                    p.text(egui::pos2(rect.left() + 8.0, rect.top() + 13.0), Align2::LEFT_CENTER, name, FontId::proportional(13.0), if added || hover { t.ink } else { t.ink2 });
-                    p.text(egui::pos2(rect.left() + 8.0, rect.top() + 29.0), Align2::LEFT_CENTER, id, FontId::proportional(11.0), t.ink3);
-                    if !built && resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if added { "Remove" } else { "Add" }).clicked() {
-                        toggle = Some(a.clone());
-                    }
-                }
-            });
+                });
         });
         if let Some(a) = toggle {
             match self.settings.or_models.iter().position(|m| m.id == a.id) {
@@ -462,7 +695,11 @@ impl App {
             return;
         }
         let job = self.font_job.lock().unwrap().clone();
-        let now = if faces.iter().any(|(id, _)| *id == self.settings.font) { self.settings.font.clone() } else { markdown::PLEX.to_string() };
+        let now = if faces.iter().any(|(id, _)| *id == self.settings.font) {
+            self.settings.font.clone()
+        } else {
+            markdown::PLEX.to_string()
+        };
         caption(ui, "Font", t.ink3);
         ui.horizontal(|ui| {
             for (id, name) in &faces {
@@ -491,16 +728,24 @@ impl App {
         let size = match scan.at {
             Some(_) => {
                 let n = scan.pads.len();
-                format!("{} in {n} folder{}", crate::scratch::fmt_bytes(scan.bytes()), crate::plural(n))
+                format!(
+                    "{} in {n} folder{}",
+                    crate::scratch::fmt_bytes(scan.bytes()),
+                    crate::plural(n)
+                )
             }
             None => "measuring…".to_string(),
         };
-        ui.label(RichText::new(size).color(t.ink2))
-            .on_hover_text("Every session's .oak/tmp/tempN folder, in the working folders of all conversations.");
+        ui.label(RichText::new(size).color(t.ink2)).on_hover_text(
+            "Every session's .oak/tmp/tempN folder, in the working folders of all conversations.",
+        );
         ui.add_space(12.0);
         caption(ui, "Clear when idle for", t.ink3);
         let before = self.settings.scratch_clear;
-        let shown = crate::scratch::AGES.iter().find(|a| a.0 == before).map_or("Never", |a| a.1);
+        let shown = crate::scratch::AGES
+            .iter()
+            .find(|a| a.0 == before)
+            .map_or("Never", |a| a.1);
         egui::ComboBox::from_id_salt("scratch-clear").selected_text(shown).show_ui(ui, |ui| {
             for (age, label) in crate::scratch::AGES {
                 ui.selectable_value(&mut self.settings.scratch_clear, age, label);
@@ -518,7 +763,9 @@ impl App {
     /// ends at (when nothing listened for it), the size of an account box.
     /// True once signed in.
     pub(crate) fn codex_add_box(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
-        let Some(login) = self.codex_login.take() else { return false };
+        let Some(login) = self.codex_login.take() else {
+            return false;
+        };
         let (mut done, mut keep) = (false, true);
         match codex::login_result(&login) {
             Some(Ok(())) => done = true,
@@ -530,10 +777,12 @@ impl App {
             let (mut add, mut cancel) = (false, false);
             side_box(ui, t, w, |ui| {
                 sign_in_heading(ui, t, "Add Codex account", &login.url);
-                let edit = TextEdit::singleline(&mut self.codex_paste).id(Id::unique("add-codex-address")).hint_text("Callback URL");
+                let edit = TextEdit::singleline(&mut self.codex_paste)
+                    .id(Id::unique("add-codex-address"))
+                    .hint_text("Callback URL");
                 (add, cancel) = add_field(ui, t, edit, None, self.codex_error.as_ref(), |ui| {
                     if login.listening {
-                        caption(ui, "Waiting for ChatGPT sign-in…", t.ink3);
+                        caption(ui, crate::widgets::LINK_COPIED, t.ink3);
                     } else {
                         ui.label(RichText::new("Paste the callback URL after sign-in.").small().color(t.ink3))
                             .on_hover_text("localhost:1455 is unavailable. Copy the callback URL even if the page fails to load.");
@@ -562,7 +811,9 @@ impl App {
     /// field for pasting the callback URL if the browser cannot reach it.
     /// True once signed in.
     pub(crate) fn antigravity_add_box(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
-        let Some(login) = self.antigravity_login.take() else { return false };
+        let Some(login) = self.antigravity_login.take() else {
+            return false;
+        };
         let (mut done, mut keep) = (false, true);
         match antigravity::login_result(&login) {
             Some(Ok(())) => done = true,
@@ -573,15 +824,24 @@ impl App {
             let (mut add, mut cancel) = (false, false);
             side_box(ui, t, w, |ui| {
                 sign_in_heading(ui, t, "Add Antigravity account", &login.url);
-                let edit = TextEdit::singleline(&mut self.antigravity_paste).id(Id::unique("add-antigravity-address")).hint_text("Callback URL");
-                (add, cancel) = add_field(ui, t, edit, None, self.antigravity_error.as_ref(), |ui| {
-                    if login.listening {
-                        caption(ui, "Waiting for Google sign-in…", t.ink3);
-                    } else {
-                        ui.label(RichText::new("Paste the callback URL after sign-in.").small().color(t.ink3))
+                let edit = TextEdit::singleline(&mut self.antigravity_paste)
+                    .id(Id::unique("add-antigravity-address"))
+                    .hint_text("Callback URL");
+                (add, cancel) = add_field(
+                    ui,
+                    t,
+                    edit,
+                    None,
+                    self.antigravity_error.as_ref(),
+                    |ui| {
+                        if login.listening {
+                            caption(ui, crate::widgets::LINK_COPIED, t.ink3);
+                        } else {
+                            ui.label(RichText::new("Paste the callback URL after sign-in.").small().color(t.ink3))
                             .on_hover_text("localhost:51121 is unavailable. Copy the callback URL even if the page fails to load.");
-                    }
-                });
+                        }
+                    },
+                );
             });
             if cancel {
                 keep = false;
@@ -607,7 +867,9 @@ impl App {
         let (mut add, mut cancel) = (false, false);
         side_box(ui, t, w, |ui| {
             caption(ui, "Add local llama.cpp server", t.ink2);
-            let edit = TextEdit::singleline(&mut self.local_url).id(Id::unique("add-local-url")).hint_text(crate::local::DEFAULT_URL);
+            let edit = TextEdit::singleline(&mut self.local_url)
+                .id(Id::unique("add-local-url"))
+                .hint_text(crate::local::DEFAULT_URL);
             (add, cancel) = add_field(ui, t, edit, None, None, |_| {});
         });
         let done = add && !cancel;
@@ -645,7 +907,11 @@ impl App {
             w,
             ("Add NodeClub key", "add-nodeclub-key", "sk-…"),
             || {
-                let to = if api::signing_in_remotely() { format!("kept on {}", api::vault_name()) } else { "kept on this machine".to_string() };
+                let to = if api::signing_in_remotely() {
+                    format!("kept on {}", api::vault_name())
+                } else {
+                    "kept on this machine".to_string()
+                };
                 format!("api.nodeclub.ai, {to}")
             },
             &mut self.adding_nodeclub,
@@ -664,7 +930,11 @@ impl App {
             w,
             ("Add Muse Code key", "add-musecode-key", "LLM_…"),
             || {
-                let to = if api::signing_in_remotely() { format!("kept on {}", api::vault_name()) } else { "kept on this machine".to_string() };
+                let to = if api::signing_in_remotely() {
+                    format!("kept on {}", api::vault_name())
+                } else {
+                    "kept on this machine".to_string()
+                };
                 format!("A Meta Model API key from dev.meta.ai, {to}")
             },
             &mut self.adding_musecode,
@@ -682,7 +952,11 @@ impl App {
             w,
             ("Add Refuseless key", "add-refuseless-key", "abl_…"),
             || {
-                let to = if api::signing_in_remotely() { format!("kept on {}", api::vault_name()) } else { "kept on this machine".to_string() };
+                let to = if api::signing_in_remotely() {
+                    format!("kept on {}", api::vault_name())
+                } else {
+                    "kept on this machine".to_string()
+                };
                 format!("refuseless.com, {to}")
             },
             &mut self.adding_refuseless,
@@ -703,8 +977,20 @@ pub(crate) struct KeyForm {
 /// The OpenRouter, NodeClub, Refuseless and Muse Code key boxes from Home: a caption, the key in a
 /// password field, a line (its error, or `note`), and Add and Cancel.
 /// The key goes to `set_key`; on success, the form closes. True once added.
-fn key_add_box(ui: &mut Ui, t: &Theme, w: f32, (title, id, hint): (&str, &str, &str), note: impl Fn() -> String, form: &mut KeyForm, set_key: fn(&str) -> Result<(), String>) -> bool {
-    let KeyForm { open: adding, key, error } = form;
+fn key_add_box(
+    ui: &mut Ui,
+    t: &Theme,
+    w: f32,
+    (title, id, hint): (&str, &str, &str),
+    note: impl Fn() -> String,
+    form: &mut KeyForm,
+    set_key: fn(&str) -> Result<(), String>,
+) -> bool {
+    let KeyForm {
+        open: adding,
+        key,
+        error,
+    } = form;
     let (mut add, mut cancel) = (false, false);
     side_box(ui, t, w, |ui| {
         caption(ui, title, t.ink2);
@@ -745,7 +1031,9 @@ pub(crate) struct FontJob {
 /// Fetches the plugin font `face` in the background; the next frame
 /// installs it if it is still the chosen font.
 pub(crate) fn download_font(ctx: &egui::Context, job: &Arc<Mutex<FontJob>>, face: &str) {
-    let Some(font) = markdown::plugin_face(face) else { return };
+    let Some(font) = markdown::plugin_face(face) else {
+        return;
+    };
     let mut j = job.lock().unwrap();
     if j.busy {
         return;
@@ -776,11 +1064,23 @@ enum Conn {
 /// NodeClub, Freebuff, Refuseless and the local llama.cpp server, how each is, and what its dot's
 /// hover says.
 fn connections() -> [(&'static str, Conn, String); 9] {
-    let kept = |remote: bool| if remote { " (shared)" } else if api::vault_on() { " (on this machine)" } else { "" };
+    let kept = |remote: bool| {
+        if remote {
+            " (shared)"
+        } else if api::vault_on() {
+            " (on this machine)"
+        } else {
+            ""
+        }
+    };
     let accounts = api::accounts();
     let claude = if accounts.is_empty() {
         (Conn::Off, "No Claude account: add one on Home.".to_string())
-    } else if let Some(e) = accounts.iter().all(|a| a.error.is_some() && a.limits.is_empty()).then(|| accounts[0].error.clone().unwrap_or_default()) {
+    } else if let Some(e) = accounts
+        .iter()
+        .all(|a| a.error.is_some() && a.limits.is_empty())
+        .then(|| accounts[0].error.clone().unwrap_or_default())
+    {
         (Conn::Failing, e)
     } else {
         let n = accounts.len();
@@ -791,18 +1091,49 @@ fn connections() -> [(&'static str, Conn, String); 9] {
         Some(a) => match a.error.filter(|_| a.limits.is_empty()) {
             Some(e) => (Conn::Failing, e),
             None => {
-                let who: Vec<&str> = [a.email.as_str(), a.plan.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
-                (Conn::Ok, format!("{}{}", if who.is_empty() { "Signed in".to_string() } else { who.join(", ") }, kept(codex::remote())))
+                let who: Vec<&str> = [a.email.as_str(), a.plan.as_str()]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                (
+                    Conn::Ok,
+                    format!(
+                        "{}{}",
+                        if who.is_empty() {
+                            "Signed in".to_string()
+                        } else {
+                            who.join(", ")
+                        },
+                        kept(codex::remote())
+                    ),
+                )
             }
         },
     };
     let agy = match antigravity::account() {
-        None => (Conn::Off, "No Antigravity account: add one on Home.".to_string()),
+        None => (
+            Conn::Off,
+            "No Antigravity account: add one on Home.".to_string(),
+        ),
         Some(a) => match a.error.filter(|_| a.limits.is_empty()) {
             Some(e) => (Conn::Failing, e),
             None => {
-                let who: Vec<&str> = [a.email.as_str(), a.plan.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
-                (Conn::Ok, format!("{}{}", if who.is_empty() { "Signed in".to_string() } else { who.join(", ") }, kept(antigravity::remote())))
+                let who: Vec<&str> = [a.email.as_str(), a.plan.as_str()]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                (
+                    Conn::Ok,
+                    format!(
+                        "{}{}",
+                        if who.is_empty() {
+                            "Signed in".to_string()
+                        } else {
+                            who.join(", ")
+                        },
+                        kept(antigravity::remote())
+                    ),
+                )
             }
         },
     };
@@ -810,46 +1141,122 @@ fn connections() -> [(&'static str, Conn, String); 9] {
         None => (Conn::Off, "No OpenRouter key: add one on Home.".to_string()),
         Some(a) => match a.error {
             Some(e) => (Conn::Failing, e),
-            None => (Conn::Ok, format!("{}{}", if a.label.is_empty() { "API key" } else { &a.label }, kept(a.remote))),
+            None => (
+                Conn::Ok,
+                format!(
+                    "{}{}",
+                    if a.label.is_empty() {
+                        "API key"
+                    } else {
+                        &a.label
+                    },
+                    kept(a.remote)
+                ),
+            ),
         },
     };
     let nodeclub = match crate::nodeclub::account() {
         None => (Conn::Off, "No NodeClub key: add one on Home.".to_string()),
         Some(a) => match a.error {
             Some(e) => (Conn::Failing, e),
-            None => (Conn::Ok, format!("{}{}", if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) }, kept(a.remote))),
+            None => (
+                Conn::Ok,
+                format!(
+                    "{}{}",
+                    if a.label.ends_with(" keys") {
+                        a.label.clone()
+                    } else {
+                        format!("key {}", a.label)
+                    },
+                    kept(a.remote)
+                ),
+            ),
         },
     };
     let refuseless = match crate::refuseless::account() {
         None => (Conn::Off, "No Refuseless key: add one on Home.".to_string()),
         Some(a) => match a.error {
             Some(e) => (Conn::Failing, e),
-            None => (Conn::Ok, format!("{}{}", if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) }, kept(a.remote))),
+            None => (
+                Conn::Ok,
+                format!(
+                    "{}{}",
+                    if a.label.ends_with(" keys") {
+                        a.label.clone()
+                    } else {
+                        format!("key {}", a.label)
+                    },
+                    kept(a.remote)
+                ),
+            ),
         },
     };
     let muse = match crate::musecode::account() {
         None => (Conn::Off, "No Muse Code key: add one on Home.".to_string()),
         Some(a) => match a.error {
             Some(e) => (Conn::Failing, e),
-            None => (Conn::Ok, format!("{}{}", if a.label.ends_with(" keys") { a.label.clone() } else { format!("key {}", a.label) }, kept(a.remote))),
+            None => (
+                Conn::Ok,
+                format!(
+                    "{}{}",
+                    if a.label.ends_with(" keys") {
+                        a.label.clone()
+                    } else {
+                        format!("key {}", a.label)
+                    },
+                    kept(a.remote)
+                ),
+            ),
         },
     };
     let freebuff = match freebuff::account() {
-        None => (Conn::Off, "No Freebuff account: add one on Home.".to_string()),
+        None => (
+            Conn::Off,
+            "No Freebuff account: add one on Home.".to_string(),
+        ),
         Some((email, _)) => match freebuff::error() {
             Some(e) => (Conn::Failing, e),
-            None => (Conn::Ok, if email.is_empty() { "Signed in".to_string() } else { email }),
+            None => (
+                Conn::Ok,
+                if email.is_empty() {
+                    "Signed in".to_string()
+                } else {
+                    email
+                },
+            ),
         },
     };
     // Its server is the user's to start: what is known here is that one was
     // added, and where it is.
     let llama = match local::server() {
-        None => (Conn::Off, "No local llama.cpp server: add one on Home.".to_string()),
-        Some(s) => (Conn::Ok, format!("{}, {}", if s.alias.is_empty() { "llama.cpp" } else { &s.alias }, s.url)),
+        None => (
+            Conn::Off,
+            "No local llama.cpp server: add one on Home.".to_string(),
+        ),
+        Some(s) => (
+            Conn::Ok,
+            format!(
+                "{}, {}",
+                if s.alias.is_empty() {
+                    "llama.cpp"
+                } else {
+                    &s.alias
+                },
+                s.url
+            ),
+        ),
     };
-    [("Claude", claude.0, claude.1), ("Codex", codex.0, codex.1), ("Antigravity", agy.0, agy.1), ("OpenRouter", router.0, router.1),
-        ("Muse Code", muse.0, muse.1), ("NodeClub", nodeclub.0, nodeclub.1),
-        ("Freebuff", freebuff.0, freebuff.1), ("Refuseless", refuseless.0, refuseless.1), ("Local", llama.0, llama.1)]
+    [
+        ("Claude", claude.0, claude.1),
+        ("Codex", codex.0, codex.1),
+        ("Antigravity", agy.0, agy.1),
+        ("OpenRouter", router.0, router.1),
+        ("Muse Code", muse.0, muse.1),
+        ("NodeClub", nodeclub.0, nodeclub.1),
+        ("Freebuff", freebuff.0, freebuff.1),
+        ("Refuseless", refuseless.0, refuseless.1),
+        ("Local", llama.0, llama.1),
+    ]
 }
 
 /// The zoom factors Oak takes, as egui's own Ctrl+Plus and Ctrl+Minus.
@@ -858,7 +1265,11 @@ const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.2..=5.0;
 /// A saved zoom factor made safe to apply: within `ZOOM_RANGE`, 100% when
 /// it is no number.
 pub(crate) fn saved_zoom(z: f32) -> f32 {
-    if z.is_finite() { z.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end()) } else { 1.0 }
+    if z.is_finite() {
+        z.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end())
+    } else {
+        1.0
+    }
 }
 
 impl App {
@@ -882,18 +1293,36 @@ fn zoom_row(ui: &mut Ui, zoom: f32) {
     let shortcut = |s: &egui::KeyboardShortcut| ctx.format_shortcut(s);
     use egui::gui_zoom::kb_shortcuts as kb;
     ui.horizontal(|ui| {
-        let out = ui.add_enabled(zoom > *ZOOM_RANGE.start() + 0.01, egui::Button::new("−").min_size(vec2(26.0, 0.0)));
-        if out.on_hover_text(format!("Zoom out ({})", shortcut(&kb::ZOOM_OUT))).clicked() {
+        let out = ui.add_enabled(
+            zoom > *ZOOM_RANGE.start() + 0.01,
+            egui::Button::new("−").min_size(vec2(26.0, 0.0)),
+        );
+        if out
+            .on_hover_text(format!("Zoom out ({})", shortcut(&kb::ZOOM_OUT)))
+            .clicked()
+        {
             egui::gui_zoom::zoom_out(&ctx);
         }
         let percent = format!("{:.0}%", zoom * 100.0);
-        ui.add_sized(vec2(44.0, ui.spacing().interact_size.y), egui::Label::new(percent));
-        let into = ui.add_enabled(zoom < *ZOOM_RANGE.end() - 0.01, egui::Button::new("+").min_size(vec2(26.0, 0.0)));
-        if into.on_hover_text(format!("Zoom in ({})", shortcut(&kb::ZOOM_IN))).clicked() {
+        ui.add_sized(
+            vec2(44.0, ui.spacing().interact_size.y),
+            egui::Label::new(percent),
+        );
+        let into = ui.add_enabled(
+            zoom < *ZOOM_RANGE.end() - 0.01,
+            egui::Button::new("+").min_size(vec2(26.0, 0.0)),
+        );
+        if into
+            .on_hover_text(format!("Zoom in ({})", shortcut(&kb::ZOOM_IN)))
+            .clicked()
+        {
             egui::gui_zoom::zoom_in(&ctx);
         }
         let reset = ui.add_enabled(zoom != 1.0, egui::Button::new("Reset"));
-        if reset.on_hover_text(format!("100% ({})", shortcut(&kb::ZOOM_RESET))).clicked() {
+        if reset
+            .on_hover_text(format!("100% ({})", shortcut(&kb::ZOOM_RESET)))
+            .clicked()
+        {
             ctx.set_zoom_factor(1.0);
         }
     });
@@ -901,7 +1330,14 @@ fn zoom_row(ui: &mut Ui, zoom: f32) {
 
 /// One setting's caption and its options in a row (`tip` on the row), in
 /// the settings grid. True when another was picked.
-fn option_row<T: PartialEq + Clone>(ui: &mut Ui, t: &Theme, label: &str, value: &mut T, choices: impl IntoIterator<Item = (T, &'static str)>, tip: Option<&str>) -> bool {
+fn option_row<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    t: &Theme,
+    label: &str,
+    value: &mut T,
+    choices: impl IntoIterator<Item = (T, &'static str)>,
+    tip: Option<&str>,
+) -> bool {
     caption(ui, label, t.ink3);
     let before = value.clone();
     let r = ui.horizontal(|ui| {

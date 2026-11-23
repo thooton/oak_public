@@ -58,7 +58,11 @@ struct Kept {
     at: i64,
 }
 
-static KEPT: Mutex<Kept> = Mutex::new(Kept { usage: None, error: None, at: 0 });
+static KEPT: Mutex<Kept> = Mutex::new(Kept {
+    usage: None,
+    error: None,
+    at: 0,
+});
 
 /// The last reading, the last fetch's error, and when the reading was taken.
 pub fn last() -> (Option<Usage>, Option<String>, i64) {
@@ -68,7 +72,10 @@ pub fn last() -> (Option<Usage>, Option<String>, i64) {
 
 /// A time Quick sends in seconds (a value past 1e12 is taken as ms already).
 fn ms(v: &Value) -> Option<i64> {
-    let n = v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).filter(|&n| n > 0)?;
+    let n = v
+        .as_i64()
+        .or_else(|| v.as_f64().map(|f| f as i64))
+        .filter(|&n| n > 0)?;
     Some(if n > 1_000_000_000_000 { n } else { n * 1000 })
 }
 
@@ -97,9 +104,15 @@ pub fn parse(v: &Value, now: i64) -> Option<Usage> {
         units_left,
         units_total,
         month_resets_at: ms(&m["resetsAt"]),
-        session_percent: session["usedPercentage"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0) as f32,
+        session_percent: session["usedPercentage"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .clamp(0.0, 100.0) as f32,
         session_resumes_at: resume.map(|m| now + (m * 60_000.0) as i64),
-        plan: s["subscription"]["subscriptionType"].as_str().unwrap_or("").to_string(),
+        plan: s["subscription"]["subscriptionType"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
         trial_ends_at: ms(&s["subscription"]["freeTrialMetadata"]["expiryDate"]),
         entitlement: s["entitlementStatus"].as_str().unwrap_or("").to_string(),
     })
@@ -108,16 +121,23 @@ pub fn parse(v: &Value, now: i64) -> Option<Usage> {
 /// "Lite trial" for "QUICK_LITE_FREE_TRIAL", "Pro" for "QUICK_PRO": the
 /// subscription as the box names it, None when Quick names none.
 pub fn plan_label(plan: &str) -> Option<String> {
-    let words: Vec<&str> = plan.split('_').filter(|w| !w.is_empty() && !w.eq_ignore_ascii_case("quick")).collect();
+    let words: Vec<&str> = plan
+        .split('_')
+        .filter(|w| !w.is_empty() && !w.eq_ignore_ascii_case("quick"))
+        .collect();
     let (words, trial) = match words.as_slice() {
-        [rest @ .., f, t] if f.eq_ignore_ascii_case("free") && t.eq_ignore_ascii_case("trial") => (rest.to_vec(), true),
+        [rest @ .., f, t] if f.eq_ignore_ascii_case("free") && t.eq_ignore_ascii_case("trial") => {
+            (rest.to_vec(), true)
+        }
         [rest @ .., t] if t.eq_ignore_ascii_case("trial") => (rest.to_vec(), true),
         _ => (words, false),
     };
     let title = |w: &str| {
         let lower = w.to_ascii_lowercase();
         let mut c = lower.chars();
-        c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
+        c.next()
+            .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+            .unwrap_or_default()
     };
     let name = words.iter().map(|w| title(w)).collect::<Vec<_>>().join(" ");
     match (name.is_empty(), trial) {
@@ -143,10 +163,13 @@ fn fetch() -> Result<Usage, String> {
     let status = resp.status().as_u16();
     let text = resp.text().unwrap_or_default();
     if !(200..300).contains(&status) {
-        let why = serde_json::from_str::<Value>(&text).map(|v| provider::error_msg(&v, &text, None)).unwrap_or_else(|_| text.chars().take(300).collect());
+        let why = serde_json::from_str::<Value>(&text)
+            .map(|v| provider::error_msg(&v, &text, None))
+            .unwrap_or_else(|_| text.chars().take(300).collect());
         return Err(format!("Quick's usage ({status}): {why}"));
     }
-    let v: Value = serde_json::from_str(&text).map_err(|e| format!("Quick's usage was unreadable: {e}"))?;
+    let v: Value =
+        serde_json::from_str(&text).map_err(|e| format!("Quick's usage was unreadable: {e}"))?;
     parse(&v, api::now_ms()).ok_or_else(|| "Quick's answer had no monthly usage".to_string())
 }
 
@@ -182,7 +205,10 @@ mod tests {
         let now = 1_795_000_000_000;
         let u = parse(&serde_json::from_str(CAPTURED).unwrap(), now).unwrap();
         assert_eq!(u.month_percent, 3.0);
-        assert_eq!((u.units_left, u.units_total, u.units_used()), (Some(582), Some(600), Some(18)));
+        assert_eq!(
+            (u.units_left, u.units_total, u.units_used()),
+            (Some(582), Some(600), Some(18))
+        );
         // December 1, 2026, 00:00 UTC.
         assert_eq!(u.month_resets_at, Some(1_796_083_200_000));
         assert_eq!((u.session_percent, u.session_resumes_at), (0.0, None));
@@ -197,7 +223,10 @@ mod tests {
         let v = serde_json::json!({"usageSummary": {"entitlementStatus": "DENIED", "monthlyUsage": {"availableUnits": 150, "provisionedUnits": 600}, "sessionUsage": {"resumeInMinutes": 12, "usedPercentage": 100}}});
         let u = parse(&v, now).unwrap();
         assert_eq!(u.month_percent, 75.0);
-        assert_eq!((u.session_percent, u.session_resumes_at), (100.0, Some(now + 12 * 60_000)));
+        assert_eq!(
+            (u.session_percent, u.session_resumes_at),
+            (100.0, Some(now + 12 * 60_000))
+        );
         assert!(!u.allowed());
         assert_eq!(parse(&serde_json::json!({"email": "x"}), now), None);
     }
@@ -205,7 +234,10 @@ mod tests {
     #[test]
     fn plans_are_named_as_the_box_shows_them() {
         assert_eq!(plan_label("QUICK_PRO").as_deref(), Some("Pro"));
-        assert_eq!(plan_label("QUICK_ENTERPRISE_PLUS").as_deref(), Some("Enterprise Plus"));
+        assert_eq!(
+            plan_label("QUICK_ENTERPRISE_PLUS").as_deref(),
+            Some("Enterprise Plus")
+        );
         assert_eq!(plan_label("FREE_TRIAL").as_deref(), Some("trial"));
         assert_eq!(plan_label(""), None);
     }

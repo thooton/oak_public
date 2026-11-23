@@ -3,8 +3,8 @@
 //! runs on its own), each by name, with EXECUTE, the task tools and ASK
 //! here; files are tracked for changes on disk.
 
-use crate::tools::Head;
 use super::*;
+use crate::tools::Head;
 
 impl Worker {
     fn alloc_task_id(&self) -> u64 {
@@ -48,7 +48,8 @@ impl Worker {
 
     /// When task `id` exits, the model is told (unless it already knows).
     fn tell_exit(&self, id: u64, p: &Arc<Proc>) {
-        let (tasks, proc): (Weak<Tasks>, Weak<Proc>) = (Arc::downgrade(&self.tasks), Arc::downgrade(p));
+        let (tasks, proc): (Weak<Tasks>, Weak<Proc>) =
+            (Arc::downgrade(&self.tasks), Arc::downgrade(p));
         let (live, wake, ctx) = (self.live.clone(), self.wake.clone(), self.ctx.clone());
         p.on_exit(Box::new(move || {
             let (Some(tasks), Some(p)) = (tasks.upgrade(), proc.upgrade()) else { return };
@@ -94,7 +95,8 @@ impl Worker {
         match name {
             "READ" => {
                 let path = tools::resolve(&folder, input["path"].as_str()?);
-                crate::images::is_image_path(&path).then(|| (crate::images::read_for_model(&path), false))
+                crate::images::is_image_path(&path)
+                    .then(|| (crate::images::read_for_model(&path), false))
             }
             "SCREENSHOT" => {
                 let save = input["path"].as_str().map(|p| tools::resolve(&folder, p));
@@ -113,15 +115,26 @@ impl Worker {
 
     /// Runs `f` on its own thread; the user can interrupt the wait for it.
     /// The bool is true when they did.
-    fn abandonable<T: Send + 'static>(&self, what: &str, f: impl FnOnce() -> Result<T, String> + Send + 'static) -> (Result<T, String>, bool) {
+    fn abandonable<T: Send + 'static>(
+        &self,
+        what: &str,
+        f: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> (Result<T, String>, bool) {
         let (tx, rx) = channel();
         std::thread::spawn(move || tx.send(f()));
         loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(r) => return (r, false),
-                Err(RecvTimeoutError::Timeout) if self.stopping() => return (Err(format!("{what} abandoned: the user sent a message.")), true),
+                Err(RecvTimeoutError::Timeout) if self.stopping() => {
+                    return (
+                        Err(format!("{what} abandoned: the user sent a message.")),
+                        true,
+                    );
+                }
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return (Err(format!("{what} failed.")), false),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return (Err(format!("{what} failed.")), false);
+                }
             }
         }
     }
@@ -157,7 +170,12 @@ impl Worker {
             )
         });
         if goal {
-            self.set(|l| l.ask = Some(Ask { background: true, ..ask }));
+            self.set(|l| {
+                l.ask = Some(Ask {
+                    background: true,
+                    ..ask
+                })
+            });
             return (Ok(format!("{ASKED_DURING_GOAL}{replaced}")), false);
         }
         self.set(|l| {
@@ -236,13 +254,19 @@ impl Worker {
     /// Runs one call of a batch (`run_call`), counted as running and timed
     /// for the benchmark. An interrupt sets `stopped`.
     fn run_traced(&self, call: &Value, stop: &str, stopped: &AtomicBool) -> Value {
-        let (id, name) = (call["id"].as_str().unwrap_or(""), call["name"].as_str().unwrap_or(""));
+        let (id, name) = (
+            call["id"].as_str().unwrap_or(""),
+            call["name"].as_str().unwrap_or(""),
+        );
         self.bench("tool_start", json!({"id": id, "name": name}));
         let t = Instant::now();
         let running = Running::new(&self.live, false);
         let (r, interrupted) = self.run_call(call, stop);
         drop(running);
-        self.bench("tool_end", json!({"id": id, "name": name, "ms": ms_since(t)}));
+        self.bench(
+            "tool_end",
+            json!({"id": id, "name": name, "ms": ms_since(t)}),
+        );
         if interrupted {
             stopped.store(true, Ordering::SeqCst);
         }
@@ -269,10 +293,22 @@ impl Worker {
         let folder = c.folder.clone();
         let names: Vec<String> = changes
             .iter()
-            .map(|ch| ch.path().strip_prefix(&folder).unwrap_or(ch.path()).display().to_string())
+            .map(|ch| {
+                ch.path()
+                    .strip_prefix(&folder)
+                    .unwrap_or(ch.path())
+                    .display()
+                    .to_string()
+            })
             .collect();
         let message = changes::message(&changes);
-        add_mark(&mut c, MarkKind::FilesChanged, names.join(", "), message.clone(), api::now_ms());
+        add_mark(
+            &mut c,
+            MarkKind::FilesChanged,
+            names.join(", "),
+            message.clone(),
+            api::now_ms(),
+        );
         drop(c);
         self.push("user", vec![context_block(&message)]);
     }
@@ -281,7 +317,10 @@ impl Worker {
     pub(super) fn track(&self, name: &str, input: &Value) {
         if let ("READ" | "WRITE" | "EDIT", Some(p)) = (name, input["path"].as_str()) {
             let folder = self.conv.lock().unwrap().folder.clone();
-            self.files.lock().unwrap().record(&tools::resolve(&folder, p));
+            self.files
+                .lock()
+                .unwrap()
+                .record(&tools::resolve(&folder, p));
         }
     }
 
@@ -315,8 +354,16 @@ impl Worker {
             Ok((n, i)) => (n.as_str(), i),
             Err(_) => (call["name"].as_str().unwrap_or(""), &call["input"]),
         };
-        let (out, is_error, interrupted) = if stop == crate::oak::stop::MAX_TOKENS || stop == crate::oak::stop::CONTEXT {
-            (format!("Not run: the reply hit {stop} before this call was complete. Retry with smaller input (e.g. split a large WRITE)."), true, false)
+        let (out, is_error, interrupted) = if stop == crate::oak::stop::MAX_TOKENS
+            || stop == crate::oak::stop::CONTEXT
+        {
+            (
+                format!(
+                    "Not run: the reply hit {stop} before this call was complete. Retry with smaller input (e.g. split a large WRITE)."
+                ),
+                true,
+                false,
+            )
         } else if let Some(raw) = call.get("_oak_raw") {
             (json!({"INVALID_JSON": raw}).to_string(), true, false)
         } else if let Some(e) = self.chat_refuses(name) {
@@ -335,10 +382,18 @@ impl Worker {
             return self.mcp_call(call, name, input);
         } else if call["name"] == "BROWSER" || name.starts_with("BROWSER_") {
             return self.browser_call(call, canon.as_ref().ok().map(|(n, i)| (n.as_str(), i)));
-        } else if cfg!(windows) && (call["name"] == "WINDOW" || name.starts_with("WINDOW_")) && canon.is_ok() {
+        } else if cfg!(windows)
+            && (call["name"] == "WINDOW" || name.starts_with("WINDOW_"))
+            && canon.is_ok()
+        {
             return self.window_call(call, name, input);
         } else if name == "REQUEST_ASK" {
             (REQUEST_ASK_GONE.to_string(), true, false)
+        } else if name == crate::mix::TOOL {
+            match self.mix_switch(input) {
+                Ok(s) => (s, false, false),
+                Err(e) => (e, true, false),
+            }
         } else if let Err(e) = &canon {
             (format!("Invalid input: {e}"), true, false)
         } else if let Err(e) = tools::validate(name, input) {
@@ -364,7 +419,8 @@ impl Worker {
                 Err(e) => (e, true, interrupted),
             }
         } else {
-            let (result, interrupted) = self.tool_for(call["id"].as_str().unwrap_or(""), name, input);
+            let (result, interrupted) =
+                self.tool_for(call["id"].as_str().unwrap_or(""), name, input);
             match result {
                 Ok(s) => (s, false, interrupted),
                 Err(s) => (s, true, interrupted),
@@ -373,7 +429,11 @@ impl Worker {
         if !is_error {
             self.track(name, input);
         }
-        let out = if out.is_empty() { "(no output)".to_string() } else { out };
+        let out = if out.is_empty() {
+            "(no output)".to_string()
+        } else {
+            out
+        };
         // A command's output too long to send goes to the scratchpad, with a
         // preview: running it again might not give it back. (Other tools'
         // output can be asked for again, or comes in pages.)
@@ -390,8 +450,13 @@ impl Worker {
     pub(crate) fn unloaded(&self, name: &str) -> Option<String> {
         // A protocol's tool (BLENDER, BLENDER_SCENE_INFO, or an older Oak's
         // mcp__blender__get_scene_info).
-        if name.starts_with("mcp__") || crate::mcp::split(name).is_some() || crate::mcp::is_family(name) {
-            let server = crate::mcp::resolve_tool(name).map(|(c, _)| c).or_else(|| crate::mcp::named(name).filter(|c| !c.native()));
+        if name.starts_with("mcp__")
+            || crate::mcp::split(name).is_some()
+            || crate::mcp::is_family(name)
+        {
+            let server = crate::mcp::resolve_tool(name)
+                .map(|(c, _)| c)
+                .or_else(|| crate::mcp::named(name).filter(|c| !c.native()));
             let Some(server) = server else {
                 return Some(format!("No protocol has a tool {name}."));
             };
@@ -399,12 +464,23 @@ impl Worker {
             if c.chat {
                 return Some(format!("{} isn't available in a chat.", server.family));
             }
-            return (!crate::mcp::loaded_in(&c.prefix.kits, &server)).then(|| format!("{} needs its kit: call LOAD with name={} first.", tools::call_name(name), server.family));
+            return (!crate::mcp::loaded_in(&c.prefix.kits, &server)).then(|| {
+                format!(
+                    "{} needs its kit: call LOAD with name={} first.",
+                    tools::call_name(name),
+                    server.family
+                )
+            });
         }
         let c = self.conv.lock().unwrap();
         let agent = c.parent.is_some();
         let kit = tools::kit_of(name, agent).filter(|k| tools::kits_for(agent).contains(k))?;
-        (!c.prefix.kits.iter().any(|k| k == kit)).then(|| format!("{} needs the {kit} kit: call LOAD with name={kit} first.", tools::call_name(name)))
+        (!c.prefix.kits.iter().any(|k| k == kit)).then(|| {
+            format!(
+                "{} needs the {kit} kit: call LOAD with name={kit} first.",
+                tools::call_name(name)
+            )
+        })
     }
 
     /// LOAD: adds a kit to the session (its tools join the list, at once or
@@ -413,7 +489,9 @@ impl Worker {
     /// can't be added mid-conversation, until its tool is in the list).
     fn load(&self, call: &Value, input: &Value, stop: &str) -> (Value, bool) {
         let fail = |e: String| (result_block(call, json!(e), true), false);
-        if let Some(server) = crate::mcp::find(input["name"].as_str().unwrap_or("")).filter(|_| !crate::local::basic(&self.conv.lock().unwrap().model)) {
+        if let Some(server) = crate::mcp::find(input["name"].as_str().unwrap_or(""))
+            .filter(|_| !crate::local::basic(&self.conv.lock().unwrap().model))
+        {
             return self.load_server(call, &server, input);
         }
         let kit = input["name"].as_str().unwrap_or("").trim().to_uppercase();
@@ -421,13 +499,21 @@ impl Worker {
             let c = self.conv.lock().unwrap();
             let agent = c.parent.is_some();
             let label = agent.then(|| agent_label(c.agent_id, &c.title));
-            (agent, label, crate::prefix::mode(c.provider(), &c.model), c.prefix.kits.contains(&kit))
+            (
+                agent,
+                label,
+                crate::prefix::mode(c.provider(), &c.model),
+                c.prefix.kits.contains(&kit),
+            )
         };
         let kits = tools::kits_for(agent);
         if !kits.contains(&kit.as_str()) {
             let servers: Vec<String> = crate::mcp::kits().into_iter().map(|(n, _)| n).collect();
             let all: Vec<String> = kits.iter().map(|k| k.to_string()).chain(servers).collect();
-            return fail(format!("No kit {kit} here: you can load {}.", all.join(", ")));
+            return fail(format!(
+                "No kit {kit} here: you can load {}.",
+                all.join(", ")
+            ));
         }
         if let Some(inner) = input.get("input").filter(|v| !v.is_null()) {
             if !loaded {
@@ -436,10 +522,16 @@ impl Worker {
             if kit == "WINDOW" && !cfg!(windows) {
                 return fail("WINDOW is instructions only: it has no tool to call.".into());
             }
-            return self.run_call(&json!({"id": call["id"], "name": kit, "input": inner}), stop);
+            return self.run_call(
+                &json!({"id": call["id"], "name": kit, "input": inner}),
+                stop,
+            );
         }
         if loaded {
-            return (result_block(call, json!(format!("{kit} is loaded already.")), false), false);
+            return (
+                result_block(call, json!(format!("{kit} is loaded already.")), false),
+                false,
+            );
         }
         {
             let mut c = self.conv.lock().unwrap();
@@ -455,7 +547,10 @@ impl Worker {
             ),
             _ => format!("The {kit} tool is in your tool list now."),
         };
-        let text = format!("Loaded {kit}. {tool}\n\n{}", super::prompt::kit_prompt(&kit, label.as_deref()));
+        let text = format!(
+            "Loaded {kit}. {tool}\n\n{}",
+            super::prompt::kit_prompt(&kit, label.as_deref())
+        );
         (result_block(call, json!(text.trim()), false), false)
     }
 
@@ -464,12 +559,21 @@ impl Worker {
     /// instructions. With `input` (the tool's: {"action", ...}, or an older
     /// Oak's {"tool", "arguments"}), calls its tool through LOAD, where
     /// tools can't join the list mid-conversation.
-    fn load_server(&self, call: &Value, server: &crate::mcp::Config, input: &Value) -> (Value, bool) {
+    fn load_server(
+        &self,
+        call: &Value,
+        server: &crate::mcp::Config,
+        input: &Value,
+    ) -> (Value, bool) {
         let fail = |e: String| (result_block(call, json!(e), true), false);
         let kit = crate::mcp::kit_id(server);
         let (mode, loaded, chat) = {
             let c = self.conv.lock().unwrap();
-            (crate::prefix::mode(c.provider(), &c.model), crate::mcp::loaded_in(&c.prefix.kits, server), c.chat)
+            (
+                crate::prefix::mode(c.provider(), &c.model),
+                crate::mcp::loaded_in(&c.prefix.kits, server),
+                c.chat,
+            )
         };
         if chat {
             return fail(format!("{kit} isn't available in a chat."));
@@ -478,9 +582,19 @@ impl Worker {
             if !loaded {
                 return fail(format!("Load {kit} first (LOAD without `input`)."));
             }
-            if let Some(tool) = inner["tool"].as_str().filter(|_| inner.get("action").is_none()) {
+            if let Some(tool) = inner["tool"]
+                .as_str()
+                .filter(|_| inner.get("action").is_none())
+            {
                 let tool = tool.rsplit("__").next().unwrap_or(tool);
-                let Some(action) = crate::mcp::offer(server).and_then(|o| crate::mcp::actions(server, &o).into_iter().find(|(_, t)| t["name"] == tool)).map(|(a, _)| a) else {
+                let Some(action) = crate::mcp::offer(server)
+                    .and_then(|o| {
+                        crate::mcp::actions(server, &o)
+                            .into_iter()
+                            .find(|(_, t)| t["name"] == tool)
+                    })
+                    .map(|(a, _)| a)
+                else {
                     return fail(format!("{kit} has no tool {tool}."));
                 };
                 let args = inner.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -493,9 +607,14 @@ impl Worker {
             };
         }
         let name = server.name.clone();
-        let (r, interrupted) = self.abandonable(&format!("Starting {}", server.title), move || crate::mcp::connect(&name));
+        let (r, interrupted) = self.abandonable(&format!("Starting {}", server.title), move || {
+            crate::mcp::connect(&name)
+        });
         if let Err(e) = r {
-            return (result_block(call, json!(format!("Couldn't load {kit}: {e}")), true), interrupted);
+            return (
+                result_block(call, json!(format!("Couldn't load {kit}: {e}")), true),
+                interrupted,
+            );
         }
         if !loaded {
             let mut c = self.conv.lock().unwrap();
@@ -507,12 +626,29 @@ impl Worker {
         if matches!(server.transport, crate::mcp::Transport::Builtin("blender")) {
             let caller = self.blender_caller();
             let canceled = caller.cancelled.clone();
-            let (r, interrupted) = self.abandonable("Starting your private Blender", move || crate::mcp::blender_run::with_caller(caller, || crate::mcp::blender_run::use_own(None, None).map(Some)));
-            if interrupted { canceled.store(true, std::sync::atomic::Ordering::SeqCst); }
+            let (r, interrupted) = self.abandonable("Starting your private Blender", move || {
+                crate::mcp::blender_run::with_caller(caller, || {
+                    crate::mcp::blender_run::use_own(None, None).map(Some)
+                })
+            });
+            if interrupted {
+                canceled.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             match r {
                 Ok(Some(note)) => text.push_str(&format!("\n\n{note}")),
                 Ok(None) => text.push_str("\n\nYour private Blender is ready."),
-                Err(e) => return (result_block(call, json!(format!("{text}\n\nThe kit is loaded, but its private Blender could not start: {e}\nIf Blender is portable, use BLENDER action=use_own with program pointing to its executable.")), true), interrupted),
+                Err(e) => {
+                    return (
+                        result_block(
+                            call,
+                            json!(format!(
+                                "{text}\n\nThe kit is loaded, but its private Blender could not start: {e}\nIf Blender is portable, use BLENDER action=use_own with program pointing to its executable."
+                            )),
+                            true,
+                        ),
+                        interrupted,
+                    );
+                }
             }
         }
         if loaded {
@@ -524,7 +660,12 @@ impl Worker {
     fn blender_caller(&self) -> crate::mcp::blender_run::Caller {
         let mut c = self.conv.lock().unwrap();
         let scratch = scratchpad(&mut c);
-        crate::mcp::blender_run::Caller { conv: c.id.clone(), folder: c.folder.clone(), scratch, ..Default::default() }
+        crate::mcp::blender_run::Caller {
+            conv: c.id.clone(),
+            folder: c.folder.clone(),
+            scratch,
+            ..Default::default()
+        }
     }
 
     /// A call of a protocol's tool (`name`: BLENDER_SCENE_INFO, or an older
@@ -537,7 +678,10 @@ impl Worker {
             return fail(format!("No protocol has a tool {name}."));
         };
         if !crate::mcp::enabled(&server.name) {
-            return fail(format!("The user switched {} off (Home > Protocols).", server.family));
+            return fail(format!(
+                "The user switched {} off (Home > Protocols).",
+                server.family
+            ));
         }
         let args = match crate::mcp::arguments(&server, &tool, input) {
             Ok(a) => a,
@@ -545,8 +689,17 @@ impl Worker {
         };
         let caller = self.blender_caller();
         let canceled = caller.cancelled.clone();
-        let (r, interrupted) = self.abandonable(&format!("{} ({})", tools::shown_name(name), server.title), move || crate::mcp::blender_run::with_caller(caller, || crate::mcp::call(&server, &tool, args)));
-        if interrupted { canceled.store(true, std::sync::atomic::Ordering::SeqCst); }
+        let (r, interrupted) = self.abandonable(
+            &format!("{} ({})", tools::shown_name(name), server.title),
+            move || {
+                crate::mcp::blender_run::with_caller(caller, || {
+                    crate::mcp::call(&server, &tool, args)
+                })
+            },
+        );
+        if interrupted {
+            canceled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let (blocks, is_error) = match r {
             Ok(r) => r,
             Err(e) => return (result_block(call, json!(e), true), interrupted),
@@ -555,7 +708,11 @@ impl Worker {
         let content = if only_text {
             let text: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
             let text = text.join("\n");
-            let text = if text.is_empty() { "(no output)".to_string() } else { text };
+            let text = if text.is_empty() {
+                "(no output)".to_string()
+            } else {
+                text
+            };
             let text = if tools::too_large(&text) {
                 let dir = scratchpad(&mut self.conv.lock().unwrap());
                 tools::persist(&text, &dir)
@@ -575,7 +732,10 @@ impl Worker {
         #[cfg(windows)]
         {
             if let Err(e) = tools::validate(name, input) {
-                return (result_block(call, json!(format!("Invalid input: {e}")), true), false);
+                return (
+                    result_block(call, json!(format!("Invalid input: {e}")), true),
+                    false,
+                );
             }
             let (conv, folder, scratch) = {
                 let mut c = self.conv.lock().unwrap();
@@ -588,12 +748,23 @@ impl Worker {
             if name == "WINDOW_ATTACH" {
                 self.set(|l| l.status = "Waiting for your permission".into());
             }
-            let (r, interrupted) = self.abandonable(&label, move || crate::window_tool::run(&conv, std::path::Path::new(&folder), &scratch, &name, &input));
+            let (r, interrupted) = self.abandonable(&label, move || {
+                crate::window_tool::run(
+                    &conv,
+                    std::path::Path::new(&folder),
+                    &scratch,
+                    &name,
+                    &input,
+                )
+            });
             if interrupted {
                 crate::approval::cancel(&conv2);
             }
             match r {
-                Ok(blocks) if blocks.len() == 1 && blocks[0]["type"] == "text" => (result_block(call, blocks[0]["text"].clone(), false), interrupted),
+                Ok(blocks) if blocks.len() == 1 && blocks[0]["type"] == "text" => (
+                    result_block(call, blocks[0]["text"].clone(), false),
+                    interrupted,
+                ),
                 Ok(blocks) => (result_block(call, json!(blocks), false), interrupted),
                 Err(e) => (result_block(call, json!(e), true), interrupted),
             }
@@ -601,7 +772,10 @@ impl Worker {
         #[cfg(not(windows))]
         {
             let _ = (name, input);
-            (result_block(call, json!("WINDOW's tool is Windows only."), true), false)
+            (
+                result_block(call, json!("WINDOW's tool is Windows only."), true),
+                false,
+            )
         }
     }
 
@@ -631,7 +805,9 @@ impl Worker {
         match name {
             "BROWSER_OPEN" => {
                 let (ctx, input) = (self.ctx.clone(), input.clone());
-                let (r, interrupted) = self.abandonable("Opening the browser", move || crate::browser::model_open(&conv, &ctx, &input, &folder));
+                let (r, interrupted) = self.abandonable("Opening the browser", move || {
+                    crate::browser::model_open(&conv, &ctx, &input, &folder)
+                });
                 return match r {
                     Ok(s) => (result_block(call, json!(s), false), interrupted),
                     Err(e) => (result_block(call, json!(e), true), interrupted),
@@ -640,7 +816,9 @@ impl Worker {
             "BROWSER_ATTACH" => {
                 let (ctx, input, conv2) = (self.ctx.clone(), input.clone(), conv.clone());
                 self.set(|l| l.status = "Waiting for your permission".into());
-                let (r, interrupted) = self.abandonable("Waiting for your permission", move || crate::browser::model_attach(&conv, &ctx, &input));
+                let (r, interrupted) = self.abandonable("Waiting for your permission", move || {
+                    crate::browser::model_attach(&conv, &ctx, &input)
+                });
                 if interrupted {
                     crate::approval::cancel(&conv2);
                 }
@@ -657,7 +835,9 @@ impl Worker {
             }
             "BROWSER_PROFILES" => {
                 let input = input.clone();
-                let (r, interrupted) = self.abandonable("The browser call", move || crate::browser::model_profiles(&conv, &input));
+                let (r, interrupted) = self.abandonable("The browser call", move || {
+                    crate::browser::model_profiles(&conv, &input)
+                });
                 return match r {
                     Ok(s) => (result_block(call, json!(s), false), interrupted),
                     Err(e) => (result_block(call, json!(e), true), interrupted),
@@ -669,22 +849,51 @@ impl Worker {
             return fail(crate::browser::CLOSED.into());
         }
         if name == "BROWSER_SCREENSHOT" {
-            let (r, interrupted) = self.abandonable("Screenshot", move || crate::browser::screenshot(&conv));
+            let (r, interrupted) =
+                self.abandonable("Screenshot", move || crate::browser::screenshot(&conv));
             return match r {
                 Ok(b) => (result_block(call, json!(b), false), interrupted),
                 Err(e) => (result_block(call, json!(e), true), interrupted),
             };
         }
         let (name, input) = (name.to_string(), input.clone());
-        let (r, interrupted) = self.abandonable("The browser call", move || crate::browser::tool(&conv, &name, &input, &folder));
+        let (r, interrupted) = self.abandonable("The browser call", move || {
+            crate::browser::tool(&conv, &name, &input, &folder)
+        });
         match r {
             Ok(s) => (result_block(call, json!(s), false), interrupted),
             Err(e) => (result_block(call, json!(e), true), interrupted),
         }
     }
 
+    /// SWITCH, in a Mix (`crate::mix`): the conversation goes to its other
+    /// model from the next request on, as a switch in the session box does,
+    /// with a line in the transcript; the result tells that model its role
+    /// and the note it was handed.
+    fn mix_switch(&self, input: &Value) -> Result<String, String> {
+        let note = input["note"].as_str().unwrap_or("").trim().to_string();
+        let mut c = self.conv.lock().unwrap();
+        let effort = c.effort.clone();
+        let Some(mix) = c.mix.as_mut() else {
+            return Err("SWITCH is only for a Mix conversation, and this isn't one.".into());
+        };
+        let s = crate::mix::switch(mix, &note, &effort)?;
+        apply_command(&mut c, Command::Model(s.provider, s.model.clone()));
+        c.effort = s.effort;
+        // A wait for the old provider's limit is over.
+        c.limit_wait = None;
+        add_mark(&mut c, MarkKind::Switched, s.mark, note, api::now_ms());
+        self.save(c);
+        let status = s.status;
+        self.set(|l| l.status = status.clone());
+        Ok(s.result)
+    }
+
     /// Runs a tool that changes the conversation, then saves it.
-    fn edit(&self, f: impl FnOnce(&mut Conversation) -> Result<String, String>) -> Result<String, String> {
+    fn edit(
+        &self,
+        f: impl FnOnce(&mut Conversation) -> Result<String, String>,
+    ) -> Result<String, String> {
         let mut c = self.conv.lock().unwrap();
         let r = f(&mut c);
         self.save(c);
@@ -699,13 +908,24 @@ impl Worker {
 
     /// Runs a tool for call `call_id` (EXECUTE streams its output to the
     /// call's row). The bool is true when the user sent a message.
-    pub(super) fn tool_for(&self, call_id: &str, name: &str, input: &Value) -> (Result<String, String>, bool) {
+    pub(super) fn tool_for(
+        &self,
+        call_id: &str,
+        name: &str,
+        input: &Value,
+    ) -> (Result<String, String>, bool) {
         let (folder, agent, spawner) = {
             let c = self.conv.lock().unwrap();
             (c.folder.clone(), c.parent.is_some(), c.spawner)
         };
         if !tools::allowed(name, agent, spawner) {
-            return (Err(format!("{} isn't available to a subagent.", tools::call_name(name))), false);
+            return (
+                Err(format!(
+                    "{} isn't available to a subagent.",
+                    tools::call_name(name)
+                )),
+                false,
+            );
         }
         if let Some(e) = self.chat_refuses(name) {
             return (Err(e), false);
@@ -716,7 +936,14 @@ impl Worker {
             "WRITE" => tools::write(&folder, input),
             "EDIT" => tools::edit(&folder, input),
             "TASK_LIST" => Ok(format!("id\ttime\tstatus\tcommand\n{}", self.tasks.list())),
-            "TASK_NEW" => crate::guard::check(input["command"].as_str().unwrap(), &folder).and_then(|_| tasks::spawn(input["command"].as_str().unwrap(), &folder)).map(|p| format!("Started task {}.", self.adopt(&p, input["summary"].as_str().unwrap_or("")))),
+            "TASK_NEW" => crate::guard::check(input["command"].as_str().unwrap(), &folder)
+                .and_then(|_| tasks::spawn(input["command"].as_str().unwrap(), &folder))
+                .map(|p| {
+                    format!(
+                        "Started task {}.",
+                        self.adopt(&p, input["summary"].as_str().unwrap_or(""))
+                    )
+                }),
             "TASK_GET_NEW_OUTPUT" => self.task(id).map(|p| self.task_output(id, &p, "", "")),
             "TASK_WAIT" => return self.task_wait(call_id, id, input),
             "TASK_DELETE" => match self.tasks.remove(id) {
@@ -725,7 +952,10 @@ impl Worker {
                     self.mark_reported(id);
                     let how = p.stop();
                     self.tasks.retire(id, &p);
-                    Ok(format!("Task {id} {how} after running {} in all, and was removed.", tasks::fmt_took(p.elapsed())))
+                    Ok(format!(
+                        "Task {id} {how} after running {} in all, and was removed.",
+                        tasks::fmt_took(p.elapsed())
+                    ))
                 }
             },
             "SEARCH" => {
@@ -738,7 +968,8 @@ impl Worker {
             }
             "ASK" => return self.ask_user(input),
             "CD" => self.edit(|c| change_folder(c, input, &instructions::home())),
-            "NOTE_NEW" | "NOTE_UPDATE" | "NOTE_DELETE" | "HEARTBEAT_START" | "HEARTBEAT_STOP" | "GOAL_JUSTIFICATION" | "GOAL_FINISH" => {
+            "NOTE_NEW" | "NOTE_UPDATE" | "NOTE_DELETE" | "HEARTBEAT_START" | "HEARTBEAT_STOP"
+            | "GOAL_JUSTIFICATION" | "GOAL_FINISH" => {
                 self.edit(|c| memory_tool(c, name, input, api::now_ms()))
             }
             "PROGRESS_SET" => {
@@ -773,7 +1004,6 @@ impl Worker {
         (result, false)
     }
 
-
     /// After PROGRESS_SET: the meter's first reading, or why it gave none,
     /// if its first run ends within FIRST_READING (so a command that
     /// prints the wrong thing gets fixed at once). An interrupt ends the wait.
@@ -783,19 +1013,28 @@ impl Worker {
         while t.elapsed() < FIRST_READING && !self.stopping() {
             {
                 let c = self.conv.lock().unwrap();
-                let Some(m) = c.meters.iter().find(|m| m.label.to_lowercase() == label) else { return String::new() };
+                let Some(m) = c.meters.iter().find(|m| m.label.to_lowercase() == label) else {
+                    return String::new();
+                };
                 match (&m.value, m.error.as_str()) {
-                    (Some(r), _) if r.note.is_empty() => return format!("First reading: {}.", r.value),
+                    (Some(r), _) if r.note.is_empty() => {
+                        return format!("First reading: {}.", r.value);
+                    }
                     (Some(r), _) => return format!("First reading: {} ({}).", r.value, r.note),
                     (None, e) if !e.is_empty() => {
-                        return format!("The first run gave no value: {e}\nFix the command with PROGRESS action=set (same label).");
+                        return format!(
+                            "The first run gave no value: {e}\nFix the command with PROGRESS action=set (same label)."
+                        );
                     }
                     _ => {}
                 }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        format!("The first run is still going after {}s; the value shows when it ends.", t.elapsed().as_secs())
+        format!(
+            "The first run is still going after {}s; the value shows when it ends.",
+            t.elapsed().as_secs()
+        )
     }
 
     /// A task's state and the output it printed since the last read, as
@@ -805,8 +1044,16 @@ impl Worker {
         // Read the exit first: if it is set, the output is complete.
         let exit = p.exit();
         let (out, more) = p.take_new(MAX_OUTPUT);
-        let out = if out.is_empty() { "(no new output)\n".to_string() } else { out };
-        let more = if more { "\n[more output waiting; call TASK action=output]" } else { "" };
+        let out = if out.is_empty() {
+            "(no new output)\n".to_string()
+        } else {
+            out
+        };
+        let more = if more {
+            "\n[more output waiting; call TASK action=output]"
+        } else {
+            ""
+        };
         // How long it ran, as the notice of its end says it.
         let took = tasks::fmt_took(p.elapsed());
         let state = match exit {
@@ -816,7 +1063,11 @@ impl Worker {
             }
             None => format!("is running ({took} so far)"),
         };
-        let after = if after.is_empty() { String::new() } else { format!(" {after}") };
+        let after = if after.is_empty() {
+            String::new()
+        } else {
+            format!(" {after}")
+        };
         format!("Task {id} {state}{waited}.{after}\n{out}{more}")
     }
 
@@ -833,11 +1084,20 @@ impl Worker {
         };
         let timeout = match input["timeout"].as_u64() {
             Some(s @ 1..=TASK_WAIT_MAX) => Duration::from_secs(s),
-            _ => return (Err(format!("`timeout` must be from 1 to {TASK_WAIT_MAX} seconds.")), false),
+            _ => {
+                return (
+                    Err(format!(
+                        "`timeout` must be from 1 to {TASK_WAIT_MAX} seconds."
+                    )),
+                    false,
+                );
+            }
         };
         // What it waited before (an Oak that closed on it), and since when.
         let before = self.begin_wait(call_id);
-        let prior = Duration::from_millis((before.waited_ms + (api::now_ms() - before.since)).max(0) as u64);
+        let prior = Duration::from_millis(
+            (before.waited_ms + (api::now_ms() - before.since)).max(0) as u64,
+        );
         let t = Instant::now();
         let waited = || prior + t.elapsed();
         let waiting = Running::new(&self.live, true);
@@ -853,19 +1113,40 @@ impl Worker {
             if ultra && !closing {
                 // (The task was killed with the rest: its end, if it shows.)
                 p.wait_exit(Duration::from_secs(1));
-                break ("; the user stopped everything (ultrapause), which ended the wait".to_string(), true);
+                break (
+                    "; the user stopped everything (ultrapause), which ended the wait".to_string(),
+                    true,
+                );
             }
             if self.interrupted() {
-                break ("; the user sent a message, which ended the wait".to_string(), true);
+                break (
+                    "; the user sent a message, which ended the wait".to_string(),
+                    true,
+                );
             }
             if self.live.lock().unwrap().ready_count() > 0 {
-                break (format!("; the wait ended after {} because the user sent a message", fmt_duration(waited())), false);
+                break (
+                    format!(
+                        "; the wait ended after {} because the user sent a message",
+                        fmt_duration(waited())
+                    ),
+                    false,
+                );
             }
             if !self.conv.lock().unwrap().inbox.is_empty() {
-                break (format!("; the wait ended after {} because a message arrived (it follows)", fmt_duration(waited())), false);
+                break (
+                    format!(
+                        "; the wait ended after {} because a message arrived (it follows)",
+                        fmt_duration(waited())
+                    ),
+                    false,
+                );
             }
             if waited() >= timeout {
-                break (format!("; still running after waiting {}s", timeout.as_secs()), false);
+                break (
+                    format!("; still running after waiting {}s", timeout.as_secs()),
+                    false,
+                );
             }
             self.wait_a_bit(30);
         };
@@ -890,7 +1171,11 @@ impl Worker {
         if let Some(w) = c.task_waits.iter().find(|w| w.call == call) {
             return w.clone();
         }
-        let w = store::TaskWait { call: call.into(), since: api::now_ms(), ..Default::default() };
+        let w = store::TaskWait {
+            call: call.into(),
+            since: api::now_ms(),
+            ..Default::default()
+        };
         if !call.is_empty() {
             c.task_waits.push(w.clone());
             c.save();
@@ -901,13 +1186,21 @@ impl Worker {
     /// The wait of call `call` is over: its record goes.
     fn end_wait(&self, call: &str) -> Option<store::TaskWait> {
         let mut c = self.conv.lock().unwrap();
-        let i = c.task_waits.iter().position(|w| w.call == call && !call.is_empty())?;
+        let i = c
+            .task_waits
+            .iter()
+            .position(|w| w.call == call && !call.is_empty())?;
         let w = c.task_waits.remove(i);
         c.save();
         Some(w)
     }
 
-    fn execute(&self, call_id: &str, input: &Value, folder: &std::path::Path) -> (Result<String, String>, bool) {
+    fn execute(
+        &self,
+        call_id: &str,
+        input: &Value,
+        folder: &std::path::Path,
+    ) -> (Result<String, String>, bool) {
         // The model must give the timeout (the schema requires it); a bad
         // one is refused before the command starts. A long sleep (`sleep 60;
         // cat log`) is refused too: it ties the session up however soon
@@ -927,29 +1220,59 @@ impl Worker {
             Ran::Exited { out, code } => {
                 // How long it ran, when that is worth knowing.
                 let ran = p.elapsed();
-                let ran = if ran >= Duration::from_secs(1) { format!(", ran {}", tasks::fmt_took(ran)) } else { String::new() };
+                let ran = if ran >= Duration::from_secs(1) {
+                    format!(", ran {}", tasks::fmt_took(ran))
+                } else {
+                    String::new()
+                };
                 // Not clipped: a long output is saved whole (see run_call).
-                (Ok(format!("{}\n[exit code {code}{ran}]", out.trim_end())), false)
+                (
+                    Ok(format!("{}\n[exit code {code}{ran}]", out.trim_end())),
+                    false,
+                )
             }
             Ran::Killed { out, took } => {
                 let msg = format!(
                     "Output so far:\n{}\n\nThe user stopped everything (ultrapause), so the command was killed after {}.",
-                    if out.trim().is_empty() { "(none)" } else { out.trim_end() },
+                    if out.trim().is_empty() {
+                        "(none)"
+                    } else {
+                        out.trim_end()
+                    },
                     tasks::fmt_took(took)
                 );
                 (Err(msg), true)
             }
-            Ran::Moved { out, more, id, took, interrupted } => {
+            Ran::Moved {
+                out,
+                more,
+                id,
+                took,
+                interrupted,
+            } => {
                 let took = tasks::fmt_took(took);
                 let why = if interrupted {
-                    format!("The user sent a message after the command had run for {took}, so it was moved to the background")
+                    format!(
+                        "The user sent a message after the command had run for {took}, so it was moved to the background"
+                    )
                 } else {
-                    format!("The command was still running after {took} (timeout {}s), so it was moved to the background", timeout.as_secs())
+                    format!(
+                        "The command was still running after {took} (timeout {}s), so it was moved to the background",
+                        timeout.as_secs()
+                    )
                 };
-                let more = if more { " More output is already waiting." } else { "" };
+                let more = if more {
+                    " More output is already waiting."
+                } else {
+                    ""
+                };
                 let msg = format!(
                     "Output so far:\n{}\n\n{why}: it is now task {id} and still running.{more} Use TASK action=output with id {id} to read new output; you will be notified when it finishes.",
-                    if out.is_empty() { "(none)" } else { out.trim_end() }
+                    if out.is_empty() {
+                        "(none)"
+                    } else {
+                        out.trim_end()
+                    }
                 );
                 (Ok(msg), interrupted)
             }
@@ -960,7 +1283,13 @@ impl Worker {
     /// under the call's row meanwhile, unless the id is empty) to exit:
     /// ultrapause kills it; an interrupt or `timeout` moves it to the
     /// background, as a task (`summary` says what it is).
-    pub(super) fn run_command(&self, call_id: &str, p: &Arc<Proc>, timeout: Duration, summary: &str) -> Ran {
+    pub(super) fn run_command(
+        &self,
+        call_id: &str,
+        p: &Arc<Proc>,
+        timeout: Duration,
+        summary: &str,
+    ) -> Ran {
         let _streaming = tasks::Streaming::new(call_id, p);
         let mut shown_lines = 0;
         let t = Instant::now();
@@ -973,27 +1302,42 @@ impl Worker {
                 // Ultrapause: killed, not moved to the background.
                 p.kill();
                 let (out, _) = p.take_new(MAX_OUTPUT);
-                return Ran::Killed { out, took: t.elapsed() };
+                return Ran::Killed {
+                    out,
+                    took: t.elapsed(),
+                };
             }
             let interrupted = self.interrupted();
             if interrupted || t.elapsed() > timeout {
                 let (out, more) = p.take_new(MAX_OUTPUT);
                 let id = self.adopt(p, summary);
-                return Ran::Moved { out, more, id, took: t.elapsed(), interrupted };
+                return Ran::Moved {
+                    out,
+                    more,
+                    id,
+                    took: t.elapsed(),
+                    interrupted,
+                };
             }
             // New output: a frame for the row, unless the transcript isn't
             // being drawn (it catches up when it is).
             if let Some(n) = tasks::streaming_len(call_id).filter(|&n| n != shown_lines) {
                 shown_lines = n;
                 let drawn = self.live.lock().unwrap().drawn;
-                if drawn + 1 >= self.ctx.cumulative_pass_nr_for(eframe::egui::ViewportId::ROOT) {
+                if drawn + 1
+                    >= self
+                        .ctx
+                        .cumulative_pass_nr_for(eframe::egui::ViewportId::ROOT)
+                {
                     self.ctx.request_repaint();
                 }
             }
             // Until it exits (its result goes at once), or for at most a
             // tick: what else ends the wait (an interrupt, ultrapause, the
             // timeout) and new output for the row are looked at that often.
-            let left = timeout.saturating_sub(t.elapsed()).max(Duration::from_millis(1));
+            let left = timeout
+                .saturating_sub(t.elapsed())
+                .max(Duration::from_millis(1));
             p.wait_exit(EXECUTE_TICK.min(left));
         }
     }
@@ -1007,7 +1351,13 @@ pub(super) enum Ran {
     Killed { out: String, took: Duration },
     /// It became task `id`, after an interrupt or its timeout: its output
     /// so far (`more` waiting).
-    Moved { out: String, more: bool, id: u64, took: Duration, interrupted: bool },
+    Moved {
+        out: String,
+        more: bool,
+        id: u64,
+        took: Duration,
+        interrupted: bool,
+    },
 }
 
 /// How often a running EXECUTE looks at what isn't its command's exit (an
@@ -1021,8 +1371,14 @@ const FIRST_READING: Duration = Duration::from_secs(15);
 /// EXECUTE's `timeout`, if it is in range (EXECUTE_TIMEOUT_MIN to _MAX).
 pub(crate) fn execute_timeout(input: &Value) -> Result<Duration, String> {
     match input["timeout"].as_u64() {
-        Some(s @ tools::EXECUTE_TIMEOUT_MIN..=tools::EXECUTE_TIMEOUT_MAX) => Ok(Duration::from_secs(s)),
-        _ => Err(format!("`timeout` must be from {} to {} seconds.", tools::EXECUTE_TIMEOUT_MIN, tools::EXECUTE_TIMEOUT_MAX)),
+        Some(s @ tools::EXECUTE_TIMEOUT_MIN..=tools::EXECUTE_TIMEOUT_MAX) => {
+            Ok(Duration::from_secs(s))
+        }
+        _ => Err(format!(
+            "`timeout` must be from {} to {} seconds.",
+            tools::EXECUTE_TIMEOUT_MIN,
+            tools::EXECUTE_TIMEOUT_MAX
+        )),
     }
 }
 
@@ -1048,7 +1404,11 @@ pub(crate) fn goal_active(c: &Conversation) -> bool {
 /// written with until the next cold moment (`prefix::Pin::folder`), so the
 /// result says what changed, with the new folder's project instructions
 /// (the user's own file is in the context already).
-pub(crate) fn change_folder(c: &mut Conversation, input: &Value, home: &Path) -> Result<String, String> {
+pub(crate) fn change_folder(
+    c: &mut Conversation,
+    input: &Value,
+    home: &Path,
+) -> Result<String, String> {
     let typed = input["path"].as_str().unwrap_or("").trim();
     if typed.is_empty() {
         return Err("`path` is empty: give the folder to switch to.".into());
@@ -1060,10 +1420,18 @@ pub(crate) fn change_folder(c: &mut Conversation, input: &Value, home: &Path) ->
         Err(e) => return Err(format!("No folder {}: {e}", dir.display())),
     }
     if tools::path_key(&dir) == tools::path_key(&c.folder) {
-        return Ok(format!("Your working folder is {} already.", c.folder.display()));
+        return Ok(format!(
+            "Your working folder is {} already.",
+            c.folder.display()
+        ));
     }
     if !c.scratch.is_empty() && Path::new(&c.scratch).is_relative() {
-        c.scratch = c.folder.join(SCRATCH_ROOT).join(&c.scratch).display().to_string();
+        c.scratch = c
+            .folder
+            .join(SCRATCH_ROOT)
+            .join(&c.scratch)
+            .display()
+            .to_string();
     }
     let old = std::mem::replace(&mut c.folder, dir);
     let mut out = format!(
@@ -1075,9 +1443,15 @@ pub(crate) fn change_folder(c: &mut Conversation, input: &Value, home: &Path) ->
         out += &format!(" Your scratchpad stays at {}.", c.scratch);
     }
     let mut skipped = vec![];
-    let files: Vec<instructions::File> = instructions::load(&c.folder, home, &mut skipped).into_iter().filter(|f| f.kind != instructions::Kind::User).collect();
+    let files: Vec<instructions::File> = instructions::load(&c.folder, home, &mut skipped)
+        .into_iter()
+        .filter(|f| f.kind != instructions::Kind::User)
+        .collect();
     if !files.is_empty() {
-        out += &format!("\n\nThe new folder's project instructions:\n{}", instructions::render(&files, &[]));
+        out += &format!(
+            "\n\nThe new folder's project instructions:\n{}",
+            instructions::render(&files, &[])
+        );
     }
     Ok(out)
 }
@@ -1113,7 +1487,18 @@ impl<'scope, 'env> Batch<'scope, 'env> {
     pub(crate) fn new(w: &'env Worker, scope: &'scope std::thread::Scope<'scope, 'env>) -> Self {
         let (done_tx, done_rx) = channel();
         w.live.lock().unwrap().early = Some(vec![]);
-        Batch { w, scope, calls: vec![], started: vec![], running: vec![], results: vec![], stopped: Arc::default(), done_tx, done_rx, dirty: false }
+        Batch {
+            w,
+            scope,
+            calls: vec![],
+            started: vec![],
+            running: vec![],
+            results: vec![],
+            stopped: Arc::default(),
+            done_tx,
+            done_rx,
+            dirty: false,
+        }
     }
 
     /// A call that has streamed in whole.
@@ -1143,15 +1528,37 @@ impl<'scope, 'env> Batch<'scope, 'env> {
         self.started.iter().any(|&s| s)
     }
 
+    /// Marks the batch as interrupted by the user so unstarted calls do not
+    /// run and `finish` reports that the turn was stopped.
+    pub(crate) fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
     /// A reply cut short: its blocks up to the last call that started (the
     /// ones after it, and any not whole, dropped).
     pub(crate) fn kept(&self, blocks: Vec<Value>) -> Vec<Value> {
-        let started: Vec<&Value> = self.calls.iter().zip(&self.started).filter(|(_, s)| **s).map(|(c, _)| &c["id"]).collect();
-        let last = blocks.iter().rposition(|b| oak::is_call(b) && started.contains(&&b["id"]));
-        let mut kept: Vec<Value> = blocks.into_iter().take(last.map_or(0, |i| i + 1)).filter(|b| b.get("_oak_partial").is_none()).collect();
+        let started: Vec<&Value> = self
+            .calls
+            .iter()
+            .zip(&self.started)
+            .filter(|(_, s)| **s)
+            .map(|(c, _)| &c["id"])
+            .collect();
+        let last = blocks
+            .iter()
+            .rposition(|b| oak::is_call(b) && started.contains(&&b["id"]));
+        let mut kept: Vec<Value> = blocks
+            .into_iter()
+            .take(last.map_or(0, |i| i + 1))
+            .filter(|b| b.get("_oak_partial").is_none())
+            .collect();
         // A call that started has its input as it ran.
         for b in &mut kept {
-            if let Some(c) = self.calls.iter().find(|c| oak::is_call(b) && c["id"] == b["id"]) {
+            if let Some(c) = self
+                .calls
+                .iter()
+                .find(|c| oak::is_call(b) && c["id"] == b["id"])
+            {
                 *b = c.clone();
             }
         }
@@ -1179,26 +1586,51 @@ impl<'scope, 'env> Batch<'scope, 'env> {
                 continue;
             }
             if last && (stopped || stop == CUT_SHORT) {
-                let why = if stopped { "Not run: the user sent a message." } else { "Not run: the reply was cut short before this call started." };
+                let why = if stopped {
+                    "Not run: the user sent a message."
+                } else {
+                    "Not run: the reply was cut short before this call started."
+                };
                 self.results[i] = Some(self.w.not_run(&self.calls[i], why));
                 self.started[i] = true;
-            } else if !stopped && (last || early_ok(&self.calls[i])) && deps.iter().all(|&j| self.results[j].is_some()) {
+            } else if !stopped
+                && (last || early_ok(&self.calls[i]))
+                && deps.iter().all(|&j| self.results[j].is_some())
+            {
                 self.start(i, stop);
                 starting.push(i);
             }
         }
         if last && !starting.is_empty() {
-            let names: Vec<String> = starting.iter().map(|&i| crate::transcript::shown(&self.calls[i])).collect();
-            self.w.set(|l| l.status = format!("Running {}", names.join(", ")));
+            let names: Vec<String> = starting
+                .iter()
+                .map(|&i| crate::transcript::shown(&self.calls[i]))
+                .collect();
+            self.w
+                .set(|l| l.status = format!("Running {}", names.join(", ")));
         }
     }
 
     fn start(&mut self, i: usize, stop: &str) {
-        let (w, call, stop, stopped, done) = (self.w, self.calls[i].clone(), stop.to_string(), self.stopped.clone(), self.done_tx.clone());
+        let (w, call, stop, stopped, done) = (
+            self.w,
+            self.calls[i].clone(),
+            stop.to_string(),
+            self.stopped.clone(),
+            self.done_tx.clone(),
+        );
         self.started[i] = true;
         self.running[i] = Some(self.scope.spawn(move || {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.run_traced(&call, &stop, &stopped)))
-                .unwrap_or_else(|_| result_block(&call, json!("The tool failed unexpectedly (Oak caught a crash)."), true));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                w.run_traced(&call, &stop, &stopped)
+            }))
+            .unwrap_or_else(|_| {
+                result_block(
+                    &call,
+                    json!("The tool failed unexpectedly (Oak caught a crash)."),
+                    true,
+                )
+            });
             w.deliver(r.clone());
             let _ = done.send(i);
             r
@@ -1233,7 +1665,10 @@ impl<'scope, 'env> Batch<'scope, 'env> {
                 Err(_) => break,
             }
         }
-        let ordered: Vec<Value> = std::mem::take(&mut self.results).into_iter().flatten().collect();
+        let ordered: Vec<Value> = std::mem::take(&mut self.results)
+            .into_iter()
+            .flatten()
+            .collect();
         let mut c = self.w.conv.lock().unwrap();
         if let Some(last) = c.messages.last_mut().filter(|m| m["role"] == "user") {
             let ids: Vec<&Value> = ordered.iter().map(|r| &r["call_id"]).collect();
@@ -1280,9 +1715,17 @@ pub(crate) fn waits_for(calls: &[Value], folder: &Path) -> Vec<Vec<usize>> {
         .map(|c| {
             let name = c["name"].as_str().unwrap_or("");
             // Windows paths ignore case. DISPLAY reads several.
-            let mut paths: Vec<String> = c["input"]["path"].as_str().into_iter().map(|p| tools::path_key(&tools::resolve(folder, p))).collect();
+            let mut paths: Vec<String> = c["input"]["path"]
+                .as_str()
+                .into_iter()
+                .map(|p| tools::path_key(&tools::resolve(folder, p)))
+                .collect();
             if name == "DISPLAY" {
-                let more = c["input"]["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str());
+                let more = c["input"]["paths"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p.as_str());
                 paths.extend(more.map(|p| tools::path_key(&tools::resolve(folder, p.trim()))));
             }
             // The browser's calls act on one page: in the order they were
@@ -1293,8 +1736,13 @@ pub(crate) fn waits_for(calls: &[Value], folder: &Path) -> Vec<Vec<usize>> {
                 paths.push("\0browser".into());
             }
             // CD changes what every later call's paths and commands mean.
-            // REPL scripts share one context: one at a time, in order.
-            (paths, browser || matches!(name, "WRITE" | "EDIT" | "SCREENSHOT"), matches!(name, "ASK" | "CD" | "REPL"))
+            // REPL scripts share one context: one at a time, in order. A
+            // Mix's SWITCH hands over after what came before it.
+            (
+                paths,
+                browser || matches!(name, "WRITE" | "EDIT" | "SCREENSHOT"),
+                matches!(name, "ASK" | "CD" | "REPL" | "SWITCH"),
+            )
         })
         .collect();
     (0..calls.len())
@@ -1303,7 +1751,8 @@ pub(crate) fn waits_for(calls: &[Value], folder: &Path) -> Vec<Vec<usize>> {
             (0..i)
                 .filter(|&j| {
                     let (earlier, wrote, asked) = &touches[j];
-                    *ask || *asked || ((*writes || *wrote) && paths.iter().any(|p| earlier.contains(p)))
+                    *ask || *asked
+                        || ((*writes || *wrote) && paths.iter().any(|p| earlier.contains(p)))
                 })
                 .collect()
         })

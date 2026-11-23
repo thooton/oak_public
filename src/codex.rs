@@ -63,8 +63,21 @@ pub struct Model {
     pub efforts: &'static [&'static str],
 }
 
-const fn m(id: &'static str, name: &'static str, context: u64, listed: bool, efforts: &'static [&'static str]) -> Model {
-    Model { id, name, context, max_output: 128_000, listed, efforts }
+const fn m(
+    id: &'static str,
+    name: &'static str,
+    context: u64,
+    listed: bool,
+    efforts: &'static [&'static str],
+) -> Model {
+    Model {
+        id,
+        name,
+        context,
+        max_output: 128_000,
+        listed,
+        efforts,
+    }
 }
 
 /// Low to max, and ultra for the bigger models: each model's
@@ -135,7 +148,14 @@ struct Acct {
 
 impl Acct {
     fn new(cred: Cred) -> Acct {
-        Acct { cred, limits: vec![], fetched: false, error: None, usage_at: 0, limited_until: 0 }
+        Acct {
+            cred,
+            limits: vec![],
+            fetched: false,
+            error: None,
+            usage_at: 0,
+            limited_until: 0,
+        }
     }
 }
 
@@ -146,7 +166,10 @@ struct State {
     note: Option<String>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { list: Vec::new(), note: None });
+static STATE: Mutex<State> = Mutex::new(State {
+    list: Vec::new(),
+    note: None,
+});
 /// Held while an access token is renewed: the refresh token changes with
 /// each renewal, so only one may go at a time.
 static RENEWING: Mutex<()> = Mutex::new(());
@@ -176,7 +199,9 @@ fn save(s: &State) {
         let _ = std::fs::remove_file(path());
         return;
     }
-    let file = File::Logins { logins: s.list.iter().map(|a| a.cred.clone()).collect() };
+    let file = File::Logins {
+        logins: s.list.iter().map(|a| a.cred.clone()).collect(),
+    };
     let _ = crate::store::write_private_json(&path(), &file);
 }
 
@@ -185,7 +210,20 @@ pub fn load() -> bool {
     let creds = read_file();
     let mut s = STATE.lock().unwrap();
     let old = std::mem::take(&mut s.list);
-    s.list = creds.into_iter().map(|c| old.iter().find(|a| a.cred.account_id == c.account_id).map_or_else(|| Acct::new(c.clone()), |a| Acct { cred: c.clone(), ..a.clone() })).collect();
+    s.list = creds
+        .into_iter()
+        .map(|c| {
+            old.iter()
+                .find(|a| a.cred.account_id == c.account_id)
+                .map_or_else(
+                    || Acct::new(c.clone()),
+                    |a| Acct {
+                        cred: c.clone(),
+                        ..a.clone()
+                    },
+                )
+        })
+        .collect();
     !s.list.is_empty()
 }
 
@@ -197,7 +235,11 @@ pub fn on() -> bool {
 /// Keeps login `c` (in place of one of the same ChatGPT account).
 fn keep(c: Cred) {
     let mut s = STATE.lock().unwrap();
-    match s.list.iter_mut().find(|a| a.cred.account_id == c.account_id) {
+    match s
+        .list
+        .iter_mut()
+        .find(|a| a.cred.account_id == c.account_id)
+    {
         Some(a) => a.cred = c,
         None => s.list.push(Acct::new(c)),
     }
@@ -205,7 +247,13 @@ fn keep(c: Cred) {
 }
 
 fn cred_of(id: &str) -> Option<Cred> {
-    STATE.lock().unwrap().list.iter().find(|a| a.cred.account_id == id).map(|a| a.cred.clone())
+    STATE
+        .lock()
+        .unwrap()
+        .list
+        .iter()
+        .find(|a| a.cred.account_id == id)
+        .map(|a| a.cred.clone())
 }
 
 /// Signs login `id` out: one on the vault is removed there, for
@@ -243,7 +291,15 @@ pub fn forget_remote() {
 fn remote_cred(info: &Value, access: Option<(String, i64)>) -> Cred {
     let field = |k: &str| info[k].as_str().unwrap_or("").to_string();
     let (access, expires) = access.unwrap_or_default();
-    Cred { access, refresh: String::new(), expires, account_id: field("account_id"), email: field("email"), plan: field("plan"), remote: true }
+    Cred {
+        access,
+        refresh: String::new(),
+        expires,
+        account_id: field("account_id"),
+        email: field("email"),
+        plan: field("plan"),
+        remote: true,
+    }
 }
 
 /// The vault's logins (who each is): Err when it can't say.
@@ -255,19 +311,40 @@ fn remote_logins() -> Result<Vec<Value>, String> {
 /// used (one on this machine too becomes its), and ones removed there go.
 pub fn sync() {
     let Ok(logins) = remote_logins() else { return };
-    let ids: Vec<&str> = logins.iter().filter_map(|i| i["account_id"].as_str()).filter(|a| !a.is_empty()).collect();
+    let ids: Vec<&str> = logins
+        .iter()
+        .filter_map(|i| i["account_id"].as_str())
+        .filter(|a| !a.is_empty())
+        .collect();
     let mut s = STATE.lock().unwrap();
-    let before: Vec<(String, bool)> = s.list.iter().map(|a| (a.cred.account_id.clone(), a.cred.remote)).collect();
-    s.list.retain(|a| !a.cred.remote || ids.contains(&a.cred.account_id.as_str()));
+    let before: Vec<(String, bool)> = s
+        .list
+        .iter()
+        .map(|a| (a.cred.account_id.clone(), a.cred.remote))
+        .collect();
+    s.list
+        .retain(|a| !a.cred.remote || ids.contains(&a.cred.account_id.as_str()));
     for info in &logins {
-        let Some(id) = info["account_id"].as_str().filter(|a| !a.is_empty()) else { continue };
+        let Some(id) = info["account_id"].as_str().filter(|a| !a.is_empty()) else {
+            continue;
+        };
         match s.list.iter_mut().find(|a| a.cred.account_id == id) {
-            Some(a) if a.cred.remote => (a.cred.email, a.cred.plan) = (info["email"].as_str().unwrap_or("").into(), info["plan"].as_str().unwrap_or("").into()),
+            Some(a) if a.cred.remote => {
+                (a.cred.email, a.cred.plan) = (
+                    info["email"].as_str().unwrap_or("").into(),
+                    info["plan"].as_str().unwrap_or("").into(),
+                )
+            }
             Some(a) => a.cred = remote_cred(info, None),
             None => s.list.push(Acct::new(remote_cred(info, None))),
         }
     }
-    if s.list.iter().map(|a| (a.cred.account_id.clone(), a.cred.remote)).collect::<Vec<_>>() != before {
+    if s.list
+        .iter()
+        .map(|a| (a.cred.account_id.clone(), a.cred.remote))
+        .collect::<Vec<_>>()
+        != before
+    {
         save(&s);
     }
 }
@@ -292,9 +369,14 @@ pub fn note() -> Option<String> {
 fn upload(tokens: &Value) -> Result<Cred, String> {
     let info = api::vault_add("codex", tokens)?;
     if info["account_id"].as_str().is_none_or(str::is_empty) {
-        return Err(format!("{} didn't say which Codex account it took.", api::capital(&api::vault_name())));
+        return Err(format!(
+            "{} didn't say which Codex account it took.",
+            api::capital(&api::vault_name())
+        ));
     }
-    let access = tokens["access_token"].as_str().map(|a| (a.to_string(), tokens["expires_at"].as_i64().unwrap_or(0)));
+    let access = tokens["access_token"]
+        .as_str()
+        .map(|a| (a.to_string(), tokens["expires_at"].as_i64().unwrap_or(0)));
     Ok(remote_cred(&info, access))
 }
 
@@ -303,8 +385,12 @@ fn upload(tokens: &Value) -> Result<Cred, String> {
 pub fn move_to_vault(id: &str) -> Result<(), String> {
     // No renewal may start while it moves.
     let _renewing = RENEWING.lock().unwrap();
-    let c = cred_of(id).filter(|c| !c.remote).ok_or("There is no such Codex login on this machine.")?;
-    let moved = upload(&json!({"refresh_token": c.refresh, "access_token": c.access, "expires_at": c.expires, "email": c.email}))?;
+    let c = cred_of(id)
+        .filter(|c| !c.remote)
+        .ok_or("There is no such Codex login on this machine.")?;
+    let moved = upload(
+        &json!({"refresh_token": c.refresh, "access_token": c.access, "expires_at": c.expires, "email": c.email}),
+    )?;
     keep(moved);
     STATE.lock().unwrap().note = None;
     Ok(())
@@ -312,7 +398,9 @@ pub fn move_to_vault(id: &str) -> Result<(), String> {
 
 /// A JWT's claims (Null when it isn't one).
 fn claims(token: &str) -> Value {
-    let Some(part) = token.split('.').nth(1) else { return Value::Null };
+    let Some(part) = token.split('.').nth(1) else {
+        return Value::Null;
+    };
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(part.trim_end_matches('='))
         .ok()
@@ -323,34 +411,79 @@ fn claims(token: &str) -> Value {
 /// "plus" → "Plus".
 fn plan_name(p: &str) -> String {
     let mut c = p.chars();
-    c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+    c.next()
+        .map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
 }
 
 /// The login a token response makes (`old`: the one it renews).
 fn cred_from(tokens: &Value, old: Option<&Cred>) -> Result<Cred, String> {
-    let access = tokens["access_token"].as_str().filter(|t| !t.is_empty()).ok_or("The sign-in gave no access token")?.to_string();
-    let refresh = tokens["refresh_token"].as_str().map(String::from).or(old.map(|o| o.refresh.clone())).unwrap_or_default();
+    let access = tokens["access_token"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .ok_or("The sign-in gave no access token")?
+        .to_string();
+    let refresh = tokens["refresh_token"]
+        .as_str()
+        .map(String::from)
+        .or(old.map(|o| o.refresh.clone()))
+        .unwrap_or_default();
     let at = claims(&access);
-    let id = tokens["id_token"].as_str().map(claims).unwrap_or(Value::Null);
+    let id = tokens["id_token"]
+        .as_str()
+        .map(claims)
+        .unwrap_or(Value::Null);
     let expires = match tokens["expires_in"].as_i64() {
         Some(s) => api::now_ms() + s * 1000,
-        None => at["exp"].as_i64().map_or(api::now_ms() + 3_600_000, |s| s * 1000),
+        None => at["exp"]
+            .as_i64()
+            .map_or(api::now_ms() + 3_600_000, |s| s * 1000),
     };
     let pick = |vals: [&Value; 2], old: Option<&str>| {
-        vals.iter().find_map(|v| v.as_str().filter(|s| !s.is_empty()).map(String::from)).or(old.map(String::from)).unwrap_or_default()
+        vals.iter()
+            .find_map(|v| v.as_str().filter(|s| !s.is_empty()).map(String::from))
+            .or(old.map(String::from))
+            .unwrap_or_default()
     };
-    let account_id = pick([&at[AUTH_CLAIM]["chatgpt_account_id"], &id[AUTH_CLAIM]["chatgpt_account_id"]], old.map(|o| o.account_id.as_str()));
+    let account_id = pick(
+        [
+            &at[AUTH_CLAIM]["chatgpt_account_id"],
+            &id[AUTH_CLAIM]["chatgpt_account_id"],
+        ],
+        old.map(|o| o.account_id.as_str()),
+    );
     if account_id.is_empty() {
-        return Err("The sign-in has no ChatGPT account (sign in with a ChatGPT plan that includes Codex)".into());
+        return Err(
+            "The sign-in has no ChatGPT account (sign in with a ChatGPT plan that includes Codex)"
+                .into(),
+        );
     }
-    let email = pick([&id["email"], &at["https://api.openai.com/profile"]["email"]], old.map(|o| o.email.as_str()));
-    let plan = pick([&id[AUTH_CLAIM]["chatgpt_plan_type"], &at[AUTH_CLAIM]["chatgpt_plan_type"]], old.map(|o| o.plan.as_str()));
-    Ok(Cred { access, refresh, expires, account_id, email, plan: plan_name(&plan), remote: false })
+    let email = pick(
+        [&id["email"], &at["https://api.openai.com/profile"]["email"]],
+        old.map(|o| o.email.as_str()),
+    );
+    let plan = pick(
+        [
+            &id[AUTH_CLAIM]["chatgpt_plan_type"],
+            &at[AUTH_CLAIM]["chatgpt_plan_type"],
+        ],
+        old.map(|o| o.plan.as_str()),
+    );
+    Ok(Cred {
+        access,
+        refresh,
+        expires,
+        account_id,
+        email,
+        plan: plan_name(&plan),
+        remote: false,
+    })
 }
 
 /// `pairs` form-encoded (for a body, or a query).
 fn form(pairs: &[(&str, &str)]) -> String {
-    reqwest::Url::parse_with_params("http://x/", pairs).map(|u| u.query().unwrap_or("").to_string()).unwrap_or_default()
+    reqwest::Url::parse_with_params("http://x/", pairs)
+        .map(|u| u.query().unwrap_or("").to_string())
+        .unwrap_or_default()
 }
 
 fn token_request(pairs: &[(&str, &str)]) -> Result<Value, String> {
@@ -384,15 +517,24 @@ fn access(id: &str, force: bool) -> Result<(String, String), String> {
     let mut c = cred_of(id).ok_or(OUT)?;
     // Renewed meanwhile, here or by another OAK (whose renewal made this
     // one's refresh token useless): that one does.
-    if let Some(f) = read_file().into_iter().find(|f| f.account_id == id && f.access != c.access) {
+    if let Some(f) = read_file()
+        .into_iter()
+        .find(|f| f.account_id == id && f.access != c.access)
+    {
         keep(f.clone());
         c = f;
     }
     if c.access != seen.access && fresh(&c) {
         return Ok((c.access, c.account_id));
     }
-    let tokens = token_request(&[("grant_type", "refresh_token"), ("refresh_token", &c.refresh), ("client_id", CLIENT_ID)])
-        .map_err(|e| format!("Couldn't renew the Codex sign-in (add the Codex account on Home again): {e}"))?;
+    let tokens = token_request(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", &c.refresh),
+        ("client_id", CLIENT_ID),
+    ])
+    .map_err(|e| {
+        format!("Couldn't renew the Codex sign-in (add the Codex account on Home again): {e}")
+    })?;
     let new = cred_from(&tokens, Some(&c))?;
     keep(new.clone());
     Ok((new.access, new.account_id))
@@ -405,9 +547,16 @@ fn remote_access(seen: &Cred, force: bool) -> Result<(String, String), String> {
     let id = seen.account_id.as_str();
     let Some(v) = api::vault_token("codex", id, refused)? else {
         forget(id);
-        return Err(format!("The Codex login was removed from {}: add it again on Home", api::vault_name()));
+        return Err(format!(
+            "The Codex login was removed from {}: add it again on Home",
+            api::vault_name()
+        ));
     };
-    let access = v["access_token"].as_str().filter(|a| !a.is_empty()).ok_or_else(|| format!("{} sent no Codex token.", api::capital(&api::vault_name())))?.to_string();
+    let access = v["access_token"]
+        .as_str()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| format!("{} sent no Codex token.", api::capital(&api::vault_name())))?
+        .to_string();
     let mut c = seen.clone();
     c.access = access;
     c.expires = v["expires_at"].as_i64().unwrap_or(0);
@@ -443,7 +592,8 @@ impl Drop for Login {
 pub fn start_login() -> Login {
     let bytes: [u8; 32] = rand::random();
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
     let state: String = api::hex(&rand::random::<[u8; 16]>());
     let query = form(&[
         ("response_type", "code"),
@@ -469,7 +619,12 @@ pub fn start_login() -> Login {
         && listener.set_nonblocking(true).is_ok()
     {
         login.listening = true;
-        let (verifier, state, result, stop) = (login.verifier.clone(), login.state.clone(), login.result.clone(), login.stop.clone());
+        let (verifier, state, result, stop) = (
+            login.verifier.clone(),
+            login.state.clone(),
+            login.result.clone(),
+            login.stop.clone(),
+        );
         std::thread::spawn(move || serve_callback(listener, &verifier, &state, &result, &stop));
     }
     login
@@ -477,7 +632,13 @@ pub fn start_login() -> Login {
 
 /// Answers the browser's requests until one brings the sign-in back (and
 /// it is finished), the login is dropped, or the wait runs out.
-fn serve_callback(listener: std::net::TcpListener, verifier: &str, state: &str, result: &Mutex<Option<Result<(), String>>>, stop: &AtomicBool) {
+fn serve_callback(
+    listener: std::net::TcpListener,
+    verifier: &str,
+    state: &str,
+    result: &Mutex<Option<Result<(), String>>>,
+    stop: &AtomicBool,
+) {
     let start = Instant::now();
     while !stop.load(Ordering::SeqCst) && start.elapsed() < LOGIN_WAIT {
         let Ok((mut conn, _)) = listener.accept() else {
@@ -493,20 +654,35 @@ fn serve_callback(listener: std::net::TcpListener, verifier: &str, state: &str, 
         }
         // The rest of the request (headers) is left unread.
         let target = line.split_whitespace().nth(1).unwrap_or("");
-        let Ok(url) = reqwest::Url::parse(&format!("http://localhost{target}")) else { continue };
+        let Ok(url) = reqwest::Url::parse(&format!("http://localhost{target}")) else {
+            continue;
+        };
         if url.path() != "/auth/callback" {
             let _ = conn.write_all(page(404, "Not found", "").as_bytes());
             continue;
         }
-        let get = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
+        let get = |k: &str| {
+            url.query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+        };
         let outcome = match (get("code"), get("state"), get("error")) {
-            (_, _, Some(e)) => Err(format!("The sign-in was refused: {}", get("error_description").unwrap_or(e))),
-            (Some(_), Some(s), _) if s != state => Err("The sign-in came back for another request (state mismatch): try again".into()),
+            (_, _, Some(e)) => Err(format!(
+                "The sign-in was refused: {}",
+                get("error_description").unwrap_or(e)
+            )),
+            (Some(_), Some(s), _) if s != state => {
+                Err("The sign-in came back for another request (state mismatch): try again".into())
+            }
             (Some(code), _, _) => exchange(&code, verifier),
             (None, ..) => Err("The sign-in came back without a code".into()),
         };
         let html = match &outcome {
-            Ok(()) => page(200, "Signed in to Codex", "You can close this tab and go back to Oak."),
+            Ok(()) => page(
+                200,
+                "Signed in to Codex",
+                "You can close this tab and go back to Oak.",
+            ),
             Err(e) => page(400, "Couldn't sign in", e),
         };
         let _ = conn.write_all(html.as_bytes());
@@ -517,7 +693,11 @@ fn serve_callback(listener: std::net::TcpListener, verifier: &str, state: &str, 
 }
 
 fn page(status: u16, title: &str, text: &str) -> String {
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
     let body = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Oak</title></head>\
          <body style=\"font-family:sans-serif;max-width:32em;margin:5em auto\"><h2>{}</h2><p>{}</p></body></html>",
@@ -529,7 +709,10 @@ fn page(status: u16, title: &str, text: &str) -> String {
         404 => "Not Found",
         _ => "Bad Request",
     };
-    format!("HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 /// How the browser sign-in ended, once it has (taken: asked again, None).
@@ -540,7 +723,9 @@ pub fn login_result(login: &Login) -> Option<Result<(), String>> {
 /// Finishes a sign-in with what the user pasted: the URL the browser was
 /// sent back to (when nothing listened for it), or the code in it.
 pub fn finish_login(login: &Login, pasted: &str) -> Result<(), String> {
-    let (code, state) = parse_pasted(pasted).ok_or("Paste the whole address the browser ended at (http://localhost:1455/auth/callback?code=…)")?;
+    let (code, state) = parse_pasted(pasted).ok_or(
+        "Paste the whole address the browser ended at (http://localhost:1455/auth/callback?code=…)",
+    )?;
     if state.as_deref().is_some_and(|s| s != login.state) {
         return Err("That address is from another sign-in: start again".into());
     }
@@ -559,11 +744,17 @@ fn parse_pasted(text: &str) -> Option<(String, Option<String>)> {
     } else if text.contains("code=") {
         text.trim_start_matches('?').to_string()
     } else {
-        let (code, state) = text.split_once('#').map_or((text, None), |(c, s)| (c, Some(s.to_string())));
+        let (code, state) = text
+            .split_once('#')
+            .map_or((text, None), |(c, s)| (c, Some(s.to_string())));
         return Some((code.to_string(), state));
     };
     let u = reqwest::Url::parse(&format!("http://x/?{query}")).ok()?;
-    let get = |k: &str| u.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
+    let get = |k: &str| {
+        u.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.into_owned())
+    };
     Some((get("code").filter(|c| !c.is_empty())?, get("state")))
 }
 
@@ -648,9 +839,24 @@ fn read_usage(v: &Value) -> Vec<Limit> {
         .filter_map(|k| {
             let w = &r[*k];
             let percent = w["used_percent"].as_f64()? as f32;
-            let secs = w["limit_window_seconds"].as_i64().unwrap_or(if *k == "primary_window" { 18_000 } else { 604_800 });
-            let resets_at = w["reset_at"].as_i64().map(|s| s * 1000).or(w["reset_after_seconds"].as_i64().map(|s| api::now_ms() + s * 1000));
-            Some(Limit { label: window_label(secs), percent, resets_at })
+            let secs = w["limit_window_seconds"]
+                .as_i64()
+                .unwrap_or(if *k == "primary_window" {
+                    18_000
+                } else {
+                    604_800
+                });
+            let resets_at = w["reset_at"]
+                .as_i64()
+                .map(|s| s * 1000)
+                .or(w["reset_after_seconds"]
+                    .as_i64()
+                    .map(|s| api::now_ms() + s * 1000));
+            Some(Limit {
+                label: window_label(secs),
+                percent,
+                resets_at,
+            })
         })
         .collect()
 }
@@ -658,16 +864,25 @@ fn read_usage(v: &Value) -> Vec<Limit> {
 /// The limits in a reply's headers (x-codex-primary-used-percent and so
 /// on), when it has them.
 fn limits_in(h: &reqwest::header::HeaderMap) -> Vec<Limit> {
-    let get = |k: String| h.get(k).and_then(|v| v.to_str().ok()?.trim().parse::<f64>().ok());
+    let get = |k: String| {
+        h.get(k)
+            .and_then(|v| v.to_str().ok()?.trim().parse::<f64>().ok())
+    };
     ["primary", "secondary"]
         .iter()
         .filter_map(|w| {
             let percent = get(format!("x-codex-{w}-used-percent"))? as f32;
-            let mins = get(format!("x-codex-{w}-window-minutes")).map_or(if *w == "primary" { 300 } else { 10_080 }, |m| m as i64);
+            let mins = get(format!("x-codex-{w}-window-minutes"))
+                .map_or(if *w == "primary" { 300 } else { 10_080 }, |m| m as i64);
             let resets_at = get(format!("x-codex-{w}-reset-at"))
                 .map(|s| s as i64 * 1000)
-                .or(get(format!("x-codex-{w}-reset-after-seconds")).map(|s| api::now_ms() + s as i64 * 1000));
-            Some(Limit { label: window_label(mins * 60), percent, resets_at })
+                .or(get(format!("x-codex-{w}-reset-after-seconds"))
+                    .map(|s| api::now_ms() + s as i64 * 1000));
+            Some(Limit {
+                label: window_label(mins * 60),
+                percent,
+                resets_at,
+            })
         })
         .collect()
 }
@@ -687,7 +902,13 @@ fn note_limits(id: &str, limits: Vec<Limit>) {
 
 /// Fetches each plan's usage, for the account boxes.
 pub fn refresh() {
-    let ids: Vec<String> = STATE.lock().unwrap().list.iter().map(|a| a.cred.account_id.clone()).collect();
+    let ids: Vec<String> = STATE
+        .lock()
+        .unwrap()
+        .list
+        .iter()
+        .map(|a| a.cred.account_id.clone())
+        .collect();
     for id in ids {
         let r = access(&id, false).and_then(|(token, account)| {
             json_reply(
@@ -700,7 +921,9 @@ pub fn refresh() {
             )
         });
         let mut s = STATE.lock().unwrap();
-        let Some(a) = s.list.iter_mut().find(|a| a.cred.account_id == id) else { continue };
+        let Some(a) = s.list.iter_mut().find(|a| a.cred.account_id == id) else {
+            continue;
+        };
         a.fetched = true;
         match r {
             Ok(v) => {
@@ -725,17 +948,39 @@ fn candidates(now: i64) -> Vec<crate::rotation::Candidate> {
         .iter()
         .map(|a| {
             let live = |l: &&Limit| l.resets_at.is_none_or(|r| r > now);
-            let used = a.limits.iter().filter(live).map(|l| l.percent).fold(0.0f32, f32::max);
-            let spent = a.limits.iter().filter(live).filter(|l| l.percent >= 100.0).filter_map(|l| l.resets_at).max().unwrap_or(0);
+            let used = a
+                .limits
+                .iter()
+                .filter(live)
+                .map(|l| l.percent)
+                .fold(0.0f32, f32::max);
+            let spent = a
+                .limits
+                .iter()
+                .filter(live)
+                .filter(|l| l.percent >= 100.0)
+                .filter_map(|l| l.resets_at)
+                .max()
+                .unwrap_or(0);
             crate::rotation::Candidate {
                 id: a.cred.account_id.clone(),
                 left: (100.0 - used.min(100.0)) as f64,
                 usable: a.limited_until.max(spent) <= now,
-                resets_at: a.limits.iter().filter(|l| l.label == "Week").find_map(|l| l.resets_at).unwrap_or(i64::MAX),
+                resets_at: a
+                    .limits
+                    .iter()
+                    .filter(|l| l.label == "Week")
+                    .find_map(|l| l.resets_at)
+                    .unwrap_or(i64::MAX),
                 preferred: a.cred.remote || !remote,
             }
         })
         .collect()
+}
+
+/// A login could take a request now (none used up or refused for its limit).
+pub(crate) fn room() -> bool {
+    candidates(api::now_ms()).iter().any(|c| c.usable)
 }
 
 /// The login conversation `conv`'s request goes through; with every one
@@ -744,13 +989,21 @@ fn login_for(conv: &str) -> Result<String, Option<Sse>> {
     let now = api::now_ms();
     let cands = candidates(now);
     if cands.is_empty() {
-        return Err(Some(Sse::Err("Not signed in to Codex: add the Codex account on Home".into())));
+        return Err(Some(Sse::Err(
+            "Not signed in to Codex: add the Codex account on Home".into(),
+        )));
     }
     match crate::rotation::pick(api::Provider::Codex, conv, &cands, now, !api::rotation_on()) {
         Some(id) if cands.iter().any(|c| c.id == id && c.usable) => Ok(id),
         _ => {
             let s = STATE.lock().unwrap();
-            let first = s.list.iter().map(|a| a.limited_until).filter(|&t| t > now).min().unwrap_or(now + 15 * 60_000);
+            let first = s
+                .list
+                .iter()
+                .map(|a| a.limited_until)
+                .filter(|&t| t > now)
+                .min()
+                .unwrap_or(now + 15 * 60_000);
             Err(Some(Sse::Limit(first)))
         }
     }
@@ -768,7 +1021,16 @@ fn limited(id: &str, until: i64) -> bool {
 }
 
 fn label_of(id: &str) -> String {
-    cred_of(id).map_or_else(|| "Codex".into(), |c| if c.email.is_empty() { "Codex".into() } else { c.email })
+    cred_of(id).map_or_else(
+        || "Codex".into(),
+        |c| {
+            if c.email.is_empty() {
+                "Codex".into()
+            } else {
+                c.email
+            }
+        },
+    )
 }
 
 // ---------------------------------------------------------------- requests
@@ -788,13 +1050,19 @@ fn error_text(status: u16, body: &str) -> String {
 fn input_part(b: &Value) -> Option<Value> {
     match b["type"].as_str()? {
         "text" => Some(json!({"type": "input_text", "text": b["text"]})),
-        "image" => Some(json!({"type": "input_image", "detail": "auto", "image_url": provider::data_url(b)?})),
+        "image" => Some(
+            json!({"type": "input_image", "detail": "auto", "image_url": provider::data_url(b)?}),
+        ),
         "document" => {
             let title = b["title"].as_str().unwrap_or("document");
             if b["media_type"] == "text/plain" {
-                Some(json!({"type": "input_text", "text": format!("{title}:\n{}", b["data"].as_str().unwrap_or(""))}))
+                Some(
+                    json!({"type": "input_text", "text": format!("{title}:\n{}", b["data"].as_str().unwrap_or(""))}),
+                )
             } else {
-                Some(json!({"type": "input_file", "filename": title, "file_data": provider::data_url(b)?}))
+                Some(
+                    json!({"type": "input_file", "filename": title, "file_data": provider::data_url(b)?}),
+                )
             }
         }
         _ => None,
@@ -810,7 +1078,12 @@ fn tool_output(b: &Value) -> Value {
         Value::String(s) => Value::String(mark(s.clone())),
         Value::Array(a) => {
             if a.iter().all(|p| p["type"] == "text") {
-                return Value::String(mark(a.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n")));
+                return Value::String(mark(
+                    a.iter()
+                        .filter_map(|p| p["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ));
             }
             let mut parts: Vec<Value> = a.iter().filter_map(input_part).collect();
             if error {
@@ -833,11 +1106,19 @@ fn input_items(messages: &[Value]) -> Vec<Value> {
             // A change since the prefix was cached (`crate::prefix`): its
             // tools in an `additional_tools` item, its text in a developer
             // message, both of which add to the cache.
-            let defs: Vec<Value> = blocks.iter().filter(|b| b["type"] == "tool_definition").map(|b| b["definition"].clone()).collect();
+            let defs: Vec<Value> = blocks
+                .iter()
+                .filter(|b| b["type"] == "tool_definition")
+                .map(|b| b["definition"].clone())
+                .collect();
             if !defs.is_empty() {
                 out.push(json!({"type": "additional_tools", "role": "developer", "tools": wire_tools(&defs)}));
             }
-            let text: Vec<Value> = blocks.iter().filter(|b| b["type"] == "text").map(|b| json!({"type": "input_text", "text": b["text"]})).collect();
+            let text: Vec<Value> = blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .map(|b| json!({"type": "input_text", "text": b["text"]}))
+                .collect();
             if !text.is_empty() {
                 out.push(json!({"role": "developer", "content": text}));
             }
@@ -896,7 +1177,13 @@ fn cache_key(req: &Request) -> String {
         Some(id) => h.update(id.as_bytes()),
         None => {
             h.update(req.model.as_bytes());
-            h.update(req.messages.first().map(Value::to_string).unwrap_or_default().as_bytes());
+            h.update(
+                req.messages
+                    .first()
+                    .map(Value::to_string)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
         }
     }
     api::uuid_text(&h.finalize())
@@ -904,7 +1191,11 @@ fn cache_key(req: &Request) -> String {
 
 /// The system prompt as Codex gets it (it refuses none).
 pub(crate) fn instructions(system: &str) -> String {
-    if system.trim().is_empty() { "You are a helpful assistant.".into() } else { system.to_string() }
+    if system.trim().is_empty() {
+        "You are a helpful assistant.".into()
+    } else {
+        system.to_string()
+    }
 }
 
 /// OAK's tool definitions as Responses functions.
@@ -921,7 +1212,11 @@ pub(crate) fn request_body(req: &Request) -> Value {
     let tools = wire_tools(&req.tools);
     // Titles go without thinking; Codex models always reason, so as
     // little as they can.
-    let effort = if !req.thinking { "low" } else { req.effort.as_deref().unwrap_or("medium") };
+    let effort = if !req.thinking {
+        "low"
+    } else {
+        req.effort.as_deref().unwrap_or("medium")
+    };
     let mut body = json!({
         "model": req.model,
         "store": false,
@@ -944,7 +1239,9 @@ pub(crate) fn request_body(req: &Request) -> Value {
 /// Whether `body` has the prefix's mid-conversation items (developer
 /// messages, an `additional_tools` item: `crate::prefix`).
 fn native_items(body: &Value) -> bool {
-    body["input"].as_array().is_some_and(|i| i.iter().any(|x| x["role"] == "developer"))
+    body["input"]
+        .as_array()
+        .is_some_and(|i| i.iter().any(|x| x["role"] == "developer"))
 }
 
 /// What one Responses event becomes.
@@ -984,7 +1281,10 @@ struct Translate {
 
 impl Translate {
     fn new(model: &str) -> Self {
-        Translate { model: model.to_string(), ..Default::default() }
+        Translate {
+            model: model.to_string(),
+            ..Default::default()
+        }
     }
 
     fn delta(&mut self, at: Option<u64>, kind: Part, text: String) -> Option<Out> {
@@ -1004,35 +1304,52 @@ impl Translate {
         if !self.started && !matches!(ty, "error" | "response.failed") {
             self.started = true;
             let r = &ev["response"];
-            out.push(Out::Event(Event::Start { id: r["id"].as_str().unwrap_or("").into(), model: r["model"].as_str().unwrap_or(&self.model).into() }));
+            out.push(Out::Event(Event::Start {
+                id: r["id"].as_str().unwrap_or("").into(),
+                model: r["model"].as_str().unwrap_or(&self.model).into(),
+            }));
         }
         let at = ev["output_index"].as_u64();
         let text = |k: &str| ev[k].as_str().unwrap_or("").to_string();
         match ty {
             "response.output_item.added" => out.extend(self.item_added(at, &ev["item"])),
             "response.reasoning_summary_part.added" => {
-                let Some(b) = at.and_then(|a| self.blocks.get_mut(&a)) else { return out };
+                let Some(b) = at.and_then(|a| self.blocks.get_mut(&a)) else {
+                    return out;
+                };
                 b.parts += 1;
                 if b.parts > 1 {
                     out.extend(self.delta(at, Part::Reasoning, "\n\n".into()));
                 }
             }
-            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" if !text("delta").is_empty() => {
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta"
+                if !text("delta").is_empty() =>
+            {
                 out.extend(self.delta(at, Part::Reasoning, text("delta")));
             }
-            "response.output_text.delta" | "response.refusal.delta" if !text("delta").is_empty() => {
+            "response.output_text.delta" | "response.refusal.delta"
+                if !text("delta").is_empty() =>
+            {
                 out.extend(self.delta(at, Part::Text, text("delta")));
             }
             "response.function_call_arguments.delta" if !text("delta").is_empty() => {
                 out.extend(self.delta(at, Part::Tool, text("delta")));
             }
             "response.output_item.done" => {
-                let Some(b) = at.and_then(|a| self.blocks.remove(&a)) else { return out };
+                let Some(b) = at.and_then(|a| self.blocks.remove(&a)) else {
+                    return out;
+                };
                 out.extend(item_done(b, &ev["item"]));
             }
-            "response.completed" | "response.incomplete" | "response.done" => out.extend(self.completed(&ev["response"])),
+            "response.completed" | "response.incomplete" | "response.done" => {
+                out.extend(self.completed(&ev["response"]))
+            }
             "response.failed" => out.push(Out::Err(stream_error(&ev["response"]["error"]))),
-            "error" => out.push(Out::Err(stream_error(if ev["error"].is_object() { &ev["error"] } else { ev }))),
+            "error" => out.push(Out::Err(stream_error(if ev["error"].is_object() {
+                &ev["error"]
+            } else {
+                ev
+            }))),
             _ => {}
         }
         out
@@ -1041,27 +1358,50 @@ impl Translate {
     /// A new output item opens a block (None for kinds Oak doesn't show).
     fn item_added(&mut self, at: Option<u64>, item: &Value) -> Option<Out> {
         let (kind, block) = match item["type"].as_str() {
-            Some("reasoning") => (Part::Reasoning, json!({"type": "reasoning", "text": "", "by": "codex"})),
+            Some("reasoning") => (
+                Part::Reasoning,
+                json!({"type": "reasoning", "text": "", "by": "codex"}),
+            ),
             Some("message") => (Part::Text, oak::text("")),
             Some("function_call") => {
                 self.tools = true;
-                (Part::Tool, json!({"type": "tool_call", "id": item["call_id"], "name": item["name"], "input": {}}))
+                (
+                    Part::Tool,
+                    json!({"type": "tool_call", "id": item["call_id"], "name": item["name"], "input": {}}),
+                )
             }
             _ => return None,
         };
         let index = self.next;
         self.next += 1;
-        self.blocks.insert(at.unwrap_or(index as u64), Block { index, kind, streamed: false, parts: 0 });
+        self.blocks.insert(
+            at.unwrap_or(index as u64),
+            Block {
+                index,
+                kind,
+                streamed: false,
+                parts: 0,
+            },
+        );
         Some(Out::Event(Event::Block { index, block }))
     }
 
     /// The response ended: the open blocks close, then come its usage and why it stopped.
     fn completed(&mut self, r: &Value) -> Vec<Out> {
-        let mut out: Vec<Out> = std::mem::take(&mut self.blocks).into_values().map(|b| Out::Event(Event::BlockEnd { index: b.index })).collect();
+        let mut out: Vec<Out> = std::mem::take(&mut self.blocks)
+            .into_values()
+            .map(|b| Out::Event(Event::BlockEnd { index: b.index }))
+            .collect();
         let u = &r["usage"];
         let input = u["input_tokens"].as_u64().unwrap_or(0);
-        let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0).min(input);
-        let reason = match (r["status"].as_str(), r["incomplete_details"]["reason"].as_str()) {
+        let cached = u["input_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(input);
+        let reason = match (
+            r["status"].as_str(),
+            r["incomplete_details"]["reason"].as_str(),
+        ) {
             (Some("incomplete"), Some("max_output_tokens")) => oak::stop::MAX_TOKENS,
             (Some("incomplete"), Some("content_filter")) => oak::stop::REFUSAL,
             _ if self.tools => oak::stop::TOOL_CALLS,
@@ -1074,7 +1414,10 @@ impl Translate {
             reasoning: u["output_tokens_details"]["reasoning_tokens"].as_u64(),
             ..Default::default()
         })));
-        out.push(Out::Event(Event::Stop { reason: reason.into(), detail: None }));
+        out.push(Out::Event(Event::Stop {
+            reason: reason.into(),
+            detail: None,
+        }));
         out.push(Out::Done);
         out
     }
@@ -1087,26 +1430,50 @@ fn item_done(b: Block, item: &Value) -> Vec<Out> {
     let mut out = vec![];
     match b.kind {
         Part::Reasoning => {
-            let summary = item["summary"].as_array().map(|s| s.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n\n")).unwrap_or_default();
+            let summary = item["summary"]
+                .as_array()
+                .map(|s| {
+                    s.iter()
+                        .filter_map(|p| p["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                })
+                .unwrap_or_default();
             if !b.streamed && !summary.is_empty() {
-                out.push(Out::Event(Event::Reasoning { index, text: summary }));
+                out.push(Out::Event(Event::Reasoning {
+                    index,
+                    text: summary,
+                }));
             }
             let mut keep = item.clone();
             if let Some(o) = keep.as_object_mut() {
                 o.remove("id");
                 o.remove("status");
             }
-            out.push(Out::Event(Event::Sig { index, sig: keep.to_string() }));
+            out.push(Out::Event(Event::Sig {
+                index,
+                sig: keep.to_string(),
+            }));
         }
         Part::Text if !b.streamed => {
-            let t: String = item["content"].as_array().map(|c| c.iter().filter_map(|p| p["text"].as_str().or(p["refusal"].as_str())).collect()).unwrap_or_default();
+            let t: String = item["content"]
+                .as_array()
+                .map(|c| {
+                    c.iter()
+                        .filter_map(|p| p["text"].as_str().or(p["refusal"].as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
             if !t.is_empty() {
                 out.push(Out::Event(Event::Text { index, text: t }));
             }
         }
         Part::Tool if !b.streamed => {
             if let Some(a) = item["arguments"].as_str().filter(|a| !a.is_empty()) {
-                out.push(Out::Event(Event::Input { index, json: a.into() }));
+                out.push(Out::Event(Event::Input {
+                    index,
+                    json: a.into(),
+                }));
             }
         }
         _ => {}
@@ -1116,7 +1483,11 @@ fn item_done(b: Block, item: &Value) -> Vec<Out> {
 }
 
 fn stream_error(e: &Value) -> String {
-    let msg = e["message"].as_str().filter(|m| !m.is_empty()).or(e["code"].as_str()).unwrap_or("unknown error");
+    let msg = e["message"]
+        .as_str()
+        .filter(|m| !m.is_empty())
+        .or(e["code"].as_str())
+        .unwrap_or("unknown error");
     match e["code"].as_str() {
         Some("context_length_exceeded") => format!("API error: prompt is too long: {msg}"),
         _ => format!("API error: {msg}"),
@@ -1136,7 +1507,10 @@ pub fn stream(req: Request, tx: Sender<Sse>) {
         Err(Some(Sse::Err(e))) if e.starts_with("Codex HTTP 400") && native_items(&body) => {
             eprintln!("Codex refused developer messages or additional_tools items: {e}");
             crate::prefix::set_codex_native(false);
-            let plain = Request { messages: crate::prefix::plain_messages(req.messages.clone(), &req.tools), ..req.clone() };
+            let plain = Request {
+                messages: crate::prefix::plain_messages(req.messages.clone(), &req.tools),
+                ..req.clone()
+            };
             open(&request_body(&plain), &session, &conv, &tx)
         }
         r => r,
@@ -1169,7 +1543,9 @@ fn forward(resp: reqwest::blocking::Response, model: &str, tx: &Sender<Sse>) {
             }
         }
     }
-    let _ = tx.send(Sse::Err("Stream ended before the reply was complete".into()));
+    let _ = tx.send(Sse::Err(
+        "Stream ended before the reply was complete".into(),
+    ));
 }
 
 /// When a used-up plan can be used again (ms), from a 429's error and
@@ -1182,12 +1558,21 @@ fn limit_reset(err: &Value, headers: &[Limit]) -> i64 {
     if let Some(s) = err["resets_in_seconds"].as_i64() {
         return now + s * 1000;
     }
-    let spent = headers.iter().filter(|l| l.percent >= 100.0).filter_map(|l| l.resets_at).max();
+    let spent = headers
+        .iter()
+        .filter(|l| l.percent >= 100.0)
+        .filter_map(|l| l.resets_at)
+        .max();
     spent.unwrap_or(now + 15 * 60_000)
 }
 
 /// The request for Codex's responses, as login `token` of `account`.
-fn responses_request(req: &Value, session: &str, token: &str, account: &str) -> reqwest::blocking::RequestBuilder {
+fn responses_request(
+    req: &Value,
+    session: &str,
+    token: &str,
+    account: &str,
+) -> reqwest::blocking::RequestBuilder {
     api::http()
         .post(format!("{}/codex/responses", backend()))
         .bearer_auth(token)
@@ -1202,14 +1587,20 @@ fn responses_request(req: &Value, session: &str, token: &str, account: &str) -> 
 
 /// Sends `req` until a response comes that can be read as a stream. Err
 /// carries what the receiver gets, or None when it is gone.
-fn open(req: &Value, session: &str, conv: &str, tx: &Sender<Sse>) -> Result<reqwest::blocking::Response, Option<Sse>> {
+fn open(
+    req: &Value,
+    session: &str,
+    conv: &str,
+    tx: &Sender<Sse>,
+) -> Result<reqwest::blocking::Response, Option<Sse>> {
     let mut tries: u32 = 0;
     let mut renewed = false;
     let mut rotations = 0;
     let mut last: Option<String> = crate::rotation::seat(api::Provider::Codex, conv);
     loop {
         let id = login_for(conv)?;
-        if last.as_ref().is_some_and(|l| *l != id) && tx.send(Sse::Rotated(label_of(&id))).is_err() {
+        if last.as_ref().is_some_and(|l| *l != id) && tx.send(Sse::Rotated(label_of(&id))).is_err()
+        {
             return Err(None);
         }
         last = Some(id.clone());
@@ -1217,7 +1608,13 @@ fn open(req: &Value, session: &str, conv: &str, tx: &Sender<Sse>) -> Result<reqw
         let r = match api::send_fresh(|| responses_request(req, session, &token, &account)) {
             Ok(r) if r.status().is_success() => {
                 note_limits(&id, limits_in(r.headers()));
-                crate::rotation::used(api::Provider::Codex, conv, &id, crate::oak::Ttl::FiveMinutes.ms(), api::now_ms());
+                crate::rotation::used(
+                    api::Provider::Codex,
+                    conv,
+                    &id,
+                    crate::oak::Ttl::FiveMinutes.ms(),
+                    api::now_ms(),
+                );
                 if !provider::say_headers(tx, r.status().as_u16()) {
                     return Err(None);
                 }
@@ -1239,7 +1636,9 @@ fn open(req: &Value, session: &str, conv: &str, tx: &Sender<Sse>) -> Result<reqw
         let limits = limits_in(r.headers());
         let after = api::retry_after(r.headers());
         let text = r.text().unwrap_or_default();
-        let err = serde_json::from_str::<Value>(&text).map(|v| v["error"].clone()).unwrap_or(Value::Null);
+        let err = serde_json::from_str::<Value>(&text)
+            .map(|v| v["error"].clone())
+            .unwrap_or(Value::Null);
         let code = err["code"].as_str().or(err["type"].as_str()).unwrap_or("");
         note_limits(&id, limits.clone());
         if status == 401 && !renewed {
@@ -1258,16 +1657,27 @@ fn open(req: &Value, session: &str, conv: &str, tx: &Sender<Sse>) -> Result<reqw
             return Err(Some(Sse::Limit(reset)));
         }
         if code == "usage_not_included" {
-            return Err(Some(Sse::Err(format!("Your ChatGPT plan doesn't include Codex: {}", error_text(status, &text)))));
+            return Err(Some(Sse::Err(format!(
+                "Your ChatGPT plan doesn't include Codex: {}",
+                error_text(status, &text)
+            ))));
         }
         tries += 1;
         if provider::retryable(Some(status)) && tries <= api::RETRIES {
-            if !provider::wait_between(tx, tries, provider::retry_in(after, tries), Some(format!("Codex {}", error_text(status, &text)))) {
+            if !provider::wait_between(
+                tx,
+                tries,
+                provider::retry_in(after, tries),
+                Some(format!("Codex {}", error_text(status, &text))),
+            ) {
                 return Err(None);
             }
             continue;
         }
-        return Err(Some(Sse::Err(format!("Codex {}", error_text(status, &text)))));
+        return Err(Some(Sse::Err(format!(
+            "Codex {}",
+            error_text(status, &text)
+        ))));
     }
 }
 
@@ -1280,7 +1690,15 @@ mod tests {
     }
 
     fn events(out: &[Out]) -> Vec<Event> {
-        out.iter().filter_map(|o| if let Out::Event(v) = o { Some(v.clone()) } else { None }).collect()
+        out.iter()
+            .filter_map(|o| {
+                if let Out::Event(v) = o {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn sample() -> Request {
@@ -1293,7 +1711,9 @@ mod tests {
             thinking: true,
             effort: Some("xhigh".into()),
             conv: Some("c1".into()),
-            tools: vec![json!({"name": "READ", "description": "Read a file", "input_schema": {"type": "object", "properties": {}}})],
+            tools: vec![
+                json!({"name": "READ", "description": "Read a file", "input_schema": {"type": "object", "properties": {}}}),
+            ],
             messages: vec![
                 json!({"role": "user", "content": [{"type": "text", "text": "hi"}, {"type": "image", "media_type": "image/png", "data": "AAA"}]}),
                 json!({"role": "assistant", "content": [
@@ -1319,25 +1739,56 @@ mod tests {
         assert_eq!(r["store"], false);
         assert_eq!(r["reasoning"]["effort"], "xhigh");
         assert!(r.get("max_tokens").is_none() && r.get("max_output_tokens").is_none());
-        assert_eq!(r["tools"][0], json!({"type": "function", "name": "READ", "description": "Read a file", "parameters": {"type": "object", "properties": {}}, "strict": false}));
+        assert_eq!(
+            r["tools"][0],
+            json!({"type": "function", "name": "READ", "description": "Read a file", "parameters": {"type": "object", "properties": {}}, "strict": false})
+        );
         assert_eq!(r["tool_choice"], "auto");
         let input = r["input"].as_array().unwrap();
-        assert_eq!(input[0]["content"][0], json!({"type": "input_text", "text": "hi"}));
-        assert_eq!(input[0]["content"][1]["image_url"], "data:image/png;base64,AAA");
+        assert_eq!(
+            input[0]["content"][0],
+            json!({"type": "input_text", "text": "hi"})
+        );
+        assert_eq!(
+            input[0]["content"][1]["image_url"],
+            "data:image/png;base64,AAA"
+        );
         // The reasoning item as it came, less its id; Claude's thinking is dropped.
-        assert_eq!(input[1], json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "hm"}], "encrypted_content": "enc"}));
+        assert_eq!(
+            input[1],
+            json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "hm"}], "encrypted_content": "enc"})
+        );
         assert_eq!(input[2]["type"], "message");
         assert_eq!(input[2]["content"][0]["text"], "Reading.");
-        assert_eq!(input[3], json!({"type": "function_call", "call_id": "call_1", "name": "READ", "arguments": "{\"path\":\"a\"}"}));
-        assert_eq!(input[4], json!({"type": "function_call_output", "call_id": "call_1", "output": "file"}));
-        assert_eq!(input[5], json!({"role": "user", "content": [{"type": "input_text", "text": "and?"}]}));
+        assert_eq!(
+            input[3],
+            json!({"type": "function_call", "call_id": "call_1", "name": "READ", "arguments": "{\"path\":\"a\"}"})
+        );
+        assert_eq!(
+            input[4],
+            json!({"type": "function_call_output", "call_id": "call_1", "output": "file"})
+        );
+        assert_eq!(
+            input[5],
+            json!({"role": "user", "content": [{"type": "input_text", "text": "and?"}]})
+        );
         assert_eq!(input.len(), 6);
         // The same conversation, later: the same cache key.
         let mut later = req.clone();
-        later.messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": "ok"}]}));
-        assert_eq!(request_body(&later)["prompt_cache_key"], r["prompt_cache_key"]);
+        later
+            .messages
+            .push(json!({"role": "assistant", "content": [{"type": "text", "text": "ok"}]}));
+        assert_eq!(
+            request_body(&later)["prompt_cache_key"],
+            r["prompt_cache_key"]
+        );
         // A title: no thinking, no tools.
-        let title = request_body(&Request { model: "gpt-6-luna".into(), system: "Title it.".into(), messages: vec![json!({"role": "user", "content": [{"type": "text", "text": "x"}]})], ..Default::default() });
+        let title = request_body(&Request {
+            model: "gpt-6-luna".into(),
+            system: "Title it.".into(),
+            messages: vec![json!({"role": "user", "content": [{"type": "text", "text": "x"}]})],
+            ..Default::default()
+        });
         assert_eq!(title["reasoning"]["effort"], "low");
         assert_eq!(title["instructions"], "Title it.");
         assert!(title.get("tools").is_none() && title.get("tool_choice").is_none());
@@ -1347,7 +1798,10 @@ mod tests {
         none.instruction = Some("Summarize.".into());
         let r = request_body(&none);
         assert_eq!(r["tool_choice"], "none");
-        assert_eq!(r["input"].as_array().unwrap().last().unwrap()["content"][1]["text"], "Summarize.");
+        assert_eq!(
+            r["input"].as_array().unwrap().last().unwrap()["content"][1]["text"],
+            "Summarize."
+        );
     }
 
     /// GPT-6.2 Astra and Sol: offered beside the models before them, with
@@ -1355,23 +1809,62 @@ mod tests {
     /// name them and carry only an effort they take.
     #[test]
     fn gpt_6_2_models() {
-        for (id, name, context) in [("gpt-6.2-astra", "GPT-6.2 Astra", 272_000), ("gpt-6.2-sol", "GPT-6.2 Sol", 500_000)] {
+        for (id, name, context) in [
+            ("gpt-6.2-astra", "GPT-6.2 Astra", 272_000),
+            ("gpt-6.2-sol", "GPT-6.2 Sol", 500_000),
+        ] {
             let m = model(id).unwrap();
-            assert_eq!((m.name, m.context, m.max_output, m.listed), (name, context, 128_000, true), "{id}");
-            assert!(serves(id) && crate::providers::Kind::of(id) == crate::providers::Kind::Codex, "{id}");
+            assert_eq!(
+                (m.name, m.context, m.max_output, m.listed),
+                (name, context, 128_000, true),
+                "{id}"
+            );
+            assert!(
+                serves(id) && crate::providers::Kind::of(id) == crate::providers::Kind::Codex,
+                "{id}"
+            );
             assert_eq!(crate::api::model_name(id), name);
             assert_eq!(crate::api::context_window(id), Some(context));
-            assert_eq!(crate::agent::efforts(id), ["low", "medium", "high", "xhigh", "max", "ultra"]);
-            for (asked, sent) in [("low", "low"), ("max", "max"), ("ultra", "ultra"), ("none", "high"), ("minimal", "high"), ("", "high"), ("bogus", "high")] {
+            assert_eq!(
+                crate::agent::efforts(id),
+                ["low", "medium", "high", "xhigh", "max", "ultra"]
+            );
+            for (asked, sent) in [
+                ("low", "low"),
+                ("max", "max"),
+                ("ultra", "ultra"),
+                ("none", "high"),
+                ("minimal", "high"),
+                ("", "high"),
+                ("bogus", "high"),
+            ] {
                 let effort = crate::agent::effort_for(id, asked);
                 assert_eq!(effort, sent, "{id} {asked}");
-                let r = request_body(&Request { model: id.into(), effort: Some(effort), ..sample() });
-                assert_eq!((r["model"].as_str(), r["reasoning"]["effort"].as_str()), (Some(id), Some(sent)));
+                let r = request_body(&Request {
+                    model: id.into(),
+                    effort: Some(effort),
+                    ..sample()
+                });
+                assert_eq!(
+                    (r["model"].as_str(), r["reasoning"]["effort"].as_str()),
+                    (Some(id), Some(sent))
+                );
             }
         }
         // The models already there stay, and stay listed as they were.
         let listed: Vec<&str> = MODELS.iter().filter(|m| m.listed).map(|m| m.id).collect();
-        assert_eq!(listed, ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-5.6-sol"]);
+        assert_eq!(
+            listed,
+            [
+                "gpt-6.2-astra",
+                "gpt-6.2-sol",
+                "gpt-6-astra",
+                "gpt-6.1-sol",
+                "gpt-6.1-terra",
+                "gpt-6-luna",
+                "gpt-5.6-sol"
+            ]
+        );
         for id in ["gpt-6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
             assert!(model(id).is_some_and(|m| !m.listed), "{id}");
         }
@@ -1402,17 +1895,79 @@ mod tests {
         assert_eq!(out.last(), Some(&Out::Done));
         let ev = events(&out);
         assert_eq!(ev.len(), 15);
-        assert_eq!(ev[0], Event::Start { id: "resp_1".into(), model: "gpt-6.1-sol".into() });
-        assert_eq!(ev[1], Event::Block { index: 0, block: json!({"type": "reasoning", "text": "", "by": "codex"}) });
-        assert_eq!(ev[3], Event::Reasoning { index: 0, text: "\n\n".into() });
-        assert_eq!(ev[4], Event::Reasoning { index: 0, text: "More".into() });
-        let Event::Sig { sig, .. } = &ev[5] else { panic!("{:?}", ev[5]) };
-        assert_eq!(serde_json::from_str::<Value>(sig).unwrap(), json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "Plan"}], "encrypted_content": "enc"}));
+        assert_eq!(
+            ev[0],
+            Event::Start {
+                id: "resp_1".into(),
+                model: "gpt-6.1-sol".into()
+            }
+        );
+        assert_eq!(
+            ev[1],
+            Event::Block {
+                index: 0,
+                block: json!({"type": "reasoning", "text": "", "by": "codex"})
+            }
+        );
+        assert_eq!(
+            ev[3],
+            Event::Reasoning {
+                index: 0,
+                text: "\n\n".into()
+            }
+        );
+        assert_eq!(
+            ev[4],
+            Event::Reasoning {
+                index: 0,
+                text: "More".into()
+            }
+        );
+        let Event::Sig { sig, .. } = &ev[5] else {
+            panic!("{:?}", ev[5])
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(sig).unwrap(),
+            json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "Plan"}], "encrypted_content": "enc"})
+        );
         assert_eq!(ev[6], Event::BlockEnd { index: 0 });
-        assert_eq!(ev[8], Event::Text { index: 1, text: "Hi".into() });
-        assert_eq!(ev[10], Event::Block { index: 2, block: json!({"type": "tool_call", "id": "call_9", "name": "READ", "input": {}}) });
-        assert_eq!(ev[11], Event::Input { index: 2, json: "{\"path\":\"x\"}".into() });
-        assert_eq!(ev[13], Event::Usage(oak::Usage { input: 200, cache_read: 800, output: 50, reasoning: Some(30), ..Default::default() }));
-        assert_eq!(ev[14], Event::Stop { reason: "tool_calls".into(), detail: None });
+        assert_eq!(
+            ev[8],
+            Event::Text {
+                index: 1,
+                text: "Hi".into()
+            }
+        );
+        assert_eq!(
+            ev[10],
+            Event::Block {
+                index: 2,
+                block: json!({"type": "tool_call", "id": "call_9", "name": "READ", "input": {}})
+            }
+        );
+        assert_eq!(
+            ev[11],
+            Event::Input {
+                index: 2,
+                json: "{\"path\":\"x\"}".into()
+            }
+        );
+        assert_eq!(
+            ev[13],
+            Event::Usage(oak::Usage {
+                input: 200,
+                cache_read: 800,
+                output: 50,
+                reasoning: Some(30),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            ev[14],
+            Event::Stop {
+                reason: "tool_calls".into(),
+                detail: None
+            }
+        );
     }
 }

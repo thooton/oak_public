@@ -48,9 +48,15 @@ pub fn tool_schema(name: &str) -> Value {
             }),
             json!(["path"]),
         ),
-        "folder_create" => obj(json!({"path": s("Path for the new folder to create.")}), json!(["path"])),
+        "folder_create" => obj(
+            json!({"path": s("Path for the new folder to create.")}),
+            json!(["path"]),
+        ),
         "file_delete" => obj(json!({"path": s("Path to delete.")}), json!(["path"])),
-        "file_copy" => obj(json!({"source": s("Source path"), "destination": s("Destination path")}), json!(["source", "destination"])),
+        "file_copy" => obj(
+            json!({"source": s("Source path"), "destination": s("Destination path")}),
+            json!(["source", "destination"]),
+        ),
         "file_type" => obj(json!({"path": s("Path to the file")}), json!(["path"])),
         "fdfind" => obj(
             json!({
@@ -69,7 +75,7 @@ pub fn tool_schema(name: &str) -> Value {
         ),
         "run_python_outpost_local" | "run_python_outpost_local_with_write" => obj(
             json!({
-                "code": {"type": "string", "default": "", "description": "The Python code to execute."},
+                "code": {"type": "string", "default": "", "description": "The Python code to execute. Do not write long scripts to walk through files (such as os.walk); run normal commands through subprocess instead."},
                 "timeout": {"type": "integer", "default": 60, "description": "Maximum execution time in seconds"}
             }),
             json!(["code"]),
@@ -95,7 +101,9 @@ pub fn id() -> String {
 
 /// The name Quick shows for this outpost.
 fn name() -> String {
-    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Oak".into())
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "Oak".into())
 }
 
 /// Registers this machine's outpost with Quick, so the tools Quick's agent
@@ -153,7 +161,10 @@ pub fn register_as(outpost: &str) -> Result<(), String> {
     let status = resp.status().as_u16();
     let text = resp.text().unwrap_or_default();
     if !(200..300).contains(&status) {
-        return Err(format!("Quick refused this machine's outpost ({status}): {}", text.chars().take(200).collect::<String>()));
+        return Err(format!(
+            "Quick refused this machine's outpost ({status}): {}",
+            text.chars().take(200).collect::<String>()
+        ));
     }
     Ok(())
 }
@@ -192,10 +203,17 @@ pub fn register_folder(token: &str, host: &str, folder: &str) -> Result<(), Stri
     let status = resp.status().as_u16();
     let text = resp.text().unwrap_or_default();
     if !(200..300).contains(&status) {
-        return Err(format!("Quick refused the folder ({status}): {}", text.chars().take(300).collect::<String>()));
+        return Err(format!(
+            "Quick refused the folder ({status}): {}",
+            text.chars().take(300).collect::<String>()
+        ));
     }
     // The agent answers in its own envelope; a refusal is inside it.
-    if let Some(inner) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["eventResponse"]["invokeAgentResponse"].as_str().map(String::from)) {
+    if let Some(inner) = serde_json::from_str::<Value>(&text).ok().and_then(|v| {
+        v["eventResponse"]["invokeAgentResponse"]
+            .as_str()
+            .map(String::from)
+    }) {
         let parsed: Value = serde_json::from_str(&inner).unwrap_or(Value::Null);
         let body = parsed["body"].as_str().unwrap_or("");
         if let Ok(b) = serde_json::from_str::<Value>(body)
@@ -216,17 +234,42 @@ pub fn put_device_state_report(token: &str, host: &str) -> Vec<(String, bool, St
     let outpost = id();
     let mut out = vec![];
     for field in [
-        "online", "isOnline", "status", "state", "availability", "presence", "connected", "isConnected", "deviceStatus", "connectionState", "outpostStatus",
-        "lastSeenAt", "lastSeen", "heartbeatAt", "isAvailable", "available", "isActive", "active", "live", "isLive", "registered", "isRegistered", "reconnectGraceMs",
+        "online",
+        "isOnline",
+        "status",
+        "state",
+        "availability",
+        "presence",
+        "connected",
+        "isConnected",
+        "deviceStatus",
+        "connectionState",
+        "outpostStatus",
+        "lastSeenAt",
+        "lastSeen",
+        "heartbeatAt",
+        "isAvailable",
+        "available",
+        "isActive",
+        "active",
+        "live",
+        "isLive",
+        "registered",
+        "isRegistered",
+        "reconnectGraceMs",
     ] {
         let value = match field {
-            "online" | "isOnline" | "connected" | "isConnected" | "isAvailable" | "available" | "isActive" | "active" | "live" | "isLive" | "registered" | "isRegistered" => json!(true),
+            "online" | "isOnline" | "connected" | "isConnected" | "isAvailable" | "available"
+            | "isActive" | "active" | "live" | "isLive" | "registered" | "isRegistered" => {
+                json!(true)
+            }
             "lastSeenAt" | "lastSeen" | "heartbeatAt" => json!(crate::api::now_ms()),
             "reconnectGraceMs" => json!(0),
             _ => json!("ONLINE"),
         };
         let body = json!({"hasUsedDesktop": true, "deviceId": outpost, "outpostId": outpost, field: value});
-        let envelope = json!({"eventType": "putDeviceState", "eventBody": {"putDeviceState": body}});
+        let envelope =
+            json!({"eventType": "putDeviceState", "eventBody": {"putDeviceState": body}});
         let resp = api::http()
             .post(format!("https://{host}/integration/quick-work/qbs-event"))
             .bearer_auth(token)
@@ -239,7 +282,10 @@ pub fn put_device_state_report(token: &str, host: &str) -> Vec<(String, bool, St
         let (ok, note) = match resp {
             Ok(r) => {
                 let t = r.text().unwrap_or_default();
-                (t.contains("putDeviceStateResponse\":{"), t.chars().take(160).collect::<String>())
+                (
+                    t.contains("putDeviceStateResponse\":{"),
+                    t.chars().take(160).collect::<String>(),
+                )
             }
             Err(e) => (false, format!("{e}")),
         };
@@ -268,8 +314,13 @@ pub fn is_online_of(token: &str, host: &str, outpost: &str) -> Result<bool, Stri
         .map_err(api::network_error)?;
     let text = resp.text().unwrap_or_default();
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    let items = v["eventResponse"]["listOutpostsResponse"]["items"].as_array().cloned().unwrap_or_default();
-    Ok(items.iter().any(|o| o["id"].as_str() == Some(outpost) && o["status"].as_str() == Some("ONLINE")))
+    let items = v["eventResponse"]["listOutpostsResponse"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Ok(items
+        .iter()
+        .any(|o| o["id"].as_str() == Some(outpost) && o["status"].as_str() == Some("ONLINE")))
 }
 
 /// Waits (briefly) until Quick lists `outpost` as ONLINE. A socket that names
@@ -302,10 +353,18 @@ fn describe(name: &str) -> &'static str {
         "file_delete" => "Delete a file or empty folder.",
         "file_copy" => "Copy a file or folder.",
         "file_type" => "Say what kind of file this is, and its size.",
-        "fdfind" => "Find files and folders by name (fd's arguments: a regex, -e, -t, -g, -H, -I, -d), in the paths given or the conversation's folder.",
-        "ripgrep" => "Search file contents with ripgrep: every pattern a regex, rg's own options, in the paths given or the conversation's folder.",
-        "run_python_outpost_local" => "Run Python in the conversation's folder.",
-        "run_python_outpost_local_with_write" => "Run Python in the conversation's folder, which may write files there.",
+        "fdfind" => {
+            "Find files and folders by name (fd's arguments: a regex, -e, -t, -g, -H, -I, -d), in the paths given or the conversation's folder."
+        }
+        "ripgrep" => {
+            "Search file contents with ripgrep: every pattern a regex, rg's own options, in the paths given or the conversation's folder."
+        }
+        "run_python_outpost_local" => {
+            "Run Python in the conversation's folder. Do not write long scripts to walk through files (such as os.walk); run normal commands through subprocess instead."
+        }
+        "run_python_outpost_local_with_write" => {
+            "Run Python in the conversation's folder, which may write files there. Do not write long scripts to walk through files (such as os.walk); run normal commands through subprocess instead."
+        }
         _ => "A tool this machine runs.",
     }
 }

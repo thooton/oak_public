@@ -1,9 +1,9 @@
 //! Building requests, keeping their caches warm, processing streamed replies
 //! and scheduling context summaries. The turn loop lives in the parent module.
 
-use super::*;
 use super::memory::memory_for_request;
 use super::prompt::system_prompt_on;
+use super::*;
 use crate::api::Sse;
 use crate::oak::Event;
 
@@ -58,21 +58,30 @@ impl BenchReply {
 /// average. A share of 0 is left off: the row then shows how long it
 /// thought instead.
 pub(super) fn spread_thinking_tokens(blocks: &mut [Value], n: u64) {
-    let mut thinking: Vec<&mut Value> = blocks.iter_mut().filter(|b| oak::is_reasoning(b)).collect();
+    let mut thinking: Vec<&mut Value> =
+        blocks.iter_mut().filter(|b| oak::is_reasoning(b)).collect();
     if n == 0 || thinking.is_empty() {
         return;
     }
     fn shown(b: &Value) -> Option<&str> {
         b["text"].as_str().filter(|_| b["redacted"] != true)
     }
-    let visible: Vec<u64> = thinking.iter().filter_map(|b| shown(b)).map(|t| t.len().max(1) as u64).collect();
+    let visible: Vec<u64> = thinking
+        .iter()
+        .filter_map(|b| shown(b))
+        .map(|t| t.len().max(1) as u64)
+        .collect();
     let average = (visible.iter().sum::<u64>() / visible.len().max(1) as u64).max(1);
     let weight = |b: &Value| shown(b).map_or(average, |t| t.len().max(1) as u64);
     let total: u64 = thinking.iter().map(|b| weight(b)).sum();
     let last = thinking.len() - 1;
     let mut given = 0;
     for (k, b) in thinking.iter_mut().enumerate() {
-        let share = if k == last { n - given } else { n * weight(b) / total };
+        let share = if k == last {
+            n - given
+        } else {
+            n * weight(b) / total
+        };
         given += share;
         if share > 0 {
             b["_oak_tokens"] = json!(share);
@@ -99,10 +108,17 @@ impl Streaming {
     /// a tool call that is complete goes to `batch`.
     fn apply(&mut self, l: &mut Live, batch: &mut Batch, ev: Event) {
         match ev {
-            Event::Retry { attempt, wait, reason } => {
+            Event::Retry {
+                attempt,
+                wait,
+                reason,
+            } => {
                 // (Past RETRIES: OpenRouter waiting out a rate limit.)
                 l.status = if attempt <= api::RETRIES {
-                    format!("Retry {attempt}/{} in {wait}s after: {reason}", api::RETRIES)
+                    format!(
+                        "Retry {attempt}/{} in {wait}s after: {reason}",
+                        api::RETRIES
+                    )
                 } else {
                     format!("Retry {attempt} in {wait}s after: {reason}")
                 };
@@ -117,7 +133,8 @@ impl Streaming {
                     l.blocks.resize(i + 1, Value::Null);
                 }
                 l.blocks[i] = b;
-                self.started.resize(self.started.len().max(i + 1), Instant::now());
+                self.started
+                    .resize(self.started.len().max(i + 1), Instant::now());
                 self.started[i] = Instant::now();
             }
             Event::Text { index, text } => {
@@ -129,7 +146,8 @@ impl Streaming {
                 if let Some(b) = l.blocks.get_mut(index) {
                     append(b, "text", &text);
                     if self.rewrite_thinking {
-                        self.rewrites.extend(crate::rewrites::mark_thinking(b, false));
+                        self.rewrites
+                            .extend(crate::rewrites::mark_thinking(b, false));
                     }
                 }
             }
@@ -163,7 +181,8 @@ impl Streaming {
                 {
                     b["_oak_ms"] = json!(t.elapsed().as_millis() as u64);
                     if self.rewrite_thinking {
-                        self.rewrites.extend(crate::rewrites::mark_thinking(b, true));
+                        self.rewrites
+                            .extend(crate::rewrites::mark_thinking(b, true));
                     }
                 }
                 if oak::is_call(b) {
@@ -220,7 +239,11 @@ impl Streaming {
 /// parsed (and repaired); input that doesn't parse is kept raw.
 fn finish_call(b: &mut Value) {
     let partial = b.as_object_mut().and_then(|o| o.remove("_oak_partial"));
-    let raw = partial.as_ref().and_then(Value::as_str).unwrap_or("").trim();
+    let raw = partial
+        .as_ref()
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     match serde_json::from_str::<Value>(if raw.is_empty() { "{}" } else { raw }) {
         Ok(v) if v.is_object() => {
             let name = b["name"].as_str().unwrap_or("").to_string();
@@ -242,12 +265,18 @@ impl Worker {
         if !api::keep_alive() || self.paused.load(Ordering::SeqCst) {
             return None;
         }
-        let (messages, dead) = self.warm.lock().unwrap().as_ref().map(|(req, dead)| (req.messages.len(), *dead))?;
+        let (messages, dead) = self
+            .warm
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(req, dead)| (req.messages.len(), *dead))?;
         let c = self.conv.lock().unwrap();
         let last = c.cache.last?;
         let now = api::now_ms();
         let due = c.cache.expires_at()? - 30_000;
-        let fits = !dead && !c.cache.cold && last.base == c.rolling.base() && last.messages == messages;
+        let fits =
+            !dead && !c.cache.cold && last.base == c.rolling.base() && last.messages == messages;
         (fits && now < due + 25_000 && due - c.cache.asked < KEEP_ALIVE_FOR).then_some(due)
     }
 
@@ -256,7 +285,9 @@ impl Worker {
     /// most of the context instead (the cache was gone) or failed ends
     /// keep-alive for this request.
     pub(super) fn keep_warm(&self) {
-        let Some(req) = self.warm.lock().unwrap().as_ref().map(|w| w.0.clone()) else { return };
+        let Some(req) = self.warm.lock().unwrap().as_ref().map(|w| w.0.clone()) else {
+            return;
+        };
         let at = api::now_ms();
         let result = api::keep_warm(&req);
         let mut c = self.conv.lock().unwrap();
@@ -293,9 +324,16 @@ impl Worker {
         // is read again only with a summary, like the rest.
         let memory = memory_for_request(&mut c, now);
         // A chat has no folder, so no scratchpad either.
-        let scratch = if c.chat { PathBuf::new() } else { scratchpad(&mut c) };
+        let scratch = if c.chat {
+            PathBuf::new()
+        } else {
+            scratchpad(&mut c)
+        };
         let context = memory_context(&c).to_string();
-        let agent = c.parent.is_some().then(|| agent_label(c.agent_id, &c.title));
+        let agent = c
+            .parent
+            .is_some()
+            .then(|| agent_label(c.agent_id, &c.title));
         // A model on the user's own server (or a plugin's) gets the basics
         // only, and the goal's tools while there is one.
         let local = crate::local::basic(&c.model);
@@ -312,36 +350,67 @@ impl Worker {
         // the prefix's tools (its LOAD's result has its instructions, its
         // tools join after it); one a summary covers (or loaded with no
         // LOAD) is in them.
-        let loads = if c.chat { vec![] } else { crate::prefix::loads_of(&c.messages) };
+        let loads = if c.chat {
+            vec![]
+        } else {
+            crate::prefix::loads_of(&c.messages)
+        };
         let shown = |k: &String| loads.iter().find(|l| &l.kit == k).filter(|l| l.call >= cut);
         // Code Mode's one tool is REPL; the others are functions in it.
         let (code_mode, spawner) = (c.code_mode && !c.chat, c.spawner);
-        let inner = |kits: &[String]| tools::definitions_with_kits(agent.is_some(), spawner, local, kits);
+        let inner =
+            |kits: &[String]| tools::definitions_with_kits(agent.is_some(), spawner, local, kits);
         let is_chat = c.chat;
+        // A Mix has SWITCH too (`crate::mix`).
+        let mix = c.mix.is_some() && !c.chat && !code_mode;
         let defs = |kits: &[String]| {
             if is_chat {
                 tools::chat_definitions()
             } else if code_mode {
                 vec![crate::code_mode::tool_definition()]
             } else {
-                inner(kits)
+                let mut defs = inner(kits);
+                if mix {
+                    defs.push(crate::mix::tool_definition());
+                }
+                defs
             }
         };
-        let held: Vec<String> = kits.iter().filter(|k| shown(k).is_none()).cloned().collect();
+        let held: Vec<String> = kits
+            .iter()
+            .filter(|k| shown(k).is_none())
+            .cloned()
+            .collect();
         let held_tools = defs(&held);
         let mut joins = vec![];
         for l in kits.iter().filter_map(shown) {
             let with = defs(&[held.clone(), vec![l.kit.clone()]].concat());
-            for t in with.iter().filter(|t| !held_tools.iter().any(|h| h["name"] == t["name"])) {
+            for t in with
+                .iter()
+                .filter(|t| !held_tools.iter().any(|h| h["name"] == t["name"]))
+            {
                 let tool = t["name"].as_str().unwrap_or("").to_string();
-                joins.push(crate::prefix::Join { tool, kit: l.kit.clone(), at: l.join, through: l.through });
+                joins.push(crate::prefix::Join {
+                    tool,
+                    kit: l.kit.clone(),
+                    at: l.join,
+                    through: l.through,
+                });
             }
         }
         let model = c.model.clone();
         let tools = defs(&kits);
         // (A session with no NOTE tool, a local model's, has no notes limit to tell.)
-        let has_notes = |tools: &[Value]| tools.iter().any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("NOTE")));
-        let notes_limit = if has_notes(&tools) || (code_mode && has_notes(&inner(&kits))) { super::notes_limit() } else { 0 };
+        let has_notes = |tools: &[Value]| {
+            tools
+                .iter()
+                .any(|t| t["name"].as_str().is_some_and(|n| n.starts_with("NOTE")))
+        };
+        let notes_limit = if has_notes(&tools) || (code_mode && has_notes(&inner(&kits))) {
+            super::notes_limit()
+        } else {
+            0
+        };
         let built = crate::prefix::Pin {
             day: crate::time::today_utc(),
             kits: kits.clone(),
@@ -352,7 +421,11 @@ impl Worker {
             system: String::new(),
             notes_limit,
         };
-        let base = crate::prefix::Pin { kits: held, tools: held_tools, ..built.clone() };
+        let base = crate::prefix::Pin {
+            kits: held,
+            tools: held_tools,
+            ..built.clone()
+        };
         // The prefix as first sent since the last summary: its system prompt,
         // tools and effort, and messages for what changed since
         // (`crate::prefix`).
@@ -361,29 +434,74 @@ impl Worker {
         let render = |pin: &crate::prefix::Pin| {
             // (The folder and model the prompt was first sent with: a CD's
             // result and a message say the new ones.)
-            let model = if pin.model.is_empty() { &model_now } else { &pin.model };
+            let model = if pin.model.is_empty() {
+                &model_now
+            } else {
+                &pin.model
+            };
             if chat {
                 super::prompt::chat_prompt(&pin.day, model, pin.notes_limit)
             } else if code_mode {
-                let base = system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role, pin.notes_limit);
-                format!("{}\n\n{}", base.trim_end(), crate::code_mode::prompt(&inner(&pin.kits)))
+                let base = system_prompt_on(
+                    &pin.day,
+                    Path::new(&pin.folder),
+                    &scratch,
+                    model,
+                    agent.as_deref(),
+                    &pin.kits,
+                    &role,
+                    pin.notes_limit,
+                );
+                format!(
+                    "{}\n\n{}",
+                    base.trim_end(),
+                    crate::code_mode::prompt(&inner(&pin.kits))
+                )
             } else {
-                system_prompt_on(&pin.day, Path::new(&pin.folder), &scratch, model, agent.as_deref(), &pin.kits, &role, pin.notes_limit)
+                let base = system_prompt_on(
+                    &pin.day,
+                    Path::new(&pin.folder),
+                    &scratch,
+                    model,
+                    agent.as_deref(),
+                    &pin.kits,
+                    &role,
+                    pin.notes_limit,
+                );
+                if mix {
+                    format!("{}\n\n{}", base.trim_end(), crate::mix::prompt().trim_end())
+                } else {
+                    base
+                }
             }
         };
         let (pin, system) = match mode {
             Some(mode) => {
                 let add = last_is(&c, "user");
                 let notes = super::notes_tokens(&c.notes);
-                let effort_per_message = mode == crate::prefix::Mode::Claude && crate::prefix::supports_effort(&c.model);
-                let pin = c.prefix.prepare(crate::prefix::Setup { mode, n, cut, add, effort_per_message, now: built, base, joins, notes });
+                let effort_per_message =
+                    mode == crate::prefix::Mode::Claude && crate::prefix::supports_effort(&c.model);
+                let pin = c.prefix.prepare(crate::prefix::Setup {
+                    mode,
+                    n,
+                    cut,
+                    add,
+                    effort_per_message,
+                    now: built,
+                    base,
+                    joins,
+                    notes,
+                });
                 let system = c.prefix.system(render);
                 (pin, system)
             }
             // Freebuff sends its own prompt and tools: these go to the
             // sidecar only for what it adds of its own.
             None => {
-                let pin = crate::prefix::Pin { kits: base.kits, ..built };
+                let pin = crate::prefix::Pin {
+                    kits: base.kits,
+                    ..built
+                };
                 let system = render(&pin);
                 (pin, system)
             }
@@ -414,7 +532,8 @@ impl Worker {
             // Through OpenRouter: the provider the last reply came from,
             // which the next request stays with while it is a good pick (its
             // cache).
-            route: (provider == api::Provider::OpenRouter && !c.served_by.is_empty()).then(|| c.served_by.clone()),
+            route: (provider == api::Provider::OpenRouter && !c.served_by.is_empty())
+                .then(|| c.served_by.clone()),
             // The Freebuff sidecar signs and snapshots the project the same
             // way the CLI does; it needs the folder.
             folder: (!c.chat).then(|| c.folder.to_string_lossy().into_owned()),
@@ -446,7 +565,11 @@ impl Worker {
                 Reply::Done(b, ..) => b,
                 _ => finish_blocks(std::mem::take(&mut self.live.lock().unwrap().blocks)),
             };
-            return Reply::Done(batch.kept(blocks), tool_calls::CUT_SHORT.into(), Usage::default());
+            return Reply::Done(
+                batch.kept(blocks),
+                tool_calls::CUT_SHORT.into(),
+                Usage::default(),
+            );
         }
         if matches!(reply, Reply::Paused | Reply::Interrupted) {
             self.set(|l| l.blocks.clear());
@@ -470,13 +593,8 @@ impl Worker {
         }
     }
 
-    /// The thread of a Quick request's turn, which takes in the messages
-    /// typed while it runs (`steer_quick`); None for any other provider, or
-    /// with `OAK_QUICK_STEER=off`.
-    fn steers_to(&self) -> Option<String> {
-        if std::env::var("OAK_QUICK_STEER").as_deref() == Ok("off") {
-            return None;
-        }
+    /// The thread of a Quick request's turn; None for any other provider.
+    fn quick_thread(&self) -> Option<String> {
         let r = self.last_request.lock().unwrap();
         let (body, ..) = r.as_ref()?;
         if body.provider != api::Provider::Quick {
@@ -485,12 +603,26 @@ impl Worker {
         body.conv.clone()
     }
 
+    /// The thread of a Quick request's turn, which takes in the messages
+    /// typed while it runs (`steer_quick`); None for any other provider, or
+    /// with `OAK_QUICK_STEER=off`.
+    fn steers_to(&self) -> Option<String> {
+        if std::env::var("OAK_QUICK_STEER").as_deref() == Ok("off") {
+            return None;
+        }
+        self.quick_thread()
+    }
+
     /// Hands the messages queued meanwhile to the Quick turn on `thread`,
     /// as Quick's app does: its agent takes each in at its next step. They
     /// stay queued (shown as sent) till Quick says it took them in.
     fn steer_quick(&self, thread: &str) {
         let mut l = self.live.lock().unwrap();
-        for q in l.queued.iter_mut().filter(|q| !q.held && !q.steered && !q.text.trim().is_empty()) {
+        for q in l
+            .queued
+            .iter_mut()
+            .filter(|q| !q.held && !q.steered && !q.text.trim().is_empty())
+        {
             q.steered = true;
             crate::quick::turn::steer(thread, q.id, &q.text);
         }
@@ -513,11 +645,14 @@ impl Worker {
         // the folder's snapshot): no chat goes there.
         if let Some(why) = {
             let c = self.conv.lock().unwrap();
-            chat_refuses_provider(c.chat, c.provider()).or_else(|| code_mode_refuses_provider(c.code_mode, c.provider()))
+            chat_refuses_provider(c.chat, c.provider())
+                .or_else(|| code_mode_refuses_provider(c.code_mode, c.provider()))
+                .or_else(|| mix_refuses_provider(c.mix.is_some(), c.provider()))
         } {
             return Reply::Failed(why);
         }
         let (rx, thread) = self.send_request();
+        let quick = self.quick_thread();
         let steer = self.steers_to();
         self.set(|l| {
             l.blocks.clear();
@@ -527,22 +662,56 @@ impl Worker {
             thread,
             // Rewrite thinking (Unslop): sections go to be rewritten as they
             // come in, the rest when their block ends.
-            rewrite_thinking: crate::rewrites::applies(&self.conv.lock().unwrap()) && crate::rewrites::thinking(),
+            rewrite_thinking: crate::rewrites::applies(&self.conv.lock().unwrap())
+                && crate::rewrites::thinking(),
             ..Default::default()
         };
         // Output speed, from the provider's output token count only.
         let mut rate = crate::token_rate::TokenRate::default();
         let mut bench = BenchReply::default();
+        let mut quick_stop: Option<(crate::quick::turn::StopKind, Instant)> = None;
         loop {
+            if let Some(t) = &quick {
+                let queued = self.live.lock().unwrap().pause_queued;
+                crate::quick::turn::set_pause(t, queued);
+            }
             // Checked on every event too: a busy stream may never go quiet.
             // (The blocks are cleared by `ask`.)
             if self.paused.load(Ordering::SeqCst) {
-                return Reply::Paused;
+                match &quick {
+                    Some(t) => {
+                        if quick_stop.is_none() {
+                            crate::quick::turn::abort(t, crate::quick::turn::StopKind::Pause);
+                            quick_stop =
+                                Some((crate::quick::turn::StopKind::Pause, Instant::now()));
+                        }
+                    }
+                    None => return Reply::Paused,
+                }
             }
             if self.interrupted() {
-                return Reply::Interrupted;
+                batch.stop();
+                match &quick {
+                    Some(t) => {
+                        crate::quick::turn::abort(t, crate::quick::turn::StopKind::Interrupt);
+                        if self.reverting() {
+                            crate::quick::turn::wait_stopped(t);
+                            return Reply::Interrupted;
+                        }
+                        quick_stop =
+                            Some((crate::quick::turn::StopKind::Interrupt, Instant::now()));
+                    }
+                    None => return Reply::Interrupted,
+                }
             }
-            if let Some(t) = &steer {
+            if let Some((_, since)) = quick_stop
+                && since.elapsed() >= Duration::from_secs(3)
+            {
+                break;
+            }
+            if quick_stop.is_none()
+                && let Some(t) = &steer
+            {
                 self.steer_quick(t);
             }
             // Tool calls that streamed in start as soon as they may.
@@ -550,6 +719,7 @@ impl Worker {
             let ev = match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(Sse::Event(ev)) => ev,
                 Ok(Sse::Done) => break,
+                Ok(Sse::Err(_)) if quick_stop.is_some() => break,
                 Ok(Sse::Err(e)) => return Reply::Failed(e),
                 Ok(Sse::Limit(at)) => return Reply::Limited(at),
                 Ok(Sse::Rotated(label)) => {
@@ -562,7 +732,10 @@ impl Worker {
                     self.freebuff_alerts();
                     continue;
                 }
-                Err(RecvTimeoutError::Disconnected) => return Reply::Failed("Stream ended unexpectedly".into()),
+                Err(RecvTimeoutError::Disconnected) if quick_stop.is_some() => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Reply::Failed("Stream ended unexpectedly".into());
+                }
             };
             if crate::bench::on() {
                 bench.event(self, &ev);
@@ -574,15 +747,28 @@ impl Worker {
                 _ => {}
             }
             rate.observe(&ev, Instant::now());
-            let delta = matches!(ev, Event::Text { .. } | Event::Reasoning { .. } | Event::Input { .. } | Event::Sig { .. });
+            let delta = matches!(
+                ev,
+                Event::Text { .. }
+                    | Event::Reasoning { .. }
+                    | Event::Input { .. }
+                    | Event::Sig { .. }
+            );
             let (drawn, viewport) = {
                 let mut l = self.live.lock().unwrap();
                 s.apply(&mut l, batch, ev);
                 l.mark_phase();
-                (l.drawn, l.drawn_viewport.unwrap_or(eframe::egui::ViewportId::ROOT))
+                (
+                    l.drawn,
+                    l.drawn_viewport.unwrap_or(eframe::egui::ViewportId::ROOT),
+                )
             };
             if !s.rewrites.is_empty() {
-                crate::rewrites::start_parts(std::mem::take(&mut s.rewrites), &self.conv, &self.ctx);
+                crate::rewrites::start_parts(
+                    std::mem::take(&mut s.rewrites),
+                    &self.conv,
+                    &self.ctx,
+                );
             }
             // A delta only changes the transcript; any other event may
             // change what Home and the tabs show (the account's limits).
@@ -590,7 +776,33 @@ impl Worker {
                 self.ctx.request_repaint();
             }
         }
+        if let Some(t) = &quick
+            && quick_stop.is_some()
+        {
+            crate::quick::turn::wait_stopped(t);
+        }
         let blocks = std::mem::take(&mut self.live.lock().unwrap().blocks);
+        if blocks.is_empty() {
+            if let Some((kind, _)) = quick_stop {
+                return match kind {
+                    crate::quick::turn::StopKind::Interrupt => Reply::Interrupted,
+                    crate::quick::turn::StopKind::Pause => Reply::Paused,
+                };
+            }
+            if quick.is_some()
+                && (self.paused.load(Ordering::SeqCst) || self.live.lock().unwrap().pause_queued)
+            {
+                return Reply::Paused;
+            }
+        }
+        if s.stop.is_empty()
+            && let Some((kind, _)) = quick_stop
+        {
+            s.stop = match kind {
+                crate::quick::turn::StopKind::Interrupt => tool_calls::CUT_SHORT.into(),
+                crate::quick::turn::StopKind::Pause => oak::stop::TOOL_CALLS.into(),
+            };
+        }
         // The reply is complete: the server's copy now ends with it.
         *self.thread.lock().unwrap() = s.thread;
         if crate::bench::on() {
@@ -612,12 +824,21 @@ impl Worker {
         let (body, n, base) = self.request_body();
         *self.last_request.lock().unwrap() = Some((body.clone(), n, base, api::now_ms()));
         if crate::bench::on() {
-            let bytes = serde_json::to_string(&body.messages).map_or(0, |m| m.len()) + body.system.len();
-            self.bench("request_built", json!({"messages": n, "body_bytes": bytes, "kind": "main"}));
+            let bytes =
+                serde_json::to_string(&body.messages).map_or(0, |m| m.len()) + body.system.len();
+            self.bench(
+                "request_built",
+                json!({"messages": n, "body_bytes": bytes, "kind": "main"}),
+            );
         }
         let thread = api::threads().then(|| api::Thread::of(&body));
         if thread.is_some() {
-            let cont = self.thread.lock().unwrap().take().and_then(|t| Some((t.id.clone(), t.continues(&body)?)));
+            let cont = self
+                .thread
+                .lock()
+                .unwrap()
+                .take()
+                .and_then(|t| Some((t.id.clone(), t.continues(&body)?)));
             std::thread::spawn(move || api::stream_thread(body, cont, tx));
         } else {
             std::thread::spawn(move || api::stream_messages(body, tx));
@@ -625,21 +846,37 @@ impl Worker {
         (rx, thread)
     }
 
-        // ------------------------------------------------------------ smart context
+    // ------------------------------------------------------------ smart context
 
     /// Records what the API said the request cost and, once the context has
     /// passed the trigger, starts summarizing the older part in the background.
     pub(super) fn after_reply(&self, usage: Usage) {
         if usage.prompt > 0 || usage.output > 0 {
-            let t = store::Tokens { requests: 1, input: usage.input, cache_read: usage.cache_read, cache_write: usage.write, output: usage.output, usd: 0.0 };
+            let t = store::Tokens {
+                requests: 1,
+                input: usage.input,
+                cache_read: usage.cache_read,
+                cache_write: usage.write,
+                output: usage.output,
+                usd: 0.0,
+            };
             self.conv.lock().unwrap().tokens.add(&t);
         }
-        let Some((body, n, base, at)) = self.last_request.lock().unwrap().take() else { return };
+        let Some((body, n, base, at)) = self.last_request.lock().unwrap().take() else {
+            return;
+        };
         if usage.prompt == 0 {
             return; // no usage reported
         }
         let mut c = self.conv.lock().unwrap();
-        c.rolling.record(Measure { base, n, prompt: usage.prompt }, usage.output);
+        c.rolling.record(
+            Measure {
+                base,
+                n,
+                prompt: usage.prompt,
+            },
+            usage.output,
+        );
         // How long the cache lives, for its cold moments (`request_body`):
         // as Claude's request chose; the user's own server keeps its slot
         // until another conversation takes it (an hour stands for that);
@@ -651,11 +888,19 @@ impl Worker {
             _ => Some(oak::Ttl::FiveMinutes),
         };
         if let Some(ttl) = ttl {
-            let choice = crate::cache_ttl::Choice { ttl, anchor: body.anchor.filter(|_| body.provider == api::Provider::Claude) };
-            c.cache.record(at, choice, usage.prompt, body.messages.len(), base);
+            let choice = crate::cache_ttl::Choice {
+                ttl,
+                anchor: body
+                    .anchor
+                    .filter(|_| body.provider == api::Provider::Claude),
+            };
+            c.cache
+                .record(at, choice, usage.prompt, body.messages.len(), base);
         }
         if body.provider == api::Provider::Claude {
-            let warm = api::keep_alive() && body.ttl == oak::Ttl::FiveMinutes && body.purpose == oak::Purpose::Main;
+            let warm = api::keep_alive()
+                && body.ttl == oak::Ttl::FiveMinutes
+                && body.purpose == oak::Purpose::Main;
             *self.warm.lock().unwrap() = warm.then(|| (body.clone(), false));
         }
         let cfg = rolling::config_for(&c.model);
@@ -671,7 +916,9 @@ impl Worker {
                 return;
             }
         }
-        let Some(plan) = plan_summary(&mut c, n, base, usage.prompt) else { return };
+        let Some(plan) = plan_summary(&mut c, n, base, usage.prompt) else {
+            return;
+        };
         // The request that just finished, with only the part the summary
         // replaces, as that request sent it, then the instruction.
         let request = summary_request_for(&c, &body, n, plan.cut);
@@ -693,7 +940,11 @@ impl Worker {
     /// otherwise.
     pub(super) fn summarize_now(&self, error: &str) -> Result<(), String> {
         while self.live.lock().unwrap().compacting {
-            self.set(|l| l.status = "Waiting for the context summary: the conversation outgrew the model's context".into());
+            self.set(|l| {
+                l.status =
+                    "Waiting for the context summary: the conversation outgrew the model's context"
+                        .into()
+            });
             std::thread::sleep(Duration::from_millis(100));
         }
         let (body, n, base) = self.request_body();
@@ -701,16 +952,31 @@ impl Worker {
         if c.rolling.off {
             return Err("smart context is off for this conversation".into());
         }
-        if base != self.last_request.lock().unwrap().as_ref().map_or(base, |r| r.2) {
+        if base
+            != self
+                .last_request
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(base, |r| r.2)
+        {
             return Ok(()); // a summary just landed: try with it
         }
         // "prompt is too long: 213456 tokens > 200000 maximum"; without a
         // size, the last measured request and what came since.
-        let total = error.split(|ch: char| !ch.is_ascii_digit()).find_map(|d| d.parse::<u64>().ok().filter(|&t| t > 1000)).unwrap_or_else(|| {
-            c.messages.load_from(base);
-            let context = c.rolling.context;
-            rolling::size_of(&c.messages[..n.min(c.messages.len())], base, &c.rolling.measured, context)
-        });
+        let total = error
+            .split(|ch: char| !ch.is_ascii_digit())
+            .find_map(|d| d.parse::<u64>().ok().filter(|&t| t > 1000))
+            .unwrap_or_else(|| {
+                c.messages.load_from(base);
+                let context = c.rolling.context;
+                rolling::size_of(
+                    &c.messages[..n.min(c.messages.len())],
+                    base,
+                    &c.rolling.measured,
+                    context,
+                )
+            });
         let plan = plan_summary(&mut c, n, base, total).ok_or("nothing old enough to summarize")?;
         let request = summary_request_for(&c, &body, n, plan.cut);
         drop(c);
@@ -721,9 +987,27 @@ impl Worker {
         let result = summarize(&self.conv, request, true);
         let ok = result.is_ok();
         let reverts = self.live.lock().unwrap().reverts;
-        finish_summary(&self.conv, &self.live, base, plan, overhead(&body), reverts, result);
+        finish_summary(
+            &self.conv,
+            &self.live,
+            base,
+            plan,
+            overhead(&body),
+            reverts,
+            result,
+        );
         self.ctx.request_repaint();
-        if ok { Ok(()) } else { Err(self.conv.lock().unwrap().rolling.last_error.clone().unwrap_or_default()) }
+        if ok {
+            Ok(())
+        } else {
+            Err(self
+                .conv
+                .lock()
+                .unwrap()
+                .rolling
+                .last_error
+                .clone()
+                .unwrap_or_default())
+        }
     }
-
 }

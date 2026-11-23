@@ -39,16 +39,16 @@ use std::sync::LazyLock;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-pub mod outpost;
-pub mod socket;
-pub mod turn;
-pub mod usage;
 #[cfg(test)]
 mod live_test;
 #[cfg(test)]
 mod models_test;
+pub mod outpost;
 #[cfg(test)]
 mod outpost_test;
+pub mod socket;
+pub mod turn;
+pub mod usage;
 
 /// The surface Quick's desktop app reports; the agent tailors itself to it.
 const SURFACE: &str = "QUICK_WORK_DESKTOP_WINDOWS";
@@ -74,10 +74,22 @@ const DEFAULT_CELL: &str = "qbs-cellff9e0f5c-3614-471c-b8fe-9d3c8f3afff9.dp.appi
 /// saved before it registered its own (`outpost::id` replaces it).
 pub const DEFAULT_OUTPOST_ID: &str = "8cd71ba4-b3e6-4dba-869e-5f364e1ccf71";
 
-/// The OIDC endpoints (region-scoped, as the app uses them).
-const OIDC_AUTHORIZE: &str = "https://oidc.us-east-1.amazonaws.com/authorize";
-const OIDC_TOKEN: &str = "https://oidc.us-east-1.amazonaws.com/token";
-const OIDC_REGISTER: &str = "https://oidc.us-east-1.amazonaws.com/client/register";
+/// The discovery page that begins Quick's desktop sign-in: it sets the
+/// `qwSurface` cookie, signs the user in through AWS's discovery portal, and
+/// hands their workspace (`issuerUrl`, `tenantUrl`, `idcRegion`) back to
+/// Oak's local callback port before Oak redirects to OIDC `/authorize`.
+const DISCOVERY_URL: &str = "https://quick.aws.com/sn";
+
+/// The OIDC endpoints, scoped to the workspace's IAM Identity Center region
+/// (as `oidc_url` composes them).
+fn oidc_url(region: &str, path: &str) -> String {
+    let r = if region.trim().is_empty() {
+        "us-east-1"
+    } else {
+        region.trim()
+    };
+    format!("https://oidc.{r}.amazonaws.com/{path}")
+}
 
 /// The scope Quick's client asks for.
 const SCOPE: &str = "quicksight:read_write";
@@ -103,9 +115,27 @@ pub struct Model {
 /// What each mode is for, in Quick's own words: `fast` is quickest,
 /// `smart` balances quality and speed, `balanced` weighs cost.
 pub const MODELS: &[Model] = &[
-    Model { id: "smart", name: "Quick Smart", context: 1_000_000, max_output: 64_000, efforts: &["low", "medium", "high", "xhigh", "max"] },
-    Model { id: "fast", name: "Quick Fast", context: 1_000_000, max_output: 64_000, efforts: &["low", "medium", "high"] },
-    Model { id: "balanced", name: "Quick Balanced", context: 1_000_000, max_output: 64_000, efforts: &["low", "medium", "high"] },
+    Model {
+        id: "smart",
+        name: "Quick Smart",
+        context: 1_000_000,
+        max_output: 64_000,
+        efforts: &["low", "medium", "high", "xhigh", "max"],
+    },
+    Model {
+        id: "fast",
+        name: "Quick Fast",
+        context: 1_000_000,
+        max_output: 64_000,
+        efforts: &["low", "medium", "high"],
+    },
+    Model {
+        id: "balanced",
+        name: "Quick Balanced",
+        context: 1_000_000,
+        max_output: 64_000,
+        efforts: &["low", "medium", "high"],
+    },
 ];
 
 pub fn model(id: &str) -> Option<&'static Model> {
@@ -134,7 +164,12 @@ fn effort(r: &Request, m: &Model) -> &'static str {
         other => other,
     };
     if m.efforts.contains(&pick) {
-        return m.efforts.iter().find(|e| **e == pick).copied().unwrap_or("low");
+        return m
+            .efforts
+            .iter()
+            .find(|e| **e == pick)
+            .copied()
+            .unwrap_or("low");
     }
     // Past its levels: its highest that isn't above what was asked.
     m.efforts.last().copied().unwrap_or("low")
@@ -144,8 +179,8 @@ fn effort(r: &Request, m: &Model) -> &'static str {
 
 pub mod login {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// quick.json: the registered client, the refresh token, who signed in,
     /// and what Quick's absence costs (the last error).
@@ -175,6 +210,15 @@ pub mod login {
         /// the machine that owns it, and Oak runs them.
         #[serde(default)]
         pub outpost: String,
+        /// The IAM Identity Center region reported at discovery (`us-east-1`
+        /// when absent).
+        #[serde(default)]
+        pub oidc_region: String,
+        /// For Gateway OAuth accounts: the token endpoint and resource URI.
+        #[serde(default)]
+        pub token_endpoint: String,
+        #[serde(default)]
+        pub resource: String,
         /// The last sign-in or request error.
         #[serde(default)]
         pub error: String,
@@ -185,15 +229,21 @@ pub mod login {
     pub enum State {
         Idle,
         /// The address to open, and the port Oak listens on for the code.
-        Waiting { url: String, port: u16 },
+        Waiting {
+            url: String,
+            port: u16,
+        },
         Done,
         Failed(String),
     }
 
-    pub(super) static STORE: LazyLock<Mutex<Stored>> = LazyLock::new(|| Mutex::new(crate::store::read_json(&path()).unwrap_or_default()));
+    pub(super) static STORE: LazyLock<Mutex<Stored>> =
+        LazyLock::new(|| Mutex::new(crate::store::read_json(&path()).unwrap_or_default()));
     pub(super) static STATE: Mutex<Option<State>> = Mutex::new(None);
-    /// A sign-in in flight: one at a time.
+    /// A sign-in in flight: incremented on each `start()` so a new attempt
+    /// cancels any older listener still waiting for the browser.
     static RUNNING: AtomicBool = AtomicBool::new(false);
+    static LOGIN_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     fn path() -> std::path::PathBuf {
         crate::store::dir().join("quick.json")
@@ -245,9 +295,18 @@ pub mod login {
     /// The access token, bought with the refresh token (`expires_at` kept).
     /// Err says what the server said, and marks the login failed.
     pub fn access_token() -> Result<String, String> {
-        let (id, secret, refresh, mut access, expires) = {
+        let (id, secret, refresh, mut access, expires, region, token_endpoint, resource) = {
             let s = STORE.lock().unwrap();
-            (s.client_id.clone(), s.client_secret.clone(), s.refresh.clone(), s.access.clone(), s.expires_at)
+            (
+                s.client_id.clone(),
+                s.client_secret.clone(),
+                s.refresh.clone(),
+                s.access.clone(),
+                s.expires_at,
+                s.oidc_region.clone(),
+                s.token_endpoint.clone(),
+                s.resource.clone(),
+            )
         };
         if refresh.is_empty() {
             return Err("No Quick account: sign in on Home.".into());
@@ -255,33 +314,64 @@ pub mod login {
         if !access.is_empty() && expires > crate::api::now_ms() + 60_000 {
             return Ok(access);
         }
-        let body = json!({
-            "clientId": id,
-            "clientSecret": secret,
-            "grantType": "refresh_token",
-            "refreshToken": refresh,
-        });
-        let resp = api::http()
-            .post(OIDC_TOKEN)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .map_err(api::network_error)?;
+        let resp = if !token_endpoint.is_empty() {
+            let form = format!(
+                "grant_type=refresh_token&client_id={}&refresh_token={}&resource={}",
+                urlencode(&id),
+                urlencode(&refresh),
+                urlencode(&resource),
+            );
+            api::http()
+                .post(&token_endpoint)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("Accept", "application/json")
+                .body(form)
+                .timeout(Duration::from_secs(30))
+                .send()
+                .map_err(api::network_error)?
+        } else {
+            let body = json!({
+                "clientId": id,
+                "clientSecret": secret,
+                "grantType": "refresh_token",
+                "refreshToken": refresh,
+            });
+            api::http()
+                .post(oidc_url(&region, "token"))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .timeout(Duration::from_secs(30))
+                .send()
+                .map_err(api::network_error)?
+        };
         let status = resp.status().as_u16();
         let text = resp.text().unwrap_or_default();
         if !(200..300).contains(&status) {
-            let why = serde_json::from_str::<Value>(&text).map(|v| provider::error_msg(&v, &text, None)).unwrap_or_else(|_| text.chars().take(300).collect());
+            let why = serde_json::from_str::<Value>(&text)
+                .map(|v| provider::error_msg(&v, &text, None))
+                .unwrap_or_else(|_| text.chars().take(300).collect());
             let mut s = STORE.lock().unwrap();
             s.error = format!("Quick refused to renew the sign-in ({status}): {why}");
             drop(s);
             save();
             return Err(format!("Quick: {why}. Sign in again on Home."));
         }
-        let v: Value = serde_json::from_str(&text).map_err(|e| format!("Quick sent an unreadable answer: {e}"))?;
-        access = v["accessToken"].as_str().unwrap_or("").to_string();
-        let next = v["refreshToken"].as_str().unwrap_or("").to_string();
-        let ttl = v["expiresIn"].as_u64().unwrap_or(3600) as i64;
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("Quick sent an unreadable answer: {e}"))?;
+        access = v["accessToken"]
+            .as_str()
+            .or(v["access_token"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let next = v["refreshToken"]
+            .as_str()
+            .or(v["refresh_token"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let ttl = v["expiresIn"]
+            .as_u64()
+            .or(v["expires_in"].as_u64())
+            .unwrap_or(3600) as i64;
         if access.is_empty() {
             return Err("Quick's sign-in answered without an access token.".into());
         }
@@ -312,7 +402,10 @@ pub mod login {
                 save();
                 Ok(h)
             }
-            None => Err("Quick's workspace address wasn't reported at sign-in: sign in again on Home.".into()),
+            None => Err(
+                "Quick's workspace address wasn't reported at sign-in: sign in again on Home."
+                    .into(),
+            ),
         }
     }
 
@@ -332,7 +425,11 @@ pub mod login {
     /// The outpost Quick routes this machine's tools to, saved from the
     /// sign-in's callback (`outpostId`) or `OAK_QUICK_OUTPOST`.
     pub fn saved_outpost() -> String {
-        std::env::var("OAK_QUICK_OUTPOST").ok().map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).unwrap_or_else(|| STORE.lock().unwrap().outpost.clone())
+        std::env::var("OAK_QUICK_OUTPOST")
+            .ok()
+            .map(|o| o.trim().to_string())
+            .filter(|o| !o.is_empty())
+            .unwrap_or_else(|| STORE.lock().unwrap().outpost.clone())
     }
 
     /// The cell Oak's Quick login runs on. Quick's sign-in reports it
@@ -341,87 +438,117 @@ pub mod login {
     /// names another (a stand-in or a proxy, as `OAK_API_BASE` does for
     /// Claude).
     fn known_cell() -> Option<String> {
-        if let Some(h) = std::env::var("OAK_QUICK_HOST").ok().map(|h| h.trim().trim_start_matches("https://").trim_end_matches('/').to_string()).filter(|h| !h.is_empty()) {
+        if let Some(h) = std::env::var("OAK_QUICK_HOST")
+            .ok()
+            .map(|h| {
+                h.trim()
+                    .trim_start_matches("https://")
+                    .trim_end_matches('/')
+                    .to_string()
+            })
+            .filter(|h| !h.is_empty())
+        {
             return Some(h);
         }
         (!DEFAULT_CELL.is_empty()).then(|| DEFAULT_CELL.to_string())
     }
 
-    /// Starts a fresh sign-in: registers Oak's client with the identity
-    /// store, opens the browser at the approval page, and waits (in the
-    /// background) for the code on the loopback port.
+    /// What Phase 1 discovery (`/callback`) resolved for Phase 2 (`/?code=`).
+    #[derive(Clone, Debug)]
+    pub(crate) enum Discovered {
+        Idc {
+            client: (String, String),
+            redirect: String,
+            region: String,
+        },
+        Gateway {
+            client_id: String,
+            redirect: String,
+            token_endpoint: String,
+            resource: String,
+        },
+    }
+
+    /// Starts a fresh sign-in: opens the local loopback callback server and
+    /// returns Quick's two-phase discovery URL (`https://quick.aws.com/sn?qwSurface=...`).
+    /// When the user signs in there, Quick redirects their browser to
+    /// `http://127.0.0.1:{port}/callback` with their workspace (`issuerUrl`,
+    /// `tenantUrl`, `idcRegion`), Oak registers its OIDC client and 302-redirects
+    /// the browser (with its active Identity Center session) to `/authorize`,
+    /// and then exchanges the returned PKCE authorization code for tokens.
     pub fn start() -> Result<String, String> {
-        if RUNNING.swap(true, Ordering::SeqCst) {
-            return Err("Quick's sign-in is already waiting for the browser.".into());
+        let epoch = LOGIN_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        if RUNNING.load(Ordering::SeqCst) {
+            let until = std::time::Instant::now() + Duration::from_millis(300);
+            while RUNNING.load(Ordering::SeqCst) && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
+        RUNNING.store(true, Ordering::SeqCst);
         let (verifier, challenge) = pkce();
         let state = hex(rand::random::<[u8; 16]>());
-        // Quick's desktop sign-in carries a `nonce`, and the workspace it
-        // signed in to comes back with the code (it names the cell Oak's
-        // socket goes to).
         let nonce = hex(rand::random::<[u8; 16]>());
-        // The client, then the port it comes back to: the registration has
-        // to name the redirect URI, so the port is taken first.
-        let listener = match listen() {
+        let (listeners, port) = match listen() {
             Ok(l) => l,
             Err(e) => {
                 RUNNING.store(false, Ordering::SeqCst);
                 return Err(e);
             }
         };
-        let port = listener.0.local_addr().map(|a| a.port()).unwrap_or(CALLBACK_PORT);
-        let redirect = format!("http://127.0.0.1:{port}");
-        let client = match register(&redirect) {
-            Ok(c) => c,
-            Err(e) => {
-                RUNNING.store(false, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
-        let url = format!(
-            "{OIDC_AUTHORIZE}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={state}&code_challenge={challenge}&code_challenge_method=S256&prompt=login&nonce={}",
-            urlencode(&client.0),
-            urlencode(&redirect),
-            urlencode(SCOPE),
-            urlencode(&nonce),
-        );
-        set_state(State::Waiting { url: url.clone(), port });
-        let client2 = client.clone();
-        let verifier2 = verifier.clone();
-        let state2 = state.clone();
+        let surface = format!("desktop:{nonce}:{port}:{APP_VERSION}");
+        let url = format!("{DISCOVERY_URL}?qwSurface={}", urlencode(&surface));
+        set_state(State::Waiting {
+            url: url.clone(),
+            port,
+        });
         std::thread::Builder::new()
             .name("quick-login".into())
             .spawn(move || {
-                let out = wait_for_code(listener, &state2);
+                let out = wait_for_login(listeners, port, &nonce, &state, &challenge, epoch);
+                if LOGIN_GEN.load(Ordering::SeqCst) != epoch {
+                    return;
+                }
                 match out {
-                    Ok((code, host, outpost)) => match exchange(&client2, &code, &redirect, &verifier2) {
-                        Ok(()) => {
-                            let mut s = STORE.lock().unwrap();
-                            if !host.is_empty() {
-                                s.host = host;
+                    Ok(Some((code, host, outpost, discovered))) => {
+                        let disc = match discovered {
+                            Some(d) => Ok(d),
+                            None => {
+                                let redirect = format!("http://127.0.0.1:{port}");
+                                let issuer = format!(
+                                    "https://identitycenter.amazonaws.com/{IDENTITY_STORE}"
+                                );
+                                register(&redirect, &issuer, "us-east-1").map(|client| {
+                                    Discovered::Idc {
+                                        client,
+                                        redirect,
+                                        region: "us-east-1".into(),
+                                    }
+                                })
                             }
-                            if !outpost.is_empty() {
-                                s.outpost = outpost;
+                        };
+                        match disc.and_then(|d| exchange(&d, &code, &verifier, &host, &outpost)) {
+                            Ok(()) => {
+                                set_state(State::Done);
+                                crate::api::note_signed_in();
                             }
-                            s.client_id = client2.0.clone();
-                            s.client_secret = client2.1.clone();
-                            s.error.clear();
-                            drop(s);
-                            save();
-                            set_state(State::Done);
-                            crate::api::note_signed_in();
+                            Err(e) => {
+                                STORE.lock().unwrap().error = e.clone();
+                                save();
+                                set_state(State::Failed(e));
+                            }
                         }
-                        Err(e) => {
-                            STORE.lock().unwrap().error = e.clone();
-                            save();
-                            set_state(State::Failed(e));
-                        }
-                    },
+                    }
+                    Ok(None) => return,
                     Err(e) => set_state(State::Failed(e)),
                 }
-                RUNNING.store(false, Ordering::SeqCst);
+                if LOGIN_GEN.load(Ordering::SeqCst) == epoch {
+                    RUNNING.store(false, Ordering::SeqCst);
+                }
             })
-            .map_err(|e| format!("Couldn't start the sign-in: {e}"))?;
+            .map_err(|e| {
+                RUNNING.store(false, Ordering::SeqCst);
+                format!("Couldn't start the sign-in: {e}")
+            })?;
         Ok(url)
     }
 
@@ -446,38 +573,63 @@ pub mod login {
         let mut out = String::with_capacity(s.len());
         for b in s.bytes() {
             match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
                 _ => out.push_str(&format!("%{b:02X}")),
             }
         }
         out
     }
 
-    /// A loopback listener for the code, on the first free port from
+    /// The epoch of the sign-in in flight (a `start()` bumps it, cancelling
+    /// any older listener).
+    #[cfg(test)]
+    pub(crate) fn login_epoch() -> u64 {
+        LOGIN_GEN.load(Ordering::SeqCst)
+    }
+
+    /// Loopback listeners (IPv4 `127.0.0.1` and, when available, IPv6 `::1` so
+    /// `http://localhost:{port}` works on both) on the first free port from
     /// `CALLBACK_PORT`.
-    fn listen() -> Result<(std::net::TcpListener, u16), String> {
+    pub(crate) fn listen() -> Result<(Vec<std::net::TcpListener>, u16), String> {
         let mut last = String::new();
         for port in CALLBACK_PORT..CALLBACK_PORT + 40 {
             match std::net::TcpListener::bind(("127.0.0.1", port)) {
-                Ok(l) => return Ok((l, port)),
+                Ok(v4) => {
+                    let _ = v4.set_nonblocking(true);
+                    let mut list = vec![v4];
+                    if let Ok(v6) = std::net::TcpListener::bind(("::1", port)) {
+                        let _ = v6.set_nonblocking(true);
+                        list.push(v6);
+                    }
+                    return Ok((list, port));
+                }
                 Err(e) => last = e.to_string(),
             }
         }
-        Err(format!("Couldn't find a free port for Quick's sign-in: {last}"))
+        Err(format!(
+            "Couldn't find a free port for Quick's sign-in: {last}"
+        ))
     }
 
-    /// Registers Oak's public client with the identity store.
-    fn register(redirect: &str) -> Result<(String, String), String> {
+    /// Registers a public OIDC client with the discovered IAM Identity Center
+    /// instance and region.
+    fn register(
+        redirect: &str,
+        issuer_url: &str,
+        region: &str,
+    ) -> Result<(String, String), String> {
         let body = json!({
-            "clientName": "Oak-Desktop",
+            "clientName": "AmazonQuick-Desktop",
             "clientType": "public",
             "scopes": [SCOPE],
             "grantTypes": ["authorization_code", "refresh_token"],
             "redirectUris": [redirect],
-            "issuerUrl": format!("https://identitycenter.amazonaws.com/{IDENTITY_STORE}"),
+            "issuerUrl": issuer_url,
         });
         let resp = api::http()
-            .post(OIDC_REGISTER)
+            .post(oidc_url(region, "client/register"))
             .header("Content-Type", "application/json")
             .json(&body)
             .timeout(Duration::from_secs(30))
@@ -486,9 +638,13 @@ pub mod login {
         let status = resp.status().as_u16();
         let text = resp.text().unwrap_or_default();
         if !(200..300).contains(&status) {
-            return Err(format!("Quick's identity store refused Oak's client ({status}): {}", text.chars().take(300).collect::<String>()));
+            return Err(format!(
+                "Quick's identity store refused Oak's client ({status}): {}",
+                text.chars().take(300).collect::<String>()
+            ));
         }
-        let v: Value = serde_json::from_str(&text).map_err(|e| format!("The registration was unreadable: {e}"))?;
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("The registration was unreadable: {e}"))?;
         let id = v["clientId"].as_str().unwrap_or("").to_string();
         let secret = v["clientSecret"].as_str().unwrap_or("").to_string();
         if id.is_empty() {
@@ -497,17 +653,114 @@ pub mod login {
         Ok((id, secret))
     }
 
-    /// Waits for the browser's redirect with the code (and the workspace's
-    /// host), answering the page.
-    fn wait_for_code((listener, _port): (std::net::TcpListener, u16), expect: &str) -> Result<(String, String, String), String> {
+    /// Builds the Phase 1 discovery 302-redirect URL and state from the query
+    /// parameters sent to `/callback`.
+    pub(crate) fn resolve_discovery(
+        q: &std::collections::HashMap<String, String>,
+        port: u16,
+        expected_nonce: &str,
+        state: &str,
+        challenge: &str,
+        reg: impl FnOnce(&str, &str, &str) -> Result<(String, String), String>,
+    ) -> Result<(String, Discovered), String> {
+        if let Some(n) = q.get("nonce")
+            && n != expected_nonce
+        {
+            return Err("Quick's sign-in failed: the discovery nonce didn't match.".into());
+        }
+        if q.get("namespace").is_some_and(|s| !s.trim().is_empty()) {
+            let client_id = q.get("clientId").cloned().unwrap_or_default();
+            let tenant_url = q.get("tenantUrl").cloned().unwrap_or_default();
+            let auth_endpoint = q.get("authEndpoint").cloned().unwrap_or_default();
+            let token_endpoint = q.get("tokenEndpoint").cloned().unwrap_or_default();
+            if client_id.is_empty()
+                || tenant_url.is_empty()
+                || auth_endpoint.is_empty()
+                || token_endpoint.is_empty()
+            {
+                return Err(
+                    "Quick's sign-in discovery returned an incomplete Gateway manifest.".into(),
+                );
+            }
+            let redirect = format!("http://localhost:{port}");
+            let auth_url = format!(
+                "{auth_endpoint}?response_type=code&client_id={}&redirect_uri={}&state={state}&code_challenge={challenge}&code_challenge_method=S256&resource={}",
+                urlencode(&client_id),
+                urlencode(&redirect),
+                urlencode(&tenant_url),
+            );
+            return Ok((
+                auth_url,
+                Discovered::Gateway {
+                    client_id,
+                    redirect,
+                    token_endpoint,
+                    resource: tenant_url,
+                },
+            ));
+        }
+        let issuer = q
+            .get("issuerUrl")
+            .cloned()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("https://identitycenter.amazonaws.com/{IDENTITY_STORE}"));
+        let region = q
+            .get("idcRegion")
+            .cloned()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "us-east-1".into());
+        let redirect = format!("http://127.0.0.1:{port}");
+        let client = reg(&redirect, &issuer, &region)?;
+        let auth_url = format!(
+            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={state}&code_challenge={challenge}&code_challenge_method=S256&prompt=login",
+            oidc_url(&region, "authorize"),
+            urlencode(&client.0),
+            urlencode(&redirect),
+            urlencode(SCOPE),
+        );
+        Ok((
+            auth_url,
+            Discovered::Idc {
+                client,
+                redirect,
+                region,
+            },
+        ))
+    }
+
+    /// Runs the two-phase loopback callback server:
+    /// Phase 1 (`GET /callback?nonce=...&issuerUrl=...&tenantUrl=...`):
+    /// registers the OIDC client and 302-redirects the browser to `/authorize`.
+    /// Phase 2 (`GET /?code=...&state=...`): returns the code and workspace host.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn wait_for_login(
+        listeners: Vec<std::net::TcpListener>,
+        port: u16,
+        expected_nonce: &str,
+        expect_state: &str,
+        challenge: &str,
+        epoch: u64,
+    ) -> Result<Option<(String, String, String, Option<Discovered>)>, String> {
         use std::io::{BufRead, BufReader, Write};
-        listener.set_nonblocking(false).ok();
         let deadline = std::time::Instant::now() + Duration::from_secs(600);
-        for stream in listener.incoming() {
+        let mut host = String::new();
+        let mut outpost = String::new();
+        let mut discovered: Option<Discovered> = None;
+        loop {
+            if LOGIN_GEN.load(Ordering::SeqCst) != epoch {
+                return Ok(None);
+            }
             if std::time::Instant::now() > deadline {
                 return Err("The sign-in timed out: try again.".into());
             }
-            let Ok(mut stream) = stream else { continue };
+            let Some(mut stream) = listeners
+                .iter()
+                .find_map(|l| l.accept().ok().map(|(s, _)| s))
+            else {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            let _ = stream.set_nonblocking(false);
             let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
             let mut reader = BufReader::new(match stream.try_clone() {
                 Ok(s) => s,
@@ -517,87 +770,224 @@ pub mod login {
             if reader.read_line(&mut line).is_err() {
                 continue;
             }
-            let Some(target) = line.split_whitespace().nth(1) else { continue };
+            let Some(target) = line.split_whitespace().nth(1) else {
+                continue;
+            };
             let (path, query) = target.split_once('?').unwrap_or((target, ""));
             if !path.starts_with("/callback") && path != "/" {
-                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
                 continue;
             }
             let q = crate::quick::query(query);
             if let Some(err) = q.get("error") {
-                let why = q.get("error_description").cloned().unwrap_or_else(|| err.clone());
-                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+                let why = q
+                    .get("error_description")
+                    .cloned()
+                    .unwrap_or_else(|| err.clone());
+                let _ = stream.write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
                 return Err(format!("Quick's sign-in was refused: {why}"));
             }
-            let Some(state) = q.get("state") else { continue };
-            if state != expect {
-                continue;
+            if let Some(h) = q
+                .get("tenantUrl")
+                .map(|u| {
+                    u.trim_start_matches("https://")
+                        .trim_end_matches('/')
+                        .to_string()
+                })
+                .filter(|h| !h.is_empty())
+            {
+                host = h;
             }
-            let Some(code) = q.get("code").cloned() else { continue };
-            let host = q.get("tenantUrl").map(|u| u.trim_start_matches("https://").trim_end_matches('/').to_string()).unwrap_or_default();
-            let outpost = q.get("outpostId").cloned().unwrap_or_default();
-            let page = "<!doctype html><meta charset=utf-8><title>Oak</title><body style=\"font:16px system-ui;padding:40px\">Signed in to AWS Quick. You can close this tab.</body>";
-            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
-            return Ok((code, host, outpost));
+            if let Some(o) = q.get("outpostId").filter(|o| !o.is_empty()) {
+                outpost = o.clone();
+            }
+            if let Some(code) = q.get("code").cloned() {
+                let Some(state) = q.get("state") else {
+                    continue;
+                };
+                if state != expect_state {
+                    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                let page = "<!doctype html><meta charset=utf-8><title>Oak</title><body style=\"font:16px system-ui;padding:40px\">Signed in to AWS Quick. You can close this tab.</body>";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                    page.len()
+                );
+                return Ok(Some((code, host, outpost, discovered)));
+            }
+            if path.starts_with("/callback") {
+                match resolve_discovery(&q, port, expected_nonce, expect_state, challenge, register)
+                {
+                    Ok((auth_url, disc)) => {
+                        discovered = Some(disc);
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 302 Found\r\nLocation: {auth_url}\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                    }
+                    Err(e) => {
+                        let page = format!(
+                            "<!doctype html><meta charset=utf-8><title>Oak</title><body style=\"font:16px system-ui;padding:40px\">{e}</body>"
+                        );
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                            page.len()
+                        );
+                        return Err(e);
+                    }
+                }
+            }
         }
-        Err("The sign-in listener closed before the browser came back.".into())
     }
 
-    /// Exchanges the code for the tokens, and asks Quick who signed in.
-    fn exchange(client: &(String, String), code: &str, redirect: &str, verifier: &str) -> Result<(), String> {
-        let body = json!({
-            "clientId": client.0,
-            "clientSecret": client.1,
-            "grantType": "authorization_code",
-            "code": code,
-            "redirectUri": redirect,
-            "codeVerifier": verifier,
-        });
-        let resp = api::http()
-            .post(OIDC_TOKEN)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .map_err(api::network_error)?;
+    /// Exchanges the code for the tokens, saves the login, and asks Quick who
+    /// signed in.
+    fn exchange(
+        discovered: &Discovered,
+        code: &str,
+        verifier: &str,
+        host: &str,
+        outpost: &str,
+    ) -> Result<(), String> {
+        let (resp, client_id, client_secret, region, token_endpoint, resource) = match discovered {
+            Discovered::Idc {
+                client,
+                redirect,
+                region,
+            } => {
+                let body = json!({
+                    "clientId": client.0,
+                    "clientSecret": client.1,
+                    "grantType": "authorization_code",
+                    "code": code,
+                    "redirectUri": redirect,
+                    "codeVerifier": verifier,
+                });
+                let r = api::http()
+                    .post(oidc_url(region, "token"))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .timeout(Duration::from_secs(30))
+                    .send()
+                    .map_err(api::network_error)?;
+                (
+                    r,
+                    client.0.clone(),
+                    client.1.clone(),
+                    region.clone(),
+                    String::new(),
+                    String::new(),
+                )
+            }
+            Discovered::Gateway {
+                client_id,
+                redirect,
+                token_endpoint,
+                resource,
+            } => {
+                let form = format!(
+                    "grant_type=authorization_code&client_id={}&code={}&redirect_uri={}&code_verifier={}&resource={}",
+                    urlencode(client_id),
+                    urlencode(code),
+                    urlencode(redirect),
+                    urlencode(verifier),
+                    urlencode(resource),
+                );
+                let r = api::http()
+                    .post(token_endpoint)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("Accept", "application/json")
+                    .body(form)
+                    .timeout(Duration::from_secs(30))
+                    .send()
+                    .map_err(api::network_error)?;
+                (
+                    r,
+                    client_id.clone(),
+                    String::new(),
+                    String::new(),
+                    token_endpoint.clone(),
+                    resource.clone(),
+                )
+            }
+        };
         let status = resp.status().as_u16();
         let text = resp.text().unwrap_or_default();
         if !(200..300).contains(&status) {
-            return Err(format!("Quick refused the sign-in ({status}): {}", text.chars().take(300).collect::<String>()));
+            return Err(format!(
+                "Quick refused the sign-in ({status}): {}",
+                text.chars().take(300).collect::<String>()
+            ));
         }
-        let v: Value = serde_json::from_str(&text).map_err(|e| format!("The sign-in's answer was unreadable: {e}"))?;
-        let access = v["accessToken"].as_str().unwrap_or("").to_string();
-        let refresh = v["refreshToken"].as_str().unwrap_or("").to_string();
-        let ttl = v["expiresIn"].as_u64().unwrap_or(3600) as i64;
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("The sign-in's answer was unreadable: {e}"))?;
+        let access = v["accessToken"]
+            .as_str()
+            .or(v["access_token"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let refresh = v["refreshToken"]
+            .as_str()
+            .or(v["refresh_token"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let ttl = v["expiresIn"]
+            .as_u64()
+            .or(v["expires_in"].as_u64())
+            .unwrap_or(3600) as i64;
         if refresh.is_empty() {
             return Err("Quick's sign-in gave no refresh token, so it couldn't be kept.".into());
         }
-        let who = whoami(&access).unwrap_or_default();
-        let mut s = STORE.lock().unwrap();
-        s.access = access;
-        s.refresh = refresh;
-        s.expires_at = crate::api::now_ms() + ttl * 1000;
-        if !who.is_empty() {
-            s.email = who;
+        {
+            let mut s = STORE.lock().unwrap();
+            if !host.is_empty() {
+                s.host = host.to_string();
+            }
+            if !outpost.is_empty() {
+                s.outpost = outpost.to_string();
+            }
+            s.client_id = client_id;
+            s.client_secret = client_secret;
+            s.oidc_region = region;
+            s.token_endpoint = token_endpoint;
+            s.resource = resource;
+            s.access = access.clone();
+            s.refresh = refresh;
+            s.expires_at = crate::api::now_ms() + ttl * 1000;
+            s.error.clear();
         }
+        if let Some(who) = whoami(&access)
+            && !who.is_empty()
+        {
+            STORE.lock().unwrap().email = who;
+        }
+        save();
         Ok(())
     }
 
     /// Who the access token belongs to (best effort, for Home).
     fn whoami(access: &str) -> Option<String> {
         let resp = api::http()
-            .get(format!("https://{}/integration/quick-work/user-info", host_or_default()?))
+            .get(format!(
+                "https://{}/integration/quick-work/user-info",
+                host().ok()?
+            ))
             .bearer_auth(access)
             .timeout(Duration::from_secs(20))
             .send()
             .ok()?;
         let v: Value = serde_json::from_str(&resp.text().ok()?).ok()?;
-        v["email"].as_str().or(v["user"]["email"].as_str()).map(String::from)
-    }
-
-    fn host_or_default() -> Option<String> {
-        let host = STORE.lock().unwrap().host.clone();
-        (!host.is_empty()).then_some(host)
+        v["email"]
+            .as_str()
+            .or(v["user"]["email"].as_str())
+            .map(String::from)
     }
 }
 
@@ -715,22 +1105,37 @@ pub fn event_bodies(buf: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-
 /// A server frame's JSON: Quick's own event wrapper, whose `payload` is the
 /// base64 body ([`crate::quick::event_bodies`]).
 pub fn unwrap_frame(payload: &[u8]) -> Option<Value> {
     let v: Value = serde_json::from_slice(payload).ok()?;
     let inner = v.get("payload")?.as_str()?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(inner).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(inner)
+        .ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
 // ---------------------------------------------------------------- the request
 
+/// Prepended to user messages sent to Quick so its agent runs normal CLI
+/// commands through `subprocess` (or uses `ripgrep`, `fdfind`, `folder_list`)
+/// instead of writing long Python scripts to walk directories and files.
+pub(crate) const PYTHON_DIRECTIVE: &str = "[Directive: Do not run long Python scripts to walk through or search files (for example with os.walk or custom file-scanning loops). Instead, run normal commands through subprocess (such as rg, git, dir, ls, findstr) or use the ripgrep, fdfind, and folder_list tools directly.]";
+
 /// The `user_message` frame for Oak request `r` on thread `thread`: the
 /// newest user turn, since Quick keeps the thread's history.
 fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> Value {
-    let text = newest_user_text(r);
+    let newest = newest_user_text(r);
+    let text = if r
+        .instruction
+        .as_deref()
+        .is_some_and(|i| !i.trim().is_empty())
+    {
+        newest
+    } else {
+        format!("{PYTHON_DIRECTIVE}\n\n{newest}")
+    };
     let trace = hex_uuid();
     let mut payload = json!({
         "traceId": trace,
@@ -775,7 +1180,12 @@ fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> 
 /// twice. With nothing new it is told to carry on instead. A request with an
 /// instruction of its own (a summary) sends that.
 fn newest_user_text(r: &Request) -> String {
-    if let Some(i) = r.instruction.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+    if let Some(i) = r
+        .instruction
+        .as_deref()
+        .map(str::trim)
+        .filter(|i| !i.is_empty())
+    {
         return i.to_string();
     }
     match new_user_text(r) {
@@ -797,9 +1207,17 @@ pub(crate) fn new_user_text(r: &Request) -> Option<String> {
         if m["role"] != "user" {
             continue;
         }
-        let Some(blocks) = m["content"].as_array() else { continue };
-        let said = |b: &&Value| b["type"] == "text" && b.get("_oak_file").is_none() && b.get(STEERED_KEY).is_none();
-        let text: Vec<&str> = blocks.iter().filter(said).filter_map(|b| b["text"].as_str()).collect();
+        let Some(blocks) = m["content"].as_array() else {
+            continue;
+        };
+        let said = |b: &&Value| {
+            b["type"] == "text" && b.get("_oak_file").is_none() && b.get(STEERED_KEY).is_none()
+        };
+        let text: Vec<&str> = blocks
+            .iter()
+            .filter(said)
+            .filter_map(|b| b["text"].as_str())
+            .collect();
         parts.push(text.join("\n"));
     }
     parts.reverse();
@@ -816,7 +1234,14 @@ pub(crate) const STEERED_KEY: &str = "_oak_steered";
 /// turn on `thread` runs, sent as Quick's app sends one: `mid_turn`, with a
 /// `message_id` of its own (`id`), which Quick names when its agent takes the
 /// message in at its next step (`steering_ingested`).
-pub(crate) fn steer_message(r: &Request, text: &str, id: &str, thread: &str, m: &Model, outpost: Option<&str>) -> Value {
+pub(crate) fn steer_message(
+    r: &Request,
+    text: &str,
+    id: &str,
+    thread: &str,
+    m: &Model,
+    outpost: Option<&str>,
+) -> Value {
     let mut said = r.clone();
     said.messages = vec![json!({"role": "user", "content": [{"type": "text", "text": text}]})];
     said.instruction = None;
@@ -834,7 +1259,22 @@ fn hex_uuid() -> String {
     let b: [u8; 16] = rand::random();
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6] & 0x0f, b[7], (b[8] & 0x3f) | 0x80, b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6] & 0x0f,
+        b[7],
+        (b[8] & 0x3f) | 0x80,
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 
@@ -891,6 +1331,10 @@ pub(crate) struct Turn {
     /// (Quick took in a message the user typed and its message went on in a
     /// new reply, `resume`): Quick's whole text can run it in too.
     earlier: Vec<String>,
+    /// Assistant `message_id`s from earlier turns on this thread, so a
+    /// replayed or trailing `message_start` from an interrupted or paused
+    /// turn is never mistaken for the new turn's reply.
+    pub(crate) ignore_messages: std::collections::HashSet<String>,
 }
 
 /// A call in the turn: one Quick's agent made (`tool_start`), one Oak runs
@@ -912,8 +1356,16 @@ struct QuickCall {
 /// nests under `params.arguments` when it hands a call to Oak.
 fn quick_input(p: &Value) -> Value {
     let nested = &p["arguments"]["params"]["arguments"];
-    let input = if nested.is_null() { &p["arguments"] } else { nested };
-    if input.is_null() { json!({}) } else { input.clone() }
+    let input = if nested.is_null() {
+        &p["arguments"]
+    } else {
+        nested
+    };
+    if input.is_null() {
+        json!({})
+    } else {
+        input.clone()
+    }
 }
 
 /// Whether `quick` (a tool as Quick's agent called it) and `device` (the
@@ -942,7 +1394,9 @@ fn quick_result(p: &Value) -> Result<String, String> {
     };
     match error {
         Some(e) => Err(e),
-        None if p["status"].as_str() == Some("error") || p["is_error"].as_bool() == Some(true) => Err(said),
+        None if p["status"].as_str() == Some("error") || p["is_error"].as_bool() == Some(true) => {
+            Err(said)
+        }
         None => Ok(said),
     }
 }
@@ -952,7 +1406,11 @@ impl Turn {
     /// assistant's `message_id` when it starts the reply; until then the turn
     /// takes the first one the thread sends).
     pub(crate) fn for_message(thread: &str, message: &str) -> Turn {
-        Turn { thread: thread.to_string(), message: message.to_string(), ..Default::default() }
+        Turn {
+            thread: thread.to_string(),
+            message: message.to_string(),
+            ..Default::default()
+        }
     }
 
     /// Whether `v` is this turn's. Other threads' frames never are. Joining
@@ -973,6 +1431,9 @@ impl Turn {
         match self.message.as_str() {
             // Not begun: only a start opens this turn.
             "" => {
+                if self.ignore_messages.contains(&message) {
+                    return false;
+                }
                 let k = v["type"].as_str().unwrap_or("");
                 let opens = matches!(k, "message_start");
                 if opens {
@@ -985,8 +1446,12 @@ impl Turn {
             // assistant message: that is this turn's too, and its text is its
             // own block.
             _ => {
+                if self.ignore_messages.contains(&message) {
+                    return false;
+                }
                 let k = v["type"].as_str().unwrap_or("");
                 if k == "message_start" && self.awaiting_continuation {
+                    self.ignore_messages.insert(self.message.clone());
                     self.message = message;
                     self.awaiting_continuation = false;
                     self.text_at = None;
@@ -1033,7 +1498,10 @@ impl Turn {
     /// comes with its first text, and once. A text block something came
     /// after is done: it ends as the next one opens.
     fn open_text(&mut self, out: &mut Vec<Event>) -> usize {
-        if let Some(i) = self.text_at.filter(|&i| self.text_open && i + 1 == self.blocks.len()) {
+        if let Some(i) = self
+            .text_at
+            .filter(|&i| self.text_open && i + 1 == self.blocks.len())
+        {
             return i;
         }
         if let Some(i) = self.text_at.filter(|_| self.text_open) {
@@ -1041,7 +1509,10 @@ impl Turn {
         }
         let i = self.text();
         self.text_open = true;
-        out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+        out.push(Event::Block {
+            index: i,
+            block: self.blocks[i].clone(),
+        });
         i
     }
 
@@ -1051,9 +1522,13 @@ impl Turn {
             out.push(Event::BlockEnd { index: i });
         }
         let i = self.blocks.len();
-        self.blocks.push(json!({"type": "reasoning", "text": "", "by": "quick"}));
+        self.blocks
+            .push(json!({"type": "reasoning", "text": "", "by": "quick"}));
         self.thinking_at = Some(i);
-        out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+        out.push(Event::Block {
+            index: i,
+            block: self.blocks[i].clone(),
+        });
         i
     }
 
@@ -1085,7 +1560,10 @@ impl Turn {
                     if let Some(t) = self.blocks[i]["text"].as_str().map(str::to_string) {
                         self.blocks[i]["text"] = json!(format!("{t}{text}"));
                     }
-                    out.push(Event::Reasoning { index: i, text: text.to_string() });
+                    out.push(Event::Reasoning {
+                        index: i,
+                        text: text.to_string(),
+                    });
                 }
             }
             "thinking_complete" => {
@@ -1093,7 +1571,11 @@ impl Turn {
                 // follows the last of it is this thought whole, which stands
                 // for its deltas (some may never have come, or none did).
                 let total = p["thinking"].as_str().unwrap_or("").to_string();
-                let newest = total.strip_prefix(self.thinking_given.as_str()).unwrap_or(&total).trim().to_string();
+                let newest = total
+                    .strip_prefix(self.thinking_given.as_str())
+                    .unwrap_or(&total)
+                    .trim()
+                    .to_string();
                 if !total.is_empty() {
                     self.thinking_given = total.clone();
                 }
@@ -1101,10 +1583,17 @@ impl Turn {
                     self.open_thinking(&mut out);
                 }
                 if let Some(i) = self.thinking_at.take() {
-                    let had = self.blocks[i]["text"].as_str().unwrap_or("").trim().to_string();
+                    let had = self.blocks[i]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !newest.is_empty() && had != newest {
                         self.blocks[i]["text"] = json!(newest);
-                        out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                        out.push(Event::Block {
+                            index: i,
+                            block: self.blocks[i].clone(),
+                        });
                     }
                     out.push(Event::BlockEnd { index: i });
                 }
@@ -1116,7 +1605,10 @@ impl Turn {
                     if let Some(t) = self.blocks[i]["text"].as_str().map(str::to_string) {
                         self.blocks[i]["text"] = json!(format!("{t}{text}"));
                     }
-                    out.push(Event::Text { index: i, text: text.to_string() });
+                    out.push(Event::Text {
+                        index: i,
+                        text: text.to_string(),
+                    });
                 }
             }
             "text_complete" | "message_complete" => {
@@ -1125,7 +1617,8 @@ impl Turn {
                 // made of it, so it replaces them.
                 let text = p["text"].as_str().unwrap_or("");
                 let section = kind == "text_complete";
-                if !text.is_empty() && (section || (!self.section_given && self.message_texts <= 1)) {
+                if !text.is_empty() && (section || (!self.section_given && self.message_texts <= 1))
+                {
                     self.settle_text(text, section, &mut out);
                 }
                 if kind == "message_complete" {
@@ -1138,10 +1631,17 @@ impl Turn {
             // whether Quick runs it on its server or hands it to Oak (then
             // the call Oak runs is this block, not one more).
             "tool_start" => {
-                let id = p["tool_id"].as_str().or(p["tool_call_id"].as_str()).unwrap_or("").to_string();
+                let id = p["tool_id"]
+                    .as_str()
+                    .or(p["tool_call_id"].as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let name = p["tool_name"].as_str().unwrap_or("").to_string();
                 let input = quick_input(p);
-                if !id.is_empty() && !name.is_empty() && !self.quick_calls.iter().any(|c| c.tool_id == id) {
+                if !id.is_empty()
+                    && !name.is_empty()
+                    && !self.quick_calls.iter().any(|c| c.tool_id == id)
+                {
                     match self.unreported_device_call(&name, &input) {
                         Some(k) => self.quick_calls[k].tool_id = id,
                         None => {
@@ -1150,8 +1650,15 @@ impl Turn {
                             }
                             let i = self.blocks.len();
                             self.blocks.push(json!({"type": "tool_call", "id": id, "name": name, "input": input}));
-                            out.push(Event::Block { index: i, block: self.blocks[i].clone() });
-                            self.quick_calls.push(QuickCall { tool_id: id, block: i, ..Default::default() });
+                            out.push(Event::Block {
+                                index: i,
+                                block: self.blocks[i].clone(),
+                            });
+                            self.quick_calls.push(QuickCall {
+                                tool_id: id,
+                                block: i,
+                                ..Default::default()
+                            });
                         }
                     }
                 }
@@ -1159,20 +1666,33 @@ impl Turn {
             "tool_arguments" => {
                 let id = p["tool_id"].as_str().unwrap_or("");
                 let input = quick_input(p);
-                if let Some(c) = self.quick_calls.iter().find(|c| !id.is_empty() && c.tool_id == id && !c.device && !c.done)
+                if let Some(c) = self
+                    .quick_calls
+                    .iter()
+                    .find(|c| !id.is_empty() && c.tool_id == id && !c.device && !c.done)
                     && input.as_object().is_some_and(|o| !o.is_empty())
                     && self.blocks[c.block]["input"] != input
                 {
                     let i = c.block;
                     self.blocks[i]["input"] = input;
-                    out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                    out.push(Event::Block {
+                        index: i,
+                        block: self.blocks[i].clone(),
+                    });
                 }
             }
             // What a call Quick ran returned: its block ends with it. Quick
             // records the calls Oak ran too; those end with Oak's result.
             "tool_result" => {
-                let id = ["tool_id", "tool_call_id", "tool_use_id", "id"].iter().find_map(|k| p[*k].as_str()).unwrap_or("");
-                if let Some(k) = self.quick_calls.iter().position(|c| !id.is_empty() && c.tool_id == id && !c.device && !c.done) {
+                let id = ["tool_id", "tool_call_id", "tool_use_id", "id"]
+                    .iter()
+                    .find_map(|k| p[*k].as_str())
+                    .unwrap_or("");
+                if let Some(k) = self
+                    .quick_calls
+                    .iter()
+                    .position(|c| !id.is_empty() && c.tool_id == id && !c.device && !c.done)
+                {
                     let input = quick_input(p);
                     let i = self.quick_calls[k].block;
                     if input.as_object().is_some_and(|o| !o.is_empty()) {
@@ -1196,7 +1716,8 @@ impl Turn {
                     if let Some(t) = self.thinking_at.take() {
                         out.push(Event::BlockEnd { index: t });
                     }
-                    let block = json!({"type": "tool_call", "id": id, "name": name, "input": input});
+                    let block =
+                        json!({"type": "tool_call", "id": id, "name": name, "input": input});
                     // The call Quick reported is this one: its block becomes
                     // the call Oak runs.
                     match self.reported_call(&name, &input) {
@@ -1204,13 +1725,23 @@ impl Turn {
                             self.quick_calls[k].device = true;
                             let i = self.quick_calls[k].block;
                             self.blocks[i] = block;
-                            out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+                            out.push(Event::Block {
+                                index: i,
+                                block: self.blocks[i].clone(),
+                            });
                         }
                         None => {
                             let i = self.blocks.len();
                             self.blocks.push(block);
-                            out.push(Event::Block { index: i, block: self.blocks[i].clone() });
-                            self.quick_calls.push(QuickCall { block: i, device: true, ..Default::default() });
+                            out.push(Event::Block {
+                                index: i,
+                                block: self.blocks[i].clone(),
+                            });
+                            self.quick_calls.push(QuickCall {
+                                block: i,
+                                device: true,
+                                ..Default::default()
+                            });
                         }
                     }
                     self.calls.push((id, name, input));
@@ -1218,7 +1749,11 @@ impl Turn {
             }
             "turn_usage" => {
                 let n = |k: &str| p[k].as_u64().unwrap_or(0);
-                self.usage = (n("input_tokens") + n("cache_read_tokens") + n("cache_write_tokens"), n("cache_read_tokens"), n("output_tokens"));
+                self.usage = (
+                    n("input_tokens") + n("cache_read_tokens") + n("cache_write_tokens"),
+                    n("cache_read_tokens"),
+                    n("output_tokens"),
+                );
                 if let Some(m) = p["resolved_model_id"].as_str().filter(|m| !m.is_empty()) {
                     self.model = m.to_string();
                 }
@@ -1248,7 +1783,11 @@ impl Turn {
         // deltas came, its whole text not yet); otherwise it is new text, at
         // the end.
         let late = self.text_at.filter(|&i| {
-            self.text_open && i + 1 < self.blocks.len() && self.blocks[i]["text"].as_str().is_some_and(|t| t.len() > self.section_at)
+            self.text_open
+                && i + 1 < self.blocks.len()
+                && self.blocks[i]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.len() > self.section_at)
         });
         let i = match late {
             Some(i) => i,
@@ -1259,17 +1798,32 @@ impl Turn {
             return;
         }
         let had = self.blocks[i]["text"].as_str().unwrap_or("").to_string();
-        let start = if section { self.section_at.min(had.len()) } else { 0 };
+        let start = if section {
+            self.section_at.min(had.len())
+        } else {
+            0
+        };
         let kept = had.get(..start).unwrap_or("");
         // A section's whole text that already holds the block's sections
         // before it is the block's whole text.
-        let want = if !kept.is_empty() && text.starts_with(kept) { text.to_string() } else { format!("{kept}{text}") };
+        let want = if !kept.is_empty() && text.starts_with(kept) {
+            text.to_string()
+        } else {
+            format!("{kept}{text}")
+        };
         if want != had {
             if std::env::var("OAK_QUICK_DEBUG").is_ok() {
-                eprintln!("TEXT the deltas made {} bytes of a section Quick wrote as {}; Quick's is kept", had.len().saturating_sub(start), text.len());
+                eprintln!(
+                    "TEXT the deltas made {} bytes of a section Quick wrote as {}; Quick's is kept",
+                    had.len().saturating_sub(start),
+                    text.len()
+                );
             }
             self.blocks[i]["text"] = json!(want);
-            out.push(Event::Block { index: i, block: self.blocks[i].clone() });
+            out.push(Event::Block {
+                index: i,
+                block: self.blocks[i].clone(),
+            });
         }
         if section {
             self.section_at = want.len();
@@ -1281,16 +1835,30 @@ impl Turn {
     /// Oak yet for it: the one of `name` with this input, else the first of
     /// `name`.
     fn reported_call(&self, name: &str, input: &Value) -> Option<usize> {
-        let open = |c: &QuickCall| !c.device && !c.done && same_tool(self.blocks[c.block]["name"].as_str().unwrap_or(""), name);
-        let same = self.quick_calls.iter().position(|c| open(c) && self.blocks[c.block]["input"] == *input);
+        let open = |c: &QuickCall| {
+            !c.device
+                && !c.done
+                && same_tool(self.blocks[c.block]["name"].as_str().unwrap_or(""), name)
+        };
+        let same = self
+            .quick_calls
+            .iter()
+            .position(|c| open(c) && self.blocks[c.block]["input"] == *input);
         same.or_else(|| self.quick_calls.iter().position(open))
     }
 
     /// A call Oak runs that Quick hasn't reported yet, for Quick's report of
     /// a call of `name` (the one with this input, else the first).
     fn unreported_device_call(&self, name: &str, input: &Value) -> Option<usize> {
-        let open = |c: &QuickCall| c.device && c.tool_id.is_empty() && same_tool(name, self.blocks[c.block]["name"].as_str().unwrap_or(""));
-        let same = self.quick_calls.iter().position(|c| open(c) && self.blocks[c.block]["input"] == *input);
+        let open = |c: &QuickCall| {
+            c.device
+                && c.tool_id.is_empty()
+                && same_tool(name, self.blocks[c.block]["name"].as_str().unwrap_or(""))
+        };
+        let same = self
+            .quick_calls
+            .iter()
+            .position(|c| open(c) && self.blocks[c.block]["input"] == *input);
         same.or_else(|| self.quick_calls.iter().position(open))
     }
 
@@ -1303,17 +1871,29 @@ impl Turn {
     /// taken; text that starts with none is taken as it is.
     fn own_text<'a>(&self, text: &'a str, i: usize) -> &'a str {
         let from = self.message_from.min(i);
-        let here = self.blocks[from..i].iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str());
-        let above: Vec<&str> = self.earlier.iter().map(String::as_str).chain(here).map(str::trim).filter(|t| !t.is_empty()).collect();
+        let here = self.blocks[from..i]
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str());
+        let above: Vec<&str> = self
+            .earlier
+            .iter()
+            .map(String::as_str)
+            .chain(here)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect();
         for k in 0..above.len() {
             let mut rest = text;
-            let all = above[k..].iter().all(|t| match rest.trim_start().strip_prefix(t) {
-                Some(r) => {
-                    rest = r;
-                    true
-                }
-                None => false,
-            });
+            let all = above[k..]
+                .iter()
+                .all(|t| match rest.trim_start().strip_prefix(t) {
+                    Some(r) => {
+                        rest = r;
+                        true
+                    }
+                    None => false,
+                });
             if all {
                 return rest.trim_start();
             }
@@ -1324,8 +1904,23 @@ impl Turn {
     /// Oak ran call `id` (`result`: what it returned, or why it failed): its
     /// block ends, with the result, which goes in the transcript as the
     /// call's (the agent doesn't run it again).
-    pub(crate) fn finished_call(&mut self, id: &str, result: &Result<String, String>) -> Vec<Event> {
-        let Some(i) = self.blocks.iter().rposition(|b| b["type"] == "tool_call" && b["id"] == id) else { return vec![] };
+    pub(crate) fn finished_call(
+        &mut self,
+        id: &str,
+        result: &Result<String, String>,
+    ) -> Vec<Event> {
+        let Some(i) = self
+            .blocks
+            .iter()
+            .rposition(|b| b["type"] == "tool_call" && b["id"] == id)
+        else {
+            return vec![];
+        };
+        for c in &mut self.quick_calls {
+            if c.block == i {
+                c.done = true;
+            }
+        }
         self.end_call(i, id, result)
     }
 
@@ -1337,7 +1932,13 @@ impl Turn {
             Err(e) => (e.clone(), true),
         };
         self.blocks[i]["_oak_result"] = oak::tool_result(&json!(id), json!(content), is_error);
-        let out = vec![Event::Block { index: i, block: self.blocks[i].clone() }, Event::BlockEnd { index: i }];
+        let out = vec![
+            Event::Block {
+                index: i,
+                block: self.blocks[i].clone(),
+            },
+            Event::BlockEnd { index: i },
+        ];
         // The transcript's copy of the call has no result in it.
         if let Some(o) = self.blocks[i].as_object_mut() {
             o.remove("_oak_result");
@@ -1356,17 +1957,34 @@ impl Turn {
         }
         for k in 0..self.quick_calls.len() {
             let c = self.quick_calls[k].clone();
-            if c.device || c.done {
+            if c.done {
+                continue;
+            }
+            if c.device && stop != crate::agent::CUT_SHORT && stop != stop::TOOL_CALLS {
                 continue;
             }
             self.quick_calls[k].done = true;
-            let call = self.blocks[c.block]["id"].as_str().unwrap_or("").to_string();
-            out.extend(self.end_call(c.block, &call, &Ok("Quick didn't say what this call returned.".into())));
+            let call = self.blocks[c.block]["id"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let result = if stop == crate::agent::CUT_SHORT {
+                Err("Stopped: the user interrupted the turn.".into())
+            } else if c.device {
+                Err("Stopped: the session was paused.".into())
+            } else {
+                Ok("Quick didn't say what this call returned.".into())
+            };
+            out.extend(self.end_call(c.block, &call, &result));
         }
         if let Some(i) = self.text_at.filter(|_| self.text_open) {
+            self.text_open = false;
             out.push(Event::BlockEnd { index: i });
         }
-        out.push(Event::Stop { reason: self.stop.clone(), detail: None });
+        out.push(Event::Stop {
+            reason: self.stop.clone(),
+            detail: None,
+        });
         out
     }
 
@@ -1376,7 +1994,12 @@ impl Turn {
     /// (`earlier`), so its whole text, which can run that in, repeats none of it.
     pub(crate) fn resume(&mut self) {
         let from = self.message_from.min(self.blocks.len());
-        let texts: Vec<String> = self.blocks[from..].iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).map(String::from).collect();
+        let texts: Vec<String> = self.blocks[from..]
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .map(String::from)
+            .collect();
         self.earlier.extend(texts);
         self.blocks.clear();
         self.text_at = None;
@@ -1419,10 +2042,19 @@ mod tests {
 
     #[test]
     fn models_and_effort() {
-        assert!(serves("smart") && serves("fast") && serves("balanced") && !serves("claude-opus-5-5"));
-        assert_eq!(crate::providers::Kind::of("smart"), crate::providers::Kind::Quick);
+        assert!(
+            serves("smart") && serves("fast") && serves("balanced") && !serves("claude-opus-5-5")
+        );
+        assert_eq!(
+            crate::providers::Kind::of("smart"),
+            crate::providers::Kind::Quick
+        );
         let m = model("smart").unwrap();
-        let mut r = Request { provider: crate::providers::Kind::Quick, model: "smart".into(), ..Default::default() };
+        let mut r = Request {
+            provider: crate::providers::Kind::Quick,
+            model: "smart".into(),
+            ..Default::default()
+        };
         r.effort = Some("high".into());
         assert_eq!(effort(&r, m), "high");
         r.effort = Some("ultra".into());
@@ -1438,7 +2070,12 @@ mod tests {
         let outer: Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(outer["eventType"], "rawInputEvent");
         let body = outer["payload"]["payload"].as_str().unwrap();
-        let back: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(body).unwrap()).unwrap();
+        let back: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(back, v);
     }
 
@@ -1453,7 +2090,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(newest_user_text(&r), "new");
-        let empty = Request { instruction: Some("Summarize.".into()), ..Default::default() };
+        let empty = Request {
+            instruction: Some("Summarize.".into()),
+            ..Default::default()
+        };
         assert_eq!(newest_user_text(&empty), "Summarize.");
     }
 
@@ -1505,17 +2145,127 @@ mod tests {
     }
 
     /// A message typed mid-turn goes as Quick's app sends one (the capture's
-    /// "NO TESTING"): `mid_turn`, with its own message id.
+    /// "NO TESTING"): `mid_turn`, with its own message id, and the Python
+    /// directive prepended.
     #[test]
     fn a_mid_turn_message_is_sent_as_quicks_app_sends_it() {
         let m = model("smart").unwrap();
-        let v = steer_message(&Request::default(), "NO TESTING", "msg-87fa24c3", "th", m, Some("dev"));
+        let v = steer_message(
+            &Request::default(),
+            "NO TESTING",
+            "msg-87fa24c3",
+            "th",
+            m,
+            Some("dev"),
+        );
         assert_eq!(v["type"], "user_message");
-        assert_eq!(v["payload"]["text"], "NO TESTING");
+        assert_eq!(
+            v["payload"]["text"],
+            format!("{PYTHON_DIRECTIVE}\n\nNO TESTING")
+        );
         assert_eq!(v["payload"]["mid_turn"], true);
         assert_eq!(v["payload"]["message_id"], "msg-87fa24c3");
         assert_eq!(v["payload"]["thread_id"], "th");
         assert_eq!(v["payload"]["outpostId"], "dev");
+    }
+
+    #[test]
+    fn user_message_prepends_python_subprocess_directive() {
+        let m = model("smart").unwrap();
+        let r = Request {
+            messages: vec![
+                json!({"role": "user", "content": [{"type": "text", "text": "find all todo comments"}]}),
+            ],
+            ..Default::default()
+        };
+        let v = user_message(&r, "th", m, Some("dev"));
+        let sent = v["payload"]["text"].as_str().unwrap();
+        assert!(sent.starts_with(PYTHON_DIRECTIVE), "{sent}");
+        assert!(
+            sent.contains("subprocess") && sent.ends_with("\n\nfind all todo comments"),
+            "{sent}"
+        );
+    }
+
+    #[test]
+    fn the_login_listener_waits_through_unrelated_requests() {
+        use std::io::{Read, Write};
+        let (listeners, port) = login::listen().expect("a loopback port");
+        let epoch = login::login_epoch();
+        let server = std::thread::spawn(move || {
+            login::wait_for_login(listeners, port, "n1", "s1", "c1", epoch)
+        });
+        let mut ask = |line: &str| -> String {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            s.write_all(line.as_bytes()).unwrap();
+            let mut out = String::new();
+            let _ = s.read_to_string(&mut out);
+            out
+        };
+        // Another program's request (or the browser's own) changes nothing.
+        let ico = ask("GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        assert!(ico.starts_with("HTTP/1.1 404"), "{ico}");
+        // The workspace's callback: the code comes back with its host.
+        let done = ask(
+            "GET /?code=abc&state=s1&tenantUrl=https%3A%2F%2Fcell.example.com&outpostId=dev HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(done.starts_with("HTTP/1.1 200"), "{done}");
+        let got = server
+            .join()
+            .unwrap()
+            .expect("the login listener")
+            .expect("a code");
+        assert_eq!(got.0, "abc");
+        assert_eq!(got.1, "cell.example.com");
+        assert_eq!(got.2, "dev");
+        assert!(got.3.is_none(), "no discovery was needed for a code");
+    }
+
+    #[test]
+    fn login_discovery_builds_authorize_redirect_without_nonce() {
+        let q = query(
+            "nonce=n123&issuerUrl=https%3A%2F%2Fidentitycenter.amazonaws.com%2Fssoins-72233782ae72fb91&tenantUrl=https%3A%2F%2Fcell.example.com&idcRegion=us-east-1",
+        );
+        let (auth_url, disc) = login::resolve_discovery(
+            &q,
+            18080,
+            "n123",
+            "st456",
+            "ch789",
+            |redirect, issuer, region| {
+                assert_eq!(redirect, "http://127.0.0.1:18080");
+                assert_eq!(
+                    issuer,
+                    "https://identitycenter.amazonaws.com/ssoins-72233782ae72fb91"
+                );
+                assert_eq!(region, "us-east-1");
+                Ok(("cid".into(), "csec".into()))
+            },
+        )
+        .unwrap();
+        assert!(
+            auth_url.starts_with("https://oidc.us-east-1.amazonaws.com/authorize?"),
+            "{auth_url}"
+        );
+        assert!(
+            auth_url.contains("client_id=cid")
+                && auth_url.contains("state=st456")
+                && auth_url.contains("code_challenge=ch789"),
+            "{auth_url}"
+        );
+        assert!(
+            !auth_url.contains("nonce="),
+            "authorize URL must not carry nonce: {auth_url}"
+        );
+        assert!(matches!(disc, login::Discovered::Idc { .. }));
+        // Mismatched nonce is rejected.
+        assert!(
+            login::resolve_discovery(&q, 18080, "wrong", "st456", "ch789", |_, _, _| Ok((
+                "c".into(),
+                "s".into()
+            )))
+            .is_err()
+        );
     }
 
     /// Quick took in a message: the reply Oak read ends (`STEERED`), the
@@ -1528,13 +2278,22 @@ mod tests {
         t.feed(&f("message_start", json!({"role": "assistant"})));
         t.feed(&f("text_delta", json!({"delta": "Looking now."})));
         let ev = t.close(stop::STEERED);
-        assert!(ev.contains(&Event::Stop { reason: stop::STEERED.into(), detail: None }));
+        assert!(ev.contains(&Event::Stop {
+            reason: stop::STEERED.into(),
+            detail: None
+        }));
         assert_eq!(t.blocks()[0]["text"], "Looking now.");
         t.resume();
         assert!(t.blocks().is_empty());
         t.feed(&f("text_delta", json!({"delta": "No tests, then."})));
-        t.feed(&f("text_complete", json!({"text": "Looking now.No tests, then."})));
-        t.feed(&f("message_complete", json!({"text": "Looking now.No tests, then."})));
+        t.feed(&f(
+            "text_complete",
+            json!({"text": "Looking now.No tests, then."}),
+        ));
+        t.feed(&f(
+            "message_complete",
+            json!({"text": "Looking now.No tests, then."}),
+        ));
         assert_eq!(t.stop, stop::COMPLETE);
         let b = t.blocks();
         assert_eq!(b.len(), 1);
@@ -1545,7 +2304,9 @@ mod tests {
     #[test]
     fn a_summary_sends_its_instruction() {
         let r = Request {
-            messages: vec![json!({"role": "user", "content": [{"type": "text", "text": "fix the bug"}]})],
+            messages: vec![
+                json!({"role": "user", "content": [{"type": "text", "text": "fix the bug"}]}),
+            ],
             instruction: Some("Summarize the conversation.".into()),
             ..Default::default()
         };
@@ -1613,15 +2374,30 @@ mod tests {
             })
             .collect();
         assert_eq!(opened.len(), 1, "the text block is announced exactly once");
-        let first_text = ev.iter().position(|e| matches!(e, Event::Text { .. })).unwrap();
-        let block_at = ev.iter().position(|e| matches!(e, Event::Block { block, .. } if block["type"] == "text")).unwrap();
-        assert!(block_at < first_text, "the block comes before the text that fills it");
+        let first_text = ev
+            .iter()
+            .position(|e| matches!(e, Event::Text { .. }))
+            .unwrap();
+        let block_at = ev
+            .iter()
+            .position(|e| matches!(e, Event::Block { block, .. } if block["type"] == "text"))
+            .unwrap();
+        assert!(
+            block_at < first_text,
+            "the block comes before the text that fills it"
+        );
         // The block it opened is the one its deltas name.
-        let text_at = ev.iter().find_map(|e| match e {
-            Event::Text { index, .. } => Some(*index),
-            _ => None,
-        }).unwrap();
-        assert_eq!(opened[0], text_at, "the text lands in the block that was opened");
+        let text_at = ev
+            .iter()
+            .find_map(|e| match e {
+                Event::Text { index, .. } => Some(*index),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            opened[0], text_at,
+            "the text lands in the block that was opened"
+        );
         assert_eq!(t.text_at, Some(text_at));
     }
 
@@ -1649,14 +2425,26 @@ mod tests {
             second.extend(t.feed(&f));
         }
         assert!(!second.is_empty(), "the continuation is part of the turn");
-        let texts: Vec<&str> = second.iter().filter_map(|e| match e {
-            Event::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let texts: Vec<&str> = second
+            .iter()
+            .filter_map(|e| match e {
+                Event::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(texts, ["it is there"]);
         // Both messages' text is in the reply.
-        let all: String = t.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join("|");
-        assert!(all.contains("let me look") && all.contains("it is there"), "{all}");
+        let all: String = t
+            .blocks()
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .map(|b| b["text"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(
+            all.contains("let me look") && all.contains("it is there"),
+            "{all}"
+        );
     }
 
     /// After Oak gives back results the relay lost, Quick's answer comes in
@@ -1679,8 +2467,16 @@ mod tests {
         ] {
             ev.extend(t.feed(&f));
         }
-        assert!(ev.iter().any(|e| matches!(e, Event::Text { text, .. } if text == "34711")));
-        let texts: Vec<String> = t.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect();
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, Event::Text { text, .. } if text == "34711"))
+        );
+        let texts: Vec<String> = t
+            .blocks()
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .map(|b| b["text"].as_str().unwrap_or("").to_string())
+            .collect();
         assert_eq!(texts.len(), 2, "{texts:?}");
     }
 
@@ -1696,18 +2492,29 @@ mod tests {
             f("text_delta", json!({"delta": "hidden "})),
             f("text_delta", json!({"delta": "-a"})),
             f("text_delta", json!({"delta": "than plain"})),
-            f("text_complete", json!({"text": "hidden dotfiles, so it's closer to `ls -a` than plain `ls`:"})),
+            f(
+                "text_complete",
+                json!({"text": "hidden dotfiles, so it's closer to `ls -a` than plain `ls`:"}),
+            ),
             f("text_delta", json!({"delta": " after"})),
             f("text_complete", json!({"text": " after the tool."})),
             f("message_complete", json!({"text": " after the tool."})),
         ] {
             ev.extend(t.feed(&frame));
         }
-        let text = t.blocks().iter().find(|b| b["type"] == "text").unwrap()["text"].as_str().unwrap().to_string();
-        assert_eq!(text, "hidden dotfiles, so it's closer to `ls -a` than plain `ls`: after the tool.");
+        let text = t.blocks().iter().find(|b| b["type"] == "text").unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            text,
+            "hidden dotfiles, so it's closer to `ls -a` than plain `ls`: after the tool."
+        );
         // Oak was told: the last block it was given for the text is whole.
         let last = ev.iter().rev().find_map(|e| match e {
-            Event::Block { block, .. } if block["type"] == "text" => block["text"].as_str().map(String::from),
+            Event::Block { block, .. } if block["type"] == "text" => {
+                block["text"].as_str().map(String::from)
+            }
             _ => None,
         });
         assert_eq!(last.as_deref(), Some(text.as_str()));
@@ -1732,9 +2539,14 @@ mod tests {
         ] {
             ev.extend(t.feed(&frame));
         }
-        assert!(!ev.iter().any(|e| matches!(e, Event::BlockEnd { .. })), "the call doesn't end before it has run");
+        assert!(
+            !ev.iter().any(|e| matches!(e, Event::BlockEnd { .. })),
+            "the call doesn't end before it has run"
+        );
         let done = t.finished_call("c1", &Ok("{\"entries\": []}".into()));
-        let (Event::Block { block, .. }, Event::BlockEnd { .. }) = (&done[0], &done[1]) else { panic!("{done:?}") };
+        let (Event::Block { block, .. }, Event::BlockEnd { .. }) = (&done[0], &done[1]) else {
+            panic!("{done:?}")
+        };
         assert_eq!(block["_oak_result"]["type"], "tool_result");
         assert_eq!(block["_oak_result"]["call_id"], "c1");
         assert_eq!(block["input"]["path"], "/C:/x", "the input is Quick's");
@@ -1760,13 +2572,19 @@ mod tests {
         assert_eq!(t.calls[0].1, "EXECUTE");
         assert_eq!(t.calls[0].2["command"], "ls");
         assert_eq!(t.stop, stop::COMPLETE);
-        assert!(ev.iter().any(|e| matches!(e, Event::Text { text, .. } if text == "Hi")));
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, Event::Text { text, .. } if text == "Hi"))
+        );
         let blocks = t.blocks();
         // A thought Quick sends without its start is shown too, where it came.
         let kinds: Vec<&str> = blocks.iter().filter_map(|b| b["type"].as_str()).collect();
         assert_eq!(kinds, ["reasoning", "text", "tool_call"]);
         assert_eq!(blocks[0]["text"], "hm");
-        assert_eq!(blocks.iter().find(|b| b["type"] == "tool_call").unwrap()["input"]["command"], "ls");
+        assert_eq!(
+            blocks.iter().find(|b| b["type"] == "tool_call").unwrap()["input"]["command"],
+            "ls"
+        );
     }
 
     /// Quick sends a whole agent loop as one message (as its app's captures
@@ -1793,10 +2611,16 @@ mod tests {
             call("c1"),
             // The next thought: deltas alone, some of them lost.
             f("thinking_delta", json!({"delta": "Nothing there"})),
-            f("thinking_complete", json!({"thinking": "Look first.\n\nNothing there, so search.\n\n"})),
+            f(
+                "thinking_complete",
+                json!({"thinking": "Look first.\n\nNothing there, so search.\n\n"}),
+            ),
             call("c2"),
             // A thought whose deltas never came at all.
-            f("thinking_complete", json!({"thinking": "Look first.\n\nNothing there, so search.\n\nFound it.\n\n"})),
+            f(
+                "thinking_complete",
+                json!({"thinking": "Look first.\n\nNothing there, so search.\n\nFound it.\n\n"}),
+            ),
             f("text_delta", json!({"delta": "It is "})),
             f("text_delta", json!({"delta": "there."})),
             f("text_complete", json!({"text": "It is there."})),
@@ -1806,16 +2630,44 @@ mod tests {
         }
         let blocks = t.blocks();
         let kinds: Vec<&str> = blocks.iter().filter_map(|b| b["type"].as_str()).collect();
-        assert_eq!(kinds, ["reasoning", "text", "tool_call", "reasoning", "tool_call", "reasoning", "text"]);
-        let said: Vec<&str> = blocks.iter().filter(|b| b["type"] != "tool_call").filter_map(|b| b["text"].as_str()).collect();
-        assert_eq!(said, ["Look first.", "I'll look.", "Nothing there, so search.", "Found it.", "It is there."]);
+        assert_eq!(
+            kinds,
+            [
+                "reasoning",
+                "text",
+                "tool_call",
+                "reasoning",
+                "tool_call",
+                "reasoning",
+                "text"
+            ]
+        );
+        let said: Vec<&str> = blocks
+            .iter()
+            .filter(|b| b["type"] != "tool_call")
+            .filter_map(|b| b["text"].as_str())
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "Look first.",
+                "I'll look.",
+                "Nothing there, so search.",
+                "Found it.",
+                "It is there."
+            ]
+        );
         // Every block is announced once, in order, and what streams in goes
         // to the newest block: nothing is added above what came after it.
         let mut newest: Option<usize> = None;
         for e in &ev {
             match e {
-                Event::Block { index, .. } if newest.is_none_or(|n| *index > n) => newest = Some(*index),
-                Event::Text { index, .. } | Event::Reasoning { index, .. } => assert_eq!(Some(*index), newest, "{e:?} went above the reply's end"),
+                Event::Block { index, .. } if newest.is_none_or(|n| *index > n) => {
+                    newest = Some(*index)
+                }
+                Event::Text { index, .. } | Event::Reasoning { index, .. } => {
+                    assert_eq!(Some(*index), newest, "{e:?} went above the reply's end")
+                }
                 _ => {}
             }
         }
@@ -1823,10 +2675,25 @@ mod tests {
         // Whole text that comes just after a call began is still the text
         // its deltas went to, not new text below the call.
         let mut u = Turn::for_message("th", "");
-        for frame in [f("message_start", json!({})), f("text_delta", json!({"delta": "Let me"})), call("c3"), f("text_complete", json!({"text": "Let me look."}))] {
+        for frame in [
+            f("message_start", json!({})),
+            f("text_delta", json!({"delta": "Let me"})),
+            call("c3"),
+            f("text_complete", json!({"text": "Let me look."})),
+        ] {
             u.feed(&frame);
         }
-        let shown: Vec<String> = u.blocks().iter().map(|b| format!("{}:{}", b["type"].as_str().unwrap_or(""), b["text"].as_str().unwrap_or(""))).collect();
+        let shown: Vec<String> = u
+            .blocks()
+            .iter()
+            .map(|b| {
+                format!(
+                    "{}:{}",
+                    b["type"].as_str().unwrap_or(""),
+                    b["text"].as_str().unwrap_or("")
+                )
+            })
+            .collect();
         assert_eq!(shown, ["text:Let me look.", "tool_call:"]);
     }
 
@@ -1841,37 +2708,93 @@ mod tests {
         let mut ev = vec![];
         for frame in [
             f("message_start", json!({})),
-            f("tool_start", json!({"tool_name": "web_search", "tool_id": "s1", "arguments": {}})),
-            f("tool_arguments", json!({"tool_id": "s1", "arguments": {"query": "rust egui"}})),
-            f("tool_result", json!({"tool_id": "s1", "result": "3 results", "error": null})),
+            f(
+                "tool_start",
+                json!({"tool_name": "web_search", "tool_id": "s1", "arguments": {}}),
+            ),
+            f(
+                "tool_arguments",
+                json!({"tool_id": "s1", "arguments": {"query": "rust egui"}}),
+            ),
+            f(
+                "tool_result",
+                json!({"tool_id": "s1", "result": "3 results", "error": null}),
+            ),
             // Reported, then handed to Oak.
-            f("tool_start", json!({"tool_name": "run_python_on_device", "tool_id": "s2", "arguments": {"code": "print(1)"}})),
-            f("tool_call", json!({"tool_name": "run_python_outpost_local", "tool_call_id": "c2",
-                "arguments": {"params": {"name": "run_python_outpost_local", "arguments": {"code": "print(1)"}}}})),
+            f(
+                "tool_start",
+                json!({"tool_name": "run_python_on_device", "tool_id": "s2", "arguments": {"code": "print(1)"}}),
+            ),
+            f(
+                "tool_call",
+                json!({"tool_name": "run_python_outpost_local", "tool_call_id": "c2",
+                "arguments": {"params": {"name": "run_python_outpost_local", "arguments": {"code": "print(1)"}}}}),
+            ),
             // Handed to Oak, then reported.
-            f("tool_call", json!({"tool_name": "folder_list", "tool_call_id": "c3",
-                "arguments": {"params": {"name": "folder_list", "arguments": {"path": "/x"}}}})),
-            f("tool_start", json!({"tool_name": "folder_list", "tool_id": "s3", "arguments": {"path": "/x"}})),
+            f(
+                "tool_call",
+                json!({"tool_name": "folder_list", "tool_call_id": "c3",
+                "arguments": {"params": {"name": "folder_list", "arguments": {"path": "/x"}}}}),
+            ),
+            f(
+                "tool_start",
+                json!({"tool_name": "folder_list", "tool_id": "s3", "arguments": {"path": "/x"}}),
+            ),
             // Quick's records of Oak's calls aren't the results shown.
-            f("tool_result", json!({"tool_id": "s2", "result": "relay's", "error": null})),
-            f("tool_result", json!({"tool_id": "s3", "result": "relay's", "error": null})),
+            f(
+                "tool_result",
+                json!({"tool_id": "s2", "result": "relay's", "error": null}),
+            ),
+            f(
+                "tool_result",
+                json!({"tool_id": "s3", "result": "relay's", "error": null}),
+            ),
             // One Quick never gives the result of.
-            f("tool_start", json!({"tool_name": "kg_search", "tool_id": "s4", "arguments": {"query": "oak"}})),
-            f("tool_start", json!({"tool_name": "url_fetch", "tool_id": "s5", "arguments": {"url": "https://x"}})),
-            f("tool_result", json!({"tool_id": "s5", "result": "", "error": "403"})),
+            f(
+                "tool_start",
+                json!({"tool_name": "kg_search", "tool_id": "s4", "arguments": {"query": "oak"}}),
+            ),
+            f(
+                "tool_start",
+                json!({"tool_name": "url_fetch", "tool_id": "s5", "arguments": {"url": "https://x"}}),
+            ),
+            f(
+                "tool_result",
+                json!({"tool_id": "s5", "result": "", "error": "403"}),
+            ),
             f("message_complete", json!({})),
         ] {
             ev.extend(t.feed(&frame));
         }
         let blocks = t.blocks();
-        let named: Vec<(&str, &str)> = blocks.iter().map(|b| (b["name"].as_str().unwrap_or(""), b["id"].as_str().unwrap_or(""))).collect();
-        assert_eq!(named, [("web_search", "s1"), ("run_python_outpost_local", "c2"), ("folder_list", "c3"), ("kg_search", "s4"), ("url_fetch", "s5")]);
+        let named: Vec<(&str, &str)> = blocks
+            .iter()
+            .map(|b| {
+                (
+                    b["name"].as_str().unwrap_or(""),
+                    b["id"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("web_search", "s1"),
+                ("run_python_outpost_local", "c2"),
+                ("folder_list", "c3"),
+                ("kg_search", "s4"),
+                ("url_fetch", "s5")
+            ]
+        );
         assert_eq!(blocks[0]["input"]["query"], "rust egui");
         // Only Oak's own calls are Oak's to run.
         let ran: Vec<&str> = t.calls.iter().map(|c| c.0.as_str()).collect();
         assert_eq!(ran, ["c2", "c3"]);
         // Each of Quick's calls ends, with its result.
-        let ended = |i: usize| ev.iter().any(|e| matches!(e, Event::BlockEnd { index } if *index == i));
+        let ended = |i: usize| {
+            ev.iter()
+                .any(|e| matches!(e, Event::BlockEnd { index } if *index == i))
+        };
         let result = |i: usize| {
             ev.iter().rev().find_map(|e| match e {
                 Event::Block { index, block } if *index == i => block.get("_oak_result").cloned(),
@@ -1879,13 +2802,25 @@ mod tests {
             })
         };
         for i in [0, 3, 4] {
-            assert!(ended(i) && result(i).is_some(), "block {i} ends with a result");
+            assert!(
+                ended(i) && result(i).is_some(),
+                "block {i} ends with a result"
+            );
         }
-        assert!(!ended(1) && !ended(2), "Oak's calls end once Oak has run them");
+        assert!(
+            !ended(1) && !ended(2),
+            "Oak's calls end once Oak has run them"
+        );
         assert_eq!(result(0).unwrap()["content"], "3 results");
         assert_eq!(result(4).unwrap()["is_error"], true);
         assert!(blocks.iter().all(|b| b.get("_oak_result").is_none()));
-        assert!(same_tool("DESKTOP-1_folder_list", "folder_list") && same_tool("run_python_on_device_with_write", "run_python_outpost_local_with_write"));
+        assert!(
+            same_tool("DESKTOP-1_folder_list", "folder_list")
+                && same_tool(
+                    "run_python_on_device_with_write",
+                    "run_python_outpost_local_with_write"
+                )
+        );
         assert!(!same_tool("run_python", "run_python_outpost_local"));
     }
 
@@ -1908,13 +2843,27 @@ mod tests {
             f("text_delta", json!({"delta": "Cargo is installed."})),
             call("c2"),
             f("text_delta", json!({"delta": "It built."})),
-            f("text_complete", json!({"text": "I'll check the notes.Cargo is installed.It built."})),
-            f("message_complete", json!({"text": "I'll check the notes.Cargo is installed.It built."})),
+            f(
+                "text_complete",
+                json!({"text": "I'll check the notes.Cargo is installed.It built."}),
+            ),
+            f(
+                "message_complete",
+                json!({"text": "I'll check the notes.Cargo is installed.It built."}),
+            ),
         ] {
             t.feed(&frame);
         }
-        let said: Vec<String> = t.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect();
-        assert_eq!(said, ["I'll check the notes.", "Cargo is installed.", "It built."]);
+        let said: Vec<String> = t
+            .blocks()
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .map(|b| b["text"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            said,
+            ["I'll check the notes.", "Cargo is installed.", "It built."]
+        );
         // With whitespace between them, and whole text Quick gives for an
         // earlier section that holds only that section, the same.
         let mut u = Turn::for_message("th", "");
@@ -1923,11 +2872,19 @@ mod tests {
             f("text_delta", json!({"delta": "Looking."})),
             call("c3"),
             f("text_delta", json!({"delta": "Done"})),
-            f("text_complete", json!({"text": "Looking.\n\nDone, it is there."})),
+            f(
+                "text_complete",
+                json!({"text": "Looking.\n\nDone, it is there."}),
+            ),
         ] {
             u.feed(&frame);
         }
-        let said: Vec<String> = u.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect();
+        let said: Vec<String> = u
+            .blocks()
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .map(|b| b["text"].as_str().unwrap_or("").to_string())
+            .collect();
         assert_eq!(said, ["Looking.", "Done, it is there."]);
         // Whole text that carries only the blocks since the section Quick
         // last gave whole, the same.
@@ -1947,7 +2904,12 @@ mod tests {
         ] {
             v.feed(&frame);
         }
-        let said: Vec<String> = v.blocks().iter().filter(|b| b["type"] == "text").map(|b| b["text"].as_str().unwrap_or("").to_string()).collect();
+        let said: Vec<String> = v
+            .blocks()
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .map(|b| b["text"].as_str().unwrap_or("").to_string())
+            .collect();
         assert_eq!(said, ["One.", "Two.", "Three.", "Four."]);
     }
 }

@@ -26,14 +26,26 @@ pub(crate) struct Socket {
     replay: Replay,
     /// When Oak last told Quick how far it has read (`ping` with `ack`).
     acked_at: std::time::Instant,
+    /// When bytes last came off the socket (`IDLE_LIMIT`).
+    heard_at: std::time::Instant,
     /// Bytes read off the socket that don't make a whole message yet.
     inbuf: Vec<u8>,
+}
+
+/// What a bounded poll of the socket found.
+pub(crate) enum PollFrame {
+    Frame(Value),
+    Idle,
+    Closed,
 }
 
 /// The `replayContext` a socket sets its delivery up with
 /// (`v1;setup;<token>`, the token random, as the app makes it).
 pub(crate) fn replay_setup() -> String {
-    format!("v1;setup;{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>()))
+    format!(
+        "v1;setup;{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
+    )
 }
 
 /// How long a gap in Quick's numbered frames is waited on before the frames
@@ -74,7 +86,9 @@ impl Replay {
         let kind = v["type"].as_str().unwrap_or("").to_string();
         match kind.as_str() {
             "_transport_setup_ok" => {
-                self.resends = v["features"].as_array().is_some_and(|f| f.iter().any(|x| x == "retransmit"));
+                self.resends = v["features"]
+                    .as_array()
+                    .is_some_and(|f| f.iter().any(|x| x == "retransmit"));
                 return (vec![], vec![]);
             }
             // Quick has sent all it can of what was asked for: what it
@@ -88,11 +102,23 @@ impl Replay {
                     eprintln!("TRANSPORT {v}");
                 }
                 // A restart or a refusal: what is held goes on as it is.
-                return (if k == "_transport_restart" || k == "_transport_rejected" { self.flush() } else { vec![] }, vec![]);
+                return (
+                    if k == "_transport_restart" || k == "_transport_rejected" {
+                        self.flush()
+                    } else {
+                        vec![]
+                    },
+                    vec![],
+                );
             }
             _ => {}
         }
-        let Some(seq) = v.get("_transport").and_then(|t| t["sequence"].as_str().and_then(|s| s.parse::<u64>().ok()).or(t["sequence"].as_u64())) else {
+        let Some(seq) = v.get("_transport").and_then(|t| {
+            t["sequence"]
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .or(t["sequence"].as_u64())
+        }) else {
             return (vec![v], vec![]);
         };
         self.numbered = true;
@@ -153,7 +179,11 @@ impl Replay {
             return vec![];
         };
         if std::env::var("OAK_QUICK_DEBUG").is_ok() {
-            eprintln!("TRANSPORT frames {}..{} never came; going on without them", self.last + 1, next - 1);
+            eprintln!(
+                "TRANSPORT frames {}..{} never came; going on without them",
+                self.last + 1,
+                next - 1
+            );
         }
         self.asked.retain(|n| *n >= next);
         self.last = next - 1;
@@ -168,7 +198,11 @@ impl Replay {
             self.last += 1;
             out.push(v);
         }
-        self.gap_since = if self.ahead.is_empty() { None } else { Some(std::time::Instant::now()) };
+        self.gap_since = if self.ahead.is_empty() {
+            None
+        } else {
+            Some(std::time::Instant::now())
+        };
         out
     }
 }
@@ -189,7 +223,7 @@ enum Fill {
     /// The time it was given passed with none.
     Nothing,
     /// The socket ended; true when frames held past a gap went on.
-    Ended(bool),
+    Ended(#[allow(dead_code)] bool),
 }
 
 /// Takes one whole WebSocket message off the front of `buf`: (opcode,
@@ -225,7 +259,10 @@ pub(crate) fn take_message(buf: &mut Vec<u8>) -> Option<(u8, Vec<u8>)> {
         let end = i.checked_add(len)?;
         let mut payload = buf.get(i..end)?.to_vec();
         if masked {
-            payload.iter_mut().enumerate().for_each(|(k, b)| *b ^= mask[k % 4]);
+            payload
+                .iter_mut()
+                .enumerate()
+                .for_each(|(k, b)| *b ^= mask[k % 4]);
         }
         if op >= 0x8 {
             buf.drain(at..end);
@@ -250,7 +287,9 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let config = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
         Arc::new(config)
     });
     CONFIG.clone()
@@ -262,17 +301,21 @@ impl Socket {
     pub(crate) fn connect(host: &str, path: &str) -> Result<Socket, String> {
         use rustls::pki_types::ServerName;
         let addr = format!("{host}:443");
-        let tcp = TcpStream::connect(&addr).map_err(|e| format!("Couldn't reach Quick ({addr}): {e}"))?;
+        let tcp =
+            TcpStream::connect(&addr).map_err(|e| format!("Couldn't reach Quick ({addr}): {e}"))?;
         let _ = tcp.set_nodelay(true);
         let _ = tcp.set_read_timeout(Some(Duration::from_secs(600)));
-        let name = ServerName::try_from(host.to_string()).map_err(|_| format!("Quick's host name is unusual: {host}"))?;
-        let conn = rustls::ClientConnection::new(tls_config(), name).map_err(|e| format!("TLS to Quick failed: {e}"))?;
+        let name = ServerName::try_from(host.to_string())
+            .map_err(|_| format!("Quick's host name is unusual: {host}"))?;
+        let conn = rustls::ClientConnection::new(tls_config(), name)
+            .map_err(|e| format!("TLS to Quick failed: {e}"))?;
         let mut s = Socket {
             tls: rustls::StreamOwned::new(conn, tcp),
             closed: Arc::new(AtomicBool::new(false)),
             held: std::collections::VecDeque::new(),
             replay: Replay::default(),
             acked_at: std::time::Instant::now(),
+            heard_at: std::time::Instant::now(),
             inbuf: Vec::new(),
         };
         let key = base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 16]>());
@@ -282,7 +325,8 @@ impl Socket {
              Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\nAccept-Language: en-US\r\n\r\n",
             user_agent()
         );
-        s.write_all(hello.as_bytes()).map_err(|e| format!("Couldn't open Quick's socket: {e}"))?;
+        s.write_all(hello.as_bytes())
+            .map_err(|e| format!("Couldn't open Quick's socket: {e}"))?;
         s.flush().ok();
         // The handshake's headers, a byte at a time, so no frame is eaten.
         let mut head = Vec::new();
@@ -319,12 +363,14 @@ impl Socket {
     pub(crate) fn send(&mut self, v: &Value) -> Result<(), String> {
         let text = envelope(v);
         let frame = crate::cdp::frame(0x2, text.as_bytes(), true);
-        self.write_all(&frame).map_err(|e| format!("Quick's socket closed: {e}"))?;
+        self.write_all(&frame)
+            .map_err(|e| format!("Quick's socket closed: {e}"))?;
         self.flush().ok();
         Ok(())
     }
 
     /// The next frame's JSON (a text frame), or None at the end.
+    #[cfg(test)]
     pub(crate) fn next(&mut self) -> Option<Value> {
         self.next_of(&|_| true)
     }
@@ -334,6 +380,7 @@ impl Socket {
     /// together), so a frame is read to its end before the next one is asked
     /// for: taking one message per frame would drop the rest, which is how a
     /// reply's text arrived in pieces with gaps.
+    #[cfg(test)]
     pub(crate) fn next_of(&mut self, keep: &dyn Fn(&Value) -> bool) -> Option<Value> {
         loop {
             if let Some(v) = self.held.pop_front() {
@@ -350,6 +397,7 @@ impl Socket {
 
     /// Reads one WebSocket frame into `held`, in Quick's order
     /// ([`Replay`]). False when the socket ended and nothing is left.
+    #[cfg(test)]
     fn fill(&mut self) -> bool {
         loop {
             match self.fill_until(None) {
@@ -377,11 +425,67 @@ impl Socket {
         }
     }
 
+    /// Polls for the next frame up to `wait`: returns `PollFrame::Idle` if
+    /// none arrives in that window so the caller can check for interrupts,
+    /// pauses, and mid-turn steers without blocking for the whole turn.
+    pub(crate) fn poll_next(&mut self, wait: Duration) -> PollFrame {
+        if let Some(v) = self.held.pop_front() {
+            return PollFrame::Frame(v);
+        }
+        if self.closed.load(Ordering::SeqCst) {
+            return PollFrame::Closed;
+        }
+        match self.fill_until(Some(std::time::Instant::now() + wait)) {
+            Fill::Got => match self.held.pop_front() {
+                Some(v) => PollFrame::Frame(v),
+                None => PollFrame::Idle,
+            },
+            Fill::Nothing => PollFrame::Idle,
+            Fill::Ended(_) => match self.held.pop_front() {
+                Some(v) => PollFrame::Frame(v),
+                None => PollFrame::Closed,
+            },
+        }
+    }
+
+    /// Takes any frames that have already arrived on the socket without
+    /// waiting for more.
+    pub(crate) fn drain_pending(&mut self) -> Vec<Value> {
+        let _ = self.keep_alive(Duration::ZERO);
+        self.held.drain(..).collect()
+    }
+
+    /// Reads frames after `stop_generation` until Quick acknowledges with
+    /// `stream_ended` or `message_complete`, `until` passes, or the socket
+    /// closes. Returns the frames seen meanwhile.
+    pub(crate) fn wait_for_stop(&mut self, until: std::time::Instant) -> Vec<Value> {
+        let mut seen = Vec::new();
+        loop {
+            while let Some(v) = self.held.pop_front() {
+                let done = matches!(
+                    v["type"].as_str(),
+                    Some("stream_ended" | "message_complete")
+                );
+                seen.push(v);
+                if done {
+                    return seen;
+                }
+            }
+            if std::time::Instant::now() >= until || self.closed.load(Ordering::SeqCst) {
+                return seen;
+            }
+            if matches!(self.fill_until(Some(until)), Fill::Ended(_) | Fill::Nothing)
+                && self.held.is_empty()
+            {
+                return seen;
+            }
+        }
+    }
+
     /// Reads until a message goes into `held` (in Quick's order,
     /// [`Replay`]), `until` passes with none, or the socket ends.
     fn fill_until(&mut self, until: Option<std::time::Instant>) -> Fill {
         let before = self.held.len();
-        let mut heard = std::time::Instant::now();
         loop {
             // Whole messages, from what has come off the TLS stream: a read
             // cut short leaves the rest of its message in `inbuf`, never
@@ -389,22 +493,26 @@ impl Socket {
             // reply's text).
             let Some((op, payload)) = take_message(&mut self.inbuf) else {
                 match self.read_some() {
-                    Ok(true) => heard = std::time::Instant::now(),
+                    Ok(true) => self.heard_at = std::time::Instant::now(),
                     Ok(false) => {
                         // A gap waited on long enough goes on without its
                         // frames, even while nothing else comes.
-                        self.held.extend(self.replay.overdue(std::time::Instant::now()));
+                        self.held
+                            .extend(self.replay.overdue(std::time::Instant::now()));
                         self.ack_now_and_then();
                         if self.held.len() > before {
                             return Fill::Got;
                         }
-                        if until.is_some_and(|t| std::time::Instant::now() >= t) {
-                            return Fill::Nothing;
-                        }
-                        if heard.elapsed() >= IDLE_LIMIT {
-                            eprintln!("Quick's socket said nothing for {}s; Oak gave up on it", IDLE_LIMIT.as_secs());
+                        if self.heard_at.elapsed() >= IDLE_LIMIT {
+                            eprintln!(
+                                "Quick's socket said nothing for {}s; Oak gave up on it",
+                                IDLE_LIMIT.as_secs()
+                            );
                             self.closed.store(true, Ordering::SeqCst);
                             return Fill::Ended(self.end());
+                        }
+                        if until.is_some_and(|t| std::time::Instant::now() >= t) {
+                            return Fill::Nothing;
                         }
                     }
                     Err(_) => {
@@ -417,7 +525,10 @@ impl Socket {
             let mut got = vec![];
             match op {
                 0x8 => {
-                    let code = payload.get(..2).map(|b| u16::from_be_bytes([b[0], b[1]])).unwrap_or(0);
+                    let code = payload
+                        .get(..2)
+                        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+                        .unwrap_or(0);
                     let why = String::from_utf8_lossy(payload.get(2..).unwrap_or(&[])).to_string();
                     eprintln!("Quick closed the socket: {code} {why}");
                     self.closed.store(true, Ordering::SeqCst);
@@ -432,7 +543,11 @@ impl Socket {
                 0x1 => got.extend(unwrap_frame(&payload)),
                 // Quick answers in AWS event-stream messages, whose body
                 // is the JSON the app reads; one frame carries several.
-                0x2 => got.extend(crate::quick::event_bodies(&payload).iter().filter_map(|b| unwrap_frame(b))),
+                0x2 => got.extend(
+                    crate::quick::event_bodies(&payload)
+                        .iter()
+                        .filter_map(|b| unwrap_frame(b)),
+                ),
                 _ => continue,
             }
             let mut ask = vec![];
@@ -441,12 +556,18 @@ impl Socket {
                 self.held.extend(ready);
                 ask.extend(missing);
             }
-            self.held.extend(self.replay.overdue(std::time::Instant::now()));
+            self.held
+                .extend(self.replay.overdue(std::time::Instant::now()));
             if !ask.is_empty() {
                 if std::env::var("OAK_QUICK_DEBUG").is_ok() {
-                    eprintln!("TRANSPORT asking Quick again for {} frame(s) from {}", ask.len(), ask[0]);
+                    eprintln!(
+                        "TRANSPORT asking Quick again for {} frame(s) from {}",
+                        ask.len(),
+                        ask[0]
+                    );
                 }
-                let _ = self.send(&json!({"type": "_transport_retransmit", "payload": {"seqs": ask}}));
+                let _ =
+                    self.send(&json!({"type": "_transport_retransmit", "payload": {"seqs": ask}}));
             }
             self.ack_now_and_then();
             if self.held.len() > before {
@@ -454,7 +575,6 @@ impl Socket {
             }
         }
     }
-
 
     /// Reads what has come on the socket into `inbuf`, waiting `READ_SLICE`
     /// at most: Ok(false) when nothing came in that time.
@@ -466,7 +586,16 @@ impl Socket {
                 self.inbuf.extend_from_slice(&chunk[..n]);
                 Ok(true)
             }
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => Ok(false),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
             Err(e) => Err(e),
         }
     }
@@ -487,7 +616,9 @@ impl Socket {
         }
         self.acked_at = std::time::Instant::now();
         let ack = self.replay.ack();
-        let _ = self.send(&json!({"type": "ping", "payload": {"timestamp": crate::api::now_ms(), "ack": ack}}));
+        let _ = self.send(
+            &json!({"type": "ping", "payload": {"timestamp": crate::api::now_ms(), "ack": ack}}),
+        );
     }
 
     fn write_all(&mut self, b: &[u8]) -> std::io::Result<()> {
@@ -506,7 +637,9 @@ impl Socket {
 }
 
 fn user_agent() -> String {
-    format!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) AWSQuick/{APP_VERSION} Chrome/150.0.7871.250 Electron/43.8.7 Safari/537.36")
+    format!(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) AWSQuick/{APP_VERSION} Chrome/150.0.7871.250 Electron/43.8.7 Safari/537.36"
+    )
 }
 
 #[cfg(test)]
@@ -523,21 +656,37 @@ mod tests {
         let mut buf = vec![];
         for b in &text[..text.len() - 1] {
             buf.push(*b);
-            assert!(take_message(&mut buf).is_none(), "part of a message isn't one");
+            assert!(
+                take_message(&mut buf).is_none(),
+                "part of a message isn't one"
+            );
         }
         buf.push(text[text.len() - 1]);
         assert_eq!(take_message(&mut buf), Some((0x1, b"hello".to_vec())));
         assert!(buf.is_empty());
         let mut first = crate::cdp::frame(0x2, b"ab", false);
         first[0] &= 0x7f; // more to come
-        let mut buf = [first, crate::cdp::frame(0x9, b"p", false), crate::cdp::frame(0x0, b"cd", false)].concat();
+        let mut buf = [
+            first,
+            crate::cdp::frame(0x9, b"p", false),
+            crate::cdp::frame(0x0, b"cd", false),
+        ]
+        .concat();
         assert_eq!(take_message(&mut buf), Some((0x9, b"p".to_vec())));
         assert_eq!(take_message(&mut buf), Some((0x2, b"abcd".to_vec())));
         assert!(buf.is_empty());
         let long = vec![b'z'; 70_000];
-        let mut buf = [crate::cdp::frame(0x1, &long, false), crate::cdp::frame(0x1, b"next", true)].concat();
+        let mut buf = [
+            crate::cdp::frame(0x1, &long, false),
+            crate::cdp::frame(0x1, b"next", true),
+        ]
+        .concat();
         assert_eq!(take_message(&mut buf).unwrap().1.len(), 70_000);
-        assert_eq!(take_message(&mut buf), Some((0x1, b"next".to_vec())), "a masked frame is unmasked");
+        assert_eq!(
+            take_message(&mut buf),
+            Some((0x1, b"next".to_vec())),
+            "a masked frame is unmasked"
+        );
         assert!(take_message(&mut buf).is_none());
     }
 
@@ -546,7 +695,9 @@ mod tests {
     }
 
     fn texts(v: &[Value]) -> String {
-        v.iter().map(|f| f["payload"]["delta"].as_str().unwrap_or("")).collect()
+        v.iter()
+            .map(|f| f["payload"]["delta"].as_str().unwrap_or(""))
+            .collect()
     }
 
     /// Frames go on in their numbers' order, each once, without their
@@ -554,7 +705,14 @@ mod tests {
     #[test]
     fn quicks_frames_are_put_back_in_order() {
         let mut r = Replay::default();
-        assert_eq!(r.take(json!({"type": "_transport_setup_ok", "version": 1, "features": ["retransmit"]})).0.len(), 0);
+        assert_eq!(
+            r.take(
+                json!({"type": "_transport_setup_ok", "version": 1, "features": ["retransmit"]})
+            )
+            .0
+            .len(),
+            0
+        );
         let mut out = vec![];
         let (a, ask) = r.take(numbered(1, "a"));
         out.extend(a);
@@ -593,7 +751,8 @@ mod tests {
         q.take(json!({"type": "_transport_setup_ok", "features": ["retransmit"]}));
         q.take(numbered(1, "a"));
         q.take(numbered(5, "e"));
-        let (out, _) = q.take(json!({"type": "_transport_retransmit_complete", "unavailable": [2, 3, 4]}));
+        let (out, _) =
+            q.take(json!({"type": "_transport_retransmit_complete", "unavailable": [2, 3, 4]}));
         assert_eq!(texts(&out), "e");
         // Without resends, nothing is asked for.
         let mut n = Replay::default();
@@ -607,7 +766,11 @@ mod tests {
     fn frames_that_come_together_are_all_read() {
         let mut wire = vec![];
         for i in 0..5u8 {
-            wire.extend(crate::cdp::frame(0x1, format!("frame {i}").as_bytes(), false));
+            wire.extend(crate::cdp::frame(
+                0x1,
+                format!("frame {i}").as_bytes(),
+                false,
+            ));
         }
         let mut r = std::io::Cursor::new(wire);
         for i in 0..5u8 {

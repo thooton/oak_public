@@ -10,7 +10,10 @@ fn quick_models_are_listed() {
     println!("profile: {dir}");
     crate::api::load_auth();
     println!("quick on: {}", crate::quick::on());
-    println!("quick account: {:?}", crate::quick::account().map(|a| (a.email, a.label)));
+    println!(
+        "quick account: {:?}",
+        crate::quick::account().map(|a| (a.email, a.label))
+    );
     println!("quick host saved: {:?}", crate::quick::login::saved_host());
     match crate::quick::login::host() {
         Ok(h) => println!("host: {h}"),
@@ -18,12 +21,17 @@ fn quick_models_are_listed() {
     }
     let quick: Vec<_> = crate::quick::MODELS.iter().map(|m| m.id).collect();
     println!("quick models declared: {quick:?}");
-    let listed: Vec<String> = crate::api::known_models().into_iter().map(|m| format!("{} ({})", m.id, m.provider.id())).collect();
+    let listed: Vec<String> = crate::api::known_models()
+        .into_iter()
+        .map(|m| format!("{} ({})", m.id, m.provider.id()))
+        .collect();
     println!("\nknown_models ({}):", listed.len());
     for m in &listed {
         println!("  {m}");
     }
-    let has_quick = crate::api::known_models().iter().any(|m| m.provider == crate::providers::Kind::Quick);
+    let has_quick = crate::api::known_models()
+        .iter()
+        .any(|m| m.provider == crate::providers::Kind::Quick);
     println!("\nQuick in the picker: {has_quick}");
     assert!(has_quick, "Quick's models are missing from the picker");
 }

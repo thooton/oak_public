@@ -19,7 +19,12 @@ use super::*;
 /// A copy of `source` as conversation `id`, forking from just before `at`
 /// (`None`: at its end). `None` when `at` is no longer there: the source
 /// changed since the user asked.
-pub(crate) fn fork(source: &Conversation, id: String, now: i64, at: Option<agent::RevertTo>) -> Option<Conversation> {
+pub(crate) fn fork(
+    source: &Conversation,
+    id: String,
+    now: i64,
+    at: Option<agent::RevertTo>,
+) -> Option<Conversation> {
     let mut c = Conversation {
         id,
         title: fork_title(source),
@@ -28,9 +33,11 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64, at: Option<agent
         provider: source.provider,
         model: source.model.clone(),
         effort: source.effort.clone(),
+        fallbacks: source.fallbacks.clone(),
         role: source.role.clone(),
         chat: source.chat,
         code_mode: source.code_mode,
+        mix: source.mix.clone(),
         messages: source.messages.clone(),
         format: source.format,
         rolling: source.rolling.clone(),
@@ -64,23 +71,38 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64, at: Option<agent
 fn fork_title(source: &Conversation) -> String {
     let base = source.title.trim();
     let base = if base.is_empty() { "Untitled" } else { base };
-    if base.starts_with("Fork: ") { base.to_string() } else { format!("Fork: {base}") }
+    if base.starts_with("Fork: ") {
+        base.to_string()
+    } else {
+        format!("Fork: {base}")
+    }
 }
 
 impl App {
     /// Forks conversation `source` and shows the fork: from just before
     /// `at`, or at its end. What the source is doing carries on there alone.
     /// Gives the fork's id, or None when the source changed since.
-    pub(crate) fn fork_conversation(&mut self, source: &str, at: Option<agent::RevertTo>, ctx: &egui::Context) -> Option<String> {
+    pub(crate) fn fork_conversation(
+        &mut self,
+        source: &str,
+        at: Option<agent::RevertTo>,
+        ctx: &egui::Context,
+    ) -> Option<String> {
         let now = api::now_ms();
         let id = format!("fork-{now}-{:016x}", rand::random::<u64>());
-        let c = fork(&self.sessions.get(source)?.conv.lock().unwrap(), id.clone(), now, at)?;
+        let c = fork(
+            &self.sessions.get(source)?.conv.lock().unwrap(),
+            id.clone(),
+            now,
+            at,
+        )?;
         if c.code_mode {
             // Its REPL starts with the source's variables.
             crate::code_mode::copy_snapshot(source, &id);
         }
         c.save();
-        self.sessions.insert(id.clone(), Session::start(c, ctx.clone()));
+        self.sessions
+            .insert(id.clone(), Session::start(c, ctx.clone()));
         self.open(id.clone());
         Some(id)
     }
@@ -108,17 +130,42 @@ mod tests {
                 json!({"role": "assistant", "content": [call("running")]}),
                 json!({"role": "user", "content": [oak::text("Carry on")]}),
                 json!({"role": "assistant", "content": [oak::text("Done.")]}),
-            ].into(),
-            notes: vec![store::Note { id: 7, text: "Keep this context".into(), rewrite: None }],
+            ]
+            .into(),
+            notes: vec![store::Note {
+                id: 7,
+                text: "Keep this context".into(),
+                rewrite: None,
+            }],
             next_note_id: 8,
-            rolling: rolling::State { summary: Some(rolling::Summary { cut: 1, text: "Earlier context".into(), made_at: 123, clear: 1 }), ..Default::default() },
-            prefix: prefix::State {
-                kits: vec!["AGENT".into()],
-                pin: Some(prefix::Pin { system: "you are Oak, pads at temp3".into(), ..Default::default() }),
+            rolling: rolling::State {
+                summary: Some(rolling::Summary {
+                    cut: 1,
+                    text: "Earlier context".into(),
+                    made_at: 123,
+                    clear: 1,
+                }),
                 ..Default::default()
             },
-            heartbeats: vec![store::Heartbeat { id: 1, message: "Continue".into(), every_min: 1, next_at: 0 }],
-            agents: vec![store::AgentRef { id: 1, conv: "fork-source-agent".into(), name: "Worker".into() }],
+            prefix: prefix::State {
+                kits: vec!["AGENT".into()],
+                pin: Some(prefix::Pin {
+                    system: "you are Oak, pads at temp3".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            heartbeats: vec![store::Heartbeat {
+                id: 1,
+                message: "Continue".into(),
+                every_min: 1,
+                next_at: 0,
+            }],
+            agents: vec![store::AgentRef {
+                id: 1,
+                conv: "fork-source-agent".into(),
+                name: "Worker".into(),
+            }],
             goal: "Keep working".into(),
             inbox: vec!["Agent report".into()],
             held: vec!["Pending change".into()],
@@ -129,7 +176,10 @@ mod tests {
             limit_wait: Some(123),
             paused: true,
             spent: 9.0,
-            tokens: store::Tokens { requests: 3, ..Default::default() },
+            tokens: store::Tokens {
+                requests: 3,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -139,17 +189,30 @@ mod tests {
         let source = source();
         let before = serde_json::to_value(&source).unwrap();
         let mut c = fork(&source, "fork-test".into(), 456, None).expect("a fork");
-        assert_eq!(serde_json::to_value(&source).unwrap(), before, "the source is untouched");
+        assert_eq!(
+            serde_json::to_value(&source).unwrap(),
+            before,
+            "the source is untouched"
+        );
         assert_eq!(c.messages.len(), source.messages.len());
         assert_eq!(c.messages[0], source.messages[0]);
         assert_eq!(c.title, "Fork: Original");
         assert!(c.titled);
-        assert_eq!((&c.folder, &c.model, &c.effort, &c.role), (&source.folder, &source.model, &source.effort, &source.role));
+        assert_eq!(
+            (&c.folder, &c.model, &c.effort, &c.role),
+            (&source.folder, &source.model, &source.effort, &source.role)
+        );
         assert_eq!(c.notes, source.notes);
         assert_eq!(c.next_note_id, 8);
         assert_eq!(c.marks, source.marks);
-        assert_eq!(serde_json::to_value(&c.rolling).unwrap(), serde_json::to_value(&source.rolling).unwrap());
-        assert_eq!(c.prefix.kits, source.prefix.kits, "the loaded kits stay loaded");
+        assert_eq!(
+            serde_json::to_value(&c.rolling).unwrap(),
+            serde_json::to_value(&source.rolling).unwrap()
+        );
+        assert_eq!(
+            c.prefix.kits, source.prefix.kits,
+            "the loaded kits stay loaded"
+        );
         assert!(c.parent.is_none() && !c.spawner && c.agents.is_empty());
         assert!(c.goal.is_empty() && c.heartbeats.is_empty() && c.meters.is_empty());
         assert!(c.inbox.is_empty() && c.held.is_empty() && c.limit_wait.is_none());
@@ -163,7 +226,8 @@ mod tests {
         c.title = fork_title(&c);
         assert_eq!(c.title, "Fork: Original");
         // It saves and loads as a conversation of its own.
-        let loaded: Conversation = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        let loaded: Conversation =
+            serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
         assert_eq!(loaded.messages, c.messages);
         assert!(loaded.side_chat_of.is_none());
     }
@@ -173,43 +237,102 @@ mod tests {
         let source = source();
         // Before the reply's only block: the reply goes, as Revert to before
         // this leaves it.
-        let c = fork(&source, "fork-at-call".into(), 1, Some(agent::RevertTo::Block(1, 0, call("running")))).expect("a fork");
+        let c = fork(
+            &source,
+            "fork-at-call".into(),
+            1,
+            Some(agent::RevertTo::Block(1, 0, call("running"))),
+        )
+        .expect("a fork");
         assert_eq!(c.messages.len(), 1);
         assert_eq!(c.messages[0], source.messages[0]);
         // Before a call of a reply with text and calls: the text stays, and
         // the calls up to the cut keep their results; the transcript stays
         // valid for the model.
         let mut with_text = source.clone();
-        with_text.messages[1] = json!({"role": "assistant", "content": [oak::text("Looking."), call("running")]});
-        let c = fork(&with_text, "fork-at-later-call".into(), 1, Some(agent::RevertTo::Block(1, 1, call("running")))).expect("a fork");
+        with_text.messages[1] =
+            json!({"role": "assistant", "content": [oak::text("Looking."), call("running")]});
+        let c = fork(
+            &with_text,
+            "fork-at-later-call".into(),
+            1,
+            Some(agent::RevertTo::Block(1, 1, call("running"))),
+        )
+        .expect("a fork");
         assert_eq!(c.messages.len(), 2);
         assert_eq!(c.messages[1]["content"][0]["text"], "Looking.");
-        assert!(!c.messages[1]["content"].as_array().unwrap().iter().any(|b| b["type"] == "tool_call"));
+        assert!(
+            !c.messages[1]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["type"] == "tool_call")
+        );
         // Before the user's last message: it and the reply after it go. The
         // reply before it left a call without a result, which the fork
         // answers so its transcript is valid for the model.
-        let c = fork(&source, "fork-at-message".into(), 1, Some(agent::RevertTo::Block(2, 0, source.messages[2]["content"][0].clone()))).expect("a fork");
+        let c = fork(
+            &source,
+            "fork-at-message".into(),
+            1,
+            Some(agent::RevertTo::Block(
+                2,
+                0,
+                source.messages[2]["content"][0].clone(),
+            )),
+        )
+        .expect("a fork");
         assert_eq!(c.messages.len(), 3);
         assert_eq!(c.messages[2]["content"][0]["type"], "tool_result");
-        assert!(!c.messages.iter().any(|m| m["content"][0]["text"] == "Carry on"), "the message and what followed are gone");
+        assert!(
+            !c.messages
+                .iter()
+                .any(|m| m["content"][0]["text"] == "Carry on"),
+            "the message and what followed are gone"
+        );
         // Before a reply that is still streaming in: everything there is.
-        let c = fork(&source, "fork-at-end".into(), 1, Some(agent::RevertTo::End(4))).expect("a fork");
+        let c = fork(
+            &source,
+            "fork-at-end".into(),
+            1,
+            Some(agent::RevertTo::End(4)),
+        )
+        .expect("a fork");
         assert_eq!(c.messages.len(), 4);
         // Something the source no longer has: no fork at all.
         let other = json!({"type": "text", "text": "not that"});
-        assert!(fork(&source, "fork-gone".into(), 1, Some(agent::RevertTo::Block(2, 0, other))).is_none());
+        assert!(
+            fork(
+                &source,
+                "fork-gone".into(),
+                1,
+                Some(agent::RevertTo::Block(2, 0, other))
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn forking_makes_a_new_conversation_of_its_own() {
         use crate::app_hover_test::test_ctx;
         let (ctx, _t) = test_ctx(false, true);
-        let mut app = App { screen: Screen::Chat("fork-source-conv".into()), ..Default::default() };
-        app.sessions.insert("fork-source-conv".into(), Session::start(source(), ctx.clone()));
-        let id = app.fork_conversation("fork-source-conv", None, &ctx).expect("a fork");
+        let mut app = App {
+            screen: Screen::Chat("fork-source-conv".into()),
+            ..Default::default()
+        };
+        app.sessions.insert(
+            "fork-source-conv".into(),
+            Session::start(source(), ctx.clone()),
+        );
+        let id = app
+            .fork_conversation("fork-source-conv", None, &ctx)
+            .expect("a fork");
         assert_ne!(id, "fork-source-conv");
         assert!(app.sessions.contains_key(&id));
-        assert!(matches!(&app.screen, Screen::Chat(shown) if shown == &id), "the fork is shown");
+        assert!(
+            matches!(&app.screen, Screen::Chat(shown) if shown == &id),
+            "the fork is shown"
+        );
         assert!(app.settings.tabs.contains(&id));
         assert!(!app.sessions[&id].active(), "it waits for the user");
         let (len, origin_len) = {
@@ -222,7 +345,10 @@ mod tests {
         let saved = store::load_conversations().into_iter().any(|c| c.id == id);
         assert!(saved, "a fork is an ordinary saved conversation");
         app.delete_conversation(&id);
-        assert!(app.sessions.contains_key("fork-source-conv"), "deleting the fork leaves the source");
+        assert!(
+            app.sessions.contains_key("fork-source-conv"),
+            "deleting the fork leaves the source"
+        );
         app.delete_conversation("fork-source-conv");
     }
 }
