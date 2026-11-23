@@ -895,50 +895,44 @@ pub(crate) fn usage_panel(ui: &mut Ui, t: &Theme, a: Option<&api::Account>, stat
     .response
 }
 
-/// Draws one quota pool's heading and meters: side-by-side when it has two
-/// windows (`5h` and `Week`), or full-width for a single window (e.g. Argon).
+/// Draws one quota pool's heading and meters with exact pixel alignment:
+/// side-by-side columns when a pool has two windows (`5h` and `Week`), or a
+/// single full-width bar when it has one (e.g. Argon's `Week`).
 pub(crate) fn pool_meters(ui: &mut Ui, t: &Theme, w: f32, name: &str, desc: &str, cells: &[(String, String, f32, String)]) {
-    let head = ui.add(egui::Label::new(RichText::new(name).small().color(t.ink2)).truncate());
-    if !desc.is_empty() {
-        head.on_hover_text(desc);
-    }
-    if cells.len() == 2 {
-        let gap = 8.0;
-        let col_w = ((w - gap) * 0.5).max(40.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for (label, value, pct, tip) in cells {
-                let full = *pct >= 90.0;
-                let color = if full { t.error } else { t.ink };
-                let bar = if full { t.error } else { t.accent };
-                ui.allocate_ui_with_layout(vec2(col_w, 0.0), Layout::top_down(Align::Min), |ui| {
-                    ui.set_width(col_w);
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    let r = ui
-                        .scope(|ui| {
-                            kv(ui, t, label, value, color);
-                            meter(ui, t, col_w, *pct / 100.0, bar);
-                        })
-                        .response;
-                    r.on_hover_text(tip);
-                });
-            }
-        });
-    } else {
-        for (label, value, pct, tip) in cells {
-            let full = *pct >= 90.0;
-            let color = if full { t.error } else { t.ink };
-            let bar = if full { t.error } else { t.accent };
-            let r = ui
-                .scope(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    kv(ui, t, label, value, color);
-                    meter(ui, t, w, *pct / 100.0, bar);
-                })
-                .response;
-            r.on_hover_text(tip);
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let (head_rect, head_resp) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
+        let label = clip_width(ui, name, &font, w);
+        ui.painter().text(egui::pos2(head_rect.left(), head_rect.center().y), Align2::LEFT_CENTER, label, font.clone(), t.ink2);
+        if !desc.is_empty() {
+            head_resp.on_hover_text(desc);
         }
-    }
+        if cells.is_empty() {
+            return;
+        }
+        // One shared row rect so side-by-side columns share the exact same baseline and bar y.
+        let (row_rect, _) = ui.allocate_exact_size(vec2(w, 19.0), Sense::hover());
+        let gap = 10.0;
+        let n = cells.len() as f32;
+        let col_w = ((w - gap * (n - 1.0)) / n).max(36.0);
+        let p = ui.painter();
+        for (i, (k, value, pct, tip)) in cells.iter().enumerate() {
+            let x = row_rect.left() + i as f32 * (col_w + gap);
+            let col = Rect::from_min_size(egui::pos2(x, row_rect.top()), vec2(col_w, row_rect.height()));
+            let full = *pct >= 90.0;
+            let val_color = if full { t.error } else { t.ink };
+            let bar_color = if full { t.error } else { t.accent };
+            let text_y = col.top() + 6.5;
+            p.text(egui::pos2(col.left(), text_y), Align2::LEFT_CENTER, k, font.clone(), t.ink3);
+            p.text(egui::pos2(col.right(), text_y), Align2::RIGHT_CENTER, value, font.clone(), val_color);
+            let bar = Rect::from_min_size(egui::pos2(col.left(), col.bottom() - 3.0), vec2(col_w, 3.0));
+            p.rect_filled(bar, 0.0, t.panel2);
+            let fill = Rect::from_min_size(bar.min, vec2(bar.width() * (*pct / 100.0).clamp(0.0, 1.0), bar.height()));
+            p.rect_filled(fill, 0.0, bar_color);
+            ui.interact(col, ui.scope_id().with(("pool-cell", name, i)), Sense::hover()).on_hover_text(tip);
+        }
+    });
 }
 
 /// An Antigravity account card on Home: shows every quota pool (`Gemini Models`,
@@ -969,7 +963,7 @@ pub(crate) fn antigravity_panel(ui: &mut Ui, t: &Theme, v: &crate::antigravity::
         let now = api::now_ms();
         for (i, pool) in v.pools.iter().enumerate() {
             if i > 0 {
-                ui.add_space(3.0);
+                ui.add_space(5.0);
             }
             let held = api::five_hour_held_by_week(&pool.limits, now);
             let eff = api::effective_limits(&pool.limits, now);

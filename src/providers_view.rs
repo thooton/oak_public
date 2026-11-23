@@ -232,7 +232,7 @@ pub(crate) fn provider_box(ui: &mut Ui, t: &Theme, p: Kind, accounts: usize, sho
             Shown::Pools(pools) => {
                 for (i, pool) in pools.iter().enumerate() {
                     if i > 0 {
-                        ui.add_space(3.0);
+                        ui.add_space(5.0);
                     }
                     let cells: Vec<(String, String, f32, String)> = pool
                         .limits
@@ -249,6 +249,7 @@ pub(crate) fn provider_box(ui: &mut Ui, t: &Theme, p: Kind, accounts: usize, sho
                         .collect();
                     crate::composer::pool_meters(ui, t, w, &pool.name, &pool.description, &cells);
                 }
+                ui.add_space(4.0);
             }
             Shown::Credits(left, spent, error) => {
                 match (left, error) {
@@ -490,5 +491,36 @@ mod tests {
         // a1's 3p weekly at 100% fills a1's 3p 5h (not Gemini's!), averaging 50% with a2's 0%.
         assert_eq!((summed[1].limits[0].used, summed[1].limits[1].used), (50.0, 50.0));
         assert_eq!((summed[2].limits.len(), summed[2].limits[0].accounts, summed[2].limits[0].used), (1, 1, 10.0));
+    }
+
+    #[test]
+    fn antigravity_pool_meters_align_and_never_overlap() {
+        let (ctx, t) = crate::app_hover_test::test_ctx(true, true);
+        let now = api::now_ms();
+        let pool = |id: &str, name: &str, limits| crate::antigravity::QuotaPool { id: id.into(), name: name.into(), description: String::new(), limits };
+        let v = crate::antigravity::AccountView {
+            id: "a1".into(),
+            account: api::Account { provider: Kind::Antigravity, name: "Antigravity".into(), email: "u@example.com".into(), plan: "Google AI Pro".into(), fetched: true, ..Default::default() },
+            pools: vec![
+                pool("gemini", "Gemini Models", vec![limit("5h", 89.0, Some(now + 10_000)), limit("Week", 25.0, Some(now + 100_000))]),
+                pool("3p", "Claude and GPT models", vec![limit("5h", 0.0, Some(now + 10_000)), limit("Week", 0.0, Some(now + 100_000))]),
+                pool("argon", "Gemini 4 Argon", vec![limit("Week", 0.0, Some(now + 100_000))]),
+            ],
+        };
+        let mut time = 0.0;
+        let out = crate::app_hover_test::run_frame(&ctx, vec2(320.0, 400.0), &mut time, 0.05, vec![], |ui| {
+            crate::composer::antigravity_panel(ui, &t, &v, None, 260.0);
+        });
+        let texts = crate::app_hover_test::painted(&out);
+        let rect_of = |s: &str| texts.iter().find(|(text, _)| text == s).map(|(_, r)| *r).unwrap_or_else(|| panic!("missing {s:?} in {texts:?}"));
+        let gemini = rect_of("Gemini Models");
+        let pct_5h = rect_of("89%");
+        let pct_wk = rect_of("25%");
+        assert!((pct_5h.center().y - pct_wk.center().y).abs() < 0.5, "5h and Week must share a baseline: {pct_5h:?} vs {pct_wk:?}");
+        assert!(gemini.bottom() <= pct_5h.top(), "Gemini heading overlaps its 5h row: {gemini:?} vs {pct_5h:?}");
+
+        let argon = rect_of("Gemini 4 Argon");
+        let argon_wk = texts.iter().filter(|(text, _)| text == "Week").map(|(_, r)| *r).max_by(|a, b| a.top().total_cmp(&b.top())).unwrap();
+        assert!(argon.bottom() <= argon_wk.top(), "Argon heading overlaps its Week row: {argon:?} vs {argon_wk:?}");
     }
 }
