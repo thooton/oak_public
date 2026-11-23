@@ -950,7 +950,10 @@ keeps the history, so a request sends only its newest user turn (`user_message`)
 replays the rest; a conversation another model worked on since Quick's last reply sends that
 part too (`unseen_by`, above). A turn ends the way Quick's does: `stop::COMPLETE` says the reply's tool calls
 are the record of work already done and answered, not work for Oak's loop to run again (the
-loop's `batch.finish` would otherwise repeat every call Oak already answered).
+loop's `batch.finish` would otherwise repeat every call Oak already answered). A goal
+still carries such a turn on (`a_done_turn_carries_a_goal_on`): Quick's agent gets the goal as
+its `<goal>` message, calls GOAL through a snippet like any Oak tool, and when its turn ends with
+the goal unfinished, Oak's continue prompt is the next message it is sent.
 Only what the user said since Quick's last reply is sent (`newest_user_text`): a request
 in the middle of a turn (after a dropped stream, a pause, a retry or a usage limit) has only tool
 results in its newest user turn, and it tells Quick to carry on (`CARRY_ON`) rather than read back

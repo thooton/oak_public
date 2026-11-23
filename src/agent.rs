@@ -2340,8 +2340,12 @@ impl Worker {
             }
             // A done turn is the turn: its reply is written, its work (if the
             // provider ran any) is in the transcript, and Oak asks for
-            // nothing more.
+            // nothing more, unless a goal isn't finished: that keeps Quick
+            // going as it keeps any model (`a_done_turn_carries_a_goal_on`).
             if done {
+                if self.goal_step() {
+                    continue;
+                }
                 return;
             }
         }

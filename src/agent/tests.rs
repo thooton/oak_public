@@ -481,6 +481,34 @@ fn endless_goal_never_finishes() {
     assert!(c.goal.is_empty() && !c.goal_endless);
 }
 
+/// A turn its provider ran to the end itself (Quick's, `stop::COMPLETE`)
+/// still carries an unfinished goal on: the continue prompt is what Quick
+/// is sent next, and once GOAL finish is called the turn's end ends it.
+#[test]
+fn a_done_turn_carries_a_goal_on() {
+    let goal = "Ship the Quick goals.";
+    let (w, s) = idle_worker("quick-goal", Conversation { model: "smart".into(), ..Default::default() });
+    {
+        let mut c = s.conv.lock().unwrap();
+        let (block, _) = apply_command(&mut c, Command::Goal(goal.into(), false));
+        c.messages.push(json!({"role": "user", "content": [block.unwrap()]}));
+    }
+    let (r, ..) = w.request_body();
+    assert_eq!(crate::quick::new_user_text(&r).as_deref(), Some(goal_prompt(goal, false).as_str()));
+    s.conv.lock().unwrap().messages.push(json!({"role": "assistant", "content": [oak::text("Done part of it.")]}));
+    assert!(w.goal_step(), "an unfinished goal carries on");
+    let (r, ..) = w.request_body();
+    assert_eq!(crate::quick::new_user_text(&r).as_deref(), Some(goal_continue(goal, false).as_str()));
+    {
+        let mut c = s.conv.lock().unwrap();
+        memory_tool(&mut c, "GOAL_JUSTIFICATION", &json!({"justification": "Shipped."}), 0).unwrap();
+        memory_tool(&mut c, "GOAL_FINISH", &json!({}), 0).unwrap();
+        c.messages.push(json!({"role": "assistant", "content": [oak::text("All done.")]}));
+    }
+    assert!(!w.goal_step(), "a finished goal hands control back");
+    assert!(s.conv.lock().unwrap().goal.is_empty());
+}
+
 #[test]
 fn goal_runs_until_finished() {
     let goal = "Do X, Y, and then Z.";
