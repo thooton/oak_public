@@ -26,8 +26,8 @@
 //! the real project rather than a copy of it. Its device Python tool runs
 //! Oak's own tools: its code is Oak calls written as Python calls
 //! (`calls`), which the conversation's agent runs as it runs any model's,
-//! and each message tells Quick so, with Oak's instructions and tool
-//! definitions (`oak_preface`).
+//! and a thread's first message tells Quick so, with Oak's instructions and
+//! tool definitions (`oak_preface`); later ones are the user's alone.
 //!
 //! Wire details are Quick's own: frames are JSON inside a JSON envelope with
 //! the body base64'd (`rawInputEvent`), and the server answers in AWS
@@ -46,6 +46,7 @@ use std::time::Duration;
 pub(crate) mod calls;
 #[cfg(test)]
 mod live_test;
+pub(crate) mod markup;
 #[cfg(test)]
 mod models_test;
 pub mod outpost;
@@ -1603,10 +1604,6 @@ pub fn unwrap_frame(payload: &[u8]) -> Option<Value> {
 
 // ---------------------------------------------------------------- the request
 
-/// What a message to Quick opens with once the thread has Oak's briefing
-/// as it is now (`oak_preface`).
-pub(crate) const OAK_REMINDER: &str = "[Oak, on this device: your device Python tool (run_python_on_device, with or without write) runs Oak's tool calls only, the tools in <tools_loaded> at the start of this conversation, worked with as <instructions_loaded> there says: e.g. READ(path=\"src/main.rs\") and EXECUTE(command=\"cargo test\", summary=\"Run the tests\") on lines of their own, run at the same time.]";
-
 /// The names Quick calls this machine's Python by (a device's own tools may
 /// carry its name before them), which run Oak's tools (`calls`).
 pub(crate) fn is_snippet(name: &str) -> bool {
@@ -1634,8 +1631,8 @@ fn call_block(id: &str, name: &str, input: Value) -> Value {
     block
 }
 
-/// The briefing each thread was sent last (a hash of it), by thread.
-static BRIEFED: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+/// The threads Oak has briefed since it started.
+static BRIEFED: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     LazyLock::new(Default::default);
 
 /// The tools Oak offers Quick: the request's (the conversation's, with the
@@ -1679,25 +1676,31 @@ fn briefing(r: &Request) -> String {
         )
     };
     format!(
-        "{instructions}<tools_loaded>{tools}</tools_loaded>\n\n[Oak, on this device]\n{which} Oak has loaded for you here: its own system prompt, as it gives it to every model it runs, and its tool definitions. Follow them as your instructions for this work. This device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, the ones in <tools_loaded>, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Where the loaded instructions say tool calls in one reply run at the same time, for you that is the calls of one snippet. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). ASK isn't available this way: ask the user in your reply. Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's.\n[End of Oak's notes. The user's message follows.]"
+        "{instructions}<tools_loaded>{tools}</tools_loaded>\n\n[Oak, on this device]\n{which} Oak has loaded for you here: its own system prompt, as it gives it to every model it runs, and its tool definitions. Follow them as your instructions for this work. This device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, the ones in <tools_loaded>, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Where the loaded instructions say tool calls in one reply run at the same time, for you that is the calls of one snippet. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). ASK isn't available this way: ask the user in your reply, with a decision card (Oak asks its questions with ASK, and the answers are your next message). Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's. If this device drops off (it shows as OFFLINE, or a call to it fails to connect), Oak is most likely restarting or the network blipped: keep checking for it for at least 5 to 10 minutes before you end your turn, and once it is back, carry on where you left off.\n[End of Oak's notes. The user's message follows.]"
     )
 }
 
-/// What a message on `thread` opens with: Oak's briefing when the thread
-/// hasn't had it as it is now (its first message since Oak started, or the
-/// prompt or tools changed: notes, kits, the folder), else a reminder.
-fn oak_preface(r: &Request, thread: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let full = briefing(r);
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    full.hash(&mut h);
-    let h = h.finish();
+/// What a message on `thread` opens with: Oak's briefing, once per thread,
+/// else nothing. Quick keeps the thread's history, briefing included, so it
+/// isn't sent again when the prompt or tools change (notes, kits, the folder)
+/// or Oak restarts: a thread Quick has already run snippets in has had it.
+fn oak_preface(r: &Request, thread: &str) -> Option<String> {
     let mut sent = BRIEFED.lock().unwrap_or_else(|e| e.into_inner());
-    if sent.get(thread) == Some(&h) {
-        return OAK_REMINDER.into();
+    if !sent.insert(thread.to_string()) || quick_worked_here(r) {
+        return None;
     }
-    sent.insert(thread.to_string(), h);
-    full
+    Some(briefing(r))
+}
+
+/// Whether Quick has run snippets in this conversation already (so its
+/// thread holds the briefing they were called by).
+fn quick_worked_here(r: &Request) -> bool {
+    r.messages
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .any(|b| b["type"] == "tool_call" && b["name"].as_str().is_some_and(is_snippet))
 }
 
 /// The `user_message` frame for Oak request `r` on thread `thread`: the
@@ -1707,7 +1710,7 @@ fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> 
 }
 
 /// `user_message`, opened with Oak's briefing where the thread needs it
-/// (`brief`), else with the reminder.
+/// (`brief`), else the user's text as it is.
 fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, brief: bool) -> Value {
     let newest = match new_user_text(r) {
         // The conversation went on without this thread: it carries on from
@@ -1727,10 +1730,10 @@ fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, 
         .is_some_and(|i| !i.trim().is_empty())
     {
         newest
-    } else if brief {
-        format!("{}\n\n{newest}", oak_preface(r, thread))
+    } else if let Some(preface) = brief.then(|| oak_preface(r, thread)).flatten() {
+        format!("{preface}\n\n{newest}")
     } else {
-        format!("{OAK_REMINDER}\n\n{newest}")
+        newest
     };
     let trace = hex_uuid();
     let mut payload = json!({
@@ -1806,13 +1809,35 @@ pub(crate) fn new_user_text(r: &Request) -> Option<String> {
         let Some(blocks) = m["content"].as_array() else {
             continue;
         };
-        let said = |b: &&Value| {
-            b["type"] == "text" && b.get("_oak_file").is_none() && b.get(STEERED_KEY).is_none()
+        // (Not the reminders a Generic-mode request adds of what changed,
+        // notes and tools: Quick was briefed once and is told nothing more.)
+        let said = |b: &Value| {
+            b["type"] == "text"
+                && b.get("_oak_file").is_none()
+                && b.get(STEERED_KEY).is_none()
+                && !b["text"].as_str().is_some_and(|t| t.starts_with("<system-reminder>"))
         };
-        let text: Vec<&str> = blocks
+        // The answers to the ASK Quick's decision cards became are what the
+        // user said to them, as Quick's app sends a card's.
+        let answered = |b: &Value| {
+            b["type"] == "tool_result"
+                && b["call_id"]
+                    .as_str()
+                    .or(b["tool_use_id"].as_str())
+                    .is_some_and(|c| c.starts_with(ASK_CALL))
+        };
+        let text: Vec<String> = blocks
             .iter()
-            .filter(said)
-            .filter_map(|b| b["text"].as_str())
+            .filter_map(|b| {
+                if answered(b) {
+                    calls::result_text(b).ok().map(|a| markup::decision_response(&a))
+                } else if said(b) {
+                    b["text"].as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .filter(|t| !t.trim().is_empty())
             .collect();
         parts.push(text.join("\n"));
     }
@@ -2027,7 +2052,17 @@ pub(crate) struct Turn {
     /// replayed or trailing `message_start` from an interrupted or paused
     /// turn is never mistaken for the new turn's reply.
     pub(crate) ignore_messages: std::collections::HashSet<String>,
+    /// The text block Quick's text streams into (its index), as Quick wrote
+    /// it, markup and all: Oak is shown what `markup::split` makes of it.
+    raw: Option<(usize, String)>,
+    /// The questions of the decision cards the reply wrote, which Oak asks
+    /// with ASK once it ends (`close`).
+    questions: Vec<Value>,
 }
+
+/// The id of the ASK a reply's decision cards become (then the message's
+/// id): its answers are what Quick is sent next (`new_user_text`).
+pub(crate) const ASK_CALL: &str = "quick-ask-";
 
 /// A call in the turn: one Quick's agent made (`tool_start`), one Oak runs
 /// (`tool_call`), or both, since Quick reports the calls it hands Oak too.
@@ -2148,6 +2183,7 @@ impl Turn {
                     self.awaiting_continuation = false;
                     self.text_at = None;
                     self.text_open = false;
+                    self.raw = None;
                     self.section_at = 0;
                     self.section_given = false;
                     self.thinking_at = None;
@@ -2197,6 +2233,7 @@ impl Turn {
             return i;
         }
         if let Some(i) = self.text_at.filter(|_| self.text_open) {
+            self.flush_text(out);
             out.push(Event::BlockEnd { index: i });
         }
         let i = self.text();
@@ -2294,13 +2331,7 @@ impl Turn {
                 let text = p["delta"].as_str().unwrap_or("");
                 if !text.is_empty() {
                     let i = self.open_text(&mut out);
-                    if let Some(t) = self.blocks[i]["text"].as_str().map(str::to_string) {
-                        self.blocks[i]["text"] = json!(format!("{t}{text}"));
-                    }
-                    out.push(Event::Text {
-                        index: i,
-                        text: text.to_string(),
-                    });
+                    self.stream_text(i, text, &mut out);
                 }
             }
             "text_complete" | "message_complete" => {
@@ -2469,6 +2500,10 @@ impl Turn {
     /// the block's text from where the section began becomes it, and Oak is
     /// told (a `Block` with the text, which replaces the one it has).
     fn settle_text(&mut self, text: &str, section: bool, out: &mut Vec<Event>) {
+        // Quick's markup is Oak's to read, not to show (`markup`).
+        let (clean, questions) = markup::split(text, false);
+        self.add_questions(questions);
+        let text = clean.as_str();
         // Whole text that comes once a thought or a call has begun is still
         // the text block's above it while that block's section is open (its
         // deltas came, its whole text not yet); otherwise it is new text, at
@@ -2519,6 +2554,65 @@ impl Turn {
         if section {
             self.section_at = want.len();
             self.section_given = true;
+        }
+        // Deltas after it add to what Quick has given whole.
+        self.raw = Some((i, want));
+    }
+
+    /// More of Quick's text, `delta`, for text block `i`: Oak is shown what
+    /// the block's text as Quick wrote it now makes (`markup::split`, which
+    /// holds back what may begin a card).
+    fn stream_text(&mut self, i: usize, delta: &str, out: &mut Vec<Event>) {
+        let had = self.blocks[i]["text"].as_str().unwrap_or("").to_string();
+        let mut raw = match self.raw.take() {
+            Some((at, raw)) if at == i => raw,
+            _ => had.clone(),
+        };
+        raw.push_str(delta);
+        let (shown, questions) = markup::split(&raw, true);
+        self.raw = Some((i, raw));
+        self.add_questions(questions);
+        self.show_text(i, &had, shown, out);
+    }
+
+    /// Text block `i`, which Oak shows as `had`, is to show `shown`: more
+    /// text when it only grows, else the block again (which replaces it).
+    fn show_text(&mut self, i: usize, had: &str, shown: String, out: &mut Vec<Event>) {
+        if shown == had {
+            return;
+        }
+        let more = shown.strip_prefix(had).map(str::to_string);
+        self.blocks[i]["text"] = json!(shown);
+        match more {
+            Some(text) => out.push(Event::Text { index: i, text }),
+            None => out.push(Event::Block {
+                index: i,
+                block: self.blocks[i].clone(),
+            }),
+        }
+    }
+
+    /// The open text block is over: what was held back of it, as maybe the
+    /// start of a card, is shown as it is.
+    fn flush_text(&mut self, out: &mut Vec<Event>) {
+        let Some((i, raw)) = self.raw.take() else {
+            return;
+        };
+        if self.text_at != Some(i) || !self.text_open || i >= self.blocks.len() {
+            return;
+        }
+        let had = self.blocks[i]["text"].as_str().unwrap_or("").to_string();
+        let (shown, questions) = markup::split(&raw, false);
+        self.add_questions(questions);
+        self.show_text(i, &had, shown, out);
+    }
+
+    /// Cards the reply wrote: a question asked again (Quick's whole text
+    /// repeats what its deltas wrote) replaces the one before.
+    fn add_questions(&mut self, questions: Vec<Value>) {
+        for q in questions {
+            self.questions.retain(|h| h["question"] != q["question"]);
+            self.questions.push(q);
         }
     }
 
@@ -2698,8 +2792,18 @@ impl Turn {
             out.extend(self.end_call(c.block, &call, &result));
         }
         if let Some(i) = self.text_at.filter(|_| self.text_open) {
+            self.flush_text(&mut out);
             self.text_open = false;
             out.push(Event::BlockEnd { index: i });
+        }
+        // The decision cards Quick's reply offered are Oak's ASK: the user
+        // answers them as any model's questions, Oak's loop goes on for it,
+        // and the answers are Quick's next message (`new_user_text`).
+        if self.stop == stop::COMPLETE && !self.questions.is_empty() {
+            let questions = std::mem::take(&mut self.questions);
+            let id = format!("{ASK_CALL}{}", self.message);
+            out.extend(self.oak_call(&id, "ASK", &json!({"questions": questions})));
+            self.stop = stop::TOOL_CALLS.into();
         }
         out.push(Event::Stop {
             reason: self.stop.clone(),
@@ -2722,6 +2826,7 @@ impl Turn {
             .collect();
         self.earlier.extend(texts);
         self.blocks.clear();
+        self.raw = None;
         self.text_at = None;
         self.thinking_at = None;
         self.text_open = false;
@@ -2739,12 +2844,16 @@ impl Turn {
     pub(crate) fn await_resend(&mut self) -> Vec<Event> {
         let mut out = vec![];
         if let Some(i) = self.text_at.filter(|_| self.text_open) {
+            self.flush_text(&mut out);
             out.push(Event::BlockEnd { index: i });
         }
         self.text_at = None;
         self.text_open = false;
         self.section_at = 0;
         self.section_given = false;
+        // That message read errors for its results: what it asked isn't
+        // what the answer to the real ones will.
+        self.questions.clear();
         self.awaiting_continuation = true;
         out
     }
@@ -2865,8 +2974,8 @@ mod tests {
     }
 
     /// A message typed mid-turn goes as Quick's app sends one (the capture's
-    /// "NO TESTING"): `mid_turn`, with its own message id, and the Python
-    /// directive prepended.
+    /// "NO TESTING"): `mid_turn`, with its own message id, and the text as
+    /// typed.
     #[test]
     fn a_mid_turn_message_is_sent_as_quicks_app_sends_it() {
         let m = model("smart").unwrap();
@@ -2881,7 +2990,7 @@ mod tests {
         assert_eq!(v["type"], "user_message");
         assert_eq!(
             v["payload"]["text"],
-            format!("{OAK_REMINDER}\n\nNO TESTING")
+            "NO TESTING"
         );
         assert_eq!(v["payload"]["mid_turn"], true);
         assert_eq!(v["payload"]["message_id"], "msg-87fa24c3");
@@ -2890,8 +2999,8 @@ mod tests {
     }
 
     /// Quick is told once how this device's Python tool runs Oak's tools,
-    /// with Oak's prompt and tools, then reminded, and told again when they
-    /// change.
+    /// with Oak's prompt and tools, then sent the user's messages alone, even
+    /// when the prompt or tools change.
     #[test]
     fn user_message_tells_quick_how_to_call_oaks_tools() {
         let m = model("smart").unwrap();
@@ -2914,9 +3023,25 @@ mod tests {
         assert!(first.contains("\n</tools_loaded>\n\n[Oak, on this device]\nAbove are the instructions and tools"), "{first}");
         assert!(!first.contains("### ASK"), "ASK can't be called through a snippet: {first}");
         assert!(first.ends_with("[End of Oak's notes. The user's message follows.]\n\nfind all todo comments"), "{first}");
-        assert_eq!(sent(&r), format!("{OAK_REMINDER}\n\nfind all todo comments"));
+        assert_eq!(sent(&r), "find all todo comments");
         r.system = "You are Oak, with a note.".into();
-        assert!(sent(&r).starts_with("<instructions_loaded>\nYou are Oak, with a note."), "a changed prompt is sent again");
+        assert_eq!(sent(&r), "find all todo comments", "a changed prompt is not sent again");
+        // Nor what a Generic-mode request adds of what changed.
+        r.messages[0]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "text", "text": "<system-reminder>\nNote 3 added\n</system-reminder>"}));
+        assert_eq!(sent(&r), "find all todo comments");
+        // A thread Quick has run snippets in (before Oak restarted) has had it.
+        let worked = Request {
+            messages: vec![
+                json!({"role": "user", "content": [{"type": "text", "text": "hi"}]}),
+                json!({"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "Oak_run_python_on_device", "input": {}}]}),
+                json!({"role": "user", "content": [{"type": "tool_result", "call_id": "c1", "content": "ok"}, {"type": "text", "text": "next"}]}),
+            ],
+            ..r.clone()
+        };
+        assert_eq!(user_message(&worked, "oak-test-briefing-restarted", m, Some("dev"))["payload"]["text"], "next");
         // A summary sends its instruction alone.
         r.instruction = Some("Summarize.".into());
         assert_eq!(sent(&r), "Summarize.");
@@ -3240,6 +3365,61 @@ mod tests {
             "the text lands in the block that was opened"
         );
         assert_eq!(t.text_at, Some(text_at));
+    }
+
+    /// A reply's decision card is Oak's ASK, not text: neither the card nor
+    /// the sources show, even while they stream, and the reply ends on the
+    /// ASK for Oak's loop to run.
+    #[test]
+    fn a_decision_card_is_an_ask() {
+        let mut t = Turn::for_message("th", "");
+        let reply = "Pick one:\n<decision question=\"Which?\">\n<option description=\"the first\">A</option>\n<option>B</option>\n</decision>\n<sources>\n[x](mem://1)\n</sources>";
+        let frame = |kind: &str, payload: Value| json!({"type": kind, "payload": payload, "thread_id": "th", "message_id": "m1"});
+        let mut ev = t.feed(&frame("message_start", json!({})));
+        for c in reply.as_bytes().chunks(7) {
+            let delta = std::str::from_utf8(c).unwrap();
+            ev.extend(t.feed(&frame("text_delta", json!({"delta": delta}))));
+        }
+        ev.extend(t.feed(&frame("message_complete", json!({"text": reply}))));
+        // What Oak shows, delta by delta and block by block.
+        let mut shown = String::new();
+        for e in &ev {
+            match e {
+                Event::Text { text, .. } => shown.push_str(text),
+                Event::Block { block, .. } if block["type"] == "text" => {
+                    shown = block["text"].as_str().unwrap_or("").to_string()
+                }
+                _ => {}
+            }
+            assert!(!shown.contains('<'), "{shown:?}");
+        }
+        assert_eq!(shown, "Pick one:");
+        let blocks = t.blocks();
+        let ask = blocks.iter().find(|b| b["name"] == "ASK").expect("an ASK");
+        assert_eq!(ask["id"], format!("{ASK_CALL}m1"));
+        assert_eq!(
+            ask["input"]["questions"][0]["options"],
+            json!([{"label": "A", "description": "the first"}, "B"])
+        );
+        assert!(crate::agent::Ask::new(&ask["input"]).is_ok());
+        assert!(matches!(ev.last(), Some(Event::Stop { reason, .. }) if reason == stop::TOOL_CALLS));
+    }
+
+    /// The user's answers to that ASK are Quick's next message, as its app
+    /// sends a card's.
+    #[test]
+    fn answers_to_a_card_are_quicks_next_message() {
+        let r = Request {
+            messages: vec![
+                json!({"role": "assistant", "content": [{"type": "tool_call", "id": "quick-ask-m1", "name": "ASK", "input": {}}]}),
+                json!({"role": "user", "content": [{"type": "tool_result", "call_id": "quick-ask-m1", "content": "1. Which?\n   Answer: A\n"}]}),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            new_user_text(&r).as_deref(),
+            Some("<decision_response>\nWhich?: A\n</decision_response>")
+        );
     }
 
     /// After a tool result Quick carries the turn on in a fresh assistant

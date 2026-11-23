@@ -1013,7 +1013,7 @@ impl Worker {
             *self.warm.lock().unwrap() = warm.then(|| (body.clone(), false));
         }
         let cfg = rolling::config_for(&c.model);
-        if c.rolling.off || c.rolling.base() != base || c.rolling.context < cfg.trigger {
+        if !rolling::applies(body.provider) || c.rolling.off || c.rolling.base() != base || c.rolling.context < cfg.trigger {
             return;
         }
         {
@@ -1058,6 +1058,9 @@ impl Worker {
         }
         let (body, n, base) = self.request_body();
         let mut c = self.conv.lock().unwrap();
+        if !rolling::applies(body.provider) {
+            return Err("smart context doesn't apply to this provider".into());
+        }
         if c.rolling.off {
             return Err("smart context is off for this conversation".into());
         }

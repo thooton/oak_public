@@ -2310,7 +2310,7 @@ fn tool_input_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(|o| o.as_str())
+                    .filter_map(|o| o.as_str().or(o["label"].as_str()))
                     .collect();
                 format!(
                     "{}\n  {}",
@@ -3811,6 +3811,12 @@ pub(crate) fn ask_view(ui: &mut Ui, t: &Theme, a: &mut agent::Ask) -> bool {
             for o in 0..a.questions[i].options.len() {
                 if choice(ui, a.picked[i][o], &a.questions[i].options[o].clone()) {
                     a.pick(i, Some(o));
+                }
+                let about = a.questions[i].descriptions.get(o).cloned().unwrap_or_default();
+                if !about.is_empty() {
+                    ui.indent(("ask-about", i, o), |ui| {
+                        caption(ui, &about, t.ink3);
+                    });
                 }
             }
             ui.horizontal(|ui| {

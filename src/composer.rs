@@ -33,7 +33,8 @@ pub(crate) fn dock(ui: &mut Ui, id: &'static str, t: &Theme, contents: impl FnOn
 impl App {
     pub(crate) fn composer(&mut self, ui: &mut Ui, t: &Theme, hooks: &[Arc<plugins::Hooks>]) {
         let area = ui.max_rect();
-        let lay = ComposerLayout::new(area.x_range(), matches!(self.screen, Screen::Chat(_)));
+        let rolling = rolling::applies(row_provider(chat_session(&self.screen, &self.sessions), &self.settings));
+        let lay = ComposerLayout::new(area.x_range(), matches!(self.screen, Screen::Chat(_)), rolling);
         // Notices and attachments above the row, as wide as the message
         // box; without any, the row sits GAP below the panel's top line.
         let mut y = area.top() + GAP;
@@ -227,8 +228,9 @@ impl App {
     }
 
     /// The boxes along the row, each in `row` of its span: a plugin's
-    /// (Unslop's) left of the buttons, and smart context and the account
-    /// right of the message box.
+    /// (Unslop's) left of the buttons, and smart context (where it
+    /// applies, `rolling::applies`) and the account right of the message
+    /// box.
     fn side_boxes(&mut self, ui: &mut Ui, t: &Theme, lay: &ComposerLayout, row: impl Fn(Rangef) -> Rect) {
         if let (Some(x), Some(b)) = (lay.plugin_box, plugins::parts().composer_boxes.first()) {
             ui.scope_builder(UiBuilder::new().max_rect(row(x)), |ui| {
@@ -236,12 +238,15 @@ impl App {
             });
         }
         let session = chat_session(&self.screen, &self.sessions);
-        if let Some(&x) = lay.boxes.first() {
+        let mut boxes = lay.boxes.iter().copied();
+        if lay.rolling
+            && let Some(x) = boxes.next()
+        {
             ui.scope_builder(UiBuilder::new().max_rect(row(x)), |ui| {
                 rolling_panel(ui, t, session, &mut self.settings, &mut self.size_inputs, x.span());
             });
         }
-        if let Some(&x) = lay.boxes.get(1) {
+        if let Some(x) = boxes.next() {
             ui.scope_builder(UiBuilder::new().max_rect(row(x)), |ui| account_box(ui, t, session, &self.settings, x.span()));
             if ui.ctx().data_mut(|d| d.remove_temp::<bool>(Id::unique(GO_HOME))).is_some() {
                 self.page = Page::Home;
@@ -438,6 +443,15 @@ pub(crate) fn last_user_text(messages: &[Value]) -> Option<String> {
     })
 }
 
+/// Who serves the composer row's conversation: the open one's provider,
+/// or before one starts, the one picked.
+fn row_provider(session: Option<&Session>, settings: &Settings) -> api::Provider {
+    match session {
+        Some(s) => s.conv.lock().unwrap().provider(),
+        None => settings.provider.unwrap_or_else(|| api::Provider::of(&settings.model)),
+    }
+}
+
 /// The open conversation (None on a new one).
 fn chat_session<'a>(screen: &Screen, sessions: &'a HashMap<String, Session>) -> Option<&'a Session> {
     match screen {
@@ -546,14 +560,19 @@ pub(crate) struct ComposerLayout {
     /// to `BOX_W` wide, against them), when there is one and room for it.
     pub(crate) plugin_box: Option<Rangef>,
     /// Smart context, then the account (dropped in that order from the
-    /// right when the window gets narrow).
+    /// right when the window gets narrow); only the account where smart
+    /// context doesn't apply.
     boxes: Vec<Rangef>,
+    /// Smart context has the first of `boxes` (if it has any).
+    rolling: bool,
 }
 
 impl ComposerLayout {
     /// `boxed`: a conversation, whose session box takes the room left of
-    /// the transcript (`chat_column`).
-    pub(crate) fn new(area: Rangef, boxed: bool) -> ComposerLayout {
+    /// the transcript (`chat_column`). `rolling`: smart context applies,
+    /// and gets a box.
+    pub(crate) fn new(area: Rangef, boxed: bool, rolling: bool) -> ComposerLayout {
+        let most = if rolling { 2 } else { 1 };
         let col = if boxed { chat_column(area) } else { transcript_x(area) };
         let (left, right) = (area.min + GAP, area.max - GAP);
         // What goes when the window gets narrow, in order: Settings' label,
@@ -563,6 +582,7 @@ impl ComposerLayout {
         let boxed_plugin = !plugins::parts().composer_boxes.is_empty();
         let tries = [(boxed_plugin, SETTINGS_W, 2usize), (boxed_plugin, GEAR_W, 2), (boxed_plugin, GEAR_W, 1), (false, GEAR_W, 1)];
         for (plugin_box, link, n) in tries {
+            let n = n.min(most);
             let lead = left + link + 8.0 + if plugin_box { MIN_BOX_W + 8.0 } else { 0.0 } + BTN + 8.0;
             let chat_left = col.min.max(lead);
             let chat_right = col.max.min(right - n as f32 * (MIN_BOX_W + 8.0));
@@ -574,11 +594,11 @@ impl ComposerLayout {
             let w = (right - x0 - 8.0 * (n - 1) as f32) / n as f32;
             let boxes = (0..n).map(|i| Rangef::new(x0 + i as f32 * (w + 8.0), x0 + i as f32 * (w + 8.0) + w)).collect();
             let plugin_box = plugin_box.then(|| Rangef::new((buttons - 8.0 - BOX_W).max(left + link + 8.0), buttons - 8.0));
-            return ComposerLayout { buttons, chat: Rangef::new(chat_left, chat_right), plugin_box, boxes };
+            return ComposerLayout { buttons, chat: Rangef::new(chat_left, chat_right), plugin_box, boxes, rolling };
         }
         let chat_left = col.min.max(left + GEAR_W + 8.0 + BTN + 8.0);
         let chat = Rangef::new(chat_left, col.max.min(right).max(chat_left + 40.0));
-        ComposerLayout { buttons: chat_left - 8.0 - BTN, chat, plugin_box: None, boxes: vec![] }
+        ComposerLayout { buttons: chat_left - 8.0 - BTN, chat, plugin_box: None, boxes: vec![], rolling }
     }
 }
 

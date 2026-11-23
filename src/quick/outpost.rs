@@ -215,11 +215,19 @@ fn event(token: &str, host: &str, kind: &str, body: Value) -> Result<Value, Stri
     Ok(v["eventResponse"].clone())
 }
 
-/// Gives each of `TOOLS` that has none a policy on `outpost`: the tool's
-/// group (`connectorId`), and whether it may run without asking (the reading
-/// ones) or asks each time, as Quick sets them for the app's own tools. The
-/// policies the outpost has are kept as they are (the user may have changed
-/// them), and nothing is sent when none is missing.
+/// The policy that lets a tool run without asking.
+const ALLOW: &str = "ALWAYS_ALLOW";
+
+/// The policy that lets a tool run without asking.
+const ALLOW: &str = "ALWAYS_ALLOW";
+
+/// Lets each of `TOOLS` run on `outpost` without asking (`ALWAYS_ALLOW`),
+/// in its group (`connectorId`). Quick asks the user to approve a tool that
+/// asks each time through its own app, which Oak has no prompt for: the
+/// request goes unanswered and the call fails as declined. Oak's own guard
+/// still checks what its tools run. A tool's other settings (`enabled`,
+/// `originPolicy`) are kept, and nothing is sent when every tool already
+/// runs without asking.
 fn policies(token: &str, host: &str, outpost: &str) -> Result<(), String> {
     let got = event(
         token,
@@ -229,20 +237,27 @@ fn policies(token: &str, host: &str, outpost: &str) -> Result<(), String> {
     )?;
     let current = &got["batchGetPolicyResponse"]["policies"][0];
     let mut tools = current["toolPolicies"].as_array().cloned().unwrap_or_default();
-    let had = tools.len();
-    for (name, reads) in TOOLS {
-        if tools.iter().any(|t| t["toolName"] == *name) {
-            continue;
+    let mut changed = false;
+    for (name, _) in TOOLS {
+        match tools.iter_mut().find(|t| t["toolName"] == *name) {
+            Some(t) if t["permissionPolicy"] == ALLOW => {}
+            Some(t) => {
+                t["permissionPolicy"] = json!(ALLOW);
+                changed = true;
+            }
+            None => {
+                tools.push(json!({
+                    "toolName": name,
+                    "enabled": true,
+                    "connectorId": if name.starts_with("run_python") { "code_execution" } else { "file_operations" },
+                    "permissionPolicy": ALLOW,
+                    "originPolicy": "ASK_EACH_TIME",
+                }));
+                changed = true;
+            }
         }
-        tools.push(json!({
-            "toolName": name,
-            "enabled": true,
-            "connectorId": if name.starts_with("run_python") { "code_execution" } else { "file_operations" },
-            "permissionPolicy": if *reads { "ALWAYS_ALLOW" } else { "ASK_EACH_TIME" },
-            "originPolicy": "ASK_EACH_TIME",
-        }));
     }
-    if tools.len() == had {
+    if !changed {
         return Ok(());
     }
     event(

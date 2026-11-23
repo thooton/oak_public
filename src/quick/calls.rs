@@ -68,7 +68,7 @@ fn resolve(c: Written, tools: &[Value]) -> Result<OakCall, String> {
         },
     };
     if !offered(&name) {
-        return Err(format!("{name} isn't available through this tool: ask the user in your reply instead."));
+        return Err(format!("{name} isn't available through this tool: ask the user in your reply instead, with a decision card (Oak asks its questions with ASK)."));
     }
     let mut input = Map::new();
     if !c.positional.is_empty() {

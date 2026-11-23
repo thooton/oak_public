@@ -85,6 +85,13 @@ pub fn capped(c: Config, max: u64) -> Config {
     Config { trigger, keep: c.keep.min(trigger * 3 / 4) }
 }
 
+/// Whether smart context applies to conversations `provider` serves. Not
+/// Quick's: it keeps the conversation on its own thread and runs its own
+/// agent, so a summary of Oak's copy changes nothing it reads.
+pub fn applies(provider: crate::api::Provider) -> bool {
+    provider != crate::api::Provider::Quick
+}
+
 /// The sizes as they apply to a conversation on `model`: the settings,
 /// capped by its context window.
 ///

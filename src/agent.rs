@@ -577,6 +577,9 @@ pub struct Ask {
 pub struct Question {
     pub text: String,
     pub options: Vec<String>,
+    /// Per option, what it means (empty for none): an option may be given
+    /// as `{"label", "description"}`, as Quick's decision cards are.
+    pub descriptions: Vec<String>,
     pub multiple: bool,
 }
 
@@ -596,20 +599,23 @@ impl Ask {
             if text.is_empty() {
                 return Err("Each question needs a `question` text.".into());
             }
-            let options: Vec<String> = q["options"]
+            let (options, descriptions): (Vec<String>, Vec<String>) = q["options"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|o| o.as_str())
-                .map(|o| o.trim().to_string())
-                .filter(|o| !o.is_empty())
-                .collect();
+                .filter_map(|o| {
+                    let label = o.as_str().or(o["label"].as_str())?.trim().to_string();
+                    let about = o["description"].as_str().unwrap_or("").trim().to_string();
+                    (!label.is_empty()).then_some((label, about))
+                })
+                .unzip();
             if options.len() > 10 {
                 return Err("At most 10 options per question.".into());
             }
             questions.push(Question {
                 text,
                 options,
+                descriptions,
                 multiple: q["multiple"].as_bool().unwrap_or(false),
             });
         }
@@ -3084,12 +3090,16 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
     let wrapped = |b: &Value| {
         !freebuff && oak::is_call(b) && b["input"].get(crate::freebuff_tools::KEY).is_some()
     };
+    // Quick has the messages its agent took in mid-turn already. The mark
+    // saying so (`quick::STEERED_KEY`) is one of Oak's own keys, which the
+    // request drops, so the message would look new and go to Quick again.
+    let steered = |b: &Value| quick && b.get(crate::quick::STEERED_KEY).is_some();
     let touched = |b: &Value| foreign(b) || quiet(b) || wrapped(b);
     let has = |m: &Value| {
-        m["role"] == "assistant"
-            && m["content"]
-                .as_array()
-                .is_some_and(|c| c.iter().any(touched))
+        let any = |f: &dyn Fn(&Value) -> bool| {
+            m["content"].as_array().is_some_and(|c| c.iter().any(f))
+        };
+        (m["role"] == "assistant" && any(&touched)) || (m["role"] == "user" && any(&steered))
     };
     if !messages.iter().any(has) {
         return std::borrow::Cow::Borrowed(messages);
@@ -3118,10 +3128,15 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
                     o.remove(crate::freebuff_tools::KEY);
                 }
             }
-        } else if !snippets.is_empty() {
-            content.retain(|b| !snippet_result(b));
+        } else {
+            content.retain(|b| !steered(b) && (snippets.is_empty() || !snippet_result(b)));
         }
         if content.is_empty() && before > 0 {
+            // A user turn of only a steered message stays empty for Quick,
+            // which has it: "(empty)" would read as a new message.
+            if !assistant && quick {
+                continue;
+            }
             content.push(oak::text(if assistant {
                 "(No reply text.)"
             } else {

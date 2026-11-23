@@ -52,6 +52,44 @@ fn thinking_tokens_spread_over_blocks() {
     assert_eq!(n.iter().sum::<u64>(), 101);
 }
 
+/// A message Quick's agent took in mid-turn isn't in Quick's requests (it
+/// would look new there once Oak's keys are dropped, and go again), but is
+/// in any other provider's.
+#[test]
+fn a_message_quick_took_in_is_left_out_of_its_requests() {
+    let messages = vec![
+        json!({"role": "user", "content": [oak::text("fix the bug")]}),
+        json!({"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "run_python_on_device", "input": {}}]}),
+        json!({"role": "user", "content": [{"type": "tool_result", "call_id": "c1", "content": "ok"}, {"type": "text", "text": "NO TESTING", crate::quick::STEERED_KEY: true}]}),
+    ];
+    let quick = for_provider(&messages, api::Provider::Quick);
+    assert_eq!(quick[2]["content"], json!([{"type": "tool_result", "call_id": "c1", "content": "ok"}]));
+    assert_eq!(quick[0], messages[0]);
+    assert!(matches!(
+        for_provider(&messages, api::Provider::Claude),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
+/// A message Quick's agent took in mid-turn isn't in Quick's requests (it
+/// would look new there once Oak's keys are dropped, and go again), but is
+/// in any other provider's.
+#[test]
+fn a_message_quick_took_in_is_left_out_of_its_requests() {
+    let messages = vec![
+        json!({"role": "user", "content": [oak::text("fix the bug")]}),
+        json!({"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "run_python_on_device", "input": {}}]}),
+        json!({"role": "user", "content": [{"type": "tool_result", "call_id": "c1", "content": "ok"}, {"type": "text", "text": "NO TESTING", crate::quick::STEERED_KEY: true}]}),
+    ];
+    let quick = for_provider(&messages, api::Provider::Quick);
+    assert_eq!(quick[2]["content"], json!([{"type": "tool_result", "call_id": "c1", "content": "ok"}]));
+    assert_eq!(quick[0], messages[0]);
+    assert!(matches!(
+        for_provider(&messages, api::Provider::Claude),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
 /// Switching models: reasoning another provider wrote is left out of
 /// requests (kept for a model of the same provider); the OpenRouter
 /// provider is forgotten; the effort stays.

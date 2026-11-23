@@ -606,7 +606,9 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   ~20k tokens stays (the smart context box's "Tool output kept", in thousands of tokens, 0 to 1000;
   a change applies to summaries made after it). A suggested trigger is never below keep × 4/3, the
   least that allows the keep, so it is always for the keep in the box. Turning smart context
-  off for a conversation stops new summaries; the one in use stays.
+  off for a conversation stops new summaries; the one in use stays. It doesn't apply to Quick
+  (`rolling::applies`): Quick keeps the conversation on its own thread, so its conversations get
+  no summaries and the composer row shows only the account box.
   The trigger is at most 90% of the model's window, and never past it: a window too short for the
   least trigger (20k; a plugin's model, Duck.ai's 19k) gets 90% of it (`rolling::max_trigger`). A
   summary takes out at least 10k tokens, or for a basic model (local or a plugin's) a quarter of
@@ -908,11 +910,14 @@ transcript (`quick::QUIET_KEY`, `a_quiet_call_is_not_shown`): the user sees only
 ran, unless it failed (a snippet Oak refused), when it shows with why. ASK can't be called that way (it waits for the reply's end, which the turn never
 reaches while it waits). A snippet of a thread no conversation's agent reads runs here directly,
 with only READ, WRITE, EDIT, EXECUTE, SEARCH and FETCH. Quick is told all this in the user message
-(`oak_preface`): a thread's first message since Oak started opens with Oak's briefing: first Oak's
+(`oak_preface`): a thread's first message opens with Oak's briefing, once per thread: first Oak's
 own system prompt as the request has it, notes included, in `<instructions_loaded>`, and its tool
 definitions in `<tools_loaded>`, so Quick's agent takes them as what it was loaded with rather
-than as the user's words, then the call syntax; later ones with a one-line reminder, and the briefing goes again whenever the prompt or tools
-change (`user_message_tells_quick_how_to_call_oaks_tools`); a summary's instruction goes alone.
+than as the user's words, then the call syntax; later ones (mid-turn ones too) are the user's text alone. Quick keeps the
+thread's history, so the briefing never goes again: not when the prompt or tools change (notes,
+kits, the folder), not after Oak restarts (a thread Quick ran snippets in has had it), and the
+`<system-reminder>` blocks a Generic-mode request adds of such changes are left out too
+(`user_message_tells_quick_how_to_call_oaks_tools`); a summary's instruction goes alone.
 That is why a Quick conversation works on the real project rather than on a copy of it.
 Quick hands this machine's tool calls to every socket Oak has open to it, whatever thread asked
 (a call names its thread only in its arguments, `_quickwork.offload_session_id`), so each turn
@@ -945,6 +950,17 @@ its file reads READ's blue, Python EXECUTE's violet, the web SEARCH's and FETCH'
 knowledge and memory tools the notes' sage), as Freebuff's do, and their rows say what they work on,
 with a device's paths as the device has them.
 
+**Quick's markup is read, not shown** (`quick/markup.rs`, `a_decision_card_is_an_ask`). Quick's agent
+writes for Quick's app: a choice it offers is a decision card (`<decision question="...">` with its
+`<option>`s, an option's `description` attribute shown under it; several in `<decisions>`), and the
+memories it used close the reply in `<sources>`. A tag counts only where it begins a line, outside a
+code fence. Neither shows as text: while the text streams, what may begin one is held back until it
+closes (`markup::split`), and at the reply's end what never closed is shown as it is. The cards'
+questions become an ASK at the reply's end (call id `quick-ask-` and the message's id; the turn then
+stops on `stop::TOOL_CALLS`, so Oak's loop runs it), and its answers are Quick's next message, as
+Quick's app sends a card's: `<decision_response>` with a `Question: answer` line each
+(`new_user_text`). The sources are dropped.
+
 **A conversation is a Quick thread**: its conversation's id is the thread's, which is how Quick
 keeps the history, so a request sends only its newest user turn (`user_message`) and Quick
 replays the rest; a conversation another model worked on since Quick's last reply sends that
@@ -966,10 +982,13 @@ Quick's frames (`quick::turn::steer`, handed over by `steer_quick` while the req
 stays queued, shown as sent to Quick). Quick's agent takes it in at its next step and says so
 (`steering_ingested`, naming the id): the reply Oak was reading ends there (`stop::STEERED`, its
 calls run and answered), the message joins the transcript after their results marked
-`quick::STEERED_KEY` (so no request sends it again), and the next request reads on in Quick's same
+`quick::STEERED_KEY`, and the next request reads on in Quick's same
 message on the parked socket (`PARKED`, a minute at most), which starts a reply of its own
 (`a_message_taken_in_mid_turn_splits_the_reply_and_nothing_repeats`). A message Quick didn't take in
 before its turn ended goes with the next request, as before. `OAK_QUICK_STEER=off` turns it off.
+The mark is one of Oak's own keys, which every request drops, so Quick's requests leave the marked
+blocks out altogether (`for_provider`); else the next request took the message for new and sent it
+mid-turn again, under a new id (`a_message_quick_took_in_is_left_out_of_its_requests`).
 
 **The wire is Quick's**: client frames are binary WebSocket frames carrying
 `{"eventType":"rawInputEvent","payload":{"payload":"<base64 JSON>"}}`, and answers are AWS
