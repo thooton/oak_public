@@ -476,7 +476,7 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                 let reply = match calls.reply_for(&call, &key) {
                     Some(reply) => reply,
                     None => {
-                        let result = run_tool(&name, &args, folder);
+                        let result = run_tool_alive(sock, &name, &args, folder)?;
                         if std::env::var("OAK_QUICK_DEBUG").is_ok() {
                             eprintln!("TOOL {name} {args} -> {}", result.as_deref().map(|s| s.chars().take(300).collect::<String>()).unwrap_or_default());
                             if let Err(e) = &result {
@@ -545,6 +545,34 @@ fn pump(sock: &mut Socket, folder: &std::path::Path, turn: &mut Turn, calls: &mu
                 return Err(format!("Quick: {why}"));
             }
             _ => {}
+        }
+    }
+}
+
+/// Runs a tool call on a thread of its own and keeps the socket read while
+/// it runs. A socket nobody reads for the length of a long tool (a build, a
+/// snippet near its limit) stops answering Quick: its relay gives up on the
+/// call, and then the socket closes under the turn, which ended the chat.
+/// What comes meanwhile is held, in order, for the turn to read after (a call
+/// the relay asks for again among it is answered from `Calls`).
+fn run_tool_alive(sock: &mut Socket, name: &str, args: &Value, folder: &std::path::Path) -> Result<Result<String, String>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (n, a, f) = (name.to_string(), args.clone(), folder.to_path_buf());
+    std::thread::Builder::new()
+        .name(format!("quick-tool-{name}"))
+        .spawn(move || {
+            let _ = tx.send(run_tool(&n, &a, &f));
+        })
+        .map_err(|e| format!("Couldn't start {name}: {e}"))?;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(result) => return Ok(result),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(Err(format!("{name} stopped without an answer."))),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if !sock.keep_alive(Duration::from_millis(200)) {
+                    return Err(format!("Quick closed the socket while {name} ran."));
+                }
+            }
         }
     }
 }
@@ -839,16 +867,8 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
             })
             .to_string())
         }
-        "fdfind" | "fd" => {
-            let pattern = args["args"].as_str().unwrap_or("").to_string();
-            let found = find(folder, &pattern);
-            Ok(json!({"success": true, "output": found}).to_string())
-        }
-        "ripgrep" | "rg" | "grep" => {
-            let pat = args["patterns"].as_array().and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("").to_string();
-            let found = grep(folder, &pat, args["options"].as_str().unwrap_or(""));
-            Ok(json!({"success": true, "output": found}).to_string())
-        }
+        "fdfind" | "fd" => fdfind(args, folder),
+        "ripgrep" | "rg" | "grep" => ripgrep(args, folder),
         "bash" | "shell" | "run_command" | "execute_command" => {
             let cmd = args["command"].as_str().or(args["cmd"].as_str()).unwrap_or("").to_string();
             execute(&json!({"command": cmd}), folder)
@@ -1000,85 +1020,342 @@ pub(crate) fn match_paths(folder: &std::path::Path, want: &str) -> Vec<String> {
     out
 }
 
-/// Files whose name matches `pattern` (fdfind's `args`, e.g. `-i -H pong`),
-/// from the conversation's folder down.
-pub(crate) fn find(folder: &std::path::Path, pattern: &str) -> String {
-    let needle = pattern.split_whitespace().filter(|w| !w.starts_with('-')).collect::<Vec<_>>().join(" ").to_lowercase();
-    let mut out = vec![];
-    let mut stack = vec![folder.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
-        for e in read.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_lowercase();
-            if matches!(name.as_str(), ".git" | "node_modules" | "target" | ".oak") {
-                continue;
-            }
-            if p.is_dir() {
-                stack.push(p.clone());
-            }
-            if needle.is_empty() || name.contains(&needle) {
-                out.push(native(&p));
-                if out.len() >= 200 {
-                    out.sort();
-                    return out.join("\n");
-                }
-            }
-        }
+/// Strings a call gives as a list or as one.
+fn strings_of(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        Value::String(s) => vec![s.clone()],
+        _ => vec![],
     }
-    out.sort();
-    out.join("\n")
 }
 
-/// Lines matching the first of ripgrep's `patterns`, from the conversation's
-/// folder down (`options` may say `-i` for case-insensitive).
-fn grep(folder: &std::path::Path, pattern: &str, options: &str) -> String {
-    if pattern.is_empty() {
-        return String::new();
+/// The paths a search names (`paths`, or `path`), on this machine; the
+/// conversation's folder when it names none.
+fn search_paths(args: &Value, folder: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let named: Vec<std::path::PathBuf> = strings_of(&args["paths"]).into_iter().chain(strings_of(&args["path"])).filter(|p| !p.trim().is_empty()).map(|p| resolve(folder, &p)).collect();
+    if named.is_empty() { vec![folder.to_path_buf()] } else { named }
+}
+
+/// The ripgrep Oak bundles (`toolbin`), else the one on PATH.
+fn rg_program() -> std::path::PathBuf {
+    crate::toolbin::dir()
+        .map(|d| d.join(if cfg!(windows) { "rg.exe" } else { "rg" }))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| "rg".into())
+}
+
+/// Runs Oak's ripgrep with `argv` in `folder`, `input` on its stdin, for
+/// `timeout` seconds at most.
+fn run_rg(argv: &[std::ffi::OsString], folder: &std::path::Path, input: Option<Vec<u8>>, timeout: u64) -> Result<Ran, String> {
+    use std::process::Stdio;
+    let mut cmd = no_console(std::process::Command::new(rg_program()));
+    cmd.args(argv)
+        .current_dir(folder)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("Couldn't start ripgrep: {e}"))?;
+    if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(&bytes);
+        });
     }
-    let insensitive = options.split_whitespace().any(|o| o.starts_with('-') && !o.starts_with("--") && o[1..].contains('i'));
-    let needle = if insensitive { pattern.to_lowercase() } else { pattern.to_string() };
-    let mut out = vec![];
-    let mut stack = vec![folder.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else { continue };
-        for e in read.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_string();
-            if matches!(name.as_str(), ".git" | "node_modules" | "target" | ".oak") {
-                continue;
+    wait_for(child, Duration::from_secs(timeout)).map_err(|e| format!("ripgrep failed: {e}"))
+}
+
+/// Quick's `ripgrep`, run by Oak's ripgrep: every one of its `patterns` (a
+/// regex each, as rg reads them), its `options` (rg's own flags), in the
+/// `paths` it names. It once went to a walk of Oak's own that took the first
+/// pattern as plain text and searched only the conversation's folder, so a
+/// regex (`a|b`) or another folder found nothing, and the agent went on to
+/// search with Python.
+fn ripgrep(args: &Value, folder: &std::path::Path) -> Result<String, String> {
+    let patterns: Vec<String> = strings_of(&args["patterns"]).into_iter().chain(strings_of(&args["pattern"])).filter(|p| !p.is_empty()).collect();
+    if patterns.is_empty() {
+        return Err("ripgrep needs `patterns`.".into());
+    }
+    let flags = crate::freebuff_tools::parse_flags(args["options"].as_str().unwrap_or("")).ok_or("ripgrep's `options` leave a quote open.")?;
+    if let Some(no) = crate::freebuff_tools::flag_refusal(&flags) {
+        return Err(no);
+    }
+    let mut argv: Vec<std::ffi::OsString> = ["--no-config", "--color=never", "--line-number", "--with-filename", "--no-heading", "--max-columns=400", "--max-columns-preview"]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    if cfg!(windows) {
+        argv.push("--path-separator=/".into());
+    }
+    for p in &patterns {
+        argv.push("-e".into());
+        argv.push(p.into());
+    }
+    let ended = flags.iter().any(|f| f == "--");
+    argv.extend(flags.into_iter().map(Into::into));
+    if !ended {
+        argv.push("--".into());
+    }
+    argv.extend(search_paths(args, folder).into_iter().map(Into::into));
+    let timeout = timeout_of(args, 60);
+    let ran = run_rg(&argv, folder, None, timeout)?;
+    let Some(status) = ran.status else {
+        return Err(stopped("The search", timeout, &ran.stdout));
+    };
+    match status.code() {
+        // 1 is rg's "no match": an empty output, as Quick's own answers.
+        Some(0 | 1) => Ok(json!({"success": true, "output": crate::tools::clip(&ran.stdout)}).to_string()),
+        // Some files couldn't be read; what was found still stands.
+        _ if !ran.stdout.trim().is_empty() => Ok(json!({"success": true, "output": crate::tools::clip(&ran.stdout), "errors": crate::tools::clip(ran.stderr.trim())}).to_string()),
+        _ => Err(format!("ripgrep failed ({status}): {}", ran.stderr.trim())),
+    }
+}
+
+/// The most entries `fdfind` lists.
+const FIND_MAX: usize = 2_000;
+
+/// Quick's `fdfind`, as fd reads its `args`: a regex matched against each
+/// name (smart case), the paths after it, and fd's usual flags (`-e`, `-t`,
+/// `-g`, `-H`, `-I`, `-u`, `-d`, `-p`, `-F`, `-E`, `-s`, `-i`). Oak's
+/// ripgrep lists the files (`rg --files`, which keeps to .gitignore as fd
+/// does) and matches the names; the folders are those the files are in.
+fn fdfind(args: &Value, folder: &std::path::Path) -> Result<String, String> {
+    let given = crate::freebuff_tools::parse_flags(args["args"].as_str().unwrap_or("")).ok_or("fdfind's `args` leave a quote open.")?;
+    // `-HI` is `-H -I`.
+    let words: Vec<String> = given
+        .into_iter()
+        .flat_map(|w| {
+            let short = w.len() > 2 && w.starts_with('-') && !w.starts_with("--") && w[1..].chars().all(|c| "HIuisFgpaL".contains(c));
+            if short { w[1..].chars().map(|c| format!("-{c}")).collect() } else { vec![w] }
+        })
+        .collect();
+    let mut list: Vec<std::ffi::OsString> = vec!["--no-config".into(), "--files".into()];
+    if cfg!(windows) {
+        list.push("--path-separator=/".into());
+    }
+    let (mut pattern, mut roots, mut exts, mut kinds) = (None::<String>, vec![], vec![], vec![]);
+    let (mut glob, mut full, mut fixed, mut case, mut only_positional) = (false, false, false, None::<bool>, false);
+    let mut it = words.into_iter();
+    while let Some(w) = it.next() {
+        if only_positional || !w.starts_with('-') || w == "-" {
+            if pattern.is_none() {
+                pattern = Some(w);
+            } else {
+                roots.push(resolve(folder, &w));
             }
-            if p.is_dir() {
-                stack.push(p);
-                continue;
+            continue;
+        }
+        let (name, inline) = match w.split_once('=') {
+            Some((n, v)) if n.starts_with("--") => (n.to_string(), Some(v.to_string())),
+            _ => (w.clone(), None),
+        };
+        let value = |it: &mut std::vec::IntoIter<String>| inline.clone().or_else(|| it.next()).unwrap_or_default();
+        match name.as_str() {
+            "--" => only_positional = true,
+            "-H" | "--hidden" => list.push("--hidden".into()),
+            "-I" | "--no-ignore" => list.push("--no-ignore".into()),
+            "-u" | "--unrestricted" => list.extend(["--hidden".into(), "--no-ignore".into()]),
+            "-s" | "--case-sensitive" => case = Some(true),
+            "-i" | "--ignore-case" => case = Some(false),
+            "-g" | "--glob" => glob = true,
+            "-p" | "--full-path" => full = true,
+            "-F" | "--fixed-strings" => fixed = true,
+            "-e" | "--extension" => exts.push(value(&mut it).trim_start_matches('.').to_lowercase()),
+            "-t" | "--type" => kinds.push(value(&mut it).to_lowercase()),
+            "-d" | "--max-depth" => list.extend(["--max-depth".into(), value(&mut it).into()]),
+            "-E" | "--exclude" => list.extend(["--glob".into(), format!("!{}", value(&mut it)).into()]),
+            _ => {}
+        }
+    }
+    let pattern = pattern.unwrap_or_default();
+    if roots.is_empty() {
+        roots = search_paths(args, folder);
+    } else {
+        roots.extend(strings_of(&args["paths"]).iter().filter(|p| !p.trim().is_empty()).map(|p| resolve(folder, p)));
+    }
+    if glob && !pattern.is_empty() {
+        list.extend([if case == Some(false) { "--iglob" } else { "--glob" }.into(), pattern.clone().into()]);
+    }
+    list.push("--".into());
+    list.extend(roots.iter().map(|r| r.clone().into_os_string()));
+    let timeout = timeout_of(args, 60);
+    let ran = run_rg(&list, folder, None, timeout)?;
+    let Some(status) = ran.status else {
+        return Err(stopped("The search", timeout, &ran.stdout));
+    };
+    if !status.success() && ran.stdout.trim().is_empty() && status.code() != Some(1) {
+        return Err(format!("Listing files failed ({status}): {}", ran.stderr.trim()));
+    }
+    let files: Vec<String> = ran.stdout.lines().filter(|l| !l.trim().is_empty()).map(|l| l.replace('\\', "/")).collect();
+    let wants = |k: char| kinds.is_empty() || kinds.iter().any(|t| t.starts_with(k) || (k == 'f' && t.starts_with('x')));
+    let mut entries: Vec<String> = vec![];
+    if wants('f') {
+        entries.extend(files.iter().cloned());
+    }
+    if wants('d') && !glob {
+        let tops: Vec<String> = roots.iter().map(|r| native(r).trim_end_matches('/').to_lowercase()).collect();
+        let mut dirs = std::collections::BTreeSet::new();
+        for f in &files {
+            let mut p = f.as_str();
+            while let Some((parent, _)) = p.rsplit_once('/') {
+                let low = parent.to_lowercase();
+                if tops.contains(&low) || !tops.iter().any(|t| low.starts_with(&format!("{t}/"))) || !dirs.insert(parent.to_string()) {
+                    break;
+                }
+                p = parent;
             }
-            // A few megabytes at most: a search of the project, not of data.
-            let Ok(meta) = e.metadata() else { continue };
-            if meta.len() > 2_000_000 {
-                continue;
+        }
+        entries.extend(dirs);
+    }
+    let base = |e: &str| e.rsplit('/').next().unwrap_or(e).to_string();
+    if !exts.is_empty() {
+        entries.retain(|e| base(e).rsplit_once('.').is_some_and(|(_, x)| exts.contains(&x.to_lowercase())));
+    }
+    if !glob && !pattern.is_empty() {
+        // The names go through ripgrep, one a line, so the pattern is matched
+        // with the regex fd itself uses; a match's line number is its entry.
+        let names: String = entries.iter().map(|e| if full { e.clone() } else { base(e) }).collect::<Vec<_>>().join("\n");
+        let mut argv: Vec<std::ffi::OsString> = vec!["--no-config".into(), "--color=never".into(), "--line-number".into(), "--no-filename".into()];
+        argv.push(match case {
+            Some(true) => "--case-sensitive".into(),
+            Some(false) => "--ignore-case".into(),
+            None => "--smart-case".into(),
+        });
+        if fixed {
+            argv.push("--fixed-strings".into());
+        }
+        argv.extend(["-e".into(), pattern.into(), "-".into()]);
+        let ran = run_rg(&argv, folder, Some(names.into_bytes()), timeout)?;
+        if ran.status.and_then(|s| s.code()) == Some(2) {
+            return Err(format!("fdfind's pattern: {}", ran.stderr.trim()));
+        }
+        let hit: std::collections::BTreeSet<usize> = ran.stdout.lines().filter_map(|l| l.split(':').next()?.parse::<usize>().ok()).collect();
+        entries = entries.into_iter().enumerate().filter(|(i, _)| hit.contains(&(i + 1))).map(|(_, e)| e).collect();
+    }
+    entries.sort();
+    entries.dedup();
+    let more = entries.len().saturating_sub(FIND_MAX);
+    entries.truncate(FIND_MAX);
+    let mut out = entries.join("\n");
+    if more > 0 {
+        out.push_str(&format!("\n[{more} more not listed: narrow the search]"));
+    }
+    Ok(json!({"success": true, "output": out}).to_string())
+}
+
+/// The time limit a call asks for (`timeout`, in seconds, a number or a
+/// string), else `default`; one second at least, `EXECUTE_TIMEOUT_MAX` at
+/// most.
+fn timeout_of(args: &Value, default: u64) -> u64 {
+    let t = &args["timeout"];
+    let asked = t.as_u64().or_else(|| t.as_f64().filter(|f| *f > 0.0).map(|f| f.ceil() as u64)).or_else(|| t.as_str().and_then(|s| s.trim().parse().ok()));
+    asked.unwrap_or(default).clamp(1, crate::tools::EXECUTE_TIMEOUT_MAX.max(1))
+}
+
+/// What a tool says of a program it stopped at its time limit: what the
+/// program printed by then, and how to give it longer.
+fn stopped(what: &str, timeout: u64, printed: &str) -> String {
+    let mut s = format!("{what} ran past its {timeout}s and was stopped.");
+    if !printed.trim().is_empty() {
+        s.push_str(&format!(" What it printed by then:\n{}\n", crate::tools::clip(printed)));
+    }
+    s.push_str(&format!(" Give it a longer `timeout` (up to {}s), or start long work in the background and check on it.", crate::tools::EXECUTE_TIMEOUT_MAX));
+    s
+}
+
+/// What a program a tool started printed, and how it ended: `status` is None
+/// when it ran past its time and was stopped.
+struct Ran {
+    status: Option<std::process::ExitStatus>,
+    stdout: String,
+    stderr: String,
+}
+
+/// The most of a program's output held while it runs (a tool result is
+/// clipped far shorter).
+const OUTPUT_CAP: usize = 8 * 1024 * 1024;
+
+/// Waits on `child` for `timeout`, reading its output as it comes: a program
+/// whose pipe fills while nobody reads it stops until somebody does, and sat
+/// out its whole time limit that way. One that runs past `timeout` is
+/// stopped, with what it started, and what it printed by then is kept.
+fn wait_for(mut child: std::process::Child, timeout: Duration) -> Result<Ran, String> {
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                kill_tree(&mut child);
+                break None;
             }
-            let Ok(bytes) = std::fs::read(&p) else { continue };
-            if bytes.contains(&0) {
-                continue; // binary
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => {
+                kill_tree(&mut child);
+                return Err(e.to_string());
             }
-            let text = String::from_utf8_lossy(&bytes);
-            for (n, line) in text.lines().enumerate() {
-                let hit = if insensitive { line.to_lowercase().contains(&needle) } else { line.contains(&needle) };
-                if hit {
-                    out.push(format!("{}:{}: {}", native(&p), n + 1, line.trim_end()));
-                    if out.len() >= 200 {
-                        return out.join("\n");
+        }
+    };
+    // A program it started and left running may hold the pipes open: the
+    // output is taken for a moment more, not until they close.
+    let grace = std::time::Instant::now() + Duration::from_secs(2);
+    Ok(Ran { status, stdout: gather(&out, grace), stderr: gather(&err, grace) })
+}
+
+/// Reads `pipe` on a thread of its own, handing on what it reads.
+fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut pipe) = pipe {
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
                     }
                 }
             }
+        });
+    }
+    rx
+}
+
+/// What `drain` read, until its pipe closed or `until`.
+fn gather(rx: &std::sync::mpsc::Receiver<Vec<u8>>, until: std::time::Instant) -> String {
+    let mut bytes = vec![];
+    while let Ok(b) = rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+        if bytes.len() < OUTPUT_CAP {
+            bytes.extend(b);
         }
     }
-    out.join("\n")
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Stops `child` and, on Windows, what it started (`taskkill /T`): a
+/// snippet's own subprocesses would otherwise run on and hold its pipes.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::process::Stdio;
+        let _ = no_console(std::process::Command::new("taskkill"))
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Runs a shell command in `folder`, with the output clipped for a tool
 /// result.
-fn execute(input: &Value, folder: &std::path::Path) -> Result<String, String> {    let command = input["command"].as_str().unwrap_or("").trim();
+fn execute(input: &Value, folder: &std::path::Path) -> Result<String, String> {
+    use std::process::Stdio;
+    let command = input["command"].as_str().unwrap_or("").trim();
     if command.is_empty() {
         return Err("EXECUTE needs a `command`.".into());
     }
@@ -1088,57 +1365,49 @@ fn execute(input: &Value, folder: &std::path::Path) -> Result<String, String> { 
     {
         return listing;
     }
-    let timeout = input["timeout"].as_u64().unwrap_or(120).min(crate::tools::EXECUTE_TIMEOUT_MAX.max(1));
+    let timeout = timeout_of(input, 120);
     #[cfg(windows)]
-    let spawned = {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .arg("/C")
-            .arg(command)
-            .current_dir(folder)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .creation_flags(0x0800_0000)
-            .spawn()
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(command);
+        no_console(c)
     };
     #[cfg(not(windows))]
-    let spawned: std::io::Result<std::process::Child> = std::process::Command::new("bash").arg("-lc").arg(command).current_dir(folder).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn();
-    let mut child = spawned.map_err(|e| format!("Couldn't run `{command}`: {e}"))?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(timeout);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() > deadline => {
-                let _ = child.kill();
-                return Err(format!("`{command}` ran past its {timeout}s."));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
-            Err(e) => return Err(format!("`{command}` failed: {e}")),
-        }
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let mut text = stdout.into_owned();
+    let mut cmd = {
+        let mut c = std::process::Command::new("bash");
+        c.arg("-lc").arg(command);
+        c
+    };
+    cmd.current_dir(folder).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = cmd.spawn().map_err(|e| format!("Couldn't run `{command}`: {e}"))?;
+    let ran = wait_for(child, Duration::from_secs(timeout)).map_err(|e| format!("`{command}` failed: {e}"))?;
+    let mut text = ran.stdout;
     if text.trim().is_empty() {
-        text = stderr.into_owned();
-    } else if !stderr.trim().is_empty() {
+        text = ran.stderr;
+    } else if !ran.stderr.trim().is_empty() {
         text.push_str("\n[stderr]\n");
-        text.push_str(&stderr);
+        text.push_str(&ran.stderr);
     }
+    let Some(status) = ran.status else {
+        return Err(stopped(&format!("`{command}`"), timeout, &text));
+    };
     if text.trim().is_empty() {
-        text = format!("`{command}` finished with {}.", out.status);
+        text = format!("`{command}` finished with {status}.");
     }
     Ok(crate::tools::clip(&text))
 }
 
 /// Runs a Python snippet in `folder` (Quick's own coding tool: its agent
 /// uses it for shell work too), with the output clipped for a tool result.
+/// It runs as long as the call asks (`timeout`), two minutes when it doesn't
+/// say.
 fn run_python(args: &Value, folder: &std::path::Path) -> Result<String, String> {
+    use std::process::Stdio;
     let code = args["code"].as_str().or(args["script"].as_str()).or(args["source"].as_str()).unwrap_or("");
     if code.trim().is_empty() {
         return Err("run_python needs `code`.".into());
     }
+    let timeout = timeout_of(args, 120);
     // The snippet goes beside Oak's scratchpad, so the working folder's own
     // files aren't touched.
     let dir = folder.join(".oak").join("tmp");
@@ -1146,31 +1415,21 @@ fn run_python(args: &Value, folder: &std::path::Path) -> Result<String, String> 
     let file = dir.join(format!("quick-{}.py", crate::api::now_ms()));
     std::fs::write(&file, code).map_err(|e| format!("Couldn't write the snippet: {e}"))?;
     let mut python = python_command();
-    python.arg(&file).current_dir(folder).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let mut child = python.spawn().map_err(|e| format!("Couldn't start Python: {e}"))?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() > deadline => {
-                let _ = child.kill();
-                return Err("The snippet ran past its 120s.".into());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
-            Err(e) => return Err(format!("Python failed: {e}")),
-        }
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !stderr.trim().is_empty() {
+    python.arg(&file).current_dir(folder).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = python.spawn().map_err(|e| format!("Couldn't start Python: {e}"))?;
+    let ran = wait_for(child, Duration::from_secs(timeout)).map_err(|e| format!("Python failed: {e}"))?;
+    let mut text = ran.stdout;
+    if !ran.stderr.trim().is_empty() {
         if !text.trim().is_empty() {
             text.push_str("\n[stderr]\n");
         }
-        text.push_str(&stderr);
+        text.push_str(&ran.stderr);
     }
+    let Some(status) = ran.status else {
+        return Err(stopped("The snippet", timeout, &text));
+    };
     if text.trim().is_empty() {
-        text = format!("The snippet finished and printed nothing ({}).", out.status);
+        text = format!("The snippet finished and printed nothing ({status}).");
     }
     Ok(crate::tools::clip(&text))
 }
@@ -1419,6 +1678,79 @@ mod tests {
         assert!(run_tool("folder_list", &json!({"path": native(&dir.join("missing"))}), &dir).is_err(), "a missing folder isn't an empty one");
         let kind: Value = serde_json::from_str(&run_tool("file_type", &json!({"path": format!("/{}", native(&dir.join("a.txt")))}), &dir).unwrap()).unwrap();
         assert_eq!(kind["size_bytes"], 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A snippet keeps to the time its call asks for and says what it
+    /// printed before it was stopped, even when what it started holds its
+    /// pipes; one that prints a lot isn't held up on its pipe.
+    #[test]
+    fn a_snippet_keeps_to_its_time_and_its_output() {
+        assert_eq!(timeout_of(&json!({}), 120), 120);
+        assert_eq!(timeout_of(&json!({"timeout": 5}), 120), 5);
+        assert_eq!(timeout_of(&json!({"timeout": "7"}), 120), 7);
+        assert_eq!(timeout_of(&json!({"timeout": 0}), 120), 1);
+        assert_eq!(timeout_of(&json!({"timeout": 1_000_000}), 120), crate::tools::EXECUTE_TIMEOUT_MAX);
+        let dir = std::env::temp_dir().join(format!("oak-quick-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let code = "import subprocess, sys, time\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\nprint('started', flush=True)\ntime.sleep(60)";
+        let start = std::time::Instant::now();
+        let slow = run_python(&json!({"code": code, "timeout": 2}), &dir);
+        let took = start.elapsed();
+        match slow {
+            Err(e) if e.starts_with("Couldn't start Python") => {
+                eprintln!("no Python here: {e}");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            Err(e) => assert!(e.contains("ran past its 2s") && e.contains("started"), "{e}"),
+            Ok(o) => panic!("a snippet past its time isn't a result: {o}"),
+        }
+        assert!(took < Duration::from_secs(15), "stopped at its time, not when its pipes closed: {took:?}");
+        let start = std::time::Instant::now();
+        let big = run_python(&json!({"code": "import sys\nsys.stdout.write('x' * 3_000_000)\nprint('done')", "timeout": 60}), &dir).unwrap();
+        assert!(big.contains("xxxx") && big.contains("done"), "{}", &big[..big.len().min(200)]);
+        assert!(start.elapsed() < Duration::from_secs(30));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Quick's `ripgrep` is ripgrep: every pattern a regex, rg's options, in
+    /// the paths the call names. Its `fdfind` reads fd's arguments.
+    #[test]
+    fn search_tools_run_oaks_ripgrep() {
+        let dir = std::env::temp_dir().join(format!("oak-quick-rg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn timeout() {}\nlet deadline = 1;\n").unwrap();
+        std::fs::write(dir.join("other/b.txt"), "TIMEOUT here\n").unwrap();
+        let src = native(&dir.join("src"));
+        let out = |r: Result<String, String>| -> String {
+            let v: Value = serde_json::from_str(&r.unwrap()).unwrap();
+            v["output"].as_str().unwrap_or("").to_string()
+        };
+        let first = ripgrep(&json!({"patterns": [r"time(out)?\(", "deadline"], "paths": [format!("/outposts/DESKTOP/{src}")]}), &dir);
+        if let Err(e) = &first
+            && e.starts_with("Couldn't start ripgrep")
+        {
+            eprintln!("no ripgrep here: {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let found = out(first);
+        assert!(found.contains("a.rs:1:") && found.contains("a.rs:2:") && !found.contains("b.txt"), "{found}");
+        assert_eq!(out(ripgrep(&json!({"patterns": ["nothing-like-this"], "paths": [src]}), &dir)), "");
+        let both = out(ripgrep(&json!({"patterns": ["timeout"], "options": "-i -l"}), &dir));
+        assert!(both.contains("a.rs") && both.contains("b.txt"), "{both}");
+        assert!(ripgrep(&json!({"patterns": ["x"], "options": "--pre=cat"}), &dir).is_err());
+        let rs = out(fdfind(&json!({"args": "-e rs", "paths": [native(&dir)]}), &dir));
+        assert!(rs.contains("a.rs") && !rs.contains("b.txt"), "{rs}");
+        let b = out(fdfind(&json!({"args": r"^b\."}), &dir));
+        assert!(b.ends_with("other/b.txt") && !b.contains("a.rs"), "{b}");
+        let dirs = out(fdfind(&json!({"args": "-t d oth"}), &dir));
+        assert!(dirs.ends_with("/other") && !dirs.contains("a.rs"), "{dirs}");
+        let txt = out(fdfind(&json!({"args": "-g '*.txt'"}), &dir));
+        assert!(txt.ends_with("b.txt") && !txt.contains("a.rs"), "{txt}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

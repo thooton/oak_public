@@ -521,7 +521,7 @@ fn pretty_json(compact: &str) -> String {
 
 /// code_search's flags as the CLI splits them: on whitespace, quotes
 /// keeping a value whole. None when a quote is left open.
-fn parse_flags(flags: &str) -> Option<Vec<String>> {
+pub(crate) fn parse_flags(flags: &str) -> Option<Vec<String>> {
     let (mut out, mut token, mut quote, mut started) = (vec![], String::new(), None, false);
     for c in flags.chars() {
         match quote {
@@ -554,7 +554,7 @@ fn parse_flags(flags: &str) -> Option<Vec<String>> {
 
 /// The CLI's refusals: flags that make ripgrep run another program, or
 /// that leave no results to read.
-fn flag_refusal(flags: &[String]) -> Option<String> {
+pub(crate) fn flag_refusal(flags: &[String]) -> Option<String> {
     for f in flags.iter().take_while(|f| *f != "--") {
         if let Some(long) = f.strip_prefix("--") {
             let name = format!("--{}", long.split('=').next().unwrap_or(""));

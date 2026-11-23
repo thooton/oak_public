@@ -26,6 +26,8 @@ pub(crate) struct Socket {
     replay: Replay,
     /// When Oak last told Quick how far it has read (`ping` with `ack`).
     acked_at: std::time::Instant,
+    /// Bytes read off the socket that don't make a whole message yet.
+    inbuf: Vec<u8>,
 }
 
 /// The `replayContext` a socket sets its delivery up with
@@ -171,6 +173,74 @@ impl Replay {
     }
 }
 
+/// How long one read of the socket waits: reads go in slices this long, so
+/// the socket can be kept read while Oak does other work
+/// ([`Socket::keep_alive`]), and a gap's wait runs out even when nothing
+/// else comes.
+const READ_SLICE: Duration = Duration::from_millis(200);
+
+/// How long the socket may say nothing at all before it is given up on.
+const IDLE_LIMIT: Duration = Duration::from_secs(600);
+
+/// How a read of the socket ended.
+enum Fill {
+    /// Messages went into `held`.
+    Got,
+    /// The time it was given passed with none.
+    Nothing,
+    /// The socket ended; true when frames held past a gap went on.
+    Ended(bool),
+}
+
+/// Takes one whole WebSocket message off the front of `buf`: (opcode,
+/// payload), with the bytes it was made of removed. None while part of it
+/// has yet to come. Fragments are joined; a control frame between them comes
+/// back on its own, and the fragments wait on.
+pub(crate) fn take_message(buf: &mut Vec<u8>) -> Option<(u8, Vec<u8>)> {
+    let mut at = 0;
+    let mut data = vec![];
+    let mut opcode = None;
+    loop {
+        let (b0, b1) = (*buf.get(at)?, *buf.get(at + 1)?);
+        let (fin, op, masked) = (b0 & 0x80 != 0, b0 & 0x0f, b1 & 0x80 != 0);
+        let mut i = at + 2;
+        let len = match b1 & 0x7f {
+            126 => {
+                let b = buf.get(i..i + 2)?;
+                i += 2;
+                u16::from_be_bytes([b[0], b[1]]) as usize
+            }
+            127 => {
+                let b: [u8; 8] = buf.get(i..i + 8)?.try_into().ok()?;
+                i += 8;
+                usize::try_from(u64::from_be_bytes(b)).ok()?
+            }
+            n => n as usize,
+        };
+        let mut mask = [0u8; 4];
+        if masked {
+            mask.copy_from_slice(buf.get(i..i + 4)?);
+            i += 4;
+        }
+        let end = i.checked_add(len)?;
+        let mut payload = buf.get(i..end)?.to_vec();
+        if masked {
+            payload.iter_mut().enumerate().for_each(|(k, b)| *b ^= mask[k % 4]);
+        }
+        if op >= 0x8 {
+            buf.drain(at..end);
+            return Some((op, payload));
+        }
+        opcode.get_or_insert(op);
+        data.extend(payload);
+        at = end;
+        if fin {
+            buf.drain(..at);
+            return Some((opcode.unwrap_or(1), data));
+        }
+    }
+}
+
 fn tls_config() -> Arc<rustls::ClientConfig> {
     use rustls::RootCertStore;
     static CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
@@ -203,6 +273,7 @@ impl Socket {
             held: std::collections::VecDeque::new(),
             replay: Replay::default(),
             acked_at: std::time::Instant::now(),
+            inbuf: Vec::new(),
         };
         let key = base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 16]>());
         let hello = format!(
@@ -236,6 +307,9 @@ impl Socket {
                 format!("Quick refused the socket: {first}")
             });
         }
+        // Reads go in short slices from here on, so the socket can be kept
+        // read while Oak does other work (`keep_alive`).
+        let _ = s.tls.sock.set_read_timeout(Some(READ_SLICE));
         Ok(s)
     }
 
@@ -278,15 +352,67 @@ impl Socket {
     /// ([`Replay`]). False when the socket ended and nothing is left.
     fn fill(&mut self) -> bool {
         loop {
-            // Straight from the TLS stream: a reader of its own would read
-            // ahead and drop, with it, the frames that came in the same read
-            // (whole stretches of a reply's text went that way).
-            let (op, payload) = match crate::cdp::ws_read(&mut self.tls) {
-                Ok((op, p)) => (op, p),
-                Err(_) => {
-                    self.closed.store(true, Ordering::SeqCst);
-                    return self.end();
+            match self.fill_until(None) {
+                Fill::Got => return true,
+                Fill::Ended(any) => return any,
+                Fill::Nothing => {}
+            }
+        }
+    }
+
+    /// Keeps the socket read for `wait` while Oak is busy with other work (a
+    /// tool running): what comes is held, in order, for later, Quick's pings
+    /// are answered and Oak's acks go as always. A socket nobody reads for
+    /// the length of a long tool stops answering, and Quick gives up on the
+    /// call and then on the socket. False when the socket ended.
+    pub(crate) fn keep_alive(&mut self, wait: Duration) -> bool {
+        let until = std::time::Instant::now() + wait;
+        loop {
+            match self.fill_until(Some(until)) {
+                Fill::Ended(_) => return false,
+                Fill::Nothing => return true,
+                Fill::Got if std::time::Instant::now() >= until => return true,
+                Fill::Got => {}
+            }
+        }
+    }
+
+    /// Reads until a message goes into `held` (in Quick's order,
+    /// [`Replay`]), `until` passes with none, or the socket ends.
+    fn fill_until(&mut self, until: Option<std::time::Instant>) -> Fill {
+        let before = self.held.len();
+        let mut heard = std::time::Instant::now();
+        loop {
+            // Whole messages, from what has come off the TLS stream: a read
+            // cut short leaves the rest of its message in `inbuf`, never
+            // lost (a reader that read ahead dropped whole stretches of a
+            // reply's text).
+            let Some((op, payload)) = take_message(&mut self.inbuf) else {
+                match self.read_some() {
+                    Ok(true) => heard = std::time::Instant::now(),
+                    Ok(false) => {
+                        // A gap waited on long enough goes on without its
+                        // frames, even while nothing else comes.
+                        self.held.extend(self.replay.overdue(std::time::Instant::now()));
+                        self.ack_now_and_then();
+                        if self.held.len() > before {
+                            return Fill::Got;
+                        }
+                        if until.is_some_and(|t| std::time::Instant::now() >= t) {
+                            return Fill::Nothing;
+                        }
+                        if heard.elapsed() >= IDLE_LIMIT {
+                            eprintln!("Quick's socket said nothing for {}s; Oak gave up on it", IDLE_LIMIT.as_secs());
+                            self.closed.store(true, Ordering::SeqCst);
+                            return Fill::Ended(self.end());
+                        }
+                    }
+                    Err(_) => {
+                        self.closed.store(true, Ordering::SeqCst);
+                        return Fill::Ended(self.end());
+                    }
                 }
+                continue;
             };
             let mut got = vec![];
             match op {
@@ -295,7 +421,7 @@ impl Socket {
                     let why = String::from_utf8_lossy(payload.get(2..).unwrap_or(&[])).to_string();
                     eprintln!("Quick closed the socket: {code} {why}");
                     self.closed.store(true, Ordering::SeqCst);
-                    return self.end();
+                    return Fill::Ended(self.end());
                 }
                 0x9 => {
                     let pong = crate::cdp::frame(0xA, &payload, true);
@@ -323,9 +449,25 @@ impl Socket {
                 let _ = self.send(&json!({"type": "_transport_retransmit", "payload": {"seqs": ask}}));
             }
             self.ack_now_and_then();
-            if !self.held.is_empty() {
-                return true;
+            if self.held.len() > before {
+                return Fill::Got;
             }
+        }
+    }
+
+
+    /// Reads what has come on the socket into `inbuf`, waiting `READ_SLICE`
+    /// at most: Ok(false) when nothing came in that time.
+    fn read_some(&mut self) -> std::io::Result<bool> {
+        let mut chunk = [0u8; 16 * 1024];
+        match self.tls.read(&mut chunk) {
+            Ok(0) => Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => {
+                self.inbuf.extend_from_slice(&chunk[..n]);
+                Ok(true)
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => Ok(false),
+            Err(e) => Err(e),
         }
     }
 
@@ -370,6 +512,34 @@ fn user_agent() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A message is taken whole off what has come of the socket, however
+    /// its bytes were split: part of one waits for the rest, fragments are
+    /// joined, a ping between them comes on its own, and two in one read are
+    /// two.
+    #[test]
+    fn a_message_is_taken_whole_however_it_comes() {
+        let text = crate::cdp::frame(0x1, b"hello", false);
+        let mut buf = vec![];
+        for b in &text[..text.len() - 1] {
+            buf.push(*b);
+            assert!(take_message(&mut buf).is_none(), "part of a message isn't one");
+        }
+        buf.push(text[text.len() - 1]);
+        assert_eq!(take_message(&mut buf), Some((0x1, b"hello".to_vec())));
+        assert!(buf.is_empty());
+        let mut first = crate::cdp::frame(0x2, b"ab", false);
+        first[0] &= 0x7f; // more to come
+        let mut buf = [first, crate::cdp::frame(0x9, b"p", false), crate::cdp::frame(0x0, b"cd", false)].concat();
+        assert_eq!(take_message(&mut buf), Some((0x9, b"p".to_vec())));
+        assert_eq!(take_message(&mut buf), Some((0x2, b"abcd".to_vec())));
+        assert!(buf.is_empty());
+        let long = vec![b'z'; 70_000];
+        let mut buf = [crate::cdp::frame(0x1, &long, false), crate::cdp::frame(0x1, b"next", true)].concat();
+        assert_eq!(take_message(&mut buf).unwrap().1.len(), 70_000);
+        assert_eq!(take_message(&mut buf), Some((0x1, b"next".to_vec())), "a masked frame is unmasked");
+        assert!(take_message(&mut buf).is_none());
+    }
 
     fn numbered(n: u64, text: &str) -> Value {
         json!({"type": "text_delta", "payload": {"delta": text}, "_transport": {"version": 1, "sequence": n.to_string()}})
