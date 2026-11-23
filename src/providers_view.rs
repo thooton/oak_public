@@ -136,9 +136,45 @@ pub(crate) fn sum_limits<'a>(limits: impl IntoIterator<Item = (&'a [api::Limit],
     out
 }
 
+/// One Antigravity quota pool summed across accounts (`Gemini Models`,
+/// `Claude and GPT models`, `Gemini 4 Argon`, ...).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SummedPool {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) limits: Vec<Summed>,
+}
+
+/// Sums Antigravity's per-pool limits across accounts, keeping each pool and
+/// its `5h` and `Week` windows separate.
+pub(crate) fn sum_antigravity_pools(accounts: &[crate::antigravity::AccountView], now: i64) -> Vec<SummedPool> {
+    let mut order: Vec<(String, String, String)> = Vec::new();
+    for a in accounts {
+        for p in &a.pools {
+            if !order.iter().any(|(id, ..)| id == &p.id) {
+                order.push((p.id.clone(), p.name.clone(), p.description.clone()));
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|(id, name, description)| {
+            let matching: Vec<(&[api::Limit], f32)> = accounts
+                .iter()
+                .filter_map(|a| a.pools.iter().find(|p| p.id == id).map(|p| (p.limits.as_slice(), weight(&a.account))))
+                .collect();
+            let limits = sum_limits(matching, now);
+            (!limits.is_empty()).then_some(SummedPool { id, name, description, limits })
+        })
+        .collect()
+}
+
 /// What a provider box shows under its account count.
 pub(crate) enum Shown {
     Limits(Vec<Summed>),
+    /// Per-pool limits (Antigravity: Gemini Models, Claude and GPT models, Gemini 4 Argon).
+    Pools(Vec<SummedPool>),
     /// Dollars left (when known), spent through Oak, all told, and why
     /// what is left couldn't be checked.
     Credits(Option<f64>, f64, Option<String>),
@@ -191,6 +227,27 @@ pub(crate) fn provider_box(ui: &mut Ui, t: &Theme, p: Kind, accounts: usize, sho
                     } else {
                         r.on_hover_text(format!("{}% of the {} {} limits used, all together{how}{reset}.", s.used.floor(), s.accounts, s.label));
                     }
+                }
+            }
+            Shown::Pools(pools) => {
+                for (i, pool) in pools.iter().enumerate() {
+                    if i > 0 {
+                        ui.add_space(3.0);
+                    }
+                    let cells: Vec<(String, String, f32, String)> = pool
+                        .limits
+                        .iter()
+                        .map(|s| {
+                            let reset = s.next_reset.map(|r| format!(", next resets in {}", crate::time::until(r))).unwrap_or_default();
+                            let tip = if s.accounts == 1 {
+                                format!("{}% of {} ({}) used{reset}.", s.used.floor(), pool.name, s.label)
+                            } else {
+                                format!("{}% of the {} {} ({}) limits used, all together{reset}.", s.used.floor(), s.accounts, pool.name, s.label)
+                            };
+                            (s.label.clone(), format!("{}%", s.used.floor()), s.used, tip)
+                        })
+                        .collect();
+                    crate::composer::pool_meters(ui, t, w, &pool.name, &pool.description, &cells);
                 }
             }
             Shown::Credits(left, spent, error) => {
@@ -262,10 +319,18 @@ pub(crate) fn shown(p: Kind) -> Shown {
             },
             None => Shown::Loading,
         },
+        Metered::Limits if p == Kind::Antigravity => {
+            let all = crate::antigravity::accounts_detailed();
+            let pools = sum_antigravity_pools(&all, now);
+            match () {
+                _ if !pools.is_empty() => Shown::Pools(pools),
+                _ if !all.is_empty() && all.iter().all(|a| a.account.fetched) => Shown::Note("usage unavailable"),
+                _ => Shown::Loading,
+            }
+        }
         Metered::Limits => {
             let all: Vec<api::Account> = match p {
                 Kind::Codex => codex::accounts().into_iter().map(|(_, a)| a).collect(),
-                Kind::Antigravity => crate::antigravity::accounts().into_iter().map(|(_, a)| a).collect(),
                 _ => api::accounts(),
             };
             // API keys have no limits.
@@ -393,5 +458,37 @@ mod tests {
         assert_eq!(s.iter().map(|s| (s.label.as_str(), s.accounts)).collect::<Vec<_>>(), [("5h", 1), ("Week", 2)]);
         assert_eq!(s[0].used, 20.0);
         assert!((s[1].used - 506.0 / 11.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn antigravity_pools_sum_independently() {
+        let now = 1_000;
+        let pool = |id: &str, name: &str, limits| crate::antigravity::QuotaPool { id: id.into(), name: name.into(), description: String::new(), limits };
+        let acct = |id: &str, pools| crate::antigravity::AccountView {
+            id: id.into(),
+            account: api::Account { provider: Kind::Antigravity, fetched: true, ..Default::default() },
+            pools,
+        };
+        let a1 = acct(
+            "a1",
+            vec![
+                pool("gemini", "Gemini Models", vec![limit("5h", 80.0, Some(now + 100)), limit("Week", 20.0, Some(now + 900))]),
+                pool("3p", "Claude and GPT models", vec![limit("5h", 0.0, Some(now + 100)), limit("Week", 100.0, Some(now + 900))]),
+                pool("argon", "Gemini 4 Argon", vec![limit("Week", 10.0, Some(now + 900))]),
+            ],
+        );
+        let a2 = acct(
+            "a2",
+            vec![
+                pool("gemini", "Gemini Models", vec![limit("5h", 20.0, Some(now + 200)), limit("Week", 40.0, Some(now + 800))]),
+                pool("3p", "Claude and GPT models", vec![limit("5h", 0.0, Some(now + 200)), limit("Week", 0.0, Some(now + 800))]),
+            ],
+        );
+        let summed = sum_antigravity_pools(&[a1, a2], now);
+        assert_eq!(summed.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["gemini", "3p", "argon"]);
+        assert_eq!((summed[0].limits[0].used, summed[0].limits[1].used), (50.0, 30.0));
+        // a1's 3p weekly at 100% fills a1's 3p 5h (not Gemini's!), averaging 50% with a2's 0%.
+        assert_eq!((summed[1].limits[0].used, summed[1].limits[1].used), (50.0, 50.0));
+        assert_eq!((summed[2].limits.len(), summed[2].limits[0].accounts, summed[2].limits[0].used), (1, 1, 10.0));
     }
 }

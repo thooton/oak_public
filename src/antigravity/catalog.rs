@@ -1147,60 +1147,177 @@ pub(crate) fn fetch_available_runtime_model(token: &str, project_id: &str, reque
 
 // ---------------------------------------------------------------- quota / usage
 
+/// One Antigravity quota pool (e.g. "Gemini Models", "Claude and GPT models",
+/// "Gemini 4 Argon"), with its own independent window limits (5h, Week, ...).
+#[derive(Clone, Debug)]
+pub struct QuotaPool {
+    /// Stable pool key: `"gemini"`, `"3p"`, `"argon"`, or a normalized slug.
+    pub id: String,
+    /// Display name as reported by Antigravity (e.g. "Gemini Models").
+    pub name: String,
+    /// Optional server description (models in the group or plan notes).
+    pub description: String,
+    /// Window limits in this pool, shorter window first (`5h`, `Day`, `Week`).
+    pub limits: Vec<Limit>,
+}
+
+impl QuotaPool {
+    /// Compact label for narrow headers like the conversation's account box.
+    pub fn short_name(&self) -> &str {
+        match self.id.as_str() {
+            "gemini" => "Gemini",
+            "3p" => "Claude & GPT",
+            "argon" => "Argon",
+            _ => &self.name,
+        }
+    }
+}
+
 fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp_millis())
 }
 
-fn bucket_label(window: Option<&str>, name: &str, group_name: &str) -> &'static str {
+fn window_label(window: Option<&str>, name: &str, bucket_id: &str) -> &'static str {
     let w = window.unwrap_or("").to_ascii_lowercase();
     let n = name.to_ascii_lowercase();
-    let g = group_name.to_ascii_lowercase();
-    if w.contains("5h") || w.contains("hour") || n.contains("5h") || n.contains("5-hour") || n.contains("session") {
+    let b = bucket_id.to_ascii_lowercase();
+    if w.contains("5h")
+        || w.contains("hour")
+        || n.contains("5h")
+        || n.contains("5-hour")
+        || n.contains("five hour")
+        || n.contains("session")
+        || b.ends_with("-5h")
+    {
         "5h"
-    } else if w.contains("week") || w.contains("7d") || n.contains("week") || n.contains("7d") {
+    } else if w.contains("week") || w.contains("7d") || n.contains("week") || n.contains("7d") || b.contains("weekly") {
         "Week"
-    } else if w.contains("day") || w.contains("24h") || n.contains("daily") || n.contains("day") {
+    } else if w.contains("day") || w.contains("24h") || n.contains("daily") || n.contains("day") || b.contains("daily") {
         "Day"
-    } else if g.contains("claude") || n.contains("claude") {
-        "Claude"
-    } else if g.contains("gemini") || n.contains("gemini") {
-        "Gemini"
     } else {
         "Quota"
     }
 }
 
-/// Parses `v1internal:retrieveUserQuotaSummary` into up to 2 Oak `Limit`s.
-pub(crate) fn parse_quota_summary(data: &Value) -> Vec<Limit> {
-    let mut out: Vec<Limit> = Vec::new();
+fn pool_key_for_group(display_name: &str, bucket_ids: &[&str]) -> String {
+    let lower = display_name.to_ascii_lowercase();
+    if lower.contains("argon") || bucket_ids.iter().any(|b| b.to_ascii_lowercase().contains("argon")) {
+        return "argon".into();
+    }
+    if lower.contains("claude")
+        || lower.contains("gpt")
+        || bucket_ids.iter().any(|b| {
+            let bl = b.to_ascii_lowercase();
+            bl.starts_with("3p-") || bl.contains("claude") || bl.contains("gpt")
+        })
+    {
+        return "3p".into();
+    }
+    if lower.contains("gemini") || bucket_ids.iter().any(|b| b.to_ascii_lowercase().starts_with("gemini-")) {
+        return "gemini".into();
+    }
+    let slug: String = lower.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() { "quota".into() } else { slug }
+}
+
+/// Which quota pool key an Antigravity model id belongs to (`"3p"`, `"argon"`, or `"gemini"`).
+pub(crate) fn pool_id_for_model(model: &str) -> &'static str {
+    let pub_id = public_id(model).to_ascii_lowercase();
+    if pub_id.starts_with("claude-") || pub_id.starts_with("gpt-oss-") {
+        "3p"
+    } else if pub_id.contains("argon") {
+        "argon"
+    } else {
+        "gemini"
+    }
+}
+
+/// Picks the quota pool that governs `model` on an account.
+/// On Ultra plans (no separate `argon` group), Argon models fall back to `gemini`.
+pub(crate) fn pool_for_model<'a>(pools: &'a [QuotaPool], model: &str) -> Option<&'a QuotaPool> {
+    if pools.is_empty() {
+        return None;
+    }
+    let want = pool_id_for_model(model);
+    if let Some(p) = pools.iter().find(|p| p.id == want) {
+        return Some(p);
+    }
+    if want == "argon"
+        && let Some(p) = pools.iter().find(|p| p.id == "gemini")
+    {
+        return Some(p);
+    }
+    pools.first()
+}
+
+/// Parses `v1internal:retrieveUserQuotaSummary` into all per-pool quotas
+/// (e.g. `Gemini Models`, `Claude and GPT models`, `Gemini 4 Argon`), keeping
+/// each pool's `5h` and `Week` buckets separate.
+pub(crate) fn parse_quota_summary(data: &Value) -> Vec<QuotaPool> {
+    let mut pools: Vec<QuotaPool> = Vec::new();
     for group in data["groups"].as_array().into_iter().flatten() {
-        let gname = group["displayName"].as_str().unwrap_or("");
-        for bucket in group["buckets"].as_array().into_iter().flatten() {
+        let gname = group["displayName"].as_str().unwrap_or("").trim();
+        let gdesc = group["description"].as_str().unwrap_or("").trim().to_string();
+        let buckets = group["buckets"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let bucket_ids: Vec<&str> = buckets.iter().filter_map(|b| b["bucketId"].as_str()).collect();
+        let id = pool_key_for_group(gname, &bucket_ids);
+        let name = if !gname.is_empty() {
+            gname.to_string()
+        } else {
+            match id.as_str() {
+                "gemini" => "Gemini Models".into(),
+                "3p" => "Claude and GPT models".into(),
+                "argon" => "Gemini 4 Argon".into(),
+                _ => "Quota".into(),
+            }
+        };
+        let mut limits: Vec<Limit> = Vec::new();
+        for bucket in buckets {
             let Some(rem) = bucket["remainingFraction"].as_f64().filter(|v| v.is_finite()) else { continue };
             let used = ((1.0 - rem.clamp(0.0, 1.0)) * 100.0) as f32;
             let resets_at = bucket["resetTime"].as_str().and_then(parse_rfc3339_ms);
-            let bname = bucket["displayName"].as_str().or_else(|| bucket["bucketId"].as_str()).unwrap_or("");
-            let label = bucket_label(bucket["window"].as_str(), bname, gname);
-            if let Some(existing) = out.iter_mut().find(|l| l.label == label) {
+            let bid = bucket["bucketId"].as_str().unwrap_or("");
+            let bname = bucket["displayName"].as_str().unwrap_or(bid);
+            let label = window_label(bucket["window"].as_str(), bname, bid);
+            if let Some(existing) = limits.iter_mut().find(|l| l.label == label) {
                 if used > existing.percent {
                     existing.percent = used;
                     existing.resets_at = resets_at.or(existing.resets_at);
                 }
             } else {
-                out.push(Limit { label, percent: used, resets_at });
+                limits.push(Limit { label, percent: used, resets_at });
             }
         }
+        if limits.is_empty() {
+            continue;
+        }
+        limits.sort_by_key(|l| ["5h", "Day", "Week", "Quota"].iter().position(|x| *x == l.label).unwrap_or(9));
+        if let Some(existing) = pools.iter_mut().find(|p| p.id == id) {
+            for l in limits {
+                if let Some(el) = existing.limits.iter_mut().find(|x| x.label == l.label) {
+                    if l.percent > el.percent {
+                        el.percent = l.percent;
+                        el.resets_at = l.resets_at.or(el.resets_at);
+                    }
+                } else {
+                    existing.limits.push(l);
+                }
+            }
+            existing.limits.sort_by_key(|l| ["5h", "Day", "Week", "Quota"].iter().position(|x| *x == l.label).unwrap_or(9));
+        } else {
+            pools.push(QuotaPool { id, name, description: gdesc, limits });
+        }
     }
-    out.sort_by_key(|l| ["5h", "Day", "Week", "Gemini", "Claude", "Quota"].iter().position(|x| *x == l.label).unwrap_or(9));
-    out.truncate(2);
-    out
+    pools
 }
 
-/// Derives quota limits from `fetchAvailableModels` per-model `quotaInfo`
+/// Derives per-pool quota limits from `fetchAvailableModels` per-model `quotaInfo`
 /// (fallback when `retrieveUserQuotaSummary` is unavailable, e.g. free tier 403).
-pub(crate) fn parse_model_quotas(raw_models: &serde_json::Map<String, Value>) -> Vec<Limit> {
+pub(crate) fn parse_model_quotas(raw_models: &serde_json::Map<String, Value>) -> Vec<QuotaPool> {
     let mut gemini: Option<(f32, Option<i64>)> = None;
-    let mut claude: Option<(f32, Option<i64>)> = None;
+    let mut third_party: Option<(f32, Option<i64>)> = None;
+    let mut argon: Option<(f32, Option<i64>)> = None;
     let update = |slot: &mut Option<(f32, Option<i64>)>, used: f32, reset: Option<i64>| match slot {
         Some((p, r)) => {
             if used > *p {
@@ -1219,18 +1336,38 @@ pub(crate) fn parse_model_quotas(raw_models: &serde_json::Map<String, Value>) ->
         let used = ((1.0 - rem.clamp(0.0, 1.0)) * 100.0) as f32;
         let reset = qi["resetTime"].as_str().and_then(parse_rfc3339_ms);
         let lower = id.to_ascii_lowercase();
-        if lower.starts_with("claude-") {
-            update(&mut claude, used, reset);
+        if lower.starts_with("claude-") || lower.starts_with("gpt-oss-") {
+            update(&mut third_party, used, reset);
+        } else if lower.contains("argon") {
+            update(&mut argon, used, reset);
         } else if lower.starts_with("gemini-") {
             update(&mut gemini, used, reset);
         }
     }
     let mut out = Vec::new();
     if let Some((percent, resets_at)) = gemini {
-        out.push(Limit { label: "Gemini", percent, resets_at });
+        out.push(QuotaPool {
+            id: "gemini".into(),
+            name: "Gemini Models".into(),
+            description: String::new(),
+            limits: vec![Limit { label: "Quota", percent, resets_at }],
+        });
     }
-    if let Some((percent, resets_at)) = claude {
-        out.push(Limit { label: "Claude", percent, resets_at });
+    if let Some((percent, resets_at)) = third_party {
+        out.push(QuotaPool {
+            id: "3p".into(),
+            name: "Claude and GPT models".into(),
+            description: String::new(),
+            limits: vec![Limit { label: "Quota", percent, resets_at }],
+        });
+    }
+    if let Some((percent, resets_at)) = argon {
+        out.push(QuotaPool {
+            id: "argon".into(),
+            name: "Gemini 4 Argon".into(),
+            description: String::new(),
+            limits: vec![Limit { label: "Quota", percent, resets_at }],
+        });
     }
     out
 }
@@ -1258,15 +1395,15 @@ fn fetch_quota_summary_best_effort(token: &str) -> Option<Value> {
     None
 }
 
-/// Fetches account quota limits and (when `update_catalog` is true) updates the
+/// Fetches account quota pools and (when `update_catalog` is true) updates the
 /// dynamic model catalog from `fetchAvailableModels`.
-pub(crate) fn fetch_usage_and_catalog(token: &str, project_id: &str, update_catalog: bool) -> Result<(Vec<Limit>, bool), String> {
+pub(crate) fn fetch_usage_and_catalog(token: &str, project_id: &str, update_catalog: bool) -> Result<(Vec<QuotaPool>, bool), String> {
     let summary = fetch_quota_summary_best_effort(token).map(|v| parse_quota_summary(&v)).unwrap_or_default();
     let models_res = fetch_available_models_raw(token, project_id);
     let mut catalog_ok = false;
-    let mut fallback_limits = Vec::new();
+    let mut fallback_pools = Vec::new();
     if let Ok((raw, sorts)) = models_res {
-        fallback_limits = parse_model_quotas(&raw);
+        fallback_pools = parse_model_quotas(&raw);
         if update_catalog
             && let Ok(cat) = build_catalog(&raw, sorts.as_ref())
         {
@@ -1277,6 +1414,6 @@ pub(crate) fn fetch_usage_and_catalog(token: &str, project_id: &str, update_cata
     } else if summary.is_empty() {
         return Err(models_res.unwrap_err());
     }
-    let limits = if !summary.is_empty() { summary } else { fallback_limits };
-    Ok((limits, catalog_ok))
+    let pools = if !summary.is_empty() { summary } else { fallback_pools };
+    Ok((pools, catalog_ok))
 }

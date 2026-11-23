@@ -1081,7 +1081,7 @@ pub fn stream(req: Request, tx: Sender<Sse>) {
     let mut renewed = false;
 
     loop {
-        let acct_id = match auth::login_for(&conv) {
+        let acct_id = match auth::login_for(&conv, &req.model) {
             Ok(id) => id,
             Err(Some(s)) => return drop(tx.send(s)),
             Err(None) => return,
@@ -1229,7 +1229,7 @@ pub fn stream(req: Request, tx: Sender<Sse>) {
             if last_status == Some(429) && is_account_quota_429(&last_body) {
                 let now = api::now_ms();
                 let reset = parse_reset_time_ms(&last_body, now).unwrap_or(now + 15 * 60_000);
-                if auth::limited(&acct_id, reset) && rotations < 10 {
+                if auth::limited(&acct_id, &req.model, reset) && rotations < 10 {
                     rotations += 1;
                     capacity_attempt = 0;
                     empty_attempt = 0;

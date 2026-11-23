@@ -718,12 +718,12 @@ fn square_button_as(ui: &mut Ui, t: &Theme, small: bool, look: Look, tip: &str, 
 fn account_box(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &Settings, w: f32) -> egui::Response {
     let conv_id = session.map(|s| s.conv.lock().unwrap().id.clone()).unwrap_or_default();
     let seat = |p: api::Provider| crate::rotation::seat(p, &conv_id);
-    let (provider, spent, via) = match session {
+    let (provider, model, spent, via) = match session {
         Some(s) => {
             let c = s.conv.lock().unwrap();
-            (c.provider(), c.spent, c.served_by.clone())
+            (c.provider(), c.model.clone(), c.spent, c.served_by.clone())
         }
-        None => (settings.provider.unwrap_or_else(|| api::Provider::of(&settings.model)), 0.0, String::new()),
+        None => (settings.provider.unwrap_or_else(|| api::Provider::of(&settings.model)), settings.model.clone(), 0.0, String::new()),
     };
     match provider {
         api::Provider::OpenRouter => {
@@ -737,11 +737,41 @@ fn account_box(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &Set
             let mine = seat(api::Provider::Codex).and_then(|id| all.iter().find(|a| a.0 == id)).or(all.first()).map(|a| &a.1);
             usage_panel(ui, t, mine, None, false, w).on_hover_text("ChatGPT plan, Codex usage")
         }
-        // An Antigravity model: the Google account's Antigravity quota.
+        // An Antigravity model: only the 5h / weekly pool for the active model.
         api::Provider::Antigravity => {
-            let all = crate::antigravity::accounts();
-            let mine = seat(api::Provider::Antigravity).and_then(|id| all.iter().find(|a| a.0 == id)).or(all.first()).map(|a| &a.1);
-            usage_panel(ui, t, mine, None, false, w).on_hover_text("Google Antigravity quota")
+            let info = crate::antigravity::account_for_model(&conv_id, &model);
+            let mine = info.as_ref().map(|(a, ..)| a);
+            let status = info.as_ref().and_then(|(_, active, _)| active.as_ref().map(|p| p.short_name()));
+            let tip = match &info {
+                Some((_, active, pools)) if !pools.is_empty() => {
+                    let now = api::now_ms();
+                    let mut lines = Vec::new();
+                    if let Some(p) = active {
+                        lines.push(format!("Active pool: {}", p.name));
+                        if !p.description.is_empty() {
+                            lines.push(p.description.clone());
+                        }
+                    }
+                    if pools.len() > 1 {
+                        for p in pools {
+                            let eff = api::effective_limits(&p.limits, now);
+                            let parts: Vec<String> = eff
+                                .iter()
+                                .map(|l| {
+                                    let pct = if l.resets_at.is_some_and(|r| r <= now) { 0.0 } else { l.percent.floor() };
+                                    format!("{} {}%", l.label, pct)
+                                })
+                                .collect();
+                            if !parts.is_empty() {
+                                lines.push(format!("{}: {}", p.name, parts.join(", ")));
+                            }
+                        }
+                    }
+                    lines.join("\n")
+                }
+                _ => "Google Antigravity quota".into(),
+            };
+            usage_panel(ui, t, mine, status, false, w).on_hover_text(tip)
         }
         // A Freebuff model: the account it goes through.
         api::Provider::Freebuff => {
@@ -860,6 +890,113 @@ pub(crate) fn usage_panel(ui: &mut Ui, t: &Theme, a: Option<&api::Account>, stat
             } else {
                 r.on_hover_text(format!("{}% of the {} limit used; it resets in {reset}.", l.percent.floor(), l.label));
             }
+        }
+    })
+    .response
+}
+
+/// Draws one quota pool's heading and meters: side-by-side when it has two
+/// windows (`5h` and `Week`), or full-width for a single window (e.g. Argon).
+pub(crate) fn pool_meters(ui: &mut Ui, t: &Theme, w: f32, name: &str, desc: &str, cells: &[(String, String, f32, String)]) {
+    let head = ui.add(egui::Label::new(RichText::new(name).small().color(t.ink2)).truncate());
+    if !desc.is_empty() {
+        head.on_hover_text(desc);
+    }
+    if cells.len() == 2 {
+        let gap = 8.0;
+        let col_w = ((w - gap) * 0.5).max(40.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (label, value, pct, tip) in cells {
+                let full = *pct >= 90.0;
+                let color = if full { t.error } else { t.ink };
+                let bar = if full { t.error } else { t.accent };
+                ui.allocate_ui_with_layout(vec2(col_w, 0.0), Layout::top_down(Align::Min), |ui| {
+                    ui.set_width(col_w);
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    let r = ui
+                        .scope(|ui| {
+                            kv(ui, t, label, value, color);
+                            meter(ui, t, col_w, *pct / 100.0, bar);
+                        })
+                        .response;
+                    r.on_hover_text(tip);
+                });
+            }
+        });
+    } else {
+        for (label, value, pct, tip) in cells {
+            let full = *pct >= 90.0;
+            let color = if full { t.error } else { t.ink };
+            let bar = if full { t.error } else { t.accent };
+            let r = ui
+                .scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    kv(ui, t, label, value, color);
+                    meter(ui, t, w, *pct / 100.0, bar);
+                })
+                .response;
+            r.on_hover_text(tip);
+        }
+    }
+}
+
+/// An Antigravity account card on Home: shows every quota pool (`Gemini Models`,
+/// `Claude and GPT models`, `Gemini 4 Argon`, ...) with its `5h` and `Week` bars.
+pub(crate) fn antigravity_panel(ui: &mut Ui, t: &Theme, v: &crate::antigravity::AccountView, status: Option<&str>, w: f32) -> egui::Response {
+    let acc = &v.account;
+    framed_box(ui, t, t.line, w, |ui| {
+        let name = if acc.name.is_empty() { "Antigravity" } else { &acc.name };
+        if !acc.fetched && acc.email.is_empty() {
+            head_row(ui, t, name, status);
+            return loading(ui, t, "loading usage…");
+        }
+        let head = if acc.plan.is_empty() { name.to_string() } else { format!("{name}, {}", api::plan_label(&acc.plan)) };
+        let stale = acc.error.as_ref().filter(|_| !v.pools.is_empty()).map(|e| (format!("as of {}", clock(acc.usage_at)), e));
+        let r = ui.scope(|ui| head_row(ui, t, &head, status.or(stale.as_ref().map(|s| s.0.as_str())))).response;
+        if let Some((_, e)) = &stale {
+            r.on_hover_text(format!("Usage refresh failed; retrying shortly.\n{e}"));
+        }
+        key_line(ui, &acc.email, t.ink3);
+        if let Some(e) = acc.error.as_ref().filter(|_| v.pools.is_empty()) {
+            ui.label(RichText::new("Usage unavailable").small().color(t.error)).on_hover_text(e);
+            return;
+        }
+        if !acc.fetched {
+            return loading(ui, t, "loading usage…");
+        }
+        let iw = ui.available_width();
+        let now = api::now_ms();
+        for (i, pool) in v.pools.iter().enumerate() {
+            if i > 0 {
+                ui.add_space(3.0);
+            }
+            let held = api::five_hour_held_by_week(&pool.limits, now);
+            let eff = api::effective_limits(&pool.limits, now);
+            let single = eff.len() == 1;
+            let cells: Vec<(String, String, f32, String)> = eff
+                .iter()
+                .map(|l| {
+                    let expired = l.resets_at.is_some_and(|r| r <= now);
+                    let pct = if expired { 0.0 } else { l.percent.clamp(0.0, 100.0) };
+                    let reset = l.resets_at.filter(|&r| r > now).map(until);
+                    let value = match (single, &reset) {
+                        (true, Some(r)) => format!("{}%, {r}", pct.floor()),
+                        _ => format!("{}%", pct.floor()),
+                    };
+                    let tip = if held && l.label == "5h" {
+                        let own = pool.limits.iter().find(|x| x.label == "5h").map_or(0.0, |x| x.percent.floor());
+                        let r = reset.as_deref().unwrap_or("soon");
+                        format!("{} weekly limit is used up, so its 5h window is too until it resets in {r} ({own}% of 5h itself used).", pool.name)
+                    } else if let Some(r) = &reset {
+                        format!("{}% of {} ({}) used; resets in {r}.", pct.floor(), pool.name, l.label)
+                    } else {
+                        format!("{}% of {} ({}) used.", pct.floor(), pool.name, l.label)
+                    };
+                    (l.label.to_string(), value, pct, tip)
+                })
+                .collect();
+            pool_meters(ui, t, iw, &pool.name, &pool.description, &cells);
         }
     })
     .response

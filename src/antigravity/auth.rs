@@ -1,12 +1,13 @@
 //! Antigravity OAuth 2.0 + PKCE sign-in, token renewal, project/tier discovery,
 //! multi-account storage (`antigravity.json`), vault sync and account rotation.
 
-use super::{catalog, default_project_id, endpoint_candidates, env_var, error_text, with_headers};
+use super::{catalog::{self, QuotaPool}, default_project_id, endpoint_candidates, env_var, error_text, with_headers};
 use crate::api::{self, Limit, Sse};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -86,17 +87,18 @@ pub(crate) struct Cred {
 #[derive(Clone)]
 struct Acct {
     cred: Cred,
-    limits: Vec<Limit>,
+    pools: Vec<QuotaPool>,
     fetched: bool,
     error: Option<String>,
     usage_at: i64,
-    /// The account turned a request down for its quota limit until then (ms).
-    limited_until: i64,
+    /// Per-pool quota refusal expiry (`pool_id -> ms`), so exhausting one pool
+    /// (e.g. Claude & GPT or Argon) does not block unrelated models on this account.
+    limited_until: HashMap<String, i64>,
 }
 
 impl Acct {
     fn new(cred: Cred) -> Self {
-        Self { cred, limits: vec![], fetched: false, error: None, usage_at: 0, limited_until: 0 }
+        Self { cred, pools: vec![], fetched: false, error: None, usage_at: 0, limited_until: HashMap::new() }
     }
 }
 
@@ -166,7 +168,6 @@ fn keep(c: Cred) {
     match s.list.iter_mut().find(|a| a.cred.account_id == c.account_id) {
         Some(a) => {
             a.cred = c;
-            a.limited_until = 0;
         }
         None => s.list.push(Acct::new(c)),
     }
@@ -744,30 +745,68 @@ fn exchange(code: &str, verifier: &str) -> Result<(), String> {
 
 // ---------------------------------------------------------------- accounts & usage
 
-/// Antigravity logins formatted for Oak's account boxes and Home.
-pub fn accounts() -> Vec<(String, api::Account)> {
+/// An Antigravity account with all of its quota pools (for Home cards and
+/// provider summaries).
+#[derive(Clone, Debug)]
+pub struct AccountView {
+    pub id: String,
+    pub account: api::Account,
+    pub pools: Vec<QuotaPool>,
+}
+
+fn to_api_account(a: &Acct, paired: bool, limits: Vec<Limit>) -> api::Account {
+    let c = &a.cred;
+    api::Account {
+        provider: api::Provider::Antigravity,
+        name: "Antigravity".into(),
+        email: c.email.clone(),
+        plan: c.plan.clone(),
+        limits,
+        fetched: a.fetched,
+        error: a.error.clone(),
+        usage_at: a.usage_at,
+        fallback: paired && !c.remote,
+        movable: paired && !c.remote,
+        ..Default::default()
+    }
+}
+
+/// Summary limits for callers that only expect a flat `api::Account.limits`
+/// (such as gateway JSON): uses the Gemini pool if present, else the first pool.
+fn default_limits(pools: &[QuotaPool]) -> Vec<Limit> {
+    pools.iter().find(|p| p.id == "gemini").or_else(|| pools.first()).map(|p| p.limits.clone()).unwrap_or_default()
+}
+
+/// Antigravity logins with all per-pool quotas, for Home and provider summaries.
+pub fn accounts_detailed() -> Vec<AccountView> {
     let paired = api::vault_on();
     let s = STATE.lock().unwrap();
     s.list
         .iter()
-        .map(|a| {
-            let c = &a.cred;
-            let view = api::Account {
-                provider: api::Provider::Antigravity,
-                name: "Antigravity".into(),
-                email: c.email.clone(),
-                plan: c.plan.clone(),
-                limits: a.limits.clone(),
-                fetched: a.fetched,
-                error: a.error.clone(),
-                usage_at: a.usage_at,
-                fallback: paired && !c.remote,
-                movable: paired && !c.remote,
-                ..Default::default()
-            };
-            (c.account_id.clone(), view)
+        .map(|a| AccountView {
+            id: a.cred.account_id.clone(),
+            account: to_api_account(a, paired, default_limits(&a.pools)),
+            pools: a.pools.clone(),
         })
         .collect()
+}
+
+/// Antigravity logins formatted for generic account lists (`gateway`, counts).
+pub fn accounts() -> Vec<(String, api::Account)> {
+    accounts_detailed().into_iter().map(|v| (v.id, v.account)).collect()
+}
+
+/// Account view for a conversation using `model`: `api::Account.limits` holds
+/// only the `5h` / `Week` limits of the pool serving `model`, alongside the
+/// matched pool and all pools for tooltips.
+pub fn account_for_model(conv: &str, model: &str) -> Option<(api::Account, Option<QuotaPool>, Vec<QuotaPool>)> {
+    let paired = api::vault_on();
+    let seat = crate::rotation::seat(api::Provider::Antigravity, conv);
+    let s = STATE.lock().unwrap();
+    let a = seat.as_deref().and_then(|id| s.list.iter().find(|x| x.cred.account_id == id)).or_else(|| s.list.first())?;
+    let active = catalog::pool_for_model(&a.pools, model).cloned();
+    let limits = active.as_ref().map(|p| p.limits.clone()).unwrap_or_default();
+    Some((to_api_account(a, paired, limits), active, a.pools.clone()))
 }
 
 /// The first Antigravity login, for Settings' connection summary.
@@ -775,7 +814,7 @@ pub fn account() -> Option<api::Account> {
     accounts().into_iter().next().map(|(_, a)| a)
 }
 
-/// Refreshes each Antigravity account's plan, quota limits, and dynamic model catalog.
+/// Refreshes each Antigravity account's plan, per-pool quotas, and dynamic model catalog.
 pub fn refresh() {
     let ids: Vec<String> = STATE.lock().unwrap().list.iter().map(|a| a.cred.account_id.clone()).collect();
     let mut refreshed_catalog = false;
@@ -783,11 +822,11 @@ pub fn refresh() {
         let r = access(&id, false).and_then(|(token, project_id)| {
             let (discovered_proj, plan) = load_code_assist(&token);
             let effective_project = discovered_proj.unwrap_or(project_id);
-            let (limits, catalog_ok) = catalog::fetch_usage_and_catalog(&token, &effective_project, !refreshed_catalog)?;
+            let (pools, catalog_ok) = catalog::fetch_usage_and_catalog(&token, &effective_project, !refreshed_catalog)?;
             if catalog_ok {
                 refreshed_catalog = true;
             }
-            Ok((effective_project, plan, limits))
+            Ok((effective_project, plan, pools))
         });
         let mut s = STATE.lock().unwrap();
         let mut changed = false;
@@ -795,7 +834,7 @@ pub fn refresh() {
         if let Some(a) = s.list.iter_mut().find(|a| a.cred.account_id == id) {
             a.fetched = true;
             match r {
-                Ok((project_id, plan, limits)) => {
+                Ok((project_id, plan, pools)) => {
                     if !project_id.is_empty() && a.cred.project_id != project_id {
                         a.cred.project_id = project_id;
                         changed = true;
@@ -807,15 +846,29 @@ pub fn refresh() {
                         a.cred.plan = p;
                         changed = true;
                     }
-                    a.limits = limits;
+                    a.pools = pools;
                     a.error = None;
                     a.usage_at = api::now_ms();
-                    // Early reset recognition: if a newer reading shows room, clear limited_until.
+                    // Early reset recognition, per pool: if a pool's newer reading shows room,
+                    // clear that pool's refusal so waiting sessions can retry it.
                     let now = a.usage_at;
-                    let any_full = a.limits.iter().any(|l| l.resets_at.is_none_or(|r| r > now) && l.percent >= 100.0);
-                    if a.limited_until > now && !a.limits.is_empty() && !any_full {
-                        a.limited_until = 0;
-                        freed = true;
+                    let mut clear_keys = Vec::new();
+                    for (pool_key, &until) in &a.limited_until {
+                        if until <= now {
+                            clear_keys.push(pool_key.clone());
+                            continue;
+                        }
+                        if let Some(pool) = a.pools.iter().find(|p| p.id == *pool_key) {
+                            let eff = api::effective_limits(&pool.limits, now);
+                            let full = eff.iter().any(|l| l.resets_at.is_none_or(|r| r > now) && l.percent >= 100.0);
+                            if !eff.is_empty() && !full {
+                                clear_keys.push(pool_key.clone());
+                                freed = true;
+                            }
+                        }
+                    }
+                    for k in clear_keys {
+                        a.limited_until.remove(&k);
                     }
                 }
                 Err(e) => a.error = Some(e),
@@ -833,31 +886,43 @@ pub fn refresh() {
 
 // ---------------------------------------------------------------- rotation
 
-fn candidates(now: i64) -> Vec<crate::rotation::Candidate> {
-    let s = STATE.lock().unwrap();
-    let remote = s.list.iter().any(|a| a.cred.remote);
-    s.list
-        .iter()
-        .map(|a| {
-            let live = |l: &&Limit| l.resets_at.is_none_or(|r| r > now);
-            let used = a.limits.iter().filter(live).map(|l| l.percent).fold(0.0f32, f32::max);
-            let spent = a.limits.iter().filter(live).filter(|l| l.percent >= 100.0).filter_map(|l| l.resets_at).max().unwrap_or(0);
-            let next_reset = a.limits.iter().filter(live).filter_map(|l| l.resets_at).min().unwrap_or(i64::MAX);
-            crate::rotation::Candidate {
-                id: a.cred.account_id.clone(),
-                left: (100.0 - used.min(100.0)) as f64,
-                usable: a.limited_until.max(spent) <= now,
-                resets_at: next_reset,
-                preferred: a.cred.remote || !remote,
-            }
-        })
-        .collect()
+fn effective_pool_key<'a>(a: &Acct, model: &str) -> &'a str {
+    let want = catalog::pool_id_for_model(model);
+    // Ultra plans fold Argon into the Gemini Models pool.
+    if want == "argon" && !a.pools.is_empty() && !a.pools.iter().any(|p| p.id == "argon") {
+        "gemini"
+    } else {
+        want
+    }
 }
 
-/// Picks the Antigravity login for conversation `conv`, or returns an SSE error/limit.
-pub(crate) fn login_for(conv: &str) -> Result<String, Option<Sse>> {
+fn candidate_for(a: &Acct, model: &str, now: i64, any_remote: bool) -> crate::rotation::Candidate {
+    let pool_key = effective_pool_key(a, model);
+    let refused_until = a.limited_until.get(pool_key).copied().unwrap_or(0);
+    let eff = catalog::pool_for_model(&a.pools, model).map(|p| api::effective_limits(&p.limits, now)).unwrap_or_default();
+    let live = |l: &&Limit| l.resets_at.is_none_or(|r| r > now);
+    let used = eff.iter().filter(live).map(|l| l.percent).fold(0.0f32, f32::max);
+    let spent = eff.iter().filter(live).filter(|l| l.percent >= 100.0).filter_map(|l| l.resets_at).max().unwrap_or(0);
+    let next_reset = eff.iter().filter(live).filter_map(|l| l.resets_at).min().unwrap_or(i64::MAX);
+    crate::rotation::Candidate {
+        id: a.cred.account_id.clone(),
+        left: (100.0 - used.min(100.0)) as f64,
+        usable: refused_until.max(spent) <= now,
+        resets_at: next_reset,
+        preferred: a.cred.remote || !any_remote,
+    }
+}
+
+fn candidates(now: i64, model: &str) -> Vec<crate::rotation::Candidate> {
+    let s = STATE.lock().unwrap();
+    let any_remote = s.list.iter().any(|a| a.cred.remote);
+    s.list.iter().map(|a| candidate_for(a, model, now, any_remote)).collect()
+}
+
+/// Picks the Antigravity login for conversation `conv` using `model`, or returns an SSE error/limit.
+pub(crate) fn login_for(conv: &str, model: &str) -> Result<String, Option<Sse>> {
     let now = api::now_ms();
-    let cands = candidates(now);
+    let cands = candidates(now, model);
     if cands.is_empty() {
         return Err(Some(Sse::Err("Not signed in to Antigravity: add an Antigravity account on Home".into())));
     }
@@ -868,8 +933,22 @@ pub(crate) fn login_for(conv: &str) -> Result<String, Option<Sse>> {
             let first = s
                 .list
                 .iter()
-                .map(|a| a.limited_until)
-                .filter(|&t| t > now)
+                .filter_map(|a| {
+                    let pool_key = effective_pool_key(a, model);
+                    let refused = a.limited_until.get(pool_key).copied().unwrap_or(0);
+                    let spent = catalog::pool_for_model(&a.pools, model)
+                        .map(|p| {
+                            api::effective_limits(&p.limits, now)
+                                .into_iter()
+                                .filter(|l| l.resets_at.is_none_or(|r| r > now) && l.percent >= 100.0)
+                                .filter_map(|l| l.resets_at)
+                                .max()
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0);
+                    let at = refused.max(spent);
+                    (at > now).then_some(at)
+                })
                 .min()
                 .unwrap_or(now + 15 * 60_000);
             Err(Some(Sse::Limit(first)))
@@ -877,16 +956,25 @@ pub(crate) fn login_for(conv: &str) -> Result<String, Option<Sse>> {
     }
 }
 
-/// Marks login `id` quota-limited until `until`. True when another login can take over.
-pub(crate) fn limited(id: &str, until: i64) -> bool {
+/// Marks login `id` quota-limited for `model`'s pool until `until`.
+/// Returns true when another login can serve `model`.
+pub(crate) fn limited(id: &str, model: &str, until: i64) -> bool {
     let mut s = STATE.lock().unwrap();
     if let Some(a) = s.list.iter_mut().find(|a| a.cred.account_id == id) {
-        a.limited_until = a.limited_until.max(until);
+        let key = effective_pool_key(a, model).to_string();
+        let slot = a.limited_until.entry(key).or_insert(0);
+        *slot = (*slot).max(until);
     }
     drop(s);
-    candidates(api::now_ms()).iter().any(|c| c.usable)
+    candidates(api::now_ms(), model).iter().any(|c| c.usable)
 }
 
 pub(crate) fn label_of(id: &str) -> String {
     cred_of(id).map_or_else(|| "Antigravity".into(), |c| if c.email.is_empty() { "Antigravity".into() } else { c.email })
+}
+
+#[cfg(test)]
+pub(crate) fn candidate_for_test(pools: Vec<QuotaPool>, limited_until: HashMap<String, i64>, model: &str, now: i64) -> crate::rotation::Candidate {
+    let a = Acct { cred: Cred { account_id: "a1".into(), ..Default::default() }, pools, fetched: true, error: None, usage_at: now, limited_until };
+    candidate_for(&a, model, now, false)
 }

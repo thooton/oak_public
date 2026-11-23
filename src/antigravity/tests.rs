@@ -237,33 +237,87 @@ fn sse_translation_handles_thinking_text_tools_signatures_and_usage() {
 #[test]
 fn quota_parsing_and_429_classification() {
     let summary = json!({
-        "groups": [{
-            "displayName": "Shared",
-            "buckets": [
-                {"bucketId": "b1", "displayName": "5-hour window", "window": "5h", "remainingFraction": 0.25, "resetTime": "2026-11-23T00:00:00Z"},
-                {"bucketId": "b2", "displayName": "Weekly", "window": "7d", "remainingFraction": 0.80, "resetTime": "2026-11-29T00:00:00Z"}
-            ]
-        }]
+        "groups": [
+            {
+                "displayName": "Gemini Models",
+                "description": "Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen, Gemini 3.8 Flash",
+                "buckets": [
+                    {"bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": 0.78, "resetTime": "2026-11-30T00:38:17Z"},
+                    {"bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining", "window": "5h", "remainingFraction": 0.27, "resetTime": "2026-11-23T05:38:17Z"}
+                ]
+            },
+            {
+                "displayName": "Claude and GPT models",
+                "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B",
+                "buckets": [
+                    {"bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "remainingFraction": 0.0, "resetTime": "2026-11-30T01:51:17Z"},
+                    {"bucketId": "3p-5h", "displayName": "Five Hour Limit Remaining", "window": "5h", "remainingFraction": 0.9, "resetTime": "2026-11-23T06:51:17Z"}
+                ]
+            },
+            {
+                "displayName": "Gemini 4 Argon",
+                "description": "For paid Pro plans, Argon quota is separate.",
+                "buckets": [
+                    {"bucketId": "gemini-argon-wtu-weekly", "displayName": "Gemini 4 Argon Weekly Limit", "window": "weekly", "remainingFraction": 1.0, "resetTime": "2026-11-30T01:51:17Z"}
+                ]
+            }
+        ]
     });
-    let limits = catalog::parse_quota_summary(&summary);
-    assert_eq!(limits.len(), 2);
-    assert_eq!(limits[0].label, "5h");
-    assert!((limits[0].percent - 75.0).abs() < 0.01);
-    assert!(limits[0].resets_at.is_some());
-    assert_eq!(limits[1].label, "Week");
-    assert!((limits[1].percent - 20.0).abs() < 0.01);
+    let pools = catalog::parse_quota_summary(&summary);
+    assert_eq!(pools.len(), 3);
+    assert_eq!((pools[0].id.as_str(), pools[0].name.as_str()), ("gemini", "Gemini Models"));
+    assert_eq!(pools[0].limits.len(), 2);
+    assert_eq!(pools[0].limits[0].label, "5h");
+    assert!((pools[0].limits[0].percent - 73.0).abs() < 0.01);
+    assert_eq!(pools[0].limits[1].label, "Week");
+    assert!((pools[0].limits[1].percent - 22.0).abs() < 0.01);
+
+    assert_eq!((pools[1].id.as_str(), pools[1].name.as_str()), ("3p", "Claude and GPT models"));
+    assert_eq!(pools[1].limits.len(), 2);
+    assert_eq!(pools[1].limits[0].label, "5h");
+    assert_eq!(pools[1].limits[1].label, "Week");
+    assert!((pools[1].limits[1].percent - 100.0).abs() < 0.01);
+
+    assert_eq!((pools[2].id.as_str(), pools[2].name.as_str()), ("argon", "Gemini 4 Argon"));
+    assert_eq!(pools[2].limits.len(), 1);
+    assert_eq!(pools[2].limits[0].label, "Week");
+    assert!((pools[2].limits[0].percent - 0.0).abs() < 0.01);
+
+    // Model-to-pool routing: Pro (separate Argon) vs Ultra (Argon folded into Gemini).
+    assert_eq!(catalog::pool_for_model(&pools, "antigravity/gemini-3.8-flash").unwrap().id, "gemini");
+    assert_eq!(catalog::pool_for_model(&pools, "antigravity/claude-opus-5-5").unwrap().id, "3p");
+    assert_eq!(catalog::pool_for_model(&pools, "antigravity/gpt-oss-120b").unwrap().id, "3p");
+    assert_eq!(catalog::pool_for_model(&pools, "antigravity/gemini-4-argon").unwrap().id, "argon");
+    let ultra_pools = pools[..2].to_vec();
+    assert_eq!(catalog::pool_for_model(&ultra_pools, "antigravity/gemini-4-argon").unwrap().id, "gemini");
+
+    // Exhausting Claude & GPT (weekly 100% + refusal) must not block Gemini or Argon on the same account.
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-22T18:00:00Z").unwrap().timestamp_millis();
+    let mut refused = std::collections::HashMap::new();
+    refused.insert("3p".into(), now + 3_600_000);
+    let claude_cand = auth::candidate_for_test(pools.clone(), refused.clone(), "antigravity/claude-opus-5-5", now);
+    let gemini_cand = auth::candidate_for_test(pools.clone(), refused.clone(), "antigravity/gemini-3.8-flash", now);
+    let argon_cand = auth::candidate_for_test(pools.clone(), refused, "antigravity/gemini-4-argon", now);
+    assert!(!claude_cand.usable);
+    assert!(gemini_cand.usable);
+    assert!((gemini_cand.left - 27.0).abs() < 0.05);
+    assert!(argon_cand.usable);
+    assert!((argon_cand.left - 100.0).abs() < 0.05);
 
     // Fallback to per-model quotaInfo
     let raw_models = json!({
         "gemini-3.8-flash-high": {"quotaInfo": {"remainingFraction": 0.6, "resetTime": "2026-11-23T00:00:00Z"}},
-        "claude-opus-4-6-thinking": {"quotaInfo": {"remainingFraction": 0.1, "resetTime": "2026-11-23T02:00:00Z"}}
+        "claude-opus-4-6-thinking": {"quotaInfo": {"remainingFraction": 0.1, "resetTime": "2026-11-23T02:00:00Z"}},
+        "gemini-4-argon-high": {"quotaInfo": {"remainingFraction": 0.9, "resetTime": "2026-11-29T00:00:00Z"}}
     });
     let fb = catalog::parse_model_quotas(raw_models.as_object().unwrap());
-    assert_eq!(fb.len(), 2);
-    assert_eq!(fb[0].label, "Gemini");
-    assert!((fb[0].percent - 40.0).abs() < 0.01);
-    assert_eq!(fb[1].label, "Claude");
-    assert!((fb[1].percent - 90.0).abs() < 0.01);
+    assert_eq!(fb.len(), 3);
+    assert_eq!(fb[0].id, "gemini");
+    assert!((fb[0].limits[0].percent - 40.0).abs() < 0.01);
+    assert_eq!(fb[1].id, "3p");
+    assert!((fb[1].limits[0].percent - 90.0).abs() < 0.01);
+    assert_eq!(fb[2].id, "argon");
+    assert!((fb[2].limits[0].percent - 10.0).abs() < 0.01);
 
     // 429 classification & reset duration parsing
     let quota_wall = "Individual quota reached. Resets in 2h 15m 30s.";

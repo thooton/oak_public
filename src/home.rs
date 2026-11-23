@@ -866,10 +866,10 @@ fn account_cards(ui: &mut Ui, t: &Theme, p: Provider, w: f32, busy: bool, act: &
         }
         Provider::Antigravity => {
             let remove = if paired { "Sign out (every machine)" } else { "Sign out" };
-            for (id, a) in antigravity::accounts() {
-                let movable = antigravity::movable(&id);
-                let status = status(&id, movable);
-                account_card(ui, t, w, (p, &id), movable, remove, busy, act, |ui, t, w| usage_panel(ui, t, Some(&a), status.as_deref(), false, w));
+            for v in antigravity::accounts_detailed() {
+                let movable = antigravity::movable(&v.id);
+                let status = status(&v.id, movable);
+                account_card(ui, t, w, (p, &v.id), movable, remove, busy, act, |ui, t, w| crate::composer::antigravity_panel(ui, t, &v, status.as_deref(), w));
             }
         }
         Provider::OpenRouter => {

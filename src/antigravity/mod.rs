@@ -21,8 +21,10 @@ mod auth;
 mod catalog;
 mod wire;
 
-pub use auth::{Login, account, accounts, finish_login, forget_remote, load, login_result, movable, move_to_vault, note, on, refresh, remote, sign_out, start_login, sync};
+pub use auth::{AccountView, Login, account, account_for_model, accounts, accounts_detailed, finish_login, forget_remote, load, login_result, movable, move_to_vault, note, on, refresh, remote, sign_out, start_login, sync};
 pub use catalog::{context_window, efforts, max_output, model_name, models, serves};
+#[cfg(test)]
+pub use catalog::QuotaPool;
 pub use wire::{preamble, stream};
 #[cfg(test)]
 pub(crate) use wire::request_body;
