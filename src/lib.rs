@@ -486,6 +486,7 @@ impl App {
         let mut app = App {
             settings,
             signed_in,
+            sign_ins: api::accounts_freed(),
             sessions,
             font_job,
             ..App::default()
@@ -505,7 +506,11 @@ impl App {
     }
 
     fn fetch_models(&self, ctx: &egui::Context) {
-        *self.models.lock().unwrap() = None;
+        let mut m = self.models.lock().unwrap();
+        if m.as_ref().is_none_or(Result::is_err) {
+            *m = None;
+        }
+        drop(m);
         let (models, ctx) = (self.models.clone(), ctx.clone());
         std::thread::spawn(move || {
             *models.lock().unwrap() = Some(api::latest_models());
@@ -513,15 +518,20 @@ impl App {
         });
     }
 
-    /// An account was added or removed, or a vault's came or went: the
-    /// models and the accounts' usage are fetched again.
-    pub(crate) fn accounts_changed(&mut self, ctx: &egui::Context) {
+    fn reload_accounts(&mut self, ctx: &egui::Context) {
         self.signed_in = true;
         self.fetch_models(ctx);
         self.account.lock().unwrap().fetched = None;
+    }
+
+    /// An account was added or removed, or a vault's came or went: the
+    /// models and the accounts' usage are fetched again.
+    pub(crate) fn accounts_changed(&mut self, ctx: &egui::Context) {
+        self.reload_accounts(ctx);
         // The sign-in counts as an account that came free (a session waiting
         // out a reset may have a provider to go to now).
         api::note_signed_in();
+        self.sign_ins = api::accounts_freed();
     }
 
     /// A sign-in came in since the last frame (a provider's browser flow):
@@ -530,7 +540,7 @@ impl App {
         let n = api::accounts_freed();
         if n > self.sign_ins {
             self.sign_ins = n;
-            self.accounts_changed(ctx);
+            self.reload_accounts(ctx);
         }
     }
 

@@ -743,3 +743,47 @@ fn middle_click_scrolls_a_widget_chat() {
     }
 }
 
+/// A sign-in triggers one model reload, not a per-frame loop: `accounts_changed`
+/// must not feed back into `note_new_sign_in`, and a background reload keeps an
+/// already-loaded model list visible instead of flashing back to "Loading models…".
+#[test]
+fn sign_in_does_not_loop_model_reloads() {
+    let ctx = egui::Context::default();
+    let mut app = App { sign_ins: api::accounts_freed(), ..App::default() };
+    let existing = vec![api::Model { id: "m".into(), name: "M".into(), provider: api::Provider::Claude }];
+    *app.models.lock().unwrap() = Some(Ok(existing));
+
+    let before = api::accounts_freed();
+    app.accounts_changed(&ctx);
+    assert!(matches!(&*app.models.lock().unwrap(), Some(Ok(_))), "background refresh keeps the loaded model list");
+    assert!(app.sign_ins > before, "accounts_changed notifies waiting sessions and records its own count");
+
+    // Calling `note_new_sign_in` repeatedly must not feed back into
+    // `accounts_changed` and loop on every frame.
+    let mut reloads = 0;
+    for _ in 0..20 {
+        app.account.lock().unwrap().fetched = Some(Instant::now());
+        app.note_new_sign_in(&ctx);
+        if app.account.lock().unwrap().fetched.is_none() {
+            reloads += 1;
+        }
+    }
+    assert!(reloads <= 1, "note_new_sign_in looped {reloads} times");
+
+    // A genuine external sign-in reloads once and then stops.
+    api::note_signed_in();
+    app.account.lock().unwrap().fetched = Some(Instant::now());
+    app.note_new_sign_in(&ctx);
+    assert!(app.account.lock().unwrap().fetched.is_none(), "external sign-in triggers a reload");
+
+    let mut after_reloads = 0;
+    for _ in 0..20 {
+        app.account.lock().unwrap().fetched = Some(Instant::now());
+        app.note_new_sign_in(&ctx);
+        if app.account.lock().unwrap().fetched.is_none() {
+            after_reloads += 1;
+        }
+    }
+    assert!(after_reloads <= 1, "note_new_sign_in looped {after_reloads} times after external sign-in");
+}
+
