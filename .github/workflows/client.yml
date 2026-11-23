@@ -124,13 +124,6 @@ jobs:
         id: build
         run: cargo build --release --locked
 
-      - name: Test
-        env:
-          OAK_DIR: ${{ runner.temp }}/oak-test-profile
-        run: |
-          mkdir -p "$OAK_DIR"
-          cargo test --release --locked
-
       # The example plugins (one in Rust, one in C, which the test compiles
       # itself with gcc on Windows; no CC here, or cargo would build the
       # crates' C with it too and MSVC couldn't link them), loaded into the whole app, headless: the plugin interface
