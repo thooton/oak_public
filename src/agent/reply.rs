@@ -101,6 +101,16 @@ struct Streaming {
     rewrite_thinking: bool,
     /// Thinking sections waiting to go to be rewritten (Unslop).
     rewrites: Vec<(String, String)>,
+    /// The block the model is writing, and what the status line says of
+    /// it ("Thinking", "Writing READ").
+    writing: Option<(usize, String)>,
+    /// The provider runs the calls it makes as it goes (Quick): they come
+    /// whole, and are running, not being written, until their result.
+    provider_runs: bool,
+    /// The provider's calls running now (their blocks), until their result.
+    running: Vec<usize>,
+    /// The batch's `generation` the status line was last brought up to.
+    seen: u64,
 }
 
 impl Streaming {
@@ -124,10 +134,22 @@ impl Streaming {
                 };
             }
             Event::Block { index: i, block: b } => {
-                l.status = match b["type"].as_str() {
-                    Some("reasoning") => "Thinking".into(),
-                    Some("tool_call") => format!("Writing {}", crate::transcript::shown(&b)),
-                    _ => "Writing".into(),
+                let new = if self.provider_runs && oak::is_call(&b) {
+                    // The model has moved on from what it wrote before.
+                    self.writing = None;
+                    if b.get("_oak_result").is_none() && !self.running.contains(&i) {
+                        self.running.push(i);
+                    }
+                    false
+                } else {
+                    let what = match b["type"].as_str() {
+                        Some("reasoning") => "Thinking".into(),
+                        Some("tool_call") => format!("Writing {}", crate::transcript::shown(&b)),
+                        _ => "Writing".into(),
+                    };
+                    let new = self.writing.as_ref().is_none_or(|(w, _)| *w != i);
+                    self.writing = Some((i, what));
+                    new
                 };
                 if l.blocks.len() <= i {
                     l.blocks.resize(i + 1, Value::Null);
@@ -136,6 +158,7 @@ impl Streaming {
                 self.started
                     .resize(self.started.len().max(i + 1), Instant::now());
                 self.started[i] = Instant::now();
+                self.refresh(l, batch, new);
             }
             Event::Text { index, text } => {
                 if let Some(b) = l.blocks.get_mut(index) {
@@ -160,6 +183,7 @@ impl Streaming {
                 // The input so far, for the UI to show a WRITE or EDIT as
                 // it comes in (taken out when it's done).
                 let last = index + 1 == l.blocks.len();
+                let mut named = None;
                 if let Some(b) = l.blocks.get_mut(index) {
                     match b.get_mut("_oak_partial") {
                         Some(Value::String(s)) => s.push_str(&d),
@@ -168,46 +192,24 @@ impl Streaming {
                     // A kit's tool through LOAD is named as it once its
                     // input says which.
                     if last && b["name"] == "LOAD" {
-                        l.status = format!("Writing {}", crate::transcript::shown(b));
+                        named = Some(format!("Writing {}", crate::transcript::shown(b)));
                     }
+                }
+                if let Some(n) = named
+                    && let Some((w, what)) = self.writing.as_mut()
+                    && *w == index
+                {
+                    *what = n;
+                    self.refresh(l, batch, false);
                 }
             }
             Event::BlockEnd { index: i } => {
-                let Some(b) = l.blocks.get_mut(i) else { return };
-                // How long the model thought, for "Thought for Ns". OAK's
-                // own keys are taken out before requests (rolling::view).
-                if oak::is_reasoning(b)
-                    && let Some(t) = self.started.get(i)
-                {
-                    b["_oak_ms"] = json!(t.elapsed().as_millis() as u64);
-                    if self.rewrite_thinking {
-                        self.rewrites
-                            .extend(crate::rewrites::mark_thinking(b, true));
-                    }
+                if self.writing.as_ref().is_some_and(|(w, _)| *w == i) {
+                    self.writing = None;
                 }
-                if oak::is_call(b) {
-                    // A call its provider already ran (Quick asks Oak to run
-                    // its tools as it goes) comes with its result: that goes
-                    // in the transcript, and the call isn't run again.
-                    let ran = b.as_object_mut().and_then(|o| o.remove("_oak_result"));
-                    match ran {
-                        Some(result) => {
-                            // `l` is locked already: the result is held with
-                            // the reply's early results, which go in the
-                            // transcript after it (delivering it here would
-                            // lock `live` again, and hang).
-                            let call = b.clone();
-                            if let Some(held) = l.early.as_mut() {
-                                held.push(result.clone());
-                            }
-                            batch.provided(call, result);
-                        }
-                        None => {
-                            finish_call(b);
-                            batch.add(b.clone());
-                        }
-                    }
-                }
+                self.running.retain(|&r| r != i);
+                self.end_block(l, batch, i);
+                self.refresh(l, batch, false);
             }
             Event::Start { id, .. } => {
                 if let Some(t) = self.thread.as_mut().filter(|_| !id.is_empty()) {
@@ -231,6 +233,91 @@ impl Streaming {
                 };
             }
             _ => {}
+        }
+    }
+
+    /// Block `i` ended.
+    fn end_block(&mut self, l: &mut Live, batch: &mut Batch, i: usize) {
+        let Some(b) = l.blocks.get_mut(i) else { return };
+        // How long the model thought, for "Thought for Ns". OAK's
+        // own keys are taken out before requests (rolling::view).
+        if oak::is_reasoning(b)
+            && let Some(t) = self.started.get(i)
+        {
+            b["_oak_ms"] = json!(t.elapsed().as_millis() as u64);
+            if self.rewrite_thinking {
+                self.rewrites
+                    .extend(crate::rewrites::mark_thinking(b, true));
+            }
+        }
+        if oak::is_call(b) {
+            // A call its provider already ran (Quick asks Oak to run
+            // its tools as it goes) comes with its result: that goes
+            // in the transcript, and the call isn't run again.
+            let ran = b.as_object_mut().and_then(|o| o.remove("_oak_result"));
+            match ran {
+                Some(result) => {
+                    // `l` is locked already: the result is held with
+                    // the reply's early results, which go in the
+                    // transcript after it (delivering it here would
+                    // lock `live` again, and hang).
+                    let call = b.clone();
+                    if let Some(held) = l.early.as_mut() {
+                        held.push(result.clone());
+                    }
+                    batch.provided(call, result);
+                }
+                None => {
+                    finish_call(b);
+                    batch.add(b.clone());
+                }
+            }
+        }
+    }
+
+    /// Brings the status line up to what the reply is doing: the model
+    /// writing a block ("Thinking", "Writing EDIT"), else the calls running
+    /// (the provider's, and those that started while the reply streams
+    /// in), else, once those are done, waiting for the model. `force`: a
+    /// block began, so it is said even if something else set the status
+    /// line since.
+    fn refresh(&mut self, l: &mut Live, batch: &mut Batch, force: bool) {
+        self.seen = batch.generation();
+        let status = match &self.writing {
+            Some((_, what)) => what.clone(),
+            None => {
+                let named = |quiet: bool| -> Vec<String> {
+                    self.running
+                        .iter()
+                        .filter_map(|&i| l.blocks.get(i))
+                        .filter(|b| b.get(crate::quick::QUIET_KEY).is_some() == quiet)
+                        .map(crate::transcript::shown)
+                        .collect()
+                };
+                // A snippet's calls are named, not the snippet (it shows
+                // only when it has none running).
+                let mut names = named(false);
+                names.extend(batch.running_names());
+                if names.is_empty() {
+                    names = named(true);
+                }
+                if !names.is_empty() {
+                    format!("Running {}", names.join(", "))
+                } else if batch.shown().starts_with("Running ") {
+                    "Waiting for the model".into()
+                } else {
+                    return;
+                }
+            }
+        };
+        batch.show(l, status, force);
+    }
+
+    /// Calls that started or ended since the status line was last brought
+    /// up to date show on it.
+    fn calls_changed(&mut self, w: &Worker, batch: &mut Batch) {
+        if batch.generation() != self.seen {
+            w.set(|l| self.refresh(l, batch, false));
         }
     }
 }
@@ -659,10 +746,11 @@ impl Worker {
         let steer = self.steers_to();
         self.set(|l| {
             l.blocks.clear();
-            l.status = "Waiting for the model".into();
+            batch.show(l, "Waiting for the model".into(), true);
         });
         let mut s = Streaming {
             thread,
+            provider_runs: quick.is_some(),
             // Rewrite thinking (Unslop): sections go to be rewritten as they
             // come in, the rest when their block ends.
             rewrite_thinking: crate::rewrites::applies(&self.conv.lock().unwrap())
@@ -719,6 +807,7 @@ impl Worker {
             }
             // Tool calls that streamed in start as soon as they may.
             batch.pump(false, oak::stop::TOOL_CALLS);
+            s.calls_changed(self, batch);
             let ev = match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(Sse::Event(ev)) => ev,
                 Ok(Sse::Done) => break,
@@ -1012,5 +1101,84 @@ impl Worker {
                 .clone()
                 .unwrap_or_default())
         }
+    }
+}
+
+#[cfg(test)]
+mod status_line {
+    use super::super::tests::idle_worker;
+    use super::*;
+
+    fn feed(w: &Worker, s: &mut Streaming, b: &mut Batch, ev: Event) {
+        let mut l = w.live.lock().unwrap();
+        s.apply(&mut l, b, ev);
+    }
+
+    fn status(w: &Worker) -> String {
+        w.live.lock().unwrap().status.clone()
+    }
+
+    /// The status line says what the reply is doing: the model writing a
+    /// block, a call that started while the reply streams in running (not
+    /// "Writing" it), and the model again once it is done; a provider's
+    /// own calls (Quick's) are running from when they are made.
+    #[test]
+    fn the_status_line_follows_the_reply_and_its_calls() {
+        let dir = std::env::temp_dir().join(format!("oak-status-line-{}", api::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, s) = idle_worker(
+            "status-line",
+            Conversation {
+                folder: dir.clone(),
+                ..Default::default()
+            },
+        );
+        s.conv
+            .lock()
+            .unwrap()
+            .messages
+            .push(json!({"role": "user", "content": [oak::text("go")]}));
+        let exec = json!({"type": "tool_call", "id": "c1", "name": "EXECUTE", "input": {}});
+        let running = format!("Running {}", crate::transcript::shown(&exec));
+        std::thread::scope(|scope| {
+            let mut b = Batch::new(&w, scope);
+            let mut st = Streaming::default();
+            let reasoning = json!({"type": "reasoning", "text": ""});
+            feed(&w, &mut st, &mut b, Event::Block { index: 0, block: reasoning });
+            assert_eq!(status(&w), "Thinking");
+            feed(&w, &mut st, &mut b, Event::BlockEnd { index: 0 });
+            feed(&w, &mut st, &mut b, Event::Block { index: 1, block: exec.clone() });
+            assert_eq!(status(&w), format!("Writing {}", crate::transcript::shown(&exec)));
+            let input = r#"{"command": "sleep 1", "summary": "Wait", "timeout": 20}"#;
+            feed(&w, &mut st, &mut b, Event::Input { index: 1, json: input.into() });
+            feed(&w, &mut st, &mut b, Event::BlockEnd { index: 1 });
+            b.pump(false, oak::stop::TOOL_CALLS);
+            st.calls_changed(&w, &mut b);
+            assert_eq!(status(&w), running, "it runs while the reply streams in");
+            // The model writes on meanwhile, then only the call is left.
+            feed(&w, &mut st, &mut b, Event::Block { index: 2, block: oak::text("") });
+            assert_eq!(status(&w), "Writing");
+            feed(&w, &mut st, &mut b, Event::BlockEnd { index: 2 });
+            assert_eq!(status(&w), running);
+            let until = Instant::now() + Duration::from_secs(30);
+            while status(&w) == running && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+                b.pump(false, oak::stop::TOOL_CALLS);
+                st.calls_changed(&w, &mut b);
+            }
+            assert_eq!(status(&w), "Waiting for the model", "the call is done");
+
+            // Quick's calls come whole, and it runs them.
+            st.provider_runs = true;
+            let search = json!({"type": "tool_call", "id": "q1", "name": "file_rag_search", "input": {"query": "x"}});
+            feed(&w, &mut st, &mut b, Event::Block { index: 3, block: search.clone() });
+            assert_eq!(status(&w), format!("Running {}", crate::transcript::shown(&search)));
+            let mut done = search.clone();
+            done["_oak_result"] = oak::tool_result(&json!("q1"), json!("found"), false);
+            feed(&w, &mut st, &mut b, Event::Block { index: 3, block: done });
+            feed(&w, &mut st, &mut b, Event::BlockEnd { index: 3 });
+            assert_eq!(status(&w), "Waiting for the model");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

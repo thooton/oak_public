@@ -270,7 +270,7 @@ fn unit_conv(name: &str, conv: Conversation) -> Conversation {
 
 /// A test's session, deleted (unregistered, its tasks killed and its
 /// conversation removed) when dropped.
-struct Deleting(Session);
+pub(super) struct Deleting(Session);
 
 impl std::ops::Deref for Deleting {
     type Target = Session;
@@ -291,7 +291,7 @@ impl Drop for Deleting {
 /// A worker that isn't running on `conv` made a `unit-test-{name}` one,
 /// for calling its tools directly, and a session sharing its state,
 /// registered so other sessions reach it.
-fn idle_worker(name: &str, conv: Conversation) -> (Worker, Deleting) {
+pub(super) fn idle_worker(name: &str, conv: Conversation) -> (Worker, Deleting) {
     let conv = unit_conv(name, conv);
     let tasks = Tasks::open(&conv.id);
     let (s, w) = Session::with_worker(conv, eframe::egui::Context::default(), false, tasks);

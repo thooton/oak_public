@@ -1481,6 +1481,10 @@ pub(crate) struct Batch<'scope, 'env> {
     done_rx: Receiver<usize>,
     /// A call came in or ended since the last `pump`.
     dirty: bool,
+    /// Counts the calls coming in, starting and ending (`generation`).
+    changes: u64,
+    /// The status line the reply and its calls last set (`show`).
+    shown: String,
 }
 
 impl<'scope, 'env> Batch<'scope, 'env> {
@@ -1498,6 +1502,40 @@ impl<'scope, 'env> Batch<'scope, 'env> {
             done_tx,
             done_rx,
             dirty: false,
+            changes: 0,
+            shown: String::new(),
+        }
+    }
+
+    /// Changes whenever a call comes in, starts or ends.
+    pub(crate) fn generation(&self) -> u64 {
+        self.changes
+    }
+
+    /// The calls running now (started, with no result yet), as the status
+    /// line names them. Not ASK: it runs on its own, and says it waits for
+    /// the user's answer.
+    pub(crate) fn running_names(&self) -> Vec<String> {
+        (0..self.calls.len())
+            .filter(|&i| self.started[i] && self.results[i].is_none())
+            .filter(|&i| self.calls[i]["name"] != "ASK")
+            .map(|i| crate::transcript::shown(&self.calls[i]))
+            .collect()
+    }
+
+    /// What the status line was last set to here.
+    pub(crate) fn shown(&self) -> &str {
+        &self.shown
+    }
+
+    /// Puts `status` on the status line when it says something new (what
+    /// the reply or its calls are doing changed), or when `force`; a status
+    /// something else set meanwhile (a call waiting for permission) stays
+    /// until then.
+    pub(crate) fn show(&mut self, l: &mut Live, status: String, force: bool) {
+        if force || status != self.shown {
+            l.status = status.clone();
+            self.shown = status;
         }
     }
 
@@ -1505,6 +1543,7 @@ impl<'scope, 'env> Batch<'scope, 'env> {
     pub(crate) fn add(&mut self, call: Value) {
         self.calls.push(call);
         self.dirty = true;
+        self.changes += 1;
         self.started.push(false);
         self.running.push(None);
         self.results.push(None);
@@ -1516,6 +1555,7 @@ impl<'scope, 'env> Batch<'scope, 'env> {
     pub(crate) fn provided(&mut self, call: Value, result: Value) {
         self.calls.push(call);
         self.dirty = true;
+        self.changes += 1;
         self.started.push(true);
         self.running.push(None);
         // The caller holds `live` locked (a reply's events are applied
@@ -1580,7 +1620,6 @@ impl<'scope, 'env> Batch<'scope, 'env> {
         }
         let folder = self.w.conv.lock().unwrap().folder.clone();
         let stopped = self.stopped.load(Ordering::SeqCst);
-        let mut starting = vec![];
         for (i, deps) in waits_for(&self.calls, &folder).into_iter().enumerate() {
             if self.started[i] {
                 continue;
@@ -1598,16 +1637,17 @@ impl<'scope, 'env> Batch<'scope, 'env> {
                 && deps.iter().all(|&j| self.results[j].is_some())
             {
                 self.start(i, stop);
-                starting.push(i);
             }
         }
-        if last && !starting.is_empty() {
-            let names: Vec<String> = starting
-                .iter()
-                .map(|&i| crate::transcript::shown(&self.calls[i]))
-                .collect();
-            self.w
-                .set(|l| l.status = format!("Running {}", names.join(", ")));
+        // The reply is in: the status line names the calls still running
+        // (those that started while it streamed in too). While it streams,
+        // the reply sets it (`Streaming::refresh`).
+        if last {
+            let names = self.running_names();
+            if !names.is_empty() {
+                let w = self.w;
+                w.set(|l| self.show(l, format!("Running {}", names.join(", ")), false));
+            }
         }
     }
 
@@ -1620,6 +1660,7 @@ impl<'scope, 'env> Batch<'scope, 'env> {
             self.done_tx.clone(),
         );
         self.started[i] = true;
+        self.changes += 1;
         self.running[i] = Some(self.scope.spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 w.run_traced(&call, &stop, &stopped)
@@ -1641,6 +1682,7 @@ impl<'scope, 'env> Batch<'scope, 'env> {
 
     fn reap(&mut self, i: usize) {
         self.dirty = true;
+        self.changes += 1;
         if let Some(h) = self.running[i].take() {
             self.results[i] = h.join().ok();
         }
