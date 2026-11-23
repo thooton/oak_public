@@ -1,35 +1,45 @@
 //! The Liquid Glass theme (`ID`): Antigravity's colors (the dark Onyx theme
-//! of its Hub, as its agent_ui_toolkit sets it), in a material after iOS's
-//! Liquid Glass, ported from liquid_glass_widgets' lightweight shader (MIT,
-//! pub.dev/packages/liquid_glass_widgets): frosted bodies that show what is
-//! behind them, more saturated (its vibrancy), darker toward the bottom; a
-//! hairline rim and inner bands of light along a light axis, brightest at
-//! its two ends (its `rimLight`, a cos³ lobe at each); a sheen at the top.
+//! of its Hub, as its agent_ui_toolkit sets it) with the iOS 27 dark Liquid
+//! Glass material of liquid_glass_widgets (MIT, pub.dev/packages/
+//! liquid_glass_widgets), ported from its premium shader (`glass/`).
+//!
+//! As in the package, glass is for what floats over the content, and the
+//! content's own cards stay solid: the theme's panels are glass in areas
+//! above the page (the session box and the boxes in a chat's corner, menus,
+//! popups, tooltips, dialogs and toasts), in the message box's row
+//! (`chrome`) and over Home's wallpaper (`wallpaper`); on the page they are
+//! the flat Onyx cards they are in its colors. A selected item (egui's
+//! selection fill, `SELECT`) is the package's clear indicator lens, and a
+//! switch held down lifts a lens over its knob.
 //!
 //! Oak draws as it always does: a theme is colors, its shapes square. At
 //! the end of each frame (`Frame`'s drop) `finish` goes through what was
-//! painted and turns the theme's surfaces into glass, each rectangle where
-//! and as large as it was, its corners as they were: the page (`bg`)
-//! becomes the backdrop (`backdrop`: soft glows of Antigravity's blues and
-//! a violet over its near-black), and panels (`panel`, `panel2`, the tool
-//! rows' two colors) glass over it. As the backdrop is Oak's own, a
-//! surface's body is the backdrop under it, frosted and lit, drawn opaque:
-//! it hides what is under it as the flat panel did, with no pass on the GPU
-//! to read back the screen. Over Home's wallpaper the body is a blurred
-//! copy of the picture instead (`wallpaper`, made once on a thread).
-//! Shapes are matched by color (with the alpha a fade or a disabled widget
-//! gives them, which the glass takes on), so plugins' pages turn to glass
-//! too; colors the theme doesn't have stay as they are.
+//! painted and puts a glass callback (`gpu`) where each glass rectangle
+//! was, the same size, its corners as they were, over the flat panel (what
+//! shows if the GPU part can't draw). Its stroke in the line's color is the
+//! glass's rim now; the theme's colors on top of glass (a hovered row, a
+//! button in a menu) turn into the package's fills inside glass, white at
+//! a few percent. Shapes are matched by color, so plugins' pages turn to
+//! glass the same way.
+//!
+//! Each glass refracts and frosts what was painted under it this frame:
+//! glass that sees the same backdrop is a group (`groups`), and each
+//! group's backdrop (the shapes before its first glass that reach its
+//! region) is tessellated here for the GPU to draw before egui's pass.
+
+mod gpu;
 
 use crate::theme::Theme;
-use eframe::egui::epaint::{Mesh, RectShape, TextureId, Vertex, WHITE_UV};
+use eframe::egui::emath::TSTransform;
+use eframe::egui::epaint::{ClippedPrimitive, ClippedShape, Primitive};
 use eframe::egui::layers::ShapeIdx;
-use eframe::egui::{self, Color32, CornerRadius, LayerId, Order, Pos2, Rect, Shape, Vec2, pos2, vec2};
-use oak_sdk::theme::Palette;
+use eframe::egui::{self, Color32, CornerRadius, LayerId, Order, Pos2, Rect, Shape, Stroke, TextureId};
+use eframe::{egui_wgpu, wgpu};
+use oak_sdk::theme::{Palette, hex};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::f32::consts::{FRAC_PI_2, PI};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering as Atomic};
+use std::sync::{Arc, OnceLock};
 
 /// The theme's id in Settings, and its name.
 pub(crate) const ID: &str = "glass";
@@ -39,6 +49,10 @@ const BG: u32 = 0x070708;
 const PANEL: u32 = 0x131317;
 const PANEL2: u32 = 0x1f1f24;
 const ACCENT: u32 = 0x2f71e3;
+
+/// What egui fills a selected item with in this theme: a mark the frame's
+/// end turns into the indicator lens (white at 10% where it can't).
+pub(crate) const SELECT: Color32 = Color32::from_rgba_premultiplied(26, 26, 26, 26);
 
 /// Antigravity's dark Onyx: --background, --card, --onyx-selected,
 /// --foreground, --secondary-foreground, --muted-foreground,
@@ -60,7 +74,7 @@ pub(crate) fn theme() -> Theme {
 
 /// `t` is this theme (a scope's look may have changed its other colors).
 pub(crate) fn is(t: &Theme) -> bool {
-    t.bg == oak_sdk::theme::hex(BG) && t.accent == oak_sdk::theme::hex(ACCENT)
+    t.bg == hex(BG) && t.accent == hex(ACCENT)
 }
 
 // ------------------------------------------------------------- the frame
@@ -68,27 +82,29 @@ pub(crate) fn is(t: &Theme) -> bool {
 thread_local! {
     /// This frame's theme, while it is glass.
     static KIT: RefCell<Option<Kit>> = const { RefCell::new(None) };
-    /// Home's wallpaper, when it was painted this frame.
-    static WALL: RefCell<Option<Wall>> = const { RefCell::new(None) };
 }
 
-/// A frame drawn in `t`: when `t` is glass, what was painted turns to glass
+/// Frames laid out, for the GPU part to tell them apart.
+static FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// A frame drawn in `t`: when `t` is glass, the frame's glass is laid out
 /// as it ends (dropped, however the frame returns).
 pub(crate) struct Frame {
     ctx: egui::Context,
 }
 
 impl Frame {
-    pub(crate) fn begin(ctx: &egui::Context, t: &Theme) -> Frame {
-        KIT.set(is(t).then(|| Kit::of(t, ctx.content_rect())));
-        WALL.set(None);
+    pub(crate) fn begin(ctx: &egui::Context, t: &Theme, render: Option<&egui_wgpu::RenderState>) -> Frame {
+        KIT.set(is(t).then(|| Kit::of(t, render.cloned())));
         Frame { ctx: ctx.clone() }
     }
 }
 
 impl Drop for Frame {
     fn drop(&mut self) {
-        finish(&self.ctx);
+        if let Some(kit) = KIT.take() {
+            kit.finish(&self.ctx);
+        }
     }
 }
 
@@ -97,158 +113,197 @@ pub(crate) fn active() -> bool {
     KIT.with_borrow(|k| k.is_some())
 }
 
-/// Home's wallpaper was painted (shape `idx` on `p`'s layer), over `rect`
-/// with `uv`: glass over it shows its blurred copy, made from `source` (on
-/// a thread, the first time `key` is seen).
-pub(crate) fn wallpaper(
-    p: &egui::Painter,
-    idx: ShapeIdx,
-    rect: Rect,
-    uv: Rect,
-    key: &str,
-    source: impl FnOnce() -> Option<image::RgbaImage> + Send + 'static,
-) {
-    if !active() {
-        return;
-    }
-    if let Some(tex) = frosted(p.ctx(), key, source) {
-        WALL.set(Some(Wall { layer: p.layer_id(), idx: idx.0, rect, uv, tex }));
-    }
-}
-
-struct Wall {
-    layer: LayerId,
-    idx: usize,
-    rect: Rect,
-    uv: Rect,
-    tex: TextureId,
-}
-
-/// The blurred copies made, by key: None while one is made (or if it
-/// couldn't be).
-static FROSTED: Mutex<Option<HashMap<String, Option<egui::TextureHandle>>>> = Mutex::new(None);
-
-fn frosted(ctx: &egui::Context, key: &str, source: impl FnOnce() -> Option<image::RgbaImage> + Send + 'static) -> Option<TextureId> {
-    let mut all = FROSTED.lock().unwrap();
-    let all = all.get_or_insert_default();
-    if let Some(t) = all.get(key) {
-        return t.as_ref().map(|t| t.id());
-    }
-    all.insert(key.to_string(), None);
-    let (ctx, key) = (ctx.clone(), key.to_string());
-    let _ = std::thread::Builder::new().name("glass-wallpaper".into()).spawn(move || {
-        let Some(img) = source() else { return };
-        let tex = ctx.load_texture(format!("glass-{key}"), frost_image(&img), egui::TextureOptions::LINEAR);
-        if let Some(all) = FROSTED.lock().unwrap().as_mut() {
-            all.insert(key, Some(tex));
+/// Home's wallpaper was painted (shape `idx` on `p`'s layer, over `rect`):
+/// the theme's surfaces painted over it are glass.
+pub(crate) fn wallpaper(p: &egui::Painter, idx: ShapeIdx, rect: Rect) {
+    KIT.with_borrow_mut(|k| {
+        if let Some(k) = k {
+            k.wallpaper = Some((p.layer_id(), idx.0, rect));
         }
-        ctx.request_repaint();
     });
-    None
 }
 
-/// The picture as glass shows it behind: small (the texture's smooth
-/// scaling does the rest of the blur), blurred, more saturated.
-fn frost_image(img: &image::RgbaImage) -> egui::ColorImage {
-    let w = 96u32.min(img.width().max(1));
-    let h = ((img.height() as f32 * w as f32 / img.width().max(1) as f32).round() as u32).max(1);
-    let small = image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle);
-    let mut b = image::imageops::fast_blur(&small, 2.5);
-    for p in b.pixels_mut() {
-        let [r, g, bl] = saturate([p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0], SATURATION);
-        p[0] = (r * 255.0).round() as u8;
-        p[1] = (g * 255.0).round() as u8;
-        p[2] = (bl * 255.0).round() as u8;
-        p[3] = 255;
-    }
-    egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], b.as_raw())
+/// `rect` is chrome (the message box's row): the theme's surfaces in it are
+/// glass, on the page too.
+pub(crate) fn chrome(rect: Rect) {
+    KIT.with_borrow_mut(|k| {
+        if let Some(k) = k {
+            k.chrome.push(rect);
+        }
+    });
 }
 
-/// Turns what was painted this frame to glass (when it is drawn in glass).
-fn finish(ctx: &egui::Context) {
-    let Some(kit) = KIT.take() else { return };
-    let wall = WALL.take();
-    let mut layers: Vec<LayerId> = ctx.memory(|m| m.layer_ids().collect());
-    if !layers.contains(&LayerId::background()) {
-        layers.insert(0, LayerId::background());
+// ----------------------------------------------------------- materials
+
+/// The package's two materials.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Material {
+    /// `LiquidGlassSettings.ios27Dark`: a frosted platter.
+    Platter,
+    /// `ios27Indicator`: the clear lens of a selected item.
+    Lens,
+}
+
+impl Material {
+    /// How far its backdrop reaches past it, in points: the frost's blur
+    /// (3 sigma) and the lens's reach.
+    fn pad(self) -> f32 {
+        match self {
+            Material::Platter => 3.0 * FROST + 8.0,
+            Material::Lens => 16.0,
+        }
     }
-    ctx.graphics_mut(|g| {
-        for layer in layers {
-            let Some(list) = g.get_mut(layer) else { continue };
-            for i in 0..list.next_idx().0 {
-                // Over the wallpaper: after it in its layer, or in an area
-                // above the page.
-                let over = wall.as_ref().filter(|w| if w.layer == layer { i > w.idx } else { layer.order != Order::Background });
-                list.mutate_shape(ShapeIdx(i), |s| kit.glass(&mut s.shape, over));
+}
+
+/// ios27Dark's frost: sigma in points, and how much white outweighs black.
+const FROST: f32 = 14.0;
+const FROST_WEIGHT: f32 = 0.5;
+
+/// The shader's uniforms (`glass.wgsl`'s `Inst`), as floats.
+pub(crate) const INST_FLOATS: usize = 44;
+
+/// A glass rectangle found this frame.
+#[derive(Clone, Debug)]
+struct Spec {
+    /// Its shape's place among all of the frame's (`Flat`).
+    flat: usize,
+    rect: Rect,
+    radius: CornerRadius,
+    material: Material,
+    /// Its color's alpha (a fade's).
+    alpha: f32,
+    /// Pressed: where (points).
+    touch: Option<Pos2>,
+}
+
+/// The uniforms of glass `s`, in a group whose backdrop texture starts at
+/// `origin` and is `tex` large (pixels).
+fn uniforms(s: &Spec, ppp: f32, origin: [u32; 2], tex: [u32; 2], screen_h: f32) -> [f32; INST_FLOATS] {
+    let ds = ppp / 3.0;
+    let r = s.rect;
+    let cr = s.radius;
+    let touch = s.touch.map_or([0.0; 3], |p| [p.x * ppp, p.y * ppp, 1.0]);
+    let common = [
+        r.left() * ppp,
+        r.top() * ppp,
+        r.right() * ppp,
+        r.bottom() * ppp,
+        origin[0] as f32,
+        origin[1] as f32,
+        tex[0] as f32,
+        tex[1] as f32,
+        cr.nw as f32 * ppp,
+        cr.ne as f32 * ppp,
+        cr.se as f32 * ppp,
+        cr.sw as f32 * ppp,
+    ];
+    // glass, optics, light, rim, frost, misc; then touch and extra.
+    let material: [f32; 24] = match s.material {
+        // The light's angle is -pi/2, lit from the bottom: (cos, -sin).
+        Material::Platter => [
+            1.0, 1.0, 1.0, 31.0 / 255.0, // glassColor 0x1FFFFFFF
+            1.24, 32.0 * ds, 1.4, 1.0, // refractiveIndex, thickness, saturation, paraxial
+            0.0, 1.0, ds, s.alpha, // lightDirection, dprScale, opacity
+            1.0, 1.15, 0.0, 0.035, // rimShade, rimLight, rimShadeEnds, edgeAbsorption
+            0.85, -0.45, 0.6 * ppp, 2.5, // frostOpacity, frostClamp, blur (ghost), blurWeight
+            0.28, 0.0, 0.0, (0.85 * ppp).max(1.5), // bodyShade, -, -, smoothing
+        ],
+        // Lit from the top: pi/2.
+        Material::Lens => [
+            1.0, 1.0, 1.0, 0.0, //
+            1.17, 28.0 * ds, 1.0, 1.0, //
+            0.0, -1.0, ds, s.alpha, //
+            1.0, 1.0, 0.56, 0.0, //
+            0.0, 0.0, 0.0, 1.0, //
+            0.0, 1.0, 0.0, (1.25 * ppp).max(1.5),
+        ],
+    };
+    let mut out = [0.0; INST_FLOATS];
+    out[..12].copy_from_slice(&common);
+    out[12..36].copy_from_slice(&material);
+    out[36..40].copy_from_slice(&[touch[0], touch[1], touch[2], 0.0]);
+    out[40..44].copy_from_slice(&[screen_h, 0.0, 0.0, 0.0]);
+    out
+}
+
+/// A frame's glass, for the GPU part.
+pub(crate) struct Job {
+    id: u64,
+    ppp: f32,
+    screen: [u32; 2],
+    target: wgpu::TextureFormat,
+    groups: Vec<GroupJob>,
+    insts: Vec<[f32; INST_FLOATS]>,
+    inst_group: Vec<usize>,
+    /// egui's textures the backdrops use.
+    textures: Vec<(TextureId, wgpu::Texture, egui::TextureOptions)>,
+}
+
+struct GroupJob {
+    /// What to draw into the scene before the group's glass: what was
+    /// painted since the group before's.
+    prims: Vec<ClippedPrimitive>,
+    /// The scene's part the group reads: x, y, width, height (pixels).
+    region: [u32; 4],
+    /// Its textures' size: the region's, rounded up to 64.
+    tex: [u32; 2],
+    /// The cloud's blur, in the cloud's pixels (a quarter's).
+    sigma: f32,
+    weight: f32,
+}
+
+/// A group of glass seeing the same backdrop: the shapes before `cut`.
+#[derive(Debug)]
+struct Group {
+    cut: usize,
+    specs: Vec<usize>,
+    /// Where its backdrop is read (points).
+    area: Rect,
+}
+
+/// At most this many backdrops a frame: past it glass joins the last.
+const MAX_GROUPS: usize = 8;
+
+/// The glass in `specs` (in painting order) as groups: each joins the last
+/// group unless something painted since that group's cut (`bounds`, all
+/// of the frame's shapes in order) reaches where it reads.
+fn groups(specs: &[Spec], bounds: &[Rect]) -> Vec<Group> {
+    let mut out: Vec<Group> = Vec::new();
+    for (i, s) in specs.iter().enumerate() {
+        let reach = s.rect.expand(s.material.pad());
+        let near = s.rect.expand(s.material.pad() * 0.5);
+        let join = out.last().is_some_and(|g| out.len() >= MAX_GROUPS || bounds[g.cut..s.flat].iter().all(|b| !b.intersects(near)));
+        match out.last_mut() {
+            Some(g) if join => {
+                g.specs.push(i);
+                g.area = g.area.union(reach);
             }
+            _ => out.push(Group { cut: s.flat, specs: vec![i], area: reach }),
         }
-    });
+    }
+    out
 }
 
-// ------------------------------------------------------------ the optics
-
-/// Saturation of what shows through (the package's iOS 27 dark: 1.4).
-const SATURATION: f32 = 1.4;
-/// BT.709 luma.
-fn luma(c: [f32; 3]) -> f32 {
-    c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722
-}
-
-fn saturate(c: [f32; 3], s: f32) -> [f32; 3] {
-    let l = luma(c);
-    c.map(|v| (l + (v - l) * s).clamp(0.0, 1.0))
-}
-
-fn rgbf(h: u32) -> [f32; 3] {
-    [((h >> 16) & 0xff) as f32 / 255.0, ((h >> 8) & 0xff) as f32 / 255.0, (h & 0xff) as f32 / 255.0]
-}
-
-/// The backdrop's glows: color, center (as a fraction of the window, may
-/// be outside it), reach (of the window's longer side) and strength.
-const GLOWS: [(u32, [f32; 2], f32, f32); 4] = [
-    // --primary, from the top left.
-    (0x2f71e3, [0.06, -0.10], 0.95, 0.34),
-    // The logo's lighter blue, top right.
-    (0x3a9cf0, [1.02, 0.05], 0.55, 0.14),
-    // A violet, bottom right.
-    (0x6a4fe0, [0.86, 1.12], 0.85, 0.20),
-    // Light --primary, bottom left.
-    (0x2560a3, [0.10, 1.05], 0.60, 0.12),
-];
-
-/// The light: from above, a little left (y grows down).
-fn light() -> Vec2 {
-    vec2(-0.28, -0.96).normalized()
-}
-
-/// How much light the rim catches where its outward normal is `n`: a cos³
-/// lobe at each end of the light's axis, the far one at 85%.
-fn lobe(n: Vec2) -> f32 {
-    let along = n.dot(light());
-    let (lit, opp) = (along.max(0.0), (-along).max(0.0));
-    lit * lit * lit + 0.85 * opp * opp * opp
-}
+// ---------------------------------------------------------- the colors
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
-    /// The page: the backdrop.
+    /// The page.
     Page,
-    /// Glass, frosted by `lift`, its rim `rim` strong.
-    Surface { lift: f32, rim: f32 },
-    /// The accent's fill: lit, its color kept.
-    Accent,
+    /// The tool rows' color, the panel, a hovered row, panel2: in order.
+    Surface(u8),
+    /// A selected item.
+    Select,
 }
 
 /// What the theme's colors become.
 struct Kit {
-    screen: Rect,
     bg: [u8; 3],
-    surfaces: [([u8; 3], f32, f32); 4],
-    accent: [u8; 3],
-    /// The line's color and alpha, unmultiplied.
+    surfaces: [[u8; 3]; 4],
     line: ([u8; 3], u8),
-    glows: [([f32; 3], [f32; 2], f32, f32); 4],
-    base: [f32; 3],
+    render: Option<egui_wgpu::RenderState>,
+    wallpaper: Option<(LayerId, usize, Rect)>,
+    chrome: Vec<Rect>,
 }
 
 /// A color's unmultiplied rgb and its alpha.
@@ -267,42 +322,45 @@ fn same(c: [u8; 3], a: u8, want: [u8; 3]) -> bool {
     c.iter().zip(want).all(|(x, y)| (*x as i32 - y as i32).abs() <= tol)
 }
 
-/// `c` at alpha `a`, premultiplied.
-fn color(c: [f32; 3], a: f32) -> Color32 {
-    let q = |v: f32| (v.clamp(0.0, 1.0) * a * 255.0).round() as u8;
-    Color32::from_rgba_premultiplied(q(c[0]), q(c[1]), q(c[2]), (a.clamp(0.0, 1.0) * 255.0).round() as u8)
-}
-
+/// White at `a`, the package's fill inside glass for a surface's color.
 fn white(a: f32) -> Color32 {
     Color32::from_white_alpha((a.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
+/// Where a shape is painted.
+struct Place<'a> {
+    floating: bool,
+    over_wallpaper: bool,
+    chrome: &'a [Rect],
+    /// The layer's glass so far.
+    glass: &'a [Rect],
+}
+
 impl Kit {
-    fn of(t: &Theme, screen: Rect) -> Kit {
+    fn of(t: &Theme, render: Option<egui_wgpu::RenderState>) -> Kit {
         let rgb = |c: Color32| split(c).0;
         Kit {
-            screen,
             bg: rgb(t.bg),
-            surfaces: [(rgb(t.tool_bg), 0.03, 0.0), (rgb(t.panel), 0.055, 1.0), (rgb(t.tool_hover), 0.075, 0.0), (rgb(t.panel2), 0.095, 1.0)],
-            accent: rgb(t.accent),
+            surfaces: [rgb(t.tool_bg), rgb(t.panel), rgb(t.tool_hover), rgb(t.panel2)],
             line: split(t.line),
-            glows: GLOWS.map(|(c, at, r, k)| (rgbf(c), at, r, k)),
-            base: rgbf(BG),
+            render,
+            wallpaper: None,
+            chrome: Vec::new(),
         }
     }
 
     /// What `c` is, and its alpha (0 to 1).
     fn kind(&self, c: Color32) -> Option<(Kind, f32)> {
+        if c == SELECT {
+            return Some((Kind::Select, 1.0));
+        }
         let (rgb, a) = split(c);
         let af = a as f32 / 255.0;
         if same(rgb, a, self.bg) {
             return Some((Kind::Page, af));
         }
-        if let Some((_, lift, rim)) = self.surfaces.iter().find(|(s, ..)| same(rgb, a, *s)) {
-            return Some((Kind::Surface { lift: *lift, rim: *rim }, af));
-        }
-        // (Faded, the accent is a selection's or a hover's tint: it stays.)
-        (a > 230 && same(rgb, a, self.accent)).then_some((Kind::Accent, af))
+        let i = self.surfaces.iter().position(|s| same(rgb, a, *s))?;
+        Some((Kind::Surface(i as u8), af))
     }
 
     fn is_line(&self, c: Color32) -> bool {
@@ -310,399 +368,382 @@ impl Kit {
         rgb == self.line.0 && (a as i32 - self.line.1 as i32).abs() <= 2
     }
 
-    /// The backdrop at `p`.
-    fn backdrop(&self, p: Pos2) -> [f32; 3] {
-        let s = self.screen;
-        let long = s.width().max(s.height()).max(1.0);
-        let mut c = self.base;
-        for (g, at, reach, k) in &self.glows {
-            let center = pos2(s.left() + at[0] * s.width(), s.top() + at[1] * s.height());
-            let d = (p - center).length() / (reach * long);
-            let f = (1.0 - d * d).max(0.0);
-            let f = f * f * k;
-            for i in 0..3 {
-                c[i] += g[i] * f;
-            }
-        }
-        c.map(|v| v.min(1.0))
-    }
-
-    /// Glass over `b`, `v` of the way down it: more saturated, darkened
-    /// (more toward the bottom), frosted toward a cool white by `lift`,
-    /// with a sheen at the top.
-    fn body(&self, b: [f32; 3], lift: f32, v: f32) -> [f32; 3] {
-        let dark = 0.06 + 0.04 * v;
-        let lift = lift + 0.03 * (1.0 - v) * (1.0 - v);
-        let frost = [0.90, 0.93, 1.0];
-        let s = saturate(b, SATURATION);
-        [0, 1, 2].map(|i| {
-            let c = s[i] * (1.0 - dark);
-            c + (frost[i] - c) * lift
+    /// The fill inside glass for a theme color: white at a few percent for
+    /// a surface, a dark well for the page; None for other colors.
+    fn inside(&self, c: Color32) -> Option<Color32> {
+        Some(match self.kind(c)? {
+            (Kind::Page, a) => Color32::from_black_alpha((0.35 * a * 255.0) as u8),
+            (Kind::Surface(i), a) => white([0.035, 0.055, 0.075, 0.095][i as usize] * a),
+            (Kind::Select, _) => return None,
         })
     }
 
-    /// Turns `shape` to glass when it is drawn in the theme's colors.
-    fn glass(&self, shape: &mut Shape, wall: Option<&Wall>) {
+    /// The theme's colors in `shape`, painted on glass, as fills inside it.
+    fn recolor_inside(&self, shape: &mut Shape) {
         match shape {
-            Shape::Vec(v) => v.iter_mut().for_each(|s| self.glass(s, wall)),
-            Shape::Rect(r) if r.blur_width <= 0.0 && r.brush.is_none() => {
-                if let Some(s) = self.rect(r, wall) {
-                    *shape = s;
+            Shape::Vec(v) => v.iter_mut().for_each(|s| self.recolor_inside(s)),
+            Shape::Rect(r) => {
+                if let Some(c) = self.inside(r.fill) {
+                    r.fill = c;
                 }
             }
-            Shape::Mesh(m) if m.texture_id == TextureId::default() => {
-                if !m.vertices.iter().any(|v| self.kind(v.color).is_some_and(|(k, _)| k != Kind::Accent)) {
-                    return;
-                }
-                // Over the wallpaper, a fade is of the glass over it.
-                if let Some(w) = wall.filter(|w| w.rect.contains_rect(m.calc_bounds().shrink(0.5))) {
-                    *shape = self.wall_fade(m, w);
-                    return;
-                }
-                let m = Arc::make_mut(m);
-                for v in &mut m.vertices {
-                    v.color = self.recolor(v.color, v.pos);
-                }
-            }
-            Shape::Circle(c) => {
-                if let Some((Kind::Page, a)) = self.kind(c.fill) {
-                    c.fill = color(self.backdrop(c.center), a);
+            Shape::Mesh(m) if m.texture_id == TextureId::default() && m.vertices.iter().any(|v| self.inside(v.color).is_some()) => {
+                for v in &mut Arc::make_mut(m).vertices {
+                    if let Some(c) = self.inside(v.color) {
+                        v.color = c;
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    /// A theme color at `p` in a mesh (a fade), as glass has it there.
-    fn recolor(&self, c: Color32, p: Pos2) -> Color32 {
-        match self.kind(c) {
-            Some((Kind::Page, a)) => color(self.backdrop(p), a),
-            Some((Kind::Surface { lift, .. }, a)) => color(self.body(self.backdrop(p), lift, 0.5), a),
-            _ => c,
-        }
-    }
-
-    /// `r` as glass: its body, its strokes, its rim, over the same
-    /// rectangle with the same corners; None when it stays as it is.
-    fn rect(&self, r: &RectShape, wall: Option<&Wall>) -> Option<Shape> {
-        let rect = r.rect;
-        if !rect.is_positive() {
-            return None;
-        }
-        let line = r.stroke.width > 0.0 && self.is_line(r.stroke.color);
-        let small = rect.width() < 4.0 || rect.height() < 4.0;
-        let kind = self.kind(r.fill);
-        // An outline in the line's color alone: a rim of glass.
-        if kind.is_none() && line && r.fill.a() == 0 && !small && rect.width().min(rect.height()) >= 12.0 {
-            let mut m = Mesh::default();
-            rim(&mut m, rect, r.corner_radius, 0.8, r.stroke.color.a() as f32 / self.line.1.max(1) as f32);
-            return Some(Shape::mesh(m));
-        }
-        let (kind, a) = kind?;
-        if small {
-            // A sliver (a line drawn as a rectangle): the color under it.
-            return match kind {
-                Kind::Page => {
-                    let mut r = r.clone();
-                    r.fill = color(self.backdrop(rect.center()), a);
-                    Some(Shape::Rect(r))
+    /// `shape`, painted at `place`: turned to glass (a callback for glass
+    /// number `inst` of the frame's `job`) when it is a glass rectangle,
+    /// and what that glass is; recolored when it is on glass.
+    fn classify(&self, shape: &mut Shape, place: &Place, job: &Arc<OnceLock<Job>>, inst: usize) -> Option<(Rect, CornerRadius, Material, f32)> {
+        let bounds = shape.visual_bounding_rect();
+        let on_glass = place.glass.iter().any(|g| g.expand(0.5).contains_rect(bounds));
+        if let Shape::Rect(r) = shape
+            && r.blur_width <= 0.0
+            && r.brush.is_none()
+            && let Some((kind, alpha)) = self.kind(r.fill)
+        {
+            let rect = r.rect;
+            let line = r.stroke.width > 0.0 && self.is_line(r.stroke.color);
+            let big = rect.width() >= 10.0 && rect.height() >= 10.0;
+            let in_chrome = place.chrome.iter().any(|c| c.expand(0.5).contains_rect(rect));
+            let glass = big
+                && match kind {
+                    Kind::Select => true,
+                    _ if on_glass => false,
+                    Kind::Page => place.floating || ((place.over_wallpaper || in_chrome) && line),
+                    Kind::Surface(_) => place.floating || place.over_wallpaper || in_chrome,
+                };
+            if glass {
+                let material = if kind == Kind::Select { Material::Lens } else { Material::Platter };
+                let mut flat = r.clone();
+                flat.stroke = Stroke::NONE;
+                let callback = egui_wgpu::Callback::new_paint_callback(rect, gpu::GlassCallback { job: job.clone(), inst });
+                let mut parts = vec![Shape::Rect(flat), Shape::Callback(callback)];
+                // A stroke other than the line's (a focus ring) stays.
+                if r.stroke.width > 0.0 && !line {
+                    let mut ring = r.clone();
+                    ring.fill = Color32::TRANSPARENT;
+                    parts.push(Shape::Rect(ring));
                 }
-                _ => None,
-            };
-        }
-        let wall = wall.filter(|w| w.rect.contains_rect(rect.shrink(0.5)));
-        let mut out = Vec::with_capacity(4);
-        let (lift, rim_k) = match kind {
-            Kind::Accent => {
-                let mut fill = r.clone();
-                fill.stroke = egui::Stroke::NONE;
-                out.push(Shape::Rect(fill));
-                out.push(Shape::mesh(sheen(rect, r.corner_radius, a)));
-                (None, 0.9)
+                let out = (rect, r.corner_radius, material, alpha);
+                *shape = Shape::Vec(parts);
+                return Some(out);
             }
-            // The page with a border is a box of the page's glass; over the
-            // wallpaper, glass with no frost.
-            Kind::Page if line || wall.is_some() => (Some(0.0), if line { 1.0 } else { 0.0 }),
-            Kind::Page => (None, 0.0),
-            Kind::Surface { lift, rim } => (Some(lift), if line { rim.max(0.8) } else { rim }),
+        }
+        if on_glass {
+            self.recolor_inside(shape);
+        }
+        None
+    }
+
+    /// Lays the frame's glass out: puts its callbacks in, and the job they
+    /// draw from.
+    fn finish(self, ctx: &egui::Context) {
+        let Some(render) = self.render.clone() else { return };
+        let ppp = ctx.pixels_per_point();
+        let screen_pt = ctx.content_rect();
+        let screen = [(screen_pt.width() * ppp).round() as u32, (screen_pt.height() * ppp).round() as u32];
+        if screen[0] == 0 || screen[1] == 0 {
+            return;
+        }
+        let (pointer, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
+        let (order, transforms): (Vec<LayerId>, HashMap<LayerId, TSTransform>) =
+            ctx.memory(|m| (m.layer_ids().collect(), m.to_global.iter().map(|(k, v)| (*k, *v)).collect()));
+        // egui's painting order: by Order, the areas' order in each, then
+        // the layers outside it (the page's).
+        let mut layers = Vec::new();
+        for o in [Order::Background, Order::Middle, Order::Foreground, Order::Tooltip, Order::Debug] {
+            layers.extend(order.iter().filter(|l| l.order == o));
+            if o == Order::Background && !order.contains(&LayerId::background()) {
+                layers.push(LayerId::background());
+            }
+        }
+
+        let job = Arc::new(OnceLock::new());
+        let mut specs: Vec<Spec> = Vec::new();
+        let mut bounds: Vec<Rect> = Vec::new();
+        ctx.graphics_mut(|g| {
+            for layer in &layers {
+                let Some(list) = g.get_mut(*layer) else { continue };
+                let transform = transforms.get(layer).copied();
+                let wall = self.wallpaper.filter(|w| w.0 == *layer);
+                let mut glass: Vec<Rect> = Vec::new();
+                for i in 0..list.next_idx().0 {
+                    let mut found = None;
+                    let mut bound = Rect::NOTHING;
+                    list.mutate_shape(ShapeIdx(i), |cs| {
+                        let b = cs.shape.visual_bounding_rect().intersect(cs.clip_rect);
+                        bound = transform.map_or(b, |t| t * b);
+                        // A layer moved or scaled stays as it is drawn.
+                        if transform.is_some() {
+                            return;
+                        }
+                        let place = Place {
+                            floating: layer.order != Order::Background,
+                            over_wallpaper: wall.is_some_and(|w| i > w.1 && w.2.contains_rect(b)),
+                            chrome: &self.chrome,
+                            glass: &glass,
+                        };
+                        found = self.classify(&mut cs.shape, &place, &job, specs.len());
+                    });
+                    if let Some((rect, radius, material, alpha)) = found {
+                        glass.push(rect);
+                        let touch = pointer.filter(|p| down && rect.contains(*p));
+                        specs.push(Spec { flat: bounds.len(), rect, radius, material, alpha, touch });
+                    }
+                    bounds.push(bound);
+                }
+            }
+        });
+        if specs.is_empty() {
+            return;
+        }
+
+        // Each group's backdrop: the shapes since the group before's cut
+        // that reach it or a later group (the scene keeps them).
+        let groups = groups(&specs, &bounds);
+        let mut reach = vec![Rect::NOTHING; groups.len()];
+        let mut acc = Rect::NOTHING;
+        for (i, g) in groups.iter().enumerate().rev() {
+            acc = acc.union(g.area);
+            reach[i] = acc;
+        }
+        let mut shapes: Vec<Vec<ClippedShape>> = vec![Vec::new(); groups.len()];
+        ctx.graphics(|g| {
+            let mut k = 0;
+            let mut gi = 0;
+            for layer in &layers {
+                let Some(list) = g.get(*layer) else { continue };
+                let transform = transforms.get(layer).copied();
+                for cs in list.all_entries() {
+                    while gi < groups.len() && k >= groups[gi].cut {
+                        gi += 1;
+                    }
+                    if gi < groups.len() && bounds[k].intersects(reach[gi]) {
+                        let mut cs = cs.clone();
+                        if let Some(t) = transform {
+                            cs.transform(t);
+                        }
+                        shapes[gi].push(cs);
+                    }
+                    k += 1;
+                }
+            }
+        });
+
+        // Tessellated, with egui's textures they use (as its renderer has
+        // them; those it hasn't yet are left out).
+        let mut prims: Vec<Vec<ClippedPrimitive>> = shapes.into_iter().map(|s| ctx.tessellate(s, ppp)).collect();
+        let mut textures = Vec::new();
+        {
+            let renderer = render.renderer.read();
+            let mut seen = HashMap::new();
+            for list in &mut prims {
+                list.retain(|p| match &p.primitive {
+                    Primitive::Mesh(m) => *seen.entry(m.texture_id).or_insert_with(|| match renderer.texture(&m.texture_id) {
+                        Some(egui_wgpu::Texture { texture: Some(t), options, .. }) => {
+                            textures.push((m.texture_id, t.clone(), options.unwrap_or_default()));
+                            true
+                        }
+                        _ => false,
+                    }),
+                    Primitive::Callback(_) => true,
+                });
+            }
+            // A font atlas that grew is drawn from the old one until egui's
+            // renderer has the new: look again next frame.
+            let font = TextureId::default();
+            if let Some((_, t, _)) = textures.iter().find(|(id, ..)| *id == font)
+                && let Some(meta) = ctx.tex_manager().read().meta(font)
+                && (t.width() as usize, t.height() as usize) != (meta.size[0], meta.size[1])
+            {
+                ctx.request_repaint();
+            }
+        }
+
+        let to_px = |r: Rect| {
+            let x0 = (r.left() * ppp).floor().clamp(0.0, screen[0] as f32) as u32;
+            let y0 = (r.top() * ppp).floor().clamp(0.0, screen[1] as f32) as u32;
+            let x1 = (r.right() * ppp).ceil().clamp(0.0, screen[0] as f32) as u32;
+            let y1 = (r.bottom() * ppp).ceil().clamp(0.0, screen[1] as f32) as u32;
+            [x0, y0, (x1 - x0).max(1), (y1 - y0).max(1)]
         };
-        match (kind, lift) {
-            (Kind::Accent, _) => {}
-            (_, Some(lift)) => match wall {
-                Some(w) => out.extend(self.wall_body(r, w, lift, a)),
-                None => out.push(Shape::mesh(body_mesh(rect, r.corner_radius, TextureId::default(), |p| {
-                    let v = ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-                    Vertex { pos: p, uv: WHITE_UV, color: color(self.body(self.backdrop(p), lift, v), a) }
-                }))),
-            },
-            (_, None) => out.push(Shape::mesh(body_mesh(rect, r.corner_radius, TextureId::default(), |p| Vertex {
-                pos: p,
-                uv: WHITE_UV,
-                color: color(self.backdrop(p), a),
-            }))),
-        }
-        // Strokes other than the line (the accent's, a hover's) stay.
-        if r.stroke.width > 0.0 && !line {
-            let mut s = r.clone();
-            s.fill = Color32::TRANSPARENT;
-            out.push(Shape::Rect(s));
-        }
-        if rim_k > 0.0 {
-            let mut m = Mesh::default();
-            rim(&mut m, rect, r.corner_radius, rim_k, a);
-            out.push(Shape::mesh(m));
-        }
-        Some(Shape::Vec(out))
-    }
-
-    /// A body over the wallpaper: its blurred copy, darkened, then frosted.
-    fn wall_body(&self, r: &RectShape, w: &Wall, lift: f32, a: f32) -> [Shape; 2] {
-        let rect = r.rect;
-        let v_at = |p: Pos2| ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-        let pic = body_mesh(rect, r.corner_radius, w.tex, |p| Vertex { pos: p, uv: w.uv_at(p), color: wall_keep(v_at(p), a) });
-        let frost = body_mesh(rect, r.corner_radius, TextureId::default(), |p| Vertex { pos: p, uv: WHITE_UV, color: self.wall_frost(lift, v_at(p), a) });
-        [Shape::mesh(pic), Shape::mesh(frost)]
-    }
-
-    /// The frost over the wallpaper's copy, `v` of the way down: darker
-    /// than over the backdrop (a picture is brighter), lighter for more
-    /// `lift`.
-    fn wall_frost(&self, lift: f32, v: f32, a: f32) -> Color32 {
-        let k = ((0.40 + lift * 2.0 + 0.04 * (1.0 - v)) * a).clamp(0.0, 1.0);
-        let q = |c: f32| (c * k * 255.0).round() as u8;
-        Color32::from_rgba_premultiplied(q(self.base[0]), q(self.base[1]), q(self.base[2]), (k * 255.0).round() as u8)
-    }
-
-    /// A fade (a mesh in the theme's colors) over the wallpaper: the same
-    /// triangles twice, the wallpaper's copy and its frost, each vertex as
-    /// strong as its color was.
-    fn wall_fade(&self, m: &Mesh, w: &Wall) -> Shape {
-        let mut pic = Mesh::with_texture(w.tex);
-        let mut frost = Mesh { indices: m.indices.clone(), ..Default::default() };
-        pic.indices = m.indices.clone();
-        for v in &m.vertices {
-            let (lift, a) = match self.kind(v.color) {
-                Some((Kind::Page, a)) => (0.0, a),
-                Some((Kind::Surface { lift, .. }, a)) => (lift, a),
-                _ => (0.0, 0.0),
-            };
-            pic.vertices.push(Vertex { pos: v.pos, uv: w.uv_at(v.pos), color: wall_keep(0.5, a) });
-            frost.vertices.push(Vertex { pos: v.pos, uv: WHITE_UV, color: self.wall_frost(lift, 0.5, a) });
-        }
-        Shape::Vec(vec![Shape::mesh(pic), Shape::mesh(frost)])
-    }
-}
-
-/// How much of the wallpaper's copy shows through, `v` of the way down a
-/// body, at alpha `a`.
-fn wall_keep(v: f32, a: f32) -> Color32 {
-    color([1.0 - (0.10 + 0.06 * v); 3], a)
-}
-
-impl Wall {
-    /// Where `p` is on the wallpaper's copy.
-    fn uv_at(&self, p: Pos2) -> Pos2 {
-        let f = (p - self.rect.min) / self.rect.size();
-        pos2(self.uv.left() + f.x * self.uv.width(), self.uv.top() + f.y * self.uv.height())
-    }
-}
-
-// ----------------------------------------------------------- geometry
-
-/// How many steps round a corner as round as `cr`'s roundest.
-fn steps(cr: CornerRadius) -> usize {
-    let m = cr.nw.max(cr.ne).max(cr.se).max(cr.sw) as f32;
-    if m < 0.5 { 1 } else { ((m / 2.5).ceil() as usize).clamp(2, 10) }
-}
-
-/// The edge of `rect` with corners `cr`, `inset` in, clockwise from the
-/// top left: its points with their outward normals, `n` steps round each
-/// corner (a square corner's point twice, once per side's normal).
-fn ring(rect: Rect, cr: CornerRadius, inset: f32, n: usize) -> Vec<(Pos2, Vec2)> {
-    let r = rect.shrink(inset);
-    let most = (r.width().min(r.height()) / 2.0).max(0.0);
-    let corners = [
-        (cr.nw, r.left_top(), vec2(1.0, 1.0), PI),
-        (cr.ne, r.right_top(), vec2(-1.0, 1.0), 1.5 * PI),
-        (cr.se, r.right_bottom(), vec2(-1.0, -1.0), 0.0),
-        (cr.sw, r.left_bottom(), vec2(1.0, -1.0), 0.5 * PI),
-    ];
-    let mut out = Vec::with_capacity(4 * (n + 1));
-    for (c, corner, into, start) in corners {
-        let rad = (c as f32 - inset).clamp(0.0, most);
-        let center = corner + into * rad;
-        for i in 0..=n {
-            let a = start + FRAC_PI_2 * i as f32 / n as f32;
-            let normal = vec2(a.cos(), a.sin());
-            out.push((center + normal * rad, normal));
-        }
-    }
-    out
-}
-
-/// A band between two rings of the same length, colored by each point's
-/// normal.
-fn band(m: &mut Mesh, outer: &[(Pos2, Vec2)], inner: &[(Pos2, Vec2)], co: impl Fn(Vec2) -> Color32, ci: impl Fn(Vec2) -> Color32) {
-    let base = m.vertices.len() as u32;
-    let k = outer.len().min(inner.len());
-    for i in 0..k {
-        m.colored_vertex(outer[i].0, co(outer[i].1));
-        m.colored_vertex(inner[i].0, ci(inner[i].1));
-    }
-    for i in 0..k as u32 {
-        let j = (i + 1) % k as u32;
-        let (oi, ii, oj, ij) = (base + 2 * i, base + 2 * i + 1, base + 2 * j, base + 2 * j + 1);
-        m.add_triangle(oi, oj, ij);
-        m.add_triangle(oi, ij, ii);
-    }
-}
-
-/// The rim, `k` strong at alpha `a`: a hairline brighter where the light
-/// catches it, and inside it a band of light fading inward (the package's
-/// rimLight core and tail, as one band).
-fn rim(m: &mut Mesh, rect: Rect, cr: CornerRadius, k: f32, a: f32) {
-    let n = steps(cr);
-    let wide = (rect.width().min(rect.height()) * 0.25).clamp(2.0, 9.0);
-    let (r0, r1, r2) = (ring(rect, cr, 0.0, n), ring(rect, cr, 1.0, n), ring(rect, cr, 1.0 + wide, n));
-    let hair = |nrm: Vec2| white((0.07 + 0.24 * lobe(nrm)) * k * a);
-    band(m, &r0, &r1, hair, hair);
-    band(m, &r1, &r2, |nrm| white(0.11 * lobe(nrm) * k * a), |_| Color32::TRANSPARENT);
-}
-
-/// Light over the top half of an accent fill.
-fn sheen(rect: Rect, cr: CornerRadius, a: f32) -> Mesh {
-    let top = rect.top();
-    let h = rect.height();
-    body_mesh(rect, cr, TextureId::default(), |p| {
-        let v = ((p.y - top) / h).clamp(0.0, 1.0);
-        let k = (1.0 - v * 2.0).max(0.0);
-        Vertex { pos: p, uv: WHITE_UV, color: white(0.16 * k * k * a) }
-    })
-}
-
-/// A mesh filling `rect` with corners `cr`, each vertex from `vertex`: a
-/// grid of cells at most 32 points wide for a square one (so the backdrop
-/// under it shows), a fan for a round one.
-fn body_mesh(rect: Rect, cr: CornerRadius, tex: TextureId, mut vertex: impl FnMut(Pos2) -> Vertex) -> Mesh {
-    let mut m = Mesh::with_texture(tex);
-    if cr == CornerRadius::ZERO {
-        let nx = (rect.width() / 32.0).ceil().max(1.0) as u32;
-        let ny = (rect.height() / 32.0).ceil().max(1.0) as u32;
-        for j in 0..=ny {
-            for i in 0..=nx {
-                let p = pos2(rect.left() + rect.width() * i as f32 / nx as f32, rect.top() + rect.height() * j as f32 / ny as f32);
-                m.vertices.push(vertex(p));
+        let mut inst_group = vec![0; specs.len()];
+        let mut insts = vec![[0.0; INST_FLOATS]; specs.len()];
+        let mut jobs = Vec::with_capacity(groups.len());
+        for ((gi, g), prims) in groups.iter().enumerate().zip(prims) {
+            let region = to_px(g.area);
+            let tex = [region[2].div_ceil(64) * 64, region[3].div_ceil(64) * 64];
+            for &s in &g.specs {
+                inst_group[s] = gi;
+                insts[s] = uniforms(&specs[s], ppp, [region[0], region[1]], tex, screen[1] as f32);
             }
+            jobs.push(GroupJob { prims, region, tex, sigma: FROST * ppp / 4.0, weight: FROST_WEIGHT });
         }
-        for j in 0..ny {
-            for i in 0..nx {
-                let a = j * (nx + 1) + i;
-                let (b, c, d) = (a + 1, a + nx + 1, a + nx + 2);
-                m.add_triangle(a, b, d);
-                m.add_triangle(a, d, c);
-            }
-        }
-    } else {
-        let edge = ring(rect, cr, 0.0, steps(cr));
-        m.vertices.push(vertex(rect.center()));
-        for (p, _) in &edge {
-            m.vertices.push(vertex(*p));
-        }
-        let k = edge.len() as u32;
-        for i in 0..k {
-            m.add_triangle(0, 1 + i, 1 + (i + 1) % k);
-        }
+        let _ = job.set(Job {
+            id: FRAMES.fetch_add(1, Atomic::Relaxed) + 1,
+            ppp,
+            screen,
+            target: render.target_format,
+            groups: jobs,
+            insts,
+            inst_group,
+            textures,
+        });
     }
-    m
+}
+
+/// A shape's vertices in a color (for the tests).
+#[cfg(test)]
+fn colors(s: &Shape) -> Vec<Color32> {
+    match s {
+        Shape::Vec(v) => v.iter().flat_map(colors).collect(),
+        Shape::Rect(r) => vec![r.fill],
+        Shape::Mesh(m) => m.vertices.iter().map(|v| v.color).collect(),
+        _ => vec![],
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::egui::epaint::RectShape;
+    use eframe::egui::{pos2, vec2};
 
     fn kit() -> Kit {
-        Kit::of(&theme(), Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0)))
+        Kit::of(&theme(), None)
+    }
+
+    fn place<'a>(floating: bool, chrome: &'a [Rect], glass: &'a [Rect]) -> Place<'a> {
+        Place { floating, over_wallpaper: false, chrome, glass }
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect::from_min_size(pos2(x, y), vec2(w, h))
     }
 
     /// The colors glass tells apart are all different, and each is told
     /// apart faded too.
     #[test]
-    fn the_surfaces_are_told_apart() {
+    fn the_colors_are_told_apart() {
         let t = theme();
         let k = kit();
-        let colors = [t.bg, t.tool_bg, t.panel, t.tool_hover, t.panel2, t.accent];
+        let colors = [t.bg, t.tool_bg, t.panel, t.tool_hover, t.panel2, t.accent, SELECT];
         for (i, a) in colors.iter().enumerate() {
             for b in &colors[i + 1..] {
                 assert_ne!(a, b);
             }
         }
         assert_eq!(k.kind(t.bg).map(|k| k.0), Some(Kind::Page));
-        assert!(matches!(k.kind(t.panel), Some((Kind::Surface { rim, .. }, _)) if rim > 0.0));
-        assert!(matches!(k.kind(t.panel.gamma_multiply(0.5)), Some((Kind::Surface { .. }, a)) if (a - 0.5).abs() < 0.01));
+        assert_eq!(k.kind(t.panel).map(|k| k.0), Some(Kind::Surface(1)));
+        assert!(matches!(k.kind(t.panel.gamma_multiply(0.5)), Some((Kind::Surface(1), a)) if (a - 0.5).abs() < 0.01));
+        assert_eq!(k.kind(SELECT).map(|k| k.0), Some(Kind::Select));
         assert_eq!(k.kind(t.ink), None);
+        assert_eq!(k.kind(t.accent), None);
         assert!(k.is_line(t.line));
         assert!(is(&t) && !is(&Theme::oak()));
     }
 
-    /// Glass keeps every rectangle where and as large as it was: what it
-    /// draws for one covers it and stays inside it.
+    /// A panel floating over the page is glass where it was, its flat
+    /// panel under the callback; on the page it stays a card; in the
+    /// message box's row it is glass again.
     #[test]
-    fn glass_keeps_the_shapes() {
+    fn what_turns_to_glass() {
         let t = theme();
         let k = kit();
-        for (fill, stroke, radius) in [(t.bg, None, 0u8), (t.panel, Some(t.line), 0), (t.panel2, None, 4), (t.tool_bg, None, 0), (t.accent, None, 6), (Color32::TRANSPARENT, Some(t.line), 0)] {
-            let rect = Rect::from_min_size(pos2(100.5, 40.0), vec2(300.0, 90.0));
-            let mut r = RectShape::filled(rect, radius, fill);
-            if let Some(c) = stroke {
-                r.stroke = egui::Stroke::new(1.0, c);
-            }
-            let mut s = Shape::Rect(r);
-            k.glass(&mut s, None);
-            assert!(!matches!(s, Shape::Rect(ref r) if r.fill == fill), "{fill:?} turned to glass");
-            let b = s.visual_bounding_rect();
-            assert!(rect.expand(0.01).contains_rect(b), "{fill:?}: {b:?} inside {rect:?}");
-            if fill != Color32::TRANSPARENT {
-                assert!(b.expand(0.01).contains_rect(rect), "{fill:?}: {b:?} covers {rect:?}");
-            }
+        let job = Arc::new(OnceLock::new());
+        let r = rect(10.0, 10.0, 200.0, 80.0);
+        let mut panel = RectShape::filled(r, 0, t.panel);
+        panel.stroke = Stroke::new(1.0, t.line);
+        let mut s = Shape::Rect(panel.clone());
+        let found = k.classify(&mut s, &place(true, &[], &[]), &job, 0);
+        assert_eq!(found.map(|f| (f.0, f.2)), Some((r, Material::Platter)));
+        let Shape::Vec(parts) = &s else { panic!("glass is the panel and its callback") };
+        assert!(matches!(&parts[0], Shape::Rect(f) if f.rect == r && f.fill == t.panel && f.stroke.is_empty()));
+        assert!(matches!(&parts[1], Shape::Callback(c) if c.rect == r));
+        assert_eq!(parts.len(), 2, "the line's stroke is the rim now");
+
+        let mut card = Shape::Rect(panel.clone());
+        assert!(k.classify(&mut card, &place(false, &[], &[]), &job, 0).is_none());
+        assert!(matches!(card, Shape::Rect(ref c) if c.fill == t.panel), "a card on the page stays");
+
+        let chrome = [r.expand(4.0)];
+        assert!(k.classify(&mut Shape::Rect(panel.clone()), &place(false, &chrome, &[]), &job, 0).is_some());
+        // The page's own fill in the row isn't glass.
+        assert!(k.classify(&mut Shape::Rect(RectShape::filled(r, 0, t.bg)), &place(false, &chrome, &[]), &job, 0).is_none());
+
+        // A selected item is the lens anywhere.
+        let mut sel = Shape::Rect(RectShape::filled(rect(20.0, 20.0, 60.0, 20.0), 0, SELECT));
+        assert_eq!(k.classify(&mut sel, &place(false, &[], &[]), &job, 0).map(|f| f.2), Some(Material::Lens));
+
+        // Too small, or not the theme's color: as it was.
+        assert!(k.classify(&mut Shape::Rect(RectShape::filled(rect(0.0, 0.0, 6.0, 40.0), 0, t.panel)), &place(true, &[], &[]), &job, 0).is_none());
+        let mut red = Shape::Rect(RectShape::filled(r, 0, Color32::RED));
+        assert!(k.classify(&mut red, &place(true, &[], &[]), &job, 0).is_none());
+        assert!(matches!(red, Shape::Rect(ref c) if c.fill == Color32::RED));
+    }
+
+    /// The theme's colors on glass are the package's fills inside it: a
+    /// hovered row white at a few percent, not a solid panel.
+    #[test]
+    fn surfaces_on_glass_are_fills() {
+        let t = theme();
+        let k = kit();
+        let job = Arc::new(OnceLock::new());
+        let glass = [rect(0.0, 0.0, 300.0, 200.0)];
+        let mut row = Shape::Rect(RectShape::filled(rect(10.0, 10.0, 200.0, 24.0), 0, t.tool_hover));
+        assert!(k.classify(&mut row, &place(true, &[], &glass), &job, 1).is_none());
+        let c = colors(&row)[0];
+        assert!(c.r() == c.g() && c.g() == c.b() && c.a() > 0 && c.a() < 40, "{c:?}");
+        // Text and other colors are left alone.
+        let mut other = Shape::Rect(RectShape::filled(rect(10.0, 40.0, 50.0, 20.0), 0, t.accent));
+        k.classify(&mut other, &place(true, &[], &glass), &job, 1);
+        assert_eq!(colors(&other), vec![t.accent]);
+    }
+
+    /// Glass seeing the same backdrop shares a group; glass under which
+    /// something was painted since starts one.
+    #[test]
+    fn glass_is_grouped_by_backdrop() {
+        let spec = |flat: usize, r: Rect| Spec { flat, rect: r, radius: CornerRadius::ZERO, material: Material::Platter, alpha: 1.0, touch: None };
+        let a = rect(0.0, 0.0, 100.0, 40.0);
+        let far = rect(600.0, 0.0, 100.0, 40.0);
+        let below = rect(0.0, 48.0, 100.0, 40.0);
+        // 0: page, 1: glass a, 2: a's text, 3: glass far, 4: glass below a.
+        let bounds = [rect(0.0, 0.0, 800.0, 600.0), a, a.shrink(8.0), far, below];
+        let specs = [spec(1, a), spec(3, far), spec(4, below)];
+        let g = groups(&specs, &bounds);
+        assert_eq!(g.iter().map(|g| (g.cut, g.specs.clone())).collect::<Vec<_>>(), vec![(1, vec![0, 1]), (4, vec![2])]);
+        assert!(g[0].area.contains_rect(a.expand(FROST)) && g[0].area.contains_rect(far));
+    }
+
+    /// The uniforms say where the glass is, in pixels, and its material.
+    #[test]
+    fn uniforms_follow_the_package() {
+        let s = Spec { flat: 0, rect: rect(10.0, 20.0, 100.0, 50.0), radius: CornerRadius::same(4), material: Material::Platter, alpha: 1.0, touch: None };
+        let u = uniforms(&s, 2.0, [0, 0], [256, 256], 800.0);
+        assert_eq!(&u[0..4], &[20.0, 40.0, 220.0, 140.0]);
+        assert_eq!(&u[8..12], &[8.0; 4]);
+        assert!((u[17] - 32.0 * 2.0 / 3.0).abs() < 1e-4, "thickness 32 at 3x");
+        assert_eq!(&u[20..22], &[0.0, 1.0], "ios27Dark is lit from the bottom");
+        assert_eq!(&u[28..30], &[0.85, -0.45]);
+    }
+
+    /// The shaders are valid WGSL.
+    #[test]
+    fn the_shaders_parse() {
+        for (name, src) in [("glass", include_str!("glass/glass.wgsl")), ("blur", include_str!("glass/blur.wgsl"))] {
+            let module = wgpu::naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
+            wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         }
-        // Text and colors the theme hasn't stay as they are.
-        let mut other = Shape::Rect(RectShape::filled(Rect::from_min_size(Pos2::ZERO, vec2(50.0, 50.0)), 0, Color32::RED));
-        k.glass(&mut other, None);
-        assert!(matches!(other, Shape::Rect(ref r) if r.fill == Color32::RED));
-    }
-
-    /// A glass body is opaque (it hides what is under it, as the panel
-    /// did), lighter than the page, and a fade's page color turns into the
-    /// backdrop's.
-    #[test]
-    fn bodies_hide_what_is_under_them() {
-        let t = theme();
-        let k = kit();
-        let mut s = Shape::Rect(RectShape::filled(Rect::from_min_size(pos2(10.0, 10.0), vec2(200.0, 100.0)), 0, t.panel));
-        k.glass(&mut s, None);
-        let Shape::Vec(parts) = s else { panic!("a panel turns into parts") };
-        let Shape::Mesh(body) = &parts[0] else { panic!("its body is a mesh") };
-        assert!(body.vertices.iter().all(|v| v.color.a() == 255));
-        let page = k.backdrop(pos2(110.0, 60.0));
-        let middle = body.vertices.iter().min_by(|a, b| (a.pos - pos2(110.0, 60.0)).length().total_cmp(&(b.pos - pos2(110.0, 60.0)).length())).unwrap();
-        assert!(luma(rgbf(u32::from_be_bytes([0, middle.color.r(), middle.color.g(), middle.color.b()]))) > luma(page));
-        let mut m = Mesh::default();
-        m.colored_vertex(pos2(5.0, 5.0), t.bg);
-        m.colored_vertex(pos2(50.0, 5.0), Color32::TRANSPARENT);
-        m.colored_vertex(pos2(50.0, 50.0), Color32::TRANSPARENT);
-        m.add_triangle(0, 1, 2);
-        let mut fade = Shape::mesh(m);
-        k.glass(&mut fade, None);
-        let Shape::Mesh(m) = fade else { unreachable!() };
-        assert_eq!(m.vertices[0].color, color(k.backdrop(pos2(5.0, 5.0)), 1.0));
-        assert_eq!(m.vertices[1].color, Color32::TRANSPARENT);
-    }
-
-    /// The rim is brightest at the light's end, dimmest across it.
-    #[test]
-    fn the_rim_follows_the_light() {
-        assert!(lobe(vec2(0.0, -1.0)) > 0.8);
-        assert!(lobe(vec2(0.0, 1.0)) > 0.6);
-        assert!(lobe(vec2(1.0, 0.0)) < 0.05);
     }
 }

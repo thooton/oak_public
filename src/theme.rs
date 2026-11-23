@@ -64,11 +64,14 @@ pub(crate) fn visuals(t: &Theme) -> egui::Visuals {
         w.expansion = 0.0;
     }
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, t.ink);
-    // Glass floats: menus and windows cast a soft shadow.
+    // In Liquid Glass a selected item is the indicator lens: its fill is
+    // the mark that becomes it.
+    // And glass casts no shadow (the package's iOS 27 materials have none):
+    // under a popup it would be what the popup frosts.
     if crate::glass::is(t) {
-        let shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: Color32::from_black_alpha(0x70) };
-        v.window_shadow = shadow;
-        v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, ..shadow };
+        v.selection.bg_fill = crate::glass::SELECT;
+        v.window_shadow = egui::Shadow::NONE;
+        v.popup_shadow = egui::Shadow::NONE;
     }
     v
 }

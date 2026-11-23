@@ -299,6 +299,13 @@ pub fn secret_edit(
 pub fn switch(ui: &mut Ui, t: &Theme, on: bool, size: egui::Vec2) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     paint_switch(ui.painter(), t, rect, on, resp.hovered());
+    // Liquid Glass: held down, the knob lifts into a lens over the track.
+    if crate::glass::active() && resp.is_pointer_button_down_on() {
+        let h = rect.height();
+        let x = if on { rect.right() - h / 2.0 } else { rect.left() + h / 2.0 };
+        let lens = Rect::from_center_size(egui::pos2(x, rect.center().y), egui::vec2(h * 1.7, h * 1.3));
+        ui.painter().rect_filled(lens, 0.0, crate::glass::SELECT);
+    }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

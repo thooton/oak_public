@@ -221,12 +221,19 @@ Settings is the gear in a conversation's bottom left corner and Home's bottom ri
 built-in themes (Oak, and Liquid Glass) and those plugins add, and its Font row shows once a plugin adds a choice to IBM
 Plex Sans. Plugins are managed on Home, not in Settings, and so are their
 settings: Settings holds none of a plugin's controls.
-Liquid Glass (`src/glass.rs`, id `glass`) is Antigravity's colors (its Hub's dark Onyx theme) as iOS-style Liquid Glass,
-after liquid_glass_widgets' shader: the page is a backdrop of soft blue and violet glows, and the theme's panels are
-frosted glass over it with a rim lit along a vertical light axis; over Home's wallpaper the glass shows a blurred copy of
-the picture. It changes no layout and no shape: Oak draws as in any theme, and what was painted in the theme's colors
-turns to glass as the frame ends, each rectangle where and as large as it was, its corners as they were (plugins' pages
-included). A glass body is opaque (the backdrop under it, frosted), so it hides what is under it as a panel does.
+Liquid Glass (`src/glass.rs`, id `glass`) is Antigravity's colors (its Hub's dark Onyx theme) with the iOS 27 dark
+Liquid Glass of liquid_glass_widgets, its premium shader ported to WGSL (`src/glass/`): the paraxial lens at the edges,
+the frost (a wide, luminance-weighted blur with a ghost of the content through it), the body's tint, saturation and
+shade, the meniscus, the rim light at the ends of the light's axis and the dark hairline across it, and the glint where
+it is pressed. As in the package, glass is for what floats: the theme's panels are glass in areas above the page (the
+session box and the chat's corner boxes, menus, popups, tooltips, dialogs, toasts), in the message box's row and over
+Home's wallpaper, and the page's own cards stay the flat Onyx ones; a selected item is the clear indicator lens, a
+switch held down lifts a lens over its knob, and nothing casts a shadow. It changes no layout and no shape (square
+corners stay square): Oak draws as in any theme, and as the frame ends each glass rectangle gets a GPU callback in its
+place, over the flat panel (what shows if the GPU part can't draw); the theme's colors painted on glass become white
+fills at a few percent. Glass shows what was painted under it this frame, glass under glass included: before egui's
+pass Oak draws each group's backdrop (glass that sees the same one) into a texture of its own with a second egui
+renderer, and blurs it.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
 plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
 is clipped to the corner so it cannot move or cover the rest of the composer. The rows sit in the

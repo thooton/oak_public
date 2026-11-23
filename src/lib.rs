@@ -689,7 +689,7 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         startup::frame(ui.ctx());
         self.sync_zoom(ui.ctx());
         // Plugins were reloaded: their themes and fonts may have changed.
@@ -699,7 +699,7 @@ impl eframe::App for App {
         }
         let t = theme::theme(&self.settings.theme);
         // In Liquid Glass, what this frame paints turns to glass as it ends.
-        let _glass = glass::Frame::begin(ui.ctx(), &t);
+        let _glass = glass::Frame::begin(ui.ctx(), &t, frame.wgpu_render_state());
         plugins::begin_frame(ui.ctx(), &t);
         // Toasts (`view::toast`), over everything at the top right.
         view::show_toasts(ui.ctx(), &t, TITLE_H + TABS_H + 10.0);

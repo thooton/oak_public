@@ -17,6 +17,8 @@ pub(crate) fn dock(ui: &mut Ui, id: &'static str, t: &Theme, contents: impl FnOn
         clip_top = ui.clip_rect().top();
         contents(ui);
     }).response.rect;
+    // Liquid Glass: the row's boxes are glass, as a toolbar's are.
+    crate::glass::chrome(rect);
     // A bottom Panel starts at the previous height, but measures the new
     // height and clips at the old one. Without another pass, shrinking
     // leaves a gap below the controls and growing cuts them off.
