@@ -1,5 +1,5 @@
-//! Themes (colors only: `oak_sdk::theme`; Oak's own is built in, plugins
-//! add others) and egui's style from them.
+//! Themes (colors only: `oak_sdk::theme`; Oak's own and Liquid Glass are
+//! built in, plugins add others) and egui's style from them.
 
 use super::*;
 pub(crate) use oak_sdk::theme::{Theme, hex, mix};
@@ -7,16 +7,24 @@ pub(crate) use oak_sdk::theme::{Theme, hex, mix};
 /// The id of Oak's own theme (jet black, white, oak green).
 pub(crate) const OAK: &str = "oak";
 
-/// The themes Settings offers: Oak's own, then the plugins', as (id, name).
+/// The id of Liquid Glass (`glass`: Antigravity's colors, as glass).
+pub(crate) const GLASS: &str = crate::glass::ID;
+
+/// The themes Settings offers: Oak's own, Liquid Glass, then the plugins',
+/// as (id, name).
 pub(crate) fn themes() -> Vec<(String, String)> {
-    let mut list = vec![(OAK.to_string(), "Oak".to_string())];
-    list.extend(crate::plugins::parts().themes.iter().map(|d| (d.id(), d.name())).filter(|(id, _)| id != OAK));
+    let mut list = vec![(OAK.to_string(), "Oak".to_string()), (GLASS.to_string(), crate::glass::NAME.to_string())];
+    list.extend(crate::plugins::parts().themes.iter().map(|d| (d.id(), d.name())).filter(|(id, _)| id != OAK && id != GLASS));
     list
 }
 
-/// The theme with this id: Oak's own for its id, an unknown one, or one
-/// whose plugin isn't loaded (the setting keeps the id, for when it is).
+/// The theme with this id: a built-in one for its id; Oak's own for an
+/// unknown one, or one whose plugin isn't loaded (the setting keeps the id,
+/// for when it is).
 pub(crate) fn theme(id: &str) -> Theme {
+    if id == GLASS {
+        return crate::glass::theme();
+    }
     crate::plugins::parts().themes.iter().find(|d| id != OAK && d.id() == id).map_or_else(Theme::oak, |d| d.theme())
 }
 
@@ -56,6 +64,12 @@ pub(crate) fn visuals(t: &Theme) -> egui::Visuals {
         w.expansion = 0.0;
     }
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, t.ink);
+    // Glass floats: menus and windows cast a soft shadow.
+    if crate::glass::is(t) {
+        let shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: Color32::from_black_alpha(0x70) };
+        v.window_shadow = shadow;
+        v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, ..shadow };
+    }
     v
 }
 

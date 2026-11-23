@@ -110,16 +110,20 @@ pub(crate) fn thumbnail(ctx: &egui::Context, w: &Wallpaper) -> Option<egui::Text
 /// `path`'s first frame, shrunk to 480 wide when wider (pixel art stays as
 /// it is, to be drawn sharp).
 fn first_frame(path: &Path) -> Option<(egui::ColorImage, egui::TextureOptions)> {
-    let img = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?.to_rgba8();
-    let (w, h) = img.dimensions();
+    let w = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()?.0;
     let pixel_art = w as usize <= PIXEL_ART_W;
-    let mut img = img;
-    if w > 480 {
-        img = image::imageops::resize(&img, 480, (h * 480 / w).max(1), image::imageops::FilterType::Triangle);
-    }
+    let img = first_rgba(path)?;
     let size = [img.width() as usize, img.height() as usize];
     let options = if pixel_art { egui::TextureOptions::NEAREST } else { egui::TextureOptions::LINEAR };
     Some((egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), options))
+}
+
+/// `path`'s first frame as pixels, at most 480 wide (also what Liquid
+/// Glass blurs to show behind its glass on Home).
+pub(crate) fn first_rgba(path: &Path) -> Option<image::RgbaImage> {
+    let img = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    Some(if w > 480 { image::imageops::resize(&img, 480, (h * 480 / w).max(1), image::imageops::FilterType::Triangle) } else { img })
 }
 
 /// A file's name as the list shows it: "twilight-forest.webp" is

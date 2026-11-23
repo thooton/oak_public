@@ -73,11 +73,21 @@ impl App {
         } else if self.wallpaper.as_ref().is_none_or(|w| &w.file != file) {
             self.wallpaper = Some(wallpaper::Player::new(file));
         }
-        let tex = match self.wallpaper.as_mut().and_then(|w| w.frame(ui.ctx())) {
-            Some(tex) => tex.clone(),
-            None => picture(ui.ctx(), &mut self.pictures, "forest-home"),
+        let (tex, playing) = match self.wallpaper.as_mut().and_then(|w| w.frame(ui.ctx())) {
+            Some(tex) => (tex.clone(), true),
+            None => (picture(ui.ctx(), &mut self.pictures, "forest-home"), false),
         };
-        paint_cover(ui.painter(), rect, &tex, Color32::WHITE);
+        let idx = paint_cover(ui.painter(), rect, &tex, Color32::WHITE);
+        // Liquid Glass shows it blurred behind the glass over it.
+        let uv = cover_uv(rect, &tex);
+        if playing {
+            let path = wallpaper::folder().join(file);
+            crate::glass::wallpaper(ui.painter(), idx, rect, uv, &format!("file:{file}"), move || wallpaper::first_rgba(&path));
+        } else {
+            crate::glass::wallpaper(ui.painter(), idx, rect, uv, "forest-home", || {
+                image::load_from_memory(include_bytes!("../assets/forest-home.png")).ok().map(|i| i.to_rgba8())
+            });
+        }
     }
 
     /// The menu's box, laid out by `g`.
@@ -1509,10 +1519,15 @@ pub(crate) fn picture(
 
 /// Paints `tex` over `rect` like CSS `background-size: cover`: filling it,
 /// centred, cropping whichever side is too long.
-pub(crate) fn paint_cover(p: &egui::Painter, rect: Rect, tex: &egui::TextureHandle, tint: Color32) {
+pub(crate) fn paint_cover(p: &egui::Painter, rect: Rect, tex: &egui::TextureHandle, tint: Color32) -> egui::layers::ShapeIdx {
+    p.image(tex.id(), rect, cover_uv(rect, tex), tint)
+}
+
+/// The part of `tex` that `paint_cover` shows over `rect`.
+pub(crate) fn cover_uv(rect: Rect, tex: &egui::TextureHandle) -> Rect {
     let [w, h] = tex.size().map(|v| v as f32);
     let (ra, ia) = (rect.width() / rect.height(), w / h);
-    let uv = if ra > ia {
+    if ra > ia {
         let v = ia / ra;
         Rect::from_min_max(
             egui::pos2(0.0, (1.0 - v) / 2.0),
@@ -1524,8 +1539,7 @@ pub(crate) fn paint_cover(p: &egui::Painter, rect: Rect, tex: &egui::TextureHand
             egui::pos2((1.0 - u) / 2.0, 0.0),
             egui::pos2((1.0 + u) / 2.0, 1.0),
         )
-    };
-    p.image(tex.id(), rect, uv, tint);
+    }
 }
 
 /// A conversation in Home's list.

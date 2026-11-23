@@ -364,7 +364,9 @@ impl App {
         );
         let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(57.0, 32.0));
         match &tex {
-            Some(tex) => crate::home::paint_cover(p, thumb, tex, Color32::WHITE),
+            Some(tex) => {
+                crate::home::paint_cover(p, thumb, tex, Color32::WHITE);
+            }
             None => {
                 p.rect_filled(thumb, 2.0, t.bg);
             }
@@ -450,7 +452,9 @@ impl App {
                             });
                             let p = ui.painter();
                             match &tex {
-                                Some(tex) => crate::home::paint_cover(p, pic, tex, Color32::WHITE),
+                                Some(tex) => {
+                                    crate::home::paint_cover(p, pic, tex, Color32::WHITE);
+                                }
                                 None => {
                                     p.rect_filled(pic, 0.0, t.bg);
                                 }

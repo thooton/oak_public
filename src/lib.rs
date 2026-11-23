@@ -90,6 +90,7 @@ mod copy_menu;
 mod find;
 mod fork;
 mod geometry;
+mod glass;
 mod gpu;
 mod highlight;
 mod home;
@@ -697,6 +698,8 @@ impl eframe::App for App {
             self.font_job.lock().unwrap().reinstall = true;
         }
         let t = theme::theme(&self.settings.theme);
+        // In Liquid Glass, what this frame paints turns to glass as it ends.
+        let _glass = glass::Frame::begin(ui.ctx(), &t);
         plugins::begin_frame(ui.ctx(), &t);
         // Toasts (`view::toast`), over everything at the top right.
         view::show_toasts(ui.ctx(), &t, TITLE_H + TABS_H + 10.0);

@@ -217,9 +217,16 @@ The message box stays docked to the bottom as drafts, attachments and notices ch
 including in a side chat.
 A click on the session box's folder opens it in the system's file manager; its right-click menu
 has Open folder and Copy path (a folder that no longer exists can only be copied).
-Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme and Font rows show once a plugin adds a
-choice to Oak's own (the Oak theme, IBM Plex Sans). Plugins are managed on Home, not in Settings, and so are their
+Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme row offers Oak's two
+built-in themes (Oak, and Liquid Glass) and those plugins add, and its Font row shows once a plugin adds a choice to IBM
+Plex Sans. Plugins are managed on Home, not in Settings, and so are their
 settings: Settings holds none of a plugin's controls.
+Liquid Glass (`src/glass.rs`, id `glass`) is Antigravity's colors (its Hub's dark Onyx theme) as iOS-style Liquid Glass,
+after liquid_glass_widgets' shader: the page is a backdrop of soft blue and violet glows, and the theme's panels are
+frosted glass over it with a rim lit along a vertical light axis; over Home's wallpaper the glass shows a blurred copy of
+the picture. It changes no layout and no shape: Oak draws as in any theme, and what was painted in the theme's colors
+turns to glass as the frame ends, each rectangle where and as large as it was, its corners as they were (plugins' pages
+included). A glass body is opaque (the backdrop under it, frosted), so it hides what is under it as a panel does.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
 plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
 is clipped to the corner so it cannot move or cover the rest of the composer. The rows sit in the
