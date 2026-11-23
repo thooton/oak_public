@@ -842,7 +842,22 @@ for a tool by name and waits on the socket for its result; Quick's own sandbox w
 against copies under `/outposts/<device>/…`, not the user's folder, so Oak answers every call
 itself, in the conversation's working folder, with the same tools it runs for other models
 (`quick::turn`, `run_tool`). Quick's agent reaches for `run_python` (and its `file_*`, `fdfind`,
-`ripgrep`), so those are mapped too: `run_python` runs the snippet with Python in the folder.
+`ripgrep`), so those are mapped too. Its device Python (`run_python_outpost_local`, which Quick's
+agent knows as `run_python_on_device`) runs Oak's own tools, not Python (`quick/calls.rs`): its
+code is one or more Oak calls written as Python calls, a line each, with literal arguments only
+(`READ(path="src/main.rs")`; a tool's required fields may also go first by position), and a
+snippet with anything else is refused before any of it runs. Each call becomes a block of the
+reply (`Turn::oak_call`) that the conversation's agent runs as it runs any model's calls, all at
+once (those on a file one of them writes in order), so they show, stream and are tracked as Oak's
+own; the turn waits for their results (`turn::run_oak_alive`, handed each by the batch through
+`turn::ran`) and answers Quick with each one's, in order, while the snippet's own row says which
+calls it ran. ASK can't be called that way (it waits for the reply's end, which the turn never
+reaches while it waits). A snippet of a thread no conversation's agent reads runs here directly,
+with only READ, WRITE, EDIT, EXECUTE, SEARCH and FETCH. Quick is told all this in the user message
+(`oak_preface`): a thread's first message since Oak started opens with Oak's briefing (the call
+syntax, Oak's own system prompt as the request has it, notes included, and its tool definitions),
+later ones with a one-line reminder, and the briefing goes again whenever the prompt or tools
+change (`user_message_tells_quick_how_to_call_oaks_tools`); a summary's instruction goes alone.
 That is why a Quick conversation works on the real project rather than on a copy of it.
 Quick hands this machine's tool calls to every socket Oak has open to it, whatever thread asked
 (a call names its thread only in its arguments, `_quickwork.offload_session_id`), so each turn

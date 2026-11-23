@@ -75,7 +75,7 @@ pub fn tool_schema(name: &str) -> Value {
         ),
         "run_python_outpost_local" | "run_python_outpost_local_with_write" => obj(
             json!({
-                "code": {"type": "string", "default": "", "description": "The Python code to execute. Do not write long scripts to walk through files (such as os.walk); run normal commands through subprocess instead."},
+                "code": {"type": "string", "default": "", "description": "One or more of Oak's tool calls written as Python calls, a line each, with literal arguments: READ(path=\"src/main.rs\"), EXECUTE(command=\"cargo test\", summary=\"Run the tests\"). Not Python: nothing but the calls runs."},
                 "timeout": {"type": "integer", "default": 60, "description": "Maximum execution time in seconds"}
             }),
             json!(["code"]),
@@ -359,11 +359,8 @@ fn describe(name: &str) -> &'static str {
         "ripgrep" => {
             "Search file contents with ripgrep: every pattern a regex, rg's own options, in the paths given or the conversation's folder."
         }
-        "run_python_outpost_local" => {
-            "Run Python in the conversation's folder. Do not write long scripts to walk through files (such as os.walk); run normal commands through subprocess instead."
-        }
-        "run_python_outpost_local_with_write" => {
-            "Run Python in the conversation's folder, which may write files there. Do not write long scripts to walk through files (such as os.walk); run normal commands through subprocess instead."
+        "run_python_outpost_local" | "run_python_outpost_local_with_write" => {
+            "Run Oak's tools in the conversation's folder: the code is one or more Oak tool calls written as Python calls, a line each, with literal arguments (READ(path=\"src/main.rs\"), EXECUTE(command=\"cargo test\", summary=\"Run the tests\")), all run at the same time, and the result has each call's. It isn't Python: nothing but the calls runs."
         }
         _ => "A tool this machine runs.",
     }

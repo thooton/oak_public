@@ -1606,6 +1606,41 @@ fn calls_start_while_the_reply_streams() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A call of Quick's snippet (`quick::calls`) runs in the reply's batch
+/// as any model's call does, and what it returns goes to the Quick turn
+/// waiting for it.
+#[test]
+fn a_quick_snippets_call_reaches_the_turn_waiting_for_it() {
+    let dir = std::env::temp_dir().join(format!("oak-quick-oak-call-{}", api::now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "hello from oak\n").unwrap();
+    let (w, s) = idle_worker(
+        "quick-oak-call",
+        Conversation {
+            folder: dir.clone(),
+            ..Default::default()
+        },
+    );
+    s.conv
+        .lock()
+        .unwrap()
+        .messages
+        .push(json!({"role": "user", "content": [oak::text("go")]}));
+    let rx = crate::quick::turn::wait_for_result("q1_oak0");
+    std::thread::scope(|scope| {
+        let mut b = Batch::new(&w, scope);
+        b.add(json!({"type": "tool_call", "id": "q1_oak0", "name": "READ", "input": {"path": "a.txt"}}));
+        b.pump(false, oak::stop::TOOL_CALLS);
+        let r = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the turn gets the result");
+        assert_eq!(r["call_id"], "q1_oak0");
+        assert_eq!(r["is_error"], false);
+        assert!(r.to_string().contains("hello from oak"), "{r}");
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The first request puts the identity, instructions and tools lines at
 /// the top, folding in the instruction files' line, each opening to what
 /// was sent.

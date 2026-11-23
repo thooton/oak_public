@@ -653,6 +653,9 @@ impl Worker {
         }
         let (rx, thread) = self.send_request();
         let quick = self.quick_thread();
+        // The Oak calls of Quick's snippets come in this reply, for its batch
+        // to run (`quick::turn::run_oak_alive`).
+        let _oak_calls = quick.as_deref().map(crate::quick::turn::Runner::new);
         let steer = self.steers_to();
         self.set(|l| {
             l.blocks.clear();

@@ -1632,6 +1632,8 @@ impl<'scope, 'env> Batch<'scope, 'env> {
                 )
             });
             w.deliver(r.clone());
+            // A Quick turn may be waiting for it (a call of Quick's snippet).
+            crate::quick::turn::ran(&r);
             let _ = done.send(i);
             r
         }));

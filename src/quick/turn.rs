@@ -19,6 +19,78 @@ type Threads = std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<St
 /// turn runs and shows only its own thread's calls (`owner`).
 static LIVE: Threads = std::sync::LazyLock::new(Default::default);
 
+/// The threads whose conversation's own agent is reading the turn's reply,
+/// with how many, so the Oak calls a snippet makes go to it to be run
+/// (`run_oak_alive`): while a `Runner` for the thread lives.
+static RUNNERS: Threads = std::sync::LazyLock::new(Default::default);
+
+/// The Oak calls a turn handed its conversation's agent and waits for, by
+/// call id: what the agent returns for one goes there (`ran`).
+static WAITERS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<Value>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The conversation's own agent reads `thread`'s turn, and runs the Oak
+/// calls of Quick's snippets in it, while this lives.
+pub(crate) struct Runner(String);
+
+impl Runner {
+    pub(crate) fn new(thread: &str) -> Runner {
+        *RUNNERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(thread.to_string())
+            .or_default() += 1;
+        Runner(thread.to_string())
+    }
+}
+
+impl Drop for Runner {
+    fn drop(&mut self) {
+        let mut r = RUNNERS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = r.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                r.remove(&self.0);
+            }
+        }
+    }
+}
+
+fn has_runner(thread: &str) -> bool {
+    RUNNERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(thread)
+}
+
+/// Oak's agent ran a call (`r`, its `tool_result` block): a turn waiting for
+/// it (`run_oak_alive`) gets it. Every call any conversation runs comes
+/// here; only those a turn waits for are looked at.
+pub(crate) fn ran(r: &Value) {
+    let Some(id) = r["call_id"].as_str() else {
+        return;
+    };
+    let waiter = WAITERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(id);
+    if let Some(tx) = waiter {
+        let _ = tx.send(r.clone());
+    }
+}
+
+/// Waits, as a turn does, for what Oak's agent returns for call `id`.
+#[cfg(test)]
+pub(crate) fn wait_for_result(id: &str) -> std::sync::mpsc::Receiver<Value> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    WAITERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.to_string(), tx);
+    rx
+}
+
 /// Calls of threads no turn here is reading: the first turn to see one runs
 /// it, once.
 static CLAIMED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -774,6 +846,7 @@ fn drive(d: Drive, tx: Sender<Sse>) {
         ctl,
     } = d;
     let say = |text: &str, id: &str| steer_message(&body, text, id, &thread, m, outpost.as_deref());
+    turn.oak_tools = oak_tools(&body);
     loop {
         match pump(
             &mut sock,
@@ -1028,7 +1101,8 @@ fn pump(
                 let reply = match calls.reply_for(&call, &key) {
                     Some(reply) => reply,
                     None => {
-                        let result = run_tool_alive(sock, ctl, &name, &args, folder)?;
+                        let (result, shown) =
+                            run_call(sock, ctl, tx, turn, &call, &name, &args, folder, foreign)?;
                         if std::env::var("OAK_QUICK_DEBUG").is_ok() {
                             eprintln!(
                                 "TOOL {name} {args} -> {}",
@@ -1055,8 +1129,9 @@ fn pump(
                             // Another thread's call: answered, not shown here.
                             calls.mark_foreign(&call);
                         } else {
-                            // The call's block ends with what it returned here.
-                            finished = turn.finished_call(&call, &result);
+                            // The call's block ends with what it returned here
+                            // (a snippet's Oak calls show their own results).
+                            finished = turn.finished_call(&call, shown.as_ref().unwrap_or(&result));
                         }
                         reply
                     }
@@ -1126,6 +1201,209 @@ fn pump(
             _ => {}
         }
     }
+}
+
+/// The names Quick calls this machine's Python by, which run Oak's tools
+/// (`crate::quick::calls`).
+fn is_snippet(name: &str) -> bool {
+    matches!(
+        name,
+        "run_python_outpost_local"
+            | "run_python_outpost_local_with_write"
+            | "run_python_on_device"
+            | "run_python_on_device_with_write"
+    )
+}
+
+/// A snippet's code, under whichever name its call gives it.
+fn snippet_code(args: &Value) -> &str {
+    args["code"]
+        .as_str()
+        .or(args["script"].as_str())
+        .or(args["source"].as_str())
+        .unwrap_or("")
+}
+
+/// What a tool returned, or why it failed.
+type ToolResult = Result<String, String>;
+
+/// Runs one of Quick's calls: a snippet's Oak calls through the
+/// conversation's own agent while it reads this turn (`run_oak_alive`), and
+/// any other call here (`run_tool_alive`; a snippet too, when no agent reads
+/// the turn: `run_oak_direct`). With it, what the transcript shows as the
+/// call's result when that isn't the result itself (the Oak calls are
+/// blocks of their own, with their own results).
+#[allow(clippy::too_many_arguments)]
+fn run_call(
+    sock: &mut Socket,
+    ctl: &Arc<TurnCtl>,
+    tx: &Sender<Sse>,
+    turn: &mut Turn,
+    call: &str,
+    name: &str,
+    args: &Value,
+    folder: &std::path::Path,
+    foreign: bool,
+) -> Result<(ToolResult, Option<ToolResult>), String> {
+    if is_snippet(name) && !foreign && has_runner(&turn.thread) {
+        let oak = match crate::quick::calls::snippet(snippet_code(args), &turn.oak_tools) {
+            Ok(oak) => oak,
+            Err(e) => return Ok((Err(e), None)),
+        };
+        let result = run_oak_alive(sock, ctl, tx, turn, call, &oak)?;
+        let names: Vec<&str> = oak.iter().map(|c| c.name.as_str()).collect();
+        let shown = format!(
+            "Ran {} through Oak ({} below).",
+            names.join(", "),
+            if oak.len() == 1 { "its result is" } else { "their results are" }
+        );
+        return Ok((result, Some(Ok(shown))));
+    }
+    Ok((run_tool_alive(sock, ctl, name, args, folder)?, None))
+}
+
+/// Runs a snippet's Oak calls (`oak`) through the conversation's own agent,
+/// which runs them as it runs any model's calls: each is a block of the
+/// reply (`Turn::oak_call`), so Oak shows, runs and tracks it as its own,
+/// all at once (those on a file one writes in order). The turn waits for
+/// their results (`ran`), keeping the socket read meanwhile, and Quick gets
+/// them all in one answer (`calls::answer`).
+fn run_oak_alive(
+    sock: &mut Socket,
+    ctl: &Arc<TurnCtl>,
+    tx: &Sender<Sse>,
+    turn: &mut Turn,
+    call: &str,
+    oak: &[crate::quick::calls::OakCall],
+) -> Result<Result<String, String>, String> {
+    let (rtx, rrx) = std::sync::mpsc::channel::<Value>();
+    // Ids any provider takes, should the conversation move to another one.
+    let base: String = call
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let ids: Vec<String> = (0..oak.len()).map(|k| format!("{base}_oak{k}")).collect();
+    {
+        let mut w = WAITERS.lock().unwrap_or_else(|e| e.into_inner());
+        for id in &ids {
+            w.insert(id.clone(), rtx.clone());
+        }
+    }
+    drop(rtx);
+    let forget = || {
+        let mut w = WAITERS.lock().unwrap_or_else(|e| e.into_inner());
+        for id in &ids {
+            w.remove(id);
+        }
+    };
+    for (id, c) in ids.iter().zip(oak) {
+        for ev in turn.oak_call(id, &c.name, &c.input) {
+            if tx.send(Sse::Event(ev)).is_err() {
+                forget();
+                return Ok(Err("Oak stopped reading the turn before the calls ran.".into()));
+            }
+        }
+    }
+    let mut got: std::collections::HashMap<String, Value> = Default::default();
+    let mut aborted_at: Option<std::time::Instant> = None;
+    let mut why = "the turn ended";
+    while got.len() < ids.len() {
+        match rrx.recv_timeout(Duration::from_millis(20)) {
+            Ok(r) => {
+                if let Some(id) = r["call_id"].as_str() {
+                    got.insert(id.to_string(), r.clone());
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(kind) = ctl.aborted() {
+                    let since = *aborted_at.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= Duration::from_millis(300) {
+                        why = match kind {
+                            StopKind::Interrupt => "the user interrupted the turn",
+                            StopKind::Pause => "the user paused the session (ultrapause)",
+                        };
+                        break;
+                    }
+                    let _ = sock.keep_alive(Duration::from_millis(20));
+                    continue;
+                }
+                // The agent stopped reading the turn: nothing more will run.
+                if !has_runner(&turn.thread) {
+                    why = "Oak's agent stopped reading the turn";
+                    break;
+                }
+                if !sock.keep_alive(Duration::from_millis(100)) {
+                    forget();
+                    return Err("Quick closed the socket while Oak's calls ran.".into());
+                }
+            }
+        }
+    }
+    forget();
+    let results: Vec<Result<String, String>> = ids
+        .iter()
+        .map(|id| match got.get(id) {
+            Some(r) => crate::quick::calls::result_text(r),
+            None => Err(format!("It didn't finish: {why}.")),
+        })
+        .collect();
+    Ok(crate::quick::calls::answer(oak, &results))
+}
+
+/// A snippet's Oak calls run here, for a turn no conversation's agent reads
+/// (another thread's call, a test): those Oak runs without a session (READ,
+/// WRITE, EDIT, EXECUTE, SEARCH and FETCH), all at once, each file's in
+/// order.
+fn run_oak_direct(args: &Value, folder: &std::path::Path) -> Result<String, String> {
+    let tools = crate::tools::definitions_with_kits(false, false, false, &[]);
+    let oak = crate::quick::calls::snippet(snippet_code(args), &tools)?;
+    let ctl = CURRENT_CTL.with(|c| c.borrow().clone());
+    // The calls on one file go one after another, in order; the rest at once.
+    let mut groups: Vec<(Option<String>, Vec<usize>)> = vec![];
+    for (k, c) in oak.iter().enumerate() {
+        let path = c.input["path"]
+            .as_str()
+            .map(|p| resolve(folder, p).to_string_lossy().to_lowercase());
+        match groups
+            .iter_mut()
+            .find(|g| path.is_some() && g.0 == path)
+        {
+            Some(g) => g.1.push(k),
+            None => groups.push((path, vec![k])),
+        }
+    }
+    let results: Vec<Mutex<Option<Result<String, String>>>> =
+        (0..oak.len()).map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for (_, ks) in &groups {
+            let (ctl, oak, results) = (ctl.clone(), &oak, &results);
+            s.spawn(move || {
+                CURRENT_CTL.with(|cell| *cell.borrow_mut() = ctl);
+                for &k in ks {
+                    let c = &oak[k];
+                    let r = match c.name.as_str() {
+                        "READ" | "WRITE" | "EDIT" | "SEARCH" | "FETCH" | "EXECUTE" => {
+                            run_tool(&c.name, &c.input, folder)
+                        }
+                        other => Err(format!(
+                            "{other} runs only in the conversation's own turn in Oak; here READ, WRITE, EDIT, EXECUTE, SEARCH and FETCH run."
+                        )),
+                    };
+                    *results[k].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                }
+            });
+        }
+    });
+    let results: Vec<Result<String, String>> = results
+        .into_iter()
+        .map(|m| {
+            m.into_inner()
+                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|| Err("It didn't run.".into()))
+        })
+        .collect();
+    crate::quick::calls::answer(&oak, &results)
 }
 
 /// Runs a tool call on a thread of its own and keeps the socket read while
@@ -1549,12 +1827,12 @@ fn run_tool(name: &str, args: &Value, folder: &std::path::Path) -> Result<String
                 .to_string();
             execute(&json!({"command": cmd}), folder)
         }
-        // Quick's own coding tool: Python in the conversation's folder, which
-        // is how its agent runs shell commands (`subprocess`) too.
-        "run_python"
-        | "python"
-        | "run_python_outpost_local"
-        | "run_python_outpost_local_with_write" => run_python(args, folder),
+        // This machine's Python runs Oak's tools (`crate::quick::calls`):
+        // here when no conversation's agent reads the turn (`run_call`).
+        n if is_snippet(n) => run_oak_direct(args, folder),
+        // Quick's own coding tool by its other names: Python in the
+        // conversation's folder.
+        "run_python" | "python" => run_python(args, folder),
         // The names the outpost declares (`outpost::TOOLS`), so a call made
         // against this machine's registration runs here too.
         "file_matches" => {
@@ -2824,6 +3102,41 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no conversation's agent reading the turn, a snippet's Oak calls
+    /// run here, at once, a file's in order, and Quick gets each result.
+    #[test]
+    fn a_snippet_runs_oaks_calls_here_when_no_agent_reads_the_turn() {
+        let dir = std::env::temp_dir().join(format!("oak-quick-snippet-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let code = "WRITE(path='a.txt', content='one\\ntwo\\n')\nREAD(path='a.txt')\nREAD('missing.txt')";
+        let out = run_tool("run_python_outpost_local", &json!({"code": code}), &dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.starts_with("[1/3] WRITE(path='a.txt', content='one\\ntwo\\n')\n"), "{out}");
+        let read = out.split("[2/3] READ(path='a.txt')\n").nth(1).unwrap_or("");
+        assert!(read.contains("one") && read.contains("two"), "the read follows the write: {out}");
+        assert!(out.contains("[3/3] READ('missing.txt')\nError: "), "{out}");
+        let bad = run_tool("run_python_outpost_local", &json!({"code": "import os"}), &dir).unwrap_err();
+        assert!(bad.contains("Oak tool calls only"), "{bad}");
+    }
+
+    /// What Oak's agent returns for a call a turn waits on goes to that turn.
+    #[test]
+    fn a_result_goes_to_the_turn_waiting_for_it() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        WAITERS.lock().unwrap().insert("w1_oak0".into(), tx);
+        ran(&json!({"type": "tool_result", "call_id": "other", "content": "x"}));
+        ran(&json!({"type": "tool_result", "call_id": "w1_oak0", "content": "done"}));
+        assert_eq!(rx.try_recv().unwrap()["content"], "done");
+        assert!(rx.try_recv().is_err());
+        assert!(!WAITERS.lock().unwrap().contains_key("w1_oak0"));
+        let r = Runner::new("oak-test-runner");
+        let r2 = Runner::new("oak-test-runner");
+        drop(r);
+        assert!(has_runner("oak-test-runner"));
+        drop(r2);
+        assert!(!has_runner("oak-test-runner"));
     }
 
     #[test]

@@ -23,7 +23,11 @@
 //! `/outposts/<device>/…`, not the user's folder, so Oak answers every call
 //! itself, in the conversation's working folder, with the same tools it runs
 //! for every other model (`crate::agent::tools`). That is why Quick works on
-//! the real project rather than a copy of it.
+//! the real project rather than a copy of it. Its device Python tool runs
+//! Oak's own tools: its code is Oak calls written as Python calls
+//! (`calls`), which the conversation's agent runs as it runs any model's,
+//! and each message tells Quick so, with Oak's instructions and tool
+//! definitions (`oak_preface`).
 //!
 //! Wire details are Quick's own: frames are JSON inside a JSON envelope with
 //! the body base64'd (`rawInputEvent`), and the server answers in AWS
@@ -39,6 +43,7 @@ use std::sync::LazyLock;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+pub(crate) mod calls;
 #[cfg(test)]
 mod live_test;
 #[cfg(test)]
@@ -1118,14 +1123,81 @@ pub fn unwrap_frame(payload: &[u8]) -> Option<Value> {
 
 // ---------------------------------------------------------------- the request
 
-/// Prepended to user messages sent to Quick so its agent runs normal CLI
-/// commands through `subprocess` (or uses `ripgrep`, `fdfind`, `folder_list`)
-/// instead of writing long Python scripts to walk directories and files.
-pub(crate) const PYTHON_DIRECTIVE: &str = "[Directive: Do not run long Python scripts to walk through or search files (for example with os.walk or custom file-scanning loops). Instead, run normal commands through subprocess (such as rg, git, dir, ls, findstr) or use the ripgrep, fdfind, and folder_list tools directly.]";
+/// What a message to Quick opens with once the thread has Oak's briefing
+/// as it is now (`oak_preface`).
+pub(crate) const OAK_REMINDER: &str = "[Oak, on this device: your device Python tool (run_python_on_device, with or without write) runs Oak's tool calls only, as Oak's notes at the start of this conversation describe: e.g. READ(path=\"src/main.rs\") and EXECUTE(command=\"cargo test\", summary=\"Run the tests\") on lines of their own, run at the same time.]";
+
+/// The briefing each thread was sent last (a hash of it), by thread.
+static BRIEFED: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    LazyLock::new(Default::default);
+
+/// The tools Oak offers Quick: the request's (the conversation's, with the
+/// kits it loaded), or a fresh session's when it carries none; not those a
+/// snippet can't call (`calls::offered`).
+pub(crate) fn oak_tools(r: &Request) -> Vec<Value> {
+    let tools = if r.tools.is_empty() {
+        crate::tools::definitions_with_kits(false, false, false, &[])
+    } else {
+        r.tools.clone()
+    };
+    tools
+        .into_iter()
+        .filter(|t| t["name"].as_str().is_some_and(calls::offered))
+        .collect()
+}
+
+/// What Quick is told about this device: its Python tool runs Oak's tool
+/// calls (`calls`), and Oak's own system prompt (the request's, as every
+/// other model gets it) and tool definitions.
+fn briefing(r: &Request) -> String {
+    let mut tools = String::new();
+    for t in oak_tools(r) {
+        tools.push_str(&format!(
+            "\n### {}\n{}\nInput: {}\n",
+            t["name"].as_str().unwrap_or(""),
+            t["description"].as_str().unwrap_or("").trim(),
+            t["input_schema"]
+        ));
+    }
+    let system = r.system.trim();
+    let instructions = if system.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nOak's own instructions for working here, as it gives them to every model it runs (where they say tool calls in one reply run at the same time, for you that is the calls of one snippet):\n<oak_instructions>\n{system}\n</oak_instructions>"
+        )
+    };
+    format!(
+        "[Oak, on this device]\nThis device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). ASK isn't available this way: ask the user in your reply. Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's.{instructions}\n\nOak's tools:\n<oak_tools>{tools}</oak_tools>\n[End of Oak's notes. The user's message follows.]"
+    )
+}
+
+/// What a message on `thread` opens with: Oak's briefing when the thread
+/// hasn't had it as it is now (its first message since Oak started, or the
+/// prompt or tools changed: notes, kits, the folder), else a reminder.
+fn oak_preface(r: &Request, thread: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let full = briefing(r);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    full.hash(&mut h);
+    let h = h.finish();
+    let mut sent = BRIEFED.lock().unwrap_or_else(|e| e.into_inner());
+    if sent.get(thread) == Some(&h) {
+        return OAK_REMINDER.into();
+    }
+    sent.insert(thread.to_string(), h);
+    full
+}
 
 /// The `user_message` frame for Oak request `r` on thread `thread`: the
 /// newest user turn, since Quick keeps the thread's history.
 fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> Value {
+    user_message_as(r, thread, m, outpost, true)
+}
+
+/// `user_message`, opened with Oak's briefing where the thread needs it
+/// (`brief`), else with the reminder.
+fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, brief: bool) -> Value {
     let newest = newest_user_text(r);
     let text = if r
         .instruction
@@ -1133,8 +1205,10 @@ fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> 
         .is_some_and(|i| !i.trim().is_empty())
     {
         newest
+    } else if brief {
+        format!("{}\n\n{newest}", oak_preface(r, thread))
     } else {
-        format!("{PYTHON_DIRECTIVE}\n\n{newest}")
+        format!("{OAK_REMINDER}\n\n{newest}")
     };
     let trace = hex_uuid();
     let mut payload = json!({
@@ -1245,7 +1319,8 @@ pub(crate) fn steer_message(
     let mut said = r.clone();
     said.messages = vec![json!({"role": "user", "content": [{"type": "text", "text": text}]})];
     said.instruction = None;
-    let mut v = user_message(&said, thread, m, outpost);
+    // (Mid-turn: the turn's own message had the briefing.)
+    let mut v = user_message_as(&said, thread, m, outpost, false);
     v["payload"]["mid_turn"] = json!(true);
     v["payload"]["message_id"] = json!(id);
     v
@@ -1294,6 +1369,9 @@ pub(crate) struct Turn {
     pub model: String,
     /// A tool Oak must run: (call id, name, input).
     pub calls: Vec<(String, String, Value)>,
+    /// The tools Oak offers Quick in this turn (`oak_tools`), which a
+    /// snippet's calls are matched to.
+    pub(crate) oak_tools: Vec<Value>,
     started: bool,
     /// The text block was announced to Oak (`Event::Block`), so its deltas
     /// have a block to land in.
@@ -1901,6 +1979,30 @@ impl Turn {
         text
     }
 
+    /// A call of Oak's own tools that Quick's agent made through its device
+    /// Python (`calls`): a block of its own at the reply's end, whole, with
+    /// no result, so Oak's agent runs it as it runs any model's call (and
+    /// the turn waits for what it returns: `turn::ran`).
+    pub(crate) fn oak_call(&mut self, id: &str, name: &str, input: &Value) -> Vec<Event> {
+        let mut out = vec![];
+        if let Some(t) = self.thinking_at.take() {
+            out.push(Event::BlockEnd { index: t });
+        }
+        let i = self.blocks.len();
+        self.blocks
+            .push(json!({"type": "tool_call", "id": id, "name": name, "input": input}));
+        out.push(Event::Block {
+            index: i,
+            block: json!({"type": "tool_call", "id": id, "name": name, "input": {}}),
+        });
+        out.push(Event::Input {
+            index: i,
+            json: input.to_string(),
+        });
+        out.push(Event::BlockEnd { index: i });
+        out
+    }
+
     /// Oak ran call `id` (`result`: what it returned, or why it failed): its
     /// block ends, with the result, which goes in the transcript as the
     /// call's (the agent doesn't run it again).
@@ -2161,7 +2263,7 @@ mod tests {
         assert_eq!(v["type"], "user_message");
         assert_eq!(
             v["payload"]["text"],
-            format!("{PYTHON_DIRECTIVE}\n\nNO TESTING")
+            format!("{OAK_REMINDER}\n\nNO TESTING")
         );
         assert_eq!(v["payload"]["mid_turn"], true);
         assert_eq!(v["payload"]["message_id"], "msg-87fa24c3");
@@ -2169,22 +2271,49 @@ mod tests {
         assert_eq!(v["payload"]["outpostId"], "dev");
     }
 
+    /// Quick is told once how this device's Python tool runs Oak's tools,
+    /// with Oak's prompt and tools, then reminded, and told again when they
+    /// change.
     #[test]
-    fn user_message_prepends_python_subprocess_directive() {
+    fn user_message_tells_quick_how_to_call_oaks_tools() {
         let m = model("smart").unwrap();
-        let r = Request {
+        let thread = "oak-test-briefing";
+        let mut r = Request {
+            system: "You are Oak.".into(),
+            tools: vec![
+                json!({"name": "READ", "description": "Read a file.", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}),
+                json!({"name": "ASK", "description": "Ask the user.", "input_schema": {"type": "object", "properties": {}}}),
+            ],
             messages: vec![
                 json!({"role": "user", "content": [{"type": "text", "text": "find all todo comments"}]}),
             ],
             ..Default::default()
         };
-        let v = user_message(&r, "th", m, Some("dev"));
-        let sent = v["payload"]["text"].as_str().unwrap();
-        assert!(sent.starts_with(PYTHON_DIRECTIVE), "{sent}");
-        assert!(
-            sent.contains("subprocess") && sent.ends_with("\n\nfind all todo comments"),
-            "{sent}"
-        );
+        let sent = |r: &Request| user_message(r, thread, m, Some("dev"))["payload"]["text"].as_str().unwrap().to_string();
+        let first = sent(&r);
+        assert!(first.starts_with("[Oak, on this device]"), "{first}");
+        assert!(first.contains("<oak_instructions>\nYou are Oak.\n</oak_instructions>"), "{first}");
+        assert!(first.contains("### READ\nRead a file.\nInput: {"), "{first}");
+        assert!(!first.contains("### ASK"), "ASK can't be called through a snippet: {first}");
+        assert!(first.ends_with("[End of Oak's notes. The user's message follows.]\n\nfind all todo comments"), "{first}");
+        assert_eq!(sent(&r), format!("{OAK_REMINDER}\n\nfind all todo comments"));
+        r.system = "You are Oak, with a note.".into();
+        assert!(sent(&r).starts_with("[Oak, on this device]"), "a changed prompt is sent again");
+        // A summary sends its instruction alone.
+        r.instruction = Some("Summarize.".into());
+        assert_eq!(sent(&r), "Summarize.");
+    }
+
+    /// Oak's calls through Quick's device Python are blocks of their own,
+    /// whole, that Oak's agent runs.
+    #[test]
+    fn an_oak_call_is_a_whole_block_at_the_end() {
+        let mut t = Turn::for_message("th-oak-call", "");
+        let ev = t.oak_call("c1_oak0", "READ", &json!({"path": "a.rs"}));
+        assert!(matches!(&ev[0], Event::Block { index: 0, block } if block["name"] == "READ" && block["input"] == json!({})));
+        assert!(matches!(&ev[1], Event::Input { index: 0, json } if json == r#"{"path":"a.rs"}"#));
+        assert!(matches!(ev[2], Event::BlockEnd { index: 0 }));
+        assert_eq!(t.blocks()[0]["input"]["path"], "a.rs");
     }
 
     #[test]
