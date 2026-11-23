@@ -228,6 +228,9 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             (None, dy) => format!("{} px", dy.unwrap_or(0.0)),
         },
         "BROWSER_UPLOAD" => input["paths"].as_array().into_iter().flatten().filter_map(|p| p.as_str()).collect::<Vec<_>>().join(", "),
+        // A LOAD that loads a kit (one calling a kit's tool is shown as that
+        // tool): the kit it loads.
+        "LOAD" => s("name").trim().to_string(),
         "AGENT_NEW" => s("name"),
         "AGENT_SEND" => {
             // A subagent's names it `id`; an Oak tab agent's names another `agent`.
@@ -2757,6 +2760,7 @@ mod tests {
         assert_eq!(shown(&streaming(r#"{"name": "AGENT", "input": {"action": "send", "message": "Wo"#)), "AGENT send");
         assert_eq!(shown(&streaming(r#"{"name": "AGENT"#)), "LOAD");
         assert_eq!(shown(&streaming(r#"{"name": "AGENT"}"#)), "LOAD");
+        assert_eq!(tool_summary("LOAD", &serde_json::json!({"name": "BROWSER"})), "BROWSER", "a LOAD names the kit it loads");
         let load = Value::Object(partial_input(r#"{"name": "AGENT", "input": {"action": "send", "message": "Work"#));
         let (name, input) = tools::canonical_cow("LOAD", &load);
         assert_eq!(tool_summary(&name, &input), tool_summary("AGENT_SEND", &serde_json::json!({"message": "Work"})));
