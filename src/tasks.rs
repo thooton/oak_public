@@ -1539,10 +1539,11 @@ mod tests {
         let q = t2.take_revived().pop().unwrap().1;
         assert!(q.exit().is_none() && q.job != 0);
         let bash = find_running(&r).unwrap();
-        let mut copy: HANDLE = std::ptr::null_mut();
-        let still = unsafe { windows_sys::Win32::Foundation::DuplicateHandle(bash as HANDLE, r.held as HANDLE, windows_sys::Win32::System::Threading::GetCurrentProcess(), &mut copy, 0, 0, windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS) };
+        // (Bash may have reused the handle's value since for one of its
+        // own: what counts is that it no longer holds the job.)
+        let still = unsafe { holds_job(bash, r.held as usize, q.job) };
         unsafe { CloseHandle(bash as HANDLE) };
-        assert_eq!(still, 0, "bash's handle was taken back");
+        assert!(!still, "bash's handle was taken back");
         q.kill();
         wait_exit(&q);
         assert_eq!(q.exit(), Some(137));
@@ -1550,6 +1551,23 @@ mod tests {
         // (The first Proc's job handle was closed above.)
         std::mem::forget(p);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whether `held`, a handle value in process `process`, is a handle to
+    /// the job `job` is.
+    #[cfg(windows)]
+    unsafe fn holds_job(process: usize, held: usize, job: usize) -> bool {
+        use windows_sys::Win32::Foundation::{CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        unsafe {
+            let mut copy: HANDLE = std::ptr::null_mut();
+            if DuplicateHandle(process as HANDLE, held as HANDLE, GetCurrentProcess(), &mut copy, 0, 0, DUPLICATE_SAME_ACCESS) == 0 {
+                return false;
+            }
+            let same = CompareObjectHandles(copy, job as HANDLE) != 0;
+            CloseHandle(copy);
+            same
+        }
     }
 
     /// A task found gone after a restart, with no exit code written (the
@@ -1591,9 +1609,8 @@ mod tests {
             assert!(!job.is_null(), "the job is there to open again");
             set_kill_on_close(job as usize, true);
             take_job(bash_handle, held, job as usize);
-            let mut copy: HANDLE = std::ptr::null_mut();
-            let still = windows_sys::Win32::Foundation::DuplicateHandle(bash_handle as HANDLE, held as HANDLE, windows_sys::Win32::System::Threading::GetCurrentProcess(), &mut copy, 0, 0, windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS);
-            assert_eq!(still, 0, "bash's handle is closed");
+            // (Its value may be bash's for something else by now.)
+            assert!(!holds_job(bash_handle, held, job as usize), "bash's handle is closed");
             CloseHandle(bash_handle as HANDLE);
             // Oak's handle is the last: closing it kills the job.
             CloseHandle(job);

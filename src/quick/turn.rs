@@ -1912,8 +1912,14 @@ fn resolve(folder: &std::path::Path, path: &str) -> std::path::PathBuf {
     let real = match after {
         Some(rest) => {
             let without_device = rest.split_once('/').map(|(_, tail)| tail).unwrap_or(rest);
-            // The drive comes back with a leading slash (`/C:/…`).
-            without_device.trim_start_matches('/').to_string()
+            // The drive comes back with a leading slash (`/C:/…`); a Unix
+            // device's path keeps its root (`/outposts/dev/tmp/x` is `/tmp/x`).
+            let t = without_device.trim_start_matches('/');
+            if cfg!(windows) || drive_path(t).is_some() {
+                t.to_string()
+            } else {
+                format!("/{t}")
+            }
         }
         None => p.to_string(),
     };
@@ -2978,9 +2984,11 @@ mod tests {
         );
         let dir = std::env::temp_dir().join(format!("oak-quick-timeout-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let code = "import subprocess, sys, time\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\nprint('started', flush=True)\ntime.sleep(60)";
+        // (Printed first, and with time to spare: Python can take seconds to
+        // start on a busy machine, CI's included.)
+        let code = "import subprocess, sys, time\nprint('started', flush=True)\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\ntime.sleep(60)";
         let start = std::time::Instant::now();
-        let slow = run_python(&json!({"code": code, "timeout": 2}), &dir);
+        let slow = run_python(&json!({"code": code, "timeout": 6}), &dir);
         let took = start.elapsed();
         match slow {
             Err(e) if e.starts_with("Couldn't start Python") => {
@@ -2989,13 +2997,13 @@ mod tests {
                 return;
             }
             Err(e) => assert!(
-                e.contains("ran past its 2s") && e.contains("started"),
+                e.contains("ran past its 6s") && e.contains("started"),
                 "{e}"
             ),
             Ok(o) => panic!("a snippet past its time isn't a result: {o}"),
         }
         assert!(
-            took < Duration::from_secs(15),
+            took < Duration::from_secs(25),
             "stopped at its time, not when its pipes closed: {took:?}"
         );
         let start = std::time::Instant::now();
@@ -3077,18 +3085,26 @@ mod tests {
         ] {
             let ctl = Arc::new(TurnCtl::default());
             let ctl2 = ctl.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(150));
+            // Stopped once the snippet has printed (Python can take seconds
+            // to start on a busy machine), and timed from the stop.
+            let marker = dir.join("printed");
+            let _ = std::fs::remove_file(&marker);
+            let seen = marker.clone();
+            let stopped_at = std::thread::spawn(move || {
+                let wait = std::time::Instant::now();
+                while !seen.exists() && wait.elapsed() < Duration::from_secs(60) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
                 ctl2.set_abort(kind);
+                std::time::Instant::now()
             });
-            let start = std::time::Instant::now();
             CURRENT_CTL.with(|c| *c.borrow_mut() = Some(ctl));
             let res = run_python(
-                &json!({"code": "import time\nprint('before', flush=True)\ntime.sleep(60)", "timeout": 60}),
+                &json!({"code": "import time, pathlib\nprint('before', flush=True)\npathlib.Path('printed').write_text('1')\ntime.sleep(60)", "timeout": 90}),
                 &dir,
             );
             CURRENT_CTL.with(|c| *c.borrow_mut() = None);
-            let took = start.elapsed();
+            let took = stopped_at.join().unwrap().elapsed();
             match res {
                 Err(e) if e.starts_with("Couldn't start Python") => {
                     let _ = std::fs::remove_dir_all(&dir);
@@ -3096,7 +3112,7 @@ mod tests {
                 }
                 Err(e) => {
                     assert!(e.contains(expected) && e.contains("before"), "{e}");
-                    assert!(took < Duration::from_secs(5), "aborted promptly: {took:?}");
+                    assert!(took < Duration::from_secs(5), "stopped promptly: {took:?}");
                 }
                 Ok(o) => panic!("expected abort error, got: {o}"),
             }
@@ -3119,6 +3135,21 @@ mod tests {
         assert!(out.contains("[3/3] READ('missing.txt')\nError: "), "{out}");
         let bad = run_tool("run_python_outpost_local", &json!({"code": "import os"}), &dir).unwrap_err();
         assert!(bad.contains("Oak tool calls only"), "{bad}");
+    }
+
+    /// A device's path is the path on the device: a drive's on Windows, and
+    /// one from the root on Linux.
+    #[test]
+    fn a_device_path_is_the_real_path() {
+        let folder = std::path::Path::new(if cfg!(windows) { "C:/work" } else { "/work" });
+        assert_eq!(resolve(folder, "/outposts/DESKTOP/C:/Users/x"), std::path::PathBuf::from("C:/Users/x"));
+        assert_eq!(resolve(folder, "/outposts/DESKTOP//C:/Users/x"), std::path::PathBuf::from("C:/Users/x"));
+        assert_eq!(resolve(folder, "artifacts/a.txt"), folder.join("a.txt"));
+        assert_eq!(resolve(folder, "src/a.rs"), folder.join("src/a.rs"));
+        if !cfg!(windows) {
+            assert_eq!(resolve(folder, "/outposts/box/tmp/x/src"), std::path::PathBuf::from("/tmp/x/src"));
+            assert_eq!(resolve(folder, "/outposts/box//tmp/x"), std::path::PathBuf::from("/tmp/x"));
+        }
     }
 
     /// What Oak's agent returns for a call a turn waits on goes to that turn.
