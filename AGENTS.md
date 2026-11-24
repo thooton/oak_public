@@ -239,6 +239,13 @@ plugin can draw one row there. Only hooks that lay out or paint a row take space
 is clipped to the corner so it cannot move or cover the rest of the composer. The rows sit in the
 composer row's height, right above the gear; when there are more than fit, the message box grows
 taller with them, so its bottom always stays level with the buttons, the gear and the boxes beside it.
+Inside the message box's top right corner (the main one and a side chat's) plugins put buttons
+(`Hooks::composer_button`, `plugins::composer_buttons`): a 22-point square each, right to left,
+taken only by a hook that drew; the box's text keeps a right margin as wide as they were last
+drawn, so it wraps before them. `App::insert_input` (`app_insert_input`, `widgets::insert_text`)
+puts text at that box's cursor over what is selected (at the end when it has no cursor yet),
+spaced from the text either side when asked (not before closing punctuation), then gives the box
+the keyboard with the cursor after it.
 Home's Plugins tab (`src/plugins_view.rs`), like a game's mod manager, lists every library found
 with its name, version and description (or why it isn't running) and a switch; a click on a row
 flips it, and Enable all, Disable all and Open folder (Oak's `plugins` folder) sit above the list.

@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 10
+#define OAK_API_VERSION 11
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -673,6 +673,12 @@ struct OakHooks {
      * there (the text's rows, the boxes over it) is `app_chat_scene`.
      */
     OakBody chat_scene;
+    /* Draws inside a message box's top right corner (version 11): one
+     * button, in a square of 22 points (a microphone, say); each
+     * plugin's goes left of the one before, and the box's text keeps
+     * clear of them. `app_insert_input` puts text at its cursor.
+     */
+    OakBody composer_button;
 };
 
 /* A page (`oak_page`): a column in the middle of what scrolls, its
@@ -1323,6 +1329,10 @@ struct OakProvider {
  * message box), until another tab or Home is picked (version 5).
  */
 #define OAK_HOME_TAB_PAGE 4u
+/* `app_insert_input`: with a space between the text and what is
+ * either side of it where there is none (version 11).
+ */
+#define OAK_INSERT_SPACED 1u
 /* What something says by its color: badges, notices, progress,
  * stats, toasts, an item's dot (`oak_tone_color`).
  */
@@ -2136,6 +2146,13 @@ struct OakApi {
 
     /* Models for conversations, served by the plugin. */
     void (*add_provider)(const OakProvider *part);
+
+    /* Puts `text` in the message box at its cursor, as if typed there
+     * (over what is selected; at the end when it has no cursor yet), and
+     * gives the box the keyboard with the cursor after it.
+     * `OAK_INSERT_SPACED`: spaced from the text either side.
+     */
+    void (*app_insert_input)(OakStr text, uint32_t flags);
 };
 
 /* Text from a C string, and from a literal. */

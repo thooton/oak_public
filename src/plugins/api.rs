@@ -741,6 +741,21 @@ impl HostApi for Oak {
         app(|a| a.input = str_of(text).to_string());
     }
 
+    unsafe extern "C" fn app_insert_input(text: OakStr, flags: u32) {
+        let text = str_of(text);
+        let Some(ctx) = super::context() else { return };
+        let id = super::input_box().unwrap_or_else(|| egui::Id::unique("composer"));
+        app(|a| {
+            let at = egui::TextEdit::load_state(&ctx, id).and_then(|s| s.cursor.char_range());
+            let (cursor, input) = crate::widgets::insert_text(&a.input, at.map(|r| (r.primary.index.0, r.secondary.index.0)), text, flags & OAK_INSERT_SPACED != 0);
+            a.input = input;
+            let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor))));
+            state.store(&ctx, id);
+            ctx.memory_mut(|m| m.request_focus(id));
+        });
+    }
+
     unsafe extern "C" fn app_attachments(out: OakSink, out_user: *mut c_void) {
         let list = app(|a| Value::from(a.attachments.clone())).unwrap_or_else(|| json!([]));
         give_text(out, out_user, &list.to_string());

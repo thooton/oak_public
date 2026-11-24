@@ -600,12 +600,13 @@ pub(crate) struct Hooks {
     composer_corner: Option<OakBody>,
     home_scene: Option<OakBody>,
     chat_scene: Option<OakBody>,
+    composer_button: Option<OakBody>,
     user: User,
 }
 
 impl Hooks {
     pub(crate) fn new(d: &OakHooks) -> Hooks {
-        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, composer_corner: d.composer_corner, home_scene: d.home_scene, chat_scene: d.chat_scene, user: User(d.user) }
+        Hooks { started: d.started, frame: d.frame, providers_top: d.providers_top, exiting: d.exiting, composer_corner: d.composer_corner, home_scene: d.home_scene, chat_scene: d.chat_scene, composer_button: d.composer_button, user: User(d.user) }
     }
 
     pub(crate) fn started(&self, _ctx: &egui::Context) {
@@ -633,6 +634,15 @@ impl Hooks {
     /// Whether it draws above a message box's Settings link.
     pub(crate) fn has_composer_corner(&self) -> bool {
         self.composer_corner.is_some()
+    }
+
+    pub(crate) fn composer_button(&self, ui: &mut Ui, app: &mut App) {
+        api::draw(self.composer_button, self.user, ui, app);
+    }
+
+    /// Whether it may draw a button in a message box's top right corner.
+    pub(crate) fn has_composer_button(&self) -> bool {
+        self.composer_button.is_some()
     }
 
     pub(crate) fn home_scene(&self, ui: &mut Ui, app: &mut App) {

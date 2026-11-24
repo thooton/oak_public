@@ -132,6 +132,12 @@ impl App {
                 }
             });
         }
+        // Plugins' buttons sit inside the box's top right corner, and its
+        // text keeps clear of them (as wide as they were last drawn; a
+        // change is laid out again).
+        let buttons_id = Id::unique(("composer-buttons", id));
+        let buttons_w = ui.data(|d| d.get_temp::<f32>(buttons_id)).unwrap_or(0.0);
+        let margin = Margin { right: (10.0 + buttons_w).min(127.0) as i8, ..Margin::same(10) };
         let r = ui.scope_builder(UiBuilder::new().max_rect(Rect::from_x_y_ranges(x, top..=top + max_h)), |ui| {
             let v = ui.visuals();
             let stroke = if focused { v.selection.stroke } else { v.widgets.inactive.bg_stroke };
@@ -145,7 +151,7 @@ impl App {
                         crate::text_menu::add(
                             ui,
                             sending_edit(&mut self.input, id)
-                                .frame(egui::Frame::NONE.inner_margin(Margin::same(10)))
+                                .frame(egui::Frame::NONE.inner_margin(margin))
                                 .min_size(vec2(w, min_h - 2.0))
                                 .desired_width(w)
                                 .hint_text("Type message"),
@@ -154,7 +160,13 @@ impl App {
                     .inner
             })
         });
-        (r.inner.inner, r.inner.response.rect)
+        let rect = r.inner.response.rect;
+        let drawn = plugins::composer_buttons(ui, self, id, rect.right() - 6.0, rect.top() + 6.0);
+        if (drawn - buttons_w).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(buttons_id, drawn));
+            ui.ctx().request_repaint();
+        }
+        (r.inner.inner, rect)
     }
 
     /// The buttons left of the message box, in `rect`: attach, and for a
@@ -1602,7 +1614,7 @@ mod tests {
             Arc::new(plugins::Hooks::new(&OakHooks {
                 size: size_of::<OakHooks>() as u32, flags: 0, user: std::ptr::null_mut(),
                 started: None, frame: None, providers_top: None, exiting: None,
-                composer_corner: Some(body), home_scene: None, chat_scene: None,
+                composer_corner: Some(body), home_scene: None, chat_scene: None, composer_button: None,
             }))
         }
         unsafe extern "C" fn empty(_: *mut c_void, _: *mut OakUi) {}

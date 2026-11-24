@@ -564,3 +564,48 @@ pub fn is_open(ui: &Ui, id: Id, default: bool) -> bool {
 pub fn set_open(ui: &Ui, id: Id, open: bool) {
     ui.data_mut(|d| d.insert_temp(id, open));
 }
+
+/// `text` put into `input` at the cursor `at` (char indices: the cursor
+/// and the other end of what is selected; None: at the end), over what is
+/// selected. `spaced`: with a space between it and the text either side
+/// where there is none (not before punctuation that follows). Gives where
+/// the cursor goes (after it, in chars) and the new text.
+pub fn insert_text(input: &str, at: Option<(usize, usize)>, text: &str, spaced: bool) -> (usize, String) {
+    let len = input.chars().count();
+    let (a, b) = at.unwrap_or((len, len));
+    let (from, to) = (a.min(b).min(len), a.max(b).min(len));
+    let byte = |c: usize| input.char_indices().nth(c).map_or(input.len(), |(i, _)| i);
+    let (before, after) = (&input[..byte(from)], &input[byte(to)..]);
+    let mut put = text.to_string();
+    if spaced && !put.is_empty() {
+        if before.chars().next_back().is_some_and(|c| !c.is_whitespace()) && !put.starts_with(char::is_whitespace) {
+            put.insert(0, ' ');
+        }
+        if after.chars().next().is_some_and(|c| !c.is_whitespace() && !matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'))
+            && !put.ends_with(char::is_whitespace)
+        {
+            put.push(' ');
+        }
+    }
+    (from + put.chars().count(), format!("{before}{put}{after}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::insert_text;
+
+    #[test]
+    fn insert_text_goes_at_the_cursor_spaced_from_its_neighbours() {
+        assert_eq!(insert_text("", None, "Hello there.", true), (12, "Hello there.".into()));
+        assert_eq!(insert_text("Fix it", None, "now", true), (10, "Fix it now".into()));
+        assert_eq!(insert_text("Fix it ", None, "now", true), (10, "Fix it now".into()));
+        // In the middle: spaced on both sides; before punctuation, only before.
+        assert_eq!(insert_text("ab", Some((1, 1)), "x", true), (4, "a x b".into()));
+        assert_eq!(insert_text("Done.", Some((4, 4)), "now", true), (8, "Done now.".into()));
+        // Over a selection (either way round), and unspaced as typed.
+        assert_eq!(insert_text("one two three", Some((7, 4)), "2", false), (5, "one 2 three".into()));
+        assert_eq!(insert_text("héé", Some((1, 1)), "ß", false), (2, "hßéé".into()));
+        // A cursor past the end (the text changed under it) clamps.
+        assert_eq!(insert_text("ab", Some((9, 9)), "c", false), (3, "abc".into()));
+    }
+}

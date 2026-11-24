@@ -770,6 +770,47 @@ pub(crate) fn exiting() {
     }
 }
 
+thread_local! {
+    /// The message box whose buttons are being drawn (`composer_buttons`),
+    /// and the last one that had any: where `app_insert_input` puts text.
+    static INPUT_BOX: std::cell::Cell<Option<eframe::egui::Id>> = const { std::cell::Cell::new(None) };
+}
+
+/// The message box text from plugins goes into (`app_insert_input`).
+pub(crate) fn input_box() -> Option<eframe::egui::Id> {
+    INPUT_BOX.with(|b| b.get())
+}
+
+/// A plugin button's square, in a message box's top right corner.
+pub(crate) const BOX_BUTTON: f32 = 22.0;
+const BOX_BUTTON_GAP: f32 = 4.0;
+
+/// The plugins' buttons inside the message box `id`, right to left from
+/// `right` along `top` (`Hooks::composer_button`). Returns how much of the
+/// box's width they took, gaps included (0: none drew anything).
+pub(crate) fn composer_buttons(ui: &mut eframe::egui::Ui, app: &mut App, id: eframe::egui::Id, right: f32, top: f32) -> f32 {
+    use eframe::egui::{Layout, Rect, Shape, UiBuilder, pos2, vec2};
+    let mut width = 0.0;
+    let layer = ui.layer_id();
+    INPUT_BOX.with(|b| b.set(Some(id)));
+    for (i, hook) in parts().hooks.iter().enumerate().filter(|(_, h)| h.has_composer_button()) {
+        let x = right - width - BOX_BUTTON;
+        let area = Rect::from_min_size(pos2(x, top), vec2(BOX_BUTTON, BOX_BUTTON));
+        let mut cell = ui.new_child(UiBuilder::new().id_salt(("composer-button", id, i)).max_rect(area).layout(Layout::centered_and_justified(eframe::egui::Direction::LeftToRight)));
+        cell.shrink_clip_rect(area);
+        let before = cell.ctx().graphics(|g| g.get(layer).map_or(0, |p| p.next_idx().0));
+        hook.composer_button(&mut cell, app);
+        // (As for the corner's rows: the SDK registers a callback even for
+        // the default no-op, so only one that drew takes a square.)
+        if cell.min_rect().is_positive() || cell.ctx().graphics(|g| g.get(layer).is_some_and(|p| {
+            p.all_entries().skip(before).any(|s| !matches!(s.shape, Shape::Noop))
+        })) {
+            width += BOX_BUTTON + BOX_BUTTON_GAP;
+        }
+    }
+    width
+}
+
 /// Lay out the plugin rows above Settings, down from `top` (the composer
 /// puts them so the last ends a gap above the Settings link). Returns the
 /// vertical space taken, including that gap.

@@ -554,6 +554,17 @@ pub trait App {
     /// The message box's text. What is changed in it reaches the box when
     /// the plugin's call returns, or the next time the `App` is used.
     fn input(&mut self) -> &mut String;
+    /// Puts `text` in the message box at its cursor, as if typed there
+    /// (over what is selected), and gives the box the keyboard; `spaced`:
+    /// with a space between it and the text either side where there is
+    /// none (interface version 11). By default it is added at the end.
+    fn insert_input(&mut self, text: &str, spaced: bool) {
+        let input = self.input();
+        if spaced && !input.is_empty() && !input.ends_with(char::is_whitespace) && !text.starts_with(char::is_whitespace) {
+            input.push(' ');
+        }
+        input.push_str(text);
+    }
     /// What is attached to the message (image and file blocks); changes
     /// reach Oak as `input`'s do.
     fn attachments(&mut self) -> &mut Vec<Value>;
@@ -741,6 +752,12 @@ impl App for Window {
             (text.clone(), text)
         });
         now
+    }
+
+    fn insert_input(&mut self, text: &str, spaced: bool) {
+        // (What the plugin changed goes first; Oak's box is asked again after.)
+        self.settle();
+        unsafe { (api().app_insert_input)(s(text), if spaced { OAK_INSERT_SPACED } else { 0 }) };
     }
 
     fn attachments(&mut self) -> &mut Vec<Value> {

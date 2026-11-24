@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 10;
+pub const OAK_API_VERSION: u32 = 11;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -736,6 +736,11 @@ c_structs! {
         /// shows (`ui` is the transcript's view, clipped to it). What is
         /// there (the text's rows, the boxes over it) is `app_chat_scene`.
         pub chat_scene: Option<OakBody>,
+        /// Draws inside a message box's top right corner (version 11): one
+        /// button, in a square of 22 points (a microphone, say); each
+        /// plugin's goes left of the one before, and the box's text keeps
+        /// clear of them. `app_insert_input` puts text at its cursor.
+        pub composer_button: Option<OakBody>,
     }
 
     /// A page (`oak_page`): a column in the middle of what scrolls, its
@@ -1380,6 +1385,9 @@ c_consts! {
     /// window under the tabs' row, as Settings is shown (no tab lit, no
     /// message box), until another tab or Home is picked (version 5).
     pub const OAK_HOME_TAB_PAGE = 1 << 2;
+    /// `app_insert_input`: with a space between the text and what is
+    /// either side of it where there is none (version 11).
+    pub const OAK_INSERT_SPACED = 1 << 0;
 
     /// What something says by its color: badges, notices, progress,
     /// stats, toasts, an item's dot (`oak_tone_color`).
@@ -2025,6 +2033,14 @@ c_api! {
 
     /// Models for conversations, served by the plugin.
     fn add_provider(part: *const OakProvider);
+
+    // Version 11: the window (UI thread).
+
+    /// Puts `text` in the message box at its cursor, as if typed there
+    /// (over what is selected; at the end when it has no cursor yet), and
+    /// gives the box the keyboard with the cursor after it.
+    /// `OAK_INSERT_SPACED`: spaced from the text either side.
+    fn app_insert_input(text: OakStr, flags: u32);
 }
 
 /// The C header: everything declared above, in C.

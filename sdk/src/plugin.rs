@@ -371,6 +371,11 @@ pub trait Hooks: Send + Sync {
     /// is `App::chat_scene`. Draw in an `Area` of your own to be above the
     /// boxes over the transcript and to take the pointer there.
     fn chat_scene(&self, _ui: &mut Ui, _app: &mut dyn App) {}
+    /// Draws inside a message box's top right corner (interface version
+    /// 11): one button, in a square `ui` of 22 points (a microphone, say).
+    /// Each plugin's goes left of the one before; draw nothing to have no
+    /// button there. `App::insert_input` puts text at the box's cursor.
+    fn composer_button(&self, _ui: &mut Ui, _app: &mut dyn App) {}
     /// Oak is closing, or a reload is stopping this plugin (it was
     /// rebuilt, removed or switched off): end what it started, its threads
     /// first. Its library stays loaded either way.
@@ -755,6 +760,10 @@ unsafe extern "C" fn hooks_chat_scene(user: *mut c_void, ui: *mut OakUi) {
     outer(|| (), || unsafe { part::<Life>(user) }.chat_scene(&mut Ui::raw(ui), &mut Window::default()))
 }
 
+unsafe extern "C" fn hooks_composer_button(user: *mut c_void, ui: *mut OakUi) {
+    outer(|| (), || unsafe { part::<Life>(user) }.composer_button(&mut Ui::raw(ui), &mut Window::default()))
+}
+
 unsafe extern "C" fn hooks_exiting(user: *mut c_void) {
     outer(|| (), || unsafe { part::<Life>(user) }.exiting())
 }
@@ -985,6 +994,7 @@ impl Registrar {
             composer_corner: Some(hooks_composer_corner),
             home_scene: Some(hooks_home_scene),
             chat_scene: Some(hooks_chat_scene),
+            composer_button: Some(hooks_composer_button),
         };
         unsafe { (api().add_hooks)(&d) };
     }
