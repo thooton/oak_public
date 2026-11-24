@@ -3921,3 +3921,102 @@ fn code_mode_conversations_keep_their_own_variables() {
         "{a}\n{b}"
     );
 }
+
+/// /swarm makes a conversation the coordinator (the kit in its first
+/// request, its instructions in the system prompt); members get the worker
+/// instructions and the SWARM tool instead of AGENT; posts reach the
+/// members they name; SWARM wait parks a member; kill is for good; the
+/// monitor posts once when everyone goes quiet; members' turns end
+/// without a report to the coordinator.
+#[test]
+fn swarms_talk_on_their_board() {
+    let (cw, cs) = idle_worker("swarm-coord", Conversation { model: "claude-opus-5-5".into(), ..Default::default() });
+    let coord = cs.conv.lock().unwrap().id.clone();
+    // A chat (or a subagent) can't run one; a conversation can.
+    assert!(swarm::refuses(&Conversation { chat: true, ..Default::default() }).is_some());
+    assert!(swarm::refuses(&Conversation { parent: Some("x".into()), ..Default::default() }).is_some());
+    let (block, mark) = apply_command(&mut cs.conv.lock().unwrap(), Command::Swarm("rewrite the parser".into()));
+    assert!(block.unwrap().to_string().contains("rewrite the parser") && mark.unwrap().0 == MarkKind::Swarm);
+    {
+        let c = cs.conv.lock().unwrap();
+        assert_eq!(c.swarm.as_ref().unwrap().name, "coordinator");
+        assert_eq!(c.prefix.kits, ["SWARM"]);
+    }
+    cs.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    let (r, ..) = cw.request_body();
+    assert!(r.system.contains("# You are the swarm coordinator") && !r.system.contains("one agent in a swarm"));
+    assert!(r.tools.iter().any(|t| t["name"] == "SWARM"));
+
+    // Two members, as SWARM add makes them (without starting them).
+    let member = |name: &str| {
+        let (w, s) = idle_worker(
+            &format!("swarm-{name}"),
+            Conversation {
+                model: "claude-opus-5-5".into(),
+                title: format!("@{name}"),
+                parent: Some(coord.clone()),
+                agent_id: 1,
+                swarm: Some(crate::store::Seat { swarm: coord.clone(), name: name.into(), killed: false }),
+                prefix: crate::prefix::State { kits: vec!["SWARM".into()], ..Default::default() },
+                ..Default::default()
+            },
+        );
+        let id = s.conv.lock().unwrap().id.clone();
+        let sw = crate::swarm::get(&coord);
+        let mut b = sw.lock().unwrap();
+        b.roster.members.push(crate::swarm::Member { name: name.into(), conv: id, added_by: "coordinator".into(), ..Default::default() });
+        b.save();
+        drop(b);
+        (w, s)
+    };
+    let (pw, ps) = member("parser");
+    let (_vw, vs) = member("verifier");
+    ps.conv.lock().unwrap().messages.push(json!({"role": "user", "content": [oak::text("go")]}));
+    let (r, ..) = pw.request_body();
+    assert!(r.system.contains("You are @parser, one agent in a swarm") && !r.system.contains("You are a subagent"));
+    assert!(r.tools.iter().any(|t| t["name"] == "SWARM") && !r.tools.iter().any(|t| t["name"] == "AGENT"));
+
+    // A post reaches whom it names, as a board post.
+    let out = cw.tool("SWARM_POST", &json!({"text": "@parser take src/parse.rs"})).0.unwrap();
+    assert!(out.contains("went to @parser"), "{out}");
+    let inbox = ps.conv.lock().unwrap().inbox.clone();
+    assert_eq!(inbox.len(), 1);
+    assert!(inbox[0].contains("from=\"@coordinator\" type=\"board post\" seq=\"1\""));
+    assert!(vs.conv.lock().unwrap().inbox.is_empty());
+    ps.conv.lock().unwrap().inbox.clear();
+    // Reading; waiting with nothing new parks the member.
+    assert!(pw.tool("SWARM_READ", &json!({})).0.unwrap().contains("#1 @coordinator: @parser take src/parse.rs"));
+    assert!(pw.tool("SWARM_WAIT", &json!({"since": 0})).0.unwrap().starts_with("Not waiting"));
+    assert!(pw.tool("SWARM_WAIT", &json!({"since": 1})).0.unwrap().starts_with("Asleep"));
+    assert!(pw.parked() && !pw.parked());
+    // Its turn ends without a final reply to the coordinator.
+    pw.report_to_parent();
+    assert!(cs.conv.lock().unwrap().inbox.is_empty());
+    // Status lists everyone; names are checked; the title is the coordinator's.
+    let status = cw.tool("SWARM_STATUS", &json!({})).0.unwrap();
+    assert!(status.contains("@coordinator (you)") && status.contains("@parser: waiting") && status.contains("@verifier: waiting"), "{status}");
+    assert!(pw.tool("SWARM_TITLE", &json!({"title": "x"})).0.is_err());
+    assert!(cw.tool("SWARM_TITLE", &json!({"title": "Parser rewrite"})).0.is_ok());
+    assert!(cw.tool("SWARM_ADD", &json!({"name": "parser", "brief": "again"})).0.unwrap_err().contains("taken"));
+    assert!(cw.tool("SWARM_ADD", &json!({"name": "all", "brief": "x"})).0.unwrap_err().contains("reserved"));
+    // A member can't kill one it didn't add.
+    assert!(pw.tool("SWARM_KILL", &json!({"name": "verifier"})).0.unwrap_err().contains("ask @coordinator"));
+
+    // Everyone quiet, the job not done: the monitor posts once.
+    let seq = swarm::check_stall(&coord).expect("a stall post");
+    assert!(cs.conv.lock().unwrap().inbox.last().unwrap().contains("[stall]"));
+    assert_eq!(swarm::check_stall(&coord), None);
+    // Done: it stays quiet.
+    cw.tool("SWARM_POST", &json!({"text": "[done] rewritten"})).0.unwrap();
+    assert_eq!(swarm::check_stall(&coord), None);
+    assert!(seq > 1);
+
+    // Kill: for good; what comes for it is dropped, and the user can't send to it.
+    assert!(cw.tool("SWARM_KILL", &json!({"name": "verifier"})).0.unwrap().contains("Killed @verifier"));
+    assert!(vs.killed_member());
+    cw.tool("SWARM_POST", &json!({"text": "@all wrap up"})).0.unwrap();
+    assert!(vs.conv.lock().unwrap().inbox.is_empty());
+    assert!(cw.tool("SWARM_STATUS", &json!({})).0.unwrap().contains("@verifier: killed"));
+    assert!(cw.tool("SWARM_ADD", &json!({"name": "verifier", "brief": "x"})).0.unwrap_err().contains("taken"));
+    crate::swarm::remove(&coord);
+}

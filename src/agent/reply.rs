@@ -420,7 +420,7 @@ impl Worker {
         let agent = c
             .parent
             .is_some()
-            .then(|| agent_label(c.agent_id, &c.title));
+            .then(|| super::swarm::self_label(&c));
         // A model on the user's own server (or a plugin's) gets the basics
         // only, and the goal's tools while there is one.
         let local = crate::local::basic(&c.model);

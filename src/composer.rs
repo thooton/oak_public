@@ -8,6 +8,37 @@ pub(crate) use crate::look::{GAP, chat_column, kv, meter, paint_spinner, transcr
 use crate::widgets::{chevron_v, clip_width, draw_x, enter_pressed, icon_button, paint_pause, sending_edit, switch};
 use crate::theme::mix;
 
+/// A slash command: the message box has only two, recognized only at its
+/// very start (`slash`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Slash {
+    /// /goal <goal>: sets the conversation's goal (or starts one with it).
+    Goal,
+    /// /swarm <task>: the conversation coordinates a swarm on the task
+    /// (`agent::swarm`).
+    Swarm,
+}
+
+impl Slash {
+    /// The message box's border while it is typed.
+    pub(crate) fn color(self) -> Color32 {
+        match self {
+            Slash::Goal => Color32::from_rgb(0x3f, 0xb9, 0x50),
+            Slash::Swarm => Color32::from_rgb(0xe3, 0xb3, 0x41),
+        }
+    }
+}
+
+/// The slash command `text` starts with, and the text after it (trimmed):
+/// /goal or /swarm at its very first character, then a space, a line break
+/// or nothing. Anywhere else, or as part of a word (/goals), it is text.
+pub(crate) fn slash(text: &str) -> Option<(Slash, &str)> {
+    [("/goal", Slash::Goal), ("/swarm", Slash::Swarm)].into_iter().find_map(|(word, cmd)| {
+        let rest = text.strip_prefix(word)?;
+        (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| (cmd, rest.trim()))
+    })
+}
+
 /// Dock a composer to the bottom, including on the frame its content resizes.
 pub(crate) fn dock(ui: &mut Ui, id: &'static str, t: &Theme, contents: impl FnOnce(&mut Ui)) -> Rect {
     let room = ui.available_rect_before_wrap();
@@ -140,7 +171,13 @@ impl App {
         let margin = Margin { right: (10.0 + buttons_w).min(127.0) as i8, ..Margin::same(10) };
         let r = ui.scope_builder(UiBuilder::new().max_rect(Rect::from_x_y_ranges(x, top..=top + max_h)), |ui| {
             let v = ui.visuals();
-            let stroke = if focused { v.selection.stroke } else { v.widgets.inactive.bg_stroke };
+            // A slash command at the box's start colors its border: /goal
+            // green, /swarm yellow.
+            let stroke = match slash(&self.input) {
+                Some((cmd, _)) => Stroke::new(1.5, cmd.color()),
+                None if focused => v.selection.stroke,
+                None => v.widgets.inactive.bg_stroke,
+            };
             egui::Frame::new().fill(t.panel).stroke(stroke).show(ui, |ui| {
                 let w = ui.available_width();
                 ScrollArea::vertical()
@@ -268,8 +305,15 @@ impl App {
 
     /// Sends what is in the message box to where it goes: a new
     /// conversation or cloud session (or what a plugin starts instead), a
-    /// plugin's tab, a cloud session or this conversation.
+    /// plugin's tab, a cloud session or this conversation. A slash command
+    /// at its start (`slash`) goes as its command instead, to one of Oak's
+    /// own conversations or a new one.
     pub(crate) fn send_composed(&mut self, ctx: &egui::Context) {
+        if let Some((cmd, _)) = slash(&self.input)
+            && self.slash_applies()
+        {
+            return self.send_slash(cmd, ctx);
+        }
         self.send_input(|app, text, images| {
             // The CLI seals this prompt's typing profile here; the
             // request that sends the text reports it once.
@@ -295,8 +339,73 @@ impl App {
                         }
                     }
                     None if cloud::is_key(&id) => cloud::send(&id, text, images, ctx),
+                    None if app.sessions[&id].killed_member() => {
+                        app.hint = Some("This swarm member was removed: it takes no more messages.".into());
+                    }
                     None => app.sessions[&id].send(text, images),
                 },
+            }
+        });
+    }
+
+    /// Whether a slash command in the message box is one: on the New
+    /// screen starting one of Oak's own conversations, or in one.
+    fn slash_applies(&self) -> bool {
+        match &self.screen {
+            Screen::New => self.new_kind().is_none() && !self.new_cloud,
+            Screen::Chat(id) => crate::plugins::tab_kind(id).is_none() && !cloud::is_key(id) && self.sessions.contains_key(id),
+        }
+    }
+
+    /// /goal or /swarm with the text after it: the goal (as the session
+    /// box sets one) or the swarm's task, for the open conversation or a
+    /// new one (with the attachments, if any, as a message).
+    fn send_slash(&mut self, cmd: Slash, ctx: &egui::Context) {
+        self.send_input(|app, text, images| {
+            let rest = slash(&text).map_or("", |(_, r)| r).to_string();
+            if rest.is_empty() {
+                app.hint = Some(match cmd {
+                    Slash::Goal => "Write the goal after /goal".into(),
+                    Slash::Swarm => "Write the task after /swarm".into(),
+                });
+                return;
+            }
+            let command = match cmd {
+                Slash::Goal => Command::Goal(rest, false),
+                Slash::Swarm => Command::Swarm(rest),
+            };
+            match &app.screen {
+                Screen::New => {
+                    let refused = match (cmd, app.new_here) {
+                        (Slash::Goal, new_screen::Here::Chat) => Some("A chat has no goals"),
+                        (Slash::Swarm, new_screen::Here::Chat) => Some("A chat can't run a swarm"),
+                        (Slash::Swarm, new_screen::Here::Code) => Some("Code Mode can't run a swarm"),
+                        (Slash::Swarm, new_screen::Here::Super) => Some("A super agent can't run a swarm"),
+                        _ => None,
+                    };
+                    match refused {
+                        Some(why) => app.hint = Some(why.into()),
+                        None => app.start_conversation(String::new(), images, Some(command), ctx),
+                    }
+                }
+                Screen::Chat(id) => {
+                    let s = &app.sessions[id];
+                    let refused = {
+                        let c = s.conv.lock().unwrap();
+                        match cmd {
+                            Slash::Goal => c.chat.then(|| "A chat has no goals".to_string()),
+                            Slash::Swarm => agent::swarm::refuses(&c),
+                        }
+                    };
+                    if let Some(why) = refused {
+                        app.hint = Some(why);
+                        return;
+                    }
+                    s.command(command);
+                    if !images.is_empty() {
+                        s.send(String::new(), images);
+                    }
+                }
             }
         });
     }
@@ -1578,6 +1687,18 @@ mod tests {
     use super::*;
     use crate::app_hover_test::{key, run_frame, test_ctx};
     use serde_json::json;
+
+    /// /goal and /swarm count only at the box's very start, as whole words.
+    #[test]
+    fn slash_commands_only_at_the_start() {
+        assert_eq!(slash("/goal ship it "), Some((Slash::Goal, "ship it")));
+        assert_eq!(slash("/swarm\nrewrite the parser"), Some((Slash::Swarm, "rewrite the parser")));
+        assert_eq!(slash("/goal"), Some((Slash::Goal, "")));
+        for text in [" /goal x", "/goals x", "please /swarm x", "/Swarm x", "/effort high", "x"] {
+            assert_eq!(slash(text), None, "{text}");
+        }
+        assert_ne!(Slash::Goal.color(), Slash::Swarm.color());
+    }
 
     #[test]
     fn composer_stays_at_bottom_when_draft_height_changes() {

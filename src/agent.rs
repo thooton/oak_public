@@ -46,6 +46,7 @@ pub(crate) mod repl;
 mod reply;
 mod rewrite;
 mod subagents;
+pub(crate) mod swarm;
 pub(crate) mod title;
 mod tool_calls;
 use memory::memory_tool;
@@ -268,8 +269,9 @@ pub fn is_hidden_block(b: &Value) -> bool {
 /// What goal notes began with before they were marked `_oak_goal`.
 pub const OLD_GOAL_TAG: &str = "<oak-goal>";
 
-/// A change the user made in the session box. It reaches the model with the
-/// next request, without interrupting what it is doing.
+/// A change the user made in the session box (or with /goal and /swarm in
+/// the message box). It reaches the model with the next request, without
+/// interrupting what it is doing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// The session goal (empty clears it), and whether it is endless: the
@@ -278,6 +280,9 @@ pub enum Command {
     Effort(String),
     /// The provider and model the conversation goes on with (its id).
     Model(api::Provider, String),
+    /// /swarm: the conversation coordinates a swarm on this task
+    /// (`agent::swarm`).
+    Swarm(String),
 }
 
 /// Every effort level a model may have, lowest first. Ultra is the Codex
@@ -406,6 +411,9 @@ pub struct Live {
     /// The main session stopped this subagent (AGENT_STOP): the turn's end
     /// isn't reported back to it.
     quiet_stop: bool,
+    /// A swarm member asked to sleep on the board (SWARM wait): the turn
+    /// ends once the calls' results are in (`agent::swarm`).
+    park: bool,
     /// A request to the model is under way (sent, its reply not all in).
     pub requesting: bool,
     /// The user paused during a request: the pause starts when the request
@@ -1438,6 +1446,14 @@ impl Worker {
             };
             // (Saved: the push below saves them in the transcript instead.)
             let inbox = std::mem::take(&mut self.conv.lock().unwrap().inbox);
+            // A swarm member that was killed does nothing more: what comes
+            // for it is dropped.
+            if self.killed() {
+                if !self.sleep_idle() {
+                    return;
+                }
+                continue;
+            }
             let beats = due_beats(&mut self.conv.lock().unwrap(), api::now_ms());
             let goal = self.take_commands();
             // The goal resumed after the model's turn ended while it was
@@ -1814,6 +1830,16 @@ impl Worker {
     /// the session that started it, unless that session stopped it.
     fn report_to_parent(&self) {
         let c = self.conv.lock().unwrap();
+        // A swarm's members (and its coordinator) talk on the board: their
+        // turns end without a report, and Oak's monitor looks for a stall.
+        if let Some(seat) = c.swarm.clone() {
+            drop(c);
+            self.live.lock().unwrap().quiet_stop = false;
+            if !seat.killed && !self.deleted.load(Ordering::SeqCst) {
+                swarm::after_turn(&seat.swarm, &self.ctx);
+            }
+            return;
+        }
         let Some(parent) = c.parent.clone() else {
             return;
         };
@@ -1853,6 +1879,7 @@ impl Worker {
             // A chat has no goals and no Freebuff (whatever sent them).
             let refused = match &cmd {
                 Command::Goal(..) => c.chat,
+                Command::Swarm(_) => swarm::refuses(&c).is_some(),
                 Command::Model(p, _) => chat_refuses_provider(c.chat, *p)
                     .or_else(|| code_mode_refuses_provider(c.code_mode, *p))
                     .or_else(|| mix_refuses_provider(c.mix.is_some(), *p))
@@ -2331,6 +2358,11 @@ impl Worker {
                 // Stopped by an ultrapause, the turn holds (paused) and carries
                 // on from the killed calls' results once resumed.
                 if stopped && !self.paused.load(Ordering::SeqCst) && !self.absorb_queued() {
+                    return;
+                }
+                // A swarm member went to sleep on the board (SWARM wait),
+                // with nothing come in meanwhile.
+                if self.parked() {
                     return;
                 }
                 continue;
@@ -2929,6 +2961,10 @@ fn apply_command(
             }
             c.provider = Some(p);
             (None, None)
+        }
+        Command::Swarm(task) => {
+            let text = swarm::start(c, &task);
+            (Some(goal_block(&text)), Some((MarkKind::Swarm, task)))
         }
     }
 }

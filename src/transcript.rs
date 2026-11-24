@@ -1287,6 +1287,10 @@ pub(crate) fn mark_row(ui: &mut Ui, t: &Theme, m: &Mark) {
         MarkKind::Rotated => (format!("account rotated to {}", m.text), Some(ROTATED_ICON)),
         MarkKind::FellBack => (format!("fell back to {}", m.text), Some(MODEL_ICON)),
         MarkKind::Switched => (format!("switched to {}", m.text), Some(MODEL_ICON)),
+        MarkKind::Swarm => (
+            format!("swarm started on {}", crate::tools::one_line(&m.text)),
+            Some(AGENT_ICON),
+        ),
         MarkKind::FilesChanged => (
             format!("changed on disk, not by Oak: {}", m.text),
             Some(FILES_CHANGED_ICON),
@@ -1306,7 +1310,7 @@ pub(crate) fn mark_row(ui: &mut Ui, t: &Theme, m: &Mark) {
     };
     let hover = (matches!(
         m.kind,
-        MarkKind::Goal | MarkKind::Instructions | MarkKind::FilesChanged | MarkKind::FellBack
+        MarkKind::Goal | MarkKind::Swarm | MarkKind::Instructions | MarkKind::FilesChanged | MarkKind::FellBack
     ) && !m.text.is_empty())
     .then_some(m.text.as_str());
     let id = ui
@@ -1619,6 +1623,9 @@ fn agent_message_row(
     let short = body.lines().count() <= AGENT_MESSAGE_OPEN_LINES && body.len() <= 800;
     let head = if last {
         format!("final reply from {from}")
+    } else if from.starts_with('@') {
+        // (A swarm's board: `agent::swarm::board_message`.)
+        format!("board post from {from}")
     } else {
         format!("message from {from}")
     };
@@ -2918,7 +2925,7 @@ pub(crate) fn transcript_view(ui: &mut Ui, t: &Theme, conv: &Conversation, live:
     for u in units(&items) {
         transcript_unit(ui, t, &items, u, &results, Some(&conv.messages));
     }
-    transcript_status(ui, t, conv, live, false);
+    transcript_status(ui, t, conv, live, false, 0);
 }
 
 /// The transcript in units: a run of tool calls and thinking (shown as one
@@ -3754,14 +3761,33 @@ fn file_link(ui: &mut Ui, t: &Theme, name: &str, path: &str, note: &str) {
 /// Under the transcript's end: paused, or what OAK is doing. "Paused" shows
 /// once the pause has taken hold, and `agents_pausing` (its subagents still
 /// pausing) holds it back too; until then the pause button spins and this
-/// says what OAK is still doing.
+/// says what OAK is still doing. Then, for a swarm's coordinator, how many
+/// of its subagents (the swarm's members) are `running`.
 pub(crate) fn transcript_status(
     ui: &mut Ui,
     t: &Theme,
     conv: &Conversation,
     live: &Live,
     agents_pausing: bool,
+    running: usize,
 ) {
+    status_line(ui, t, conv, live, agents_pausing);
+    if running > 0 {
+        ui.horizontal(|ui| {
+            if live.busy {
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                crate::widgets::state_dot(ui.painter(), t, r.center(), false);
+            } else {
+                ui.spinner();
+            }
+            let text = format!("{running} subagent{} running", crate::plural(running as u64));
+            ui.label(RichText::new(text).color(t.ink3));
+        });
+    }
+}
+
+/// `transcript_status`'s first line: paused, or what OAK is doing.
+fn status_line(ui: &mut Ui, t: &Theme, conv: &Conversation, live: &Live, agents_pausing: bool) {
     if live.pause_settled(conv.paused) && !agents_pausing {
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());

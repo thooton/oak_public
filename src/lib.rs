@@ -61,6 +61,7 @@ mod scratch;
 mod sleeps;
 mod startup;
 mod store;
+mod swarm;
 mod tasks;
 mod time;
 mod token_rate;
@@ -111,6 +112,7 @@ mod settings;
 mod side_chat;
 mod super_local;
 mod super_view;
+mod swarm_view;
 mod tabs;
 mod text_menu;
 mod theme;
@@ -382,6 +384,9 @@ struct App {
     last_sent: HashMap<String, String>,
     /// The goal being edited in the session box.
     goal_edit: Option<session_box::GoalEdit>,
+    /// What each swarm coordinator's tab shows (`swarm_view`), by
+    /// conversation: its transcript unless the user picked another tab.
+    swarm_tabs: HashMap<String, swarm_view::Tab>,
     /// A model switch waiting for the user to confirm it: (conversation,
     /// model id).
     model_switch: Option<(String, api::Provider, String)>,
@@ -956,8 +961,29 @@ impl App {
             self.local_super_view(ui, t, &id);
         } else if let Some(s) = self.sessions.get(id) {
             let agents_pausing = s.pause_on() && self.agents_pausing(s);
+            let running = self.swarm_running(s);
+            // A swarm's coordinator: its tabs above the transcript
+            // (`swarm_view`).
+            let coordinated = s.conv.lock().unwrap().swarm.as_ref().filter(|seat| seat.name == swarm::COORDINATOR).map(|seat| seat.swarm.clone());
             let list = self.lists.entry(id.clone()).or_default();
-            return chat_view(ui, t, id, s, list, &mut self.editing, agents_pausing);
+            let Some(swarm_id) = coordinated else {
+                return chat_view(ui, t, id, s, list, &mut self.editing, chat_view::Group { agents_pausing, running });
+            };
+            let area = ui.max_rect();
+            let col = look::chat_column(area.x_range());
+            let tab = self.swarm_tabs.entry(id.clone()).or_default();
+            swarm_view::strip(ui, t, Rect::from_x_y_ranges(col, area.top()..=area.top() + swarm_view::STRIP_H), tab, &swarm_id);
+            let rest = Rect::from_min_max(egui::pos2(area.left(), area.top() + swarm_view::STRIP_H), area.max);
+            if *tab == swarm_view::Tab::Chat {
+                return ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| chat_view(ui, t, id, s, list, &mut self.editing, chat_view::Group { agents_pausing, running })).inner;
+            }
+            let tab = *tab;
+            let action = ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| swarm_view::show(ui, t, col, &swarm_id, tab)).inner;
+            match action {
+                Some(swarm_view::Action::Open(conv)) if self.sessions.contains_key(&conv) => self.open(conv),
+                Some(swarm_view::Action::Kill(name)) => agent::swarm::kill(&swarm_id, &[name]),
+                _ => {}
+            }
         } else {
             // A conversation that isn't loaded (its file is gone): nothing to draw.
             ui.centered_and_justified(|ui| ui.label("This conversation isn't available."));

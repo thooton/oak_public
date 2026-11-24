@@ -987,6 +987,11 @@ pub struct Conversation {
     /// `can_spawn`): a sub-orchestrator. One level only: its agents can't.
     #[serde(default)]
     pub spawner: bool,
+    /// In a swarm (/swarm): its coordinator, or one of its members (a
+    /// subagent of the coordinator). Members' turns end without a final
+    /// reply: they talk on the board (`crate::swarm`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<Seat>,
     /// The subagents this session started, by number.
     #[serde(default)]
     pub agents: Vec<AgentRef>,
@@ -1200,6 +1205,18 @@ pub struct AgentRef {
     pub name: String,
 }
 
+/// A conversation's place in a swarm (/swarm, `crate::swarm`): the
+/// coordinator's conversation the swarm belongs to, and its name on the
+/// board (without the @; "coordinator" for the coordinator).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Seat {
+    pub swarm: String,
+    pub name: String,
+    /// Killed (SWARM action=kill): for good, it does nothing more.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub killed: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Note {
     pub id: u64,
@@ -1319,6 +1336,9 @@ pub enum MarkKind {
     /// A Mix conversation went to its other model (SWITCH, `crate::mix`);
     /// `text` names it, `sent` is the note it was handed.
     Switched,
+    /// The user started a swarm with /swarm (`crate::swarm`); `text` is
+    /// its task.
+    Swarm,
 }
 
 /// A mark's `sent` in parts, each shown in a box of its own under its
@@ -1801,6 +1821,8 @@ pub fn remove_conversation(id: &str) {
     let _ = std::fs::remove_file(conversations.join(format!("{id}.json")));
     // Its REPL context, if it was in Code Mode.
     crate::code_mode::forget(id);
+    // Its swarm's board and roster, if it coordinated one.
+    crate::swarm::remove(id);
 }
 
 /// What `look` is given of a conversation as it is read: each message's

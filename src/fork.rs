@@ -2,7 +2,7 @@
 //! and Home row. It carries the durable context with it (the transcript, the
 //! summary in force, notes, the prefix as sent and the session memory), but
 //! no running work: no tasks, subagents, goal, heartbeats, meters, inbox,
-//! seat or usage totals. Forking from a message copies the conversation up
+//! seat, swarm (nor the SWARM kit) or usage totals. Forking from a message copies the conversation up
 //! to just before it (what Revert to before this goes back to), to take it
 //! another way; the source keeps its own transcript, and the fork waits for
 //! the user.
@@ -52,6 +52,8 @@ pub(crate) fn fork(
     };
     // (Its system prompt is rendered again, with its own scratchpad.)
     c.prefix.pin = None;
+    // A swarm stays with its coordinator: the fork isn't in it.
+    c.prefix.kits.retain(|k| k != "SWARM");
     if let Some(to) = at {
         let cut = match &to {
             agent::RevertTo::Block(msg, block, was) => agent::revert_to(&mut c, *msg, *block, was),

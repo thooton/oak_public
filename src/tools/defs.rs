@@ -73,6 +73,8 @@ pub fn definitions_with_kits(agent: bool, spawner: bool, local: bool, kits: &[St
         let name = d["name"].as_str().unwrap_or("");
         match name {
             "LOAD" => !loadable.is_empty() || !servers.is_empty(),
+            // A swarm's member talks on the board only: no AGENT.
+            _ if agent && has("SWARM") && name.starts_with("AGENT_") => false,
             _ => kit_of(name, agent).is_none_or(has),
         }
     });
@@ -110,14 +112,18 @@ pub fn kits_for(agent: bool) -> Vec<&'static str> {
 
 /// The kits: what each is, as LOAD's description says (BROWSER's and
 /// WINDOW's from their protocol files).
-const KITS: &[(&str, &str)] = &[("AGENT", "subagents (only when the user asks for them)"), ("BROWSER", ""), ("WINDOW", "")];
+const KITS: &[(&str, &str)] = &[("AGENT", "subagents (only when the user asks for them)"), ("BROWSER", ""), ("WINDOW", ""), ("SWARM", "coordinating a swarm of agents on a shared board (only once the user starts one with /swarm)")];
 
 /// Oak's kits that are protocols as well.
 const NATIVE: [&str; 2] = ["BROWSER", "WINDOW"];
 
 /// The kit tool OAK runs `tool` belongs to, for a session (`agent`: a
-/// subagent's AGENT is always there).
+/// subagent's AGENT is always there; a swarm's member has SWARM from its
+/// start).
 pub fn kit_of(tool: &str, agent: bool) -> Option<&'static str> {
+    if tool.starts_with("SWARM_") {
+        return Some("SWARM");
+    }
     if tool.starts_with("BROWSER_") {
         return Some("BROWSER");
     }
@@ -183,6 +189,7 @@ fn family_intro(family: &str, agent: bool) -> String {
         "GOAL" => "Only while a goal is set. A goal is separate from the user's ordinary requests: the user sets it explicitly, it arrives in a <goal> message and stays listed under \"Goal\" in your system prompt until finished. With no goal listed there, there is none: don't use this tool, even for a big task.".into(),
         "BROWSER" => BROWSER_INTRO.into(),
         "WINDOW" => "GUI apps on Oak's hidden desktop, driven without touching the user's screen, mouse, keyboard or focus; and, with their permission (attach), the user's own windows, driven the same way (they stay where they are). The user sees your current window live beside the transcript. Coordinates are pixels of the window's client area, as in its screenshots.".into(),
+        "SWARM" => "Your swarm (/swarm): its members, each an Oak agent in its own conversation in this folder, and the board they share. There are no private messages: everything goes on the board, and a post reaches at once (waking them) only the members it names: @name, @group for numbered members (fix for fix-1, fix-2...), @all".into(),
         "AGENT" if agent => "The main session (id 0) and its other subagents.".into(),
         "AGENT" => "Subagents: other agents with your tools (except ASK), working in this folder in the background. Their messages, and the final reply each sends when it ends its turn, come to you as <agent-message> blocks with your next request.".into(),
         _ => String::new(),
@@ -438,6 +445,7 @@ fn definitions_with(agent: bool) -> Value {
             json!({"delete": {"type": "string"}}), &[]),
     ]);
     let list = all.as_array_mut().expect("a list");
+    list.extend(swarm_definitions().as_array().cloned().unwrap_or_default());
     let at = list.iter().position(|d| d["name"] == "BROWSER_HELP").unwrap_or(list.len());
     list.splice(at..at, more.as_array().cloned().unwrap_or_default());
     // WINDOW's (Windows only: elsewhere WINDOW is instructions).
@@ -445,6 +453,45 @@ fn definitions_with(agent: bool) -> Value {
         list.extend(window_definitions().as_array().cloned().unwrap_or_default());
     }
     all
+}
+
+/// SWARM's actions (`agent::swarm`).
+fn swarm_definitions() -> Value {
+    let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
+        json!({"name": name, "description": description, "input_schema": {"type": "object", "properties": properties, "required": required}, "eager_input_streaming": true})
+    };
+    let model = json!({"type": "string", "description": "A model id from action=models; leave it out for your own model"});
+    let effort = json!({"type": "string", "enum": crate::agent::EFFORTS, "description": "How hard it thinks; leave it out for your own"});
+    let name = json!({"type": "string", "description": "A member's name, without the @"});
+    let since = json!({"type": "integer", "description": "The highest seq you have read"});
+    json!([
+        tool("SWARM_STATUS", "the swarm's title, the board's head, and each member: its state (working, waiting, stopped, killed), model and who added it", json!({}), &[]),
+        tool("SWARM_MODELS", "the models members can run on, by provider", json!({}), &[]),
+        tool("SWARM_ADD", "add member `name` (or `n` copies, or one per item of `tasks`, named name-1, name-2...) to work on `brief`, its whole assignment: it is posted on the board as yours (\"@name brief\") and is the member's first message, and it starts at once in this folder", 
+            json!({"name": {"type": "string", "description": "A member's name, without the @; for add, short and lowercase, for its job (parser, verifier), never reused"},
+                   "brief": {"type": "string", "description": "What it owns, what it must not touch, what it needs to know and what done looks like (with what to post then)"},
+                   "n": {"type": "integer", "description": "For add: that many copies on the same brief (2 to 16)"},
+                   "tasks": {"type": "array", "items": {"type": "string"}, "description": "For add: one slice per copy, each added to the shared brief"},
+                   "model": model.clone(), "effort": effort.clone()}), &["name", "brief"]),
+        tool("SWARM_MODEL", "switch member `name` (default you) to another `model` and/or `effort` from its next request, keeping its conversation (without `model`, another member goes on yours); a member whose turn failed takes it up again", 
+            json!({"name": name, "model": model, "effort": effort}), &[]),
+        tool("SWARM_KILL", "remove member `name` (or a numbered group) for good: it stops and does nothing more, and the name can't be used again", json!({"name": name}), &["name"]),
+        tool("SWARM_TITLE", "name the swarm (the coordinator's)", json!({"title": {"type": "string"}}), &["title"]),
+        tool("SWARM_POST", "post `text` on the board, as you: every member can read it, and those it names get it at once", json!({"text": {"type": "string"}}), &["text"]),
+        tool("SWARM_READ", "the board, oldest first, each post with its seq and author: those after `since`, or without it the latest 20", json!({"since": since}), &[]),
+        tool("SWARM_WAIT", "sleep on the board until a post you are meant to see arrives, ending your turn (waiting costs nothing); returns at once instead with the posts after `since` that would wake you", 
+            json!({"since": since, "mentions_only": {"type": "boolean", "description": "For wait: wake only for posts naming you or @all (default true); false wakes you for any post"}}), &[]),
+    ])
+}
+
+/// SWARM action=models: the models a swarm's members can run on, by
+/// provider (as AGENT new's list has them).
+pub fn models_text() -> String {
+    let models: Vec<crate::api::Model> = crate::api::known_models().into_iter().filter(|m| !matches!(m.provider, crate::api::Provider::Local | crate::api::Provider::Plugin | crate::api::Provider::Freebuff)).collect();
+    if models.is_empty() {
+        return "No models are loaded yet.".into();
+    }
+    model_list(&models)
 }
 
 /// WINDOW's actions (`window_tool.rs`).

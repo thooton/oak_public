@@ -48,6 +48,16 @@ impl App {
         out
     }
 
+    /// For a swarm's coordinator, how many of its subagents (the swarm's
+    /// members) are at work; 0 for any other session.
+    pub(crate) fn swarm_running(&self, s: &Session) -> usize {
+        let coordinator = s.conv.lock().unwrap().swarm.as_ref().is_some_and(|seat| seat.name == crate::swarm::COORDINATOR);
+        if !coordinator {
+            return 0;
+        }
+        self.agents_of(s).iter().filter(|a| a.live.lock().unwrap().busy).count()
+    }
+
     /// Whether any subagent of `s` is still pausing.
     pub(crate) fn agents_pausing(&self, s: &Session) -> bool {
         self.agents_of(s).iter().any(|a| a.pausing())

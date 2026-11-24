@@ -508,17 +508,22 @@ impl Worker {
             return self.load_server(call, &server, input);
         }
         let kit = input["name"].as_str().unwrap_or("").trim().to_uppercase();
-        let (agent, label, mode, loaded) = {
+        let (agent, label, mode, loaded, in_swarm) = {
             let c = self.conv.lock().unwrap();
             let agent = c.parent.is_some();
-            let label = agent.then(|| agent_label(c.agent_id, &c.title));
+            let label = agent.then(|| super::swarm::self_label(&c));
             (
                 agent,
                 label,
                 crate::prefix::mode(c.provider(), &c.model),
                 c.prefix.kits.contains(&kit),
+                c.swarm.is_some(),
             )
         };
+        // SWARM is the coordinator's, once the user starts a swarm (/swarm).
+        if kit == "SWARM" && !in_swarm {
+            return fail("SWARM is for a swarm the user starts with /swarm; there is none here.".into());
+        }
         let kits = tools::kits_for(agent);
         if !kits.contains(&kit.as_str()) {
             let servers: Vec<String> = crate::mcp::kits().into_iter().map(|(n, _)| n).collect();
@@ -1012,6 +1017,7 @@ impl Worker {
             "AGENT_STOP" => self.agent_stop(id),
             "AGENT_DELETE" => self.agent_delete(id),
             "AGENT_WAIT" => return self.agent_wait(input),
+            n if n.starts_with("SWARM_") => self.swarm_tool(n, input),
             _ => Err(format!("Unknown tool {name}")),
         };
         (result, false)

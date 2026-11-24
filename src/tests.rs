@@ -379,7 +379,7 @@ fn find_in_a_conversation() {
         let mut texts = vec![];
         for events in std::iter::once(events).chain((0..quiet).map(|_| vec![])) {
             let out = run_frame(&ctx, vec2(1000.0, 500.0), &mut time, 0.1, events, |ui| {
-                chat_view(ui, &t, &id, &s, &mut list, &mut editing, false);
+                chat_view(ui, &t, &id, &s, &mut list, &mut editing, chat_view::Group::default());
             });
             texts = out
                 .shapes
@@ -443,7 +443,7 @@ fn cleared_tool_output_line_at_the_boundary() {
     let (mut texts, mut lines) = (vec![], vec![]);
     for _ in 0..4 {
         let out = run_frame(&ctx, vec2(1000.0, 900.0), &mut time, 0.1, vec![], |ui| {
-            chat_view(ui, &t, &id, &s, &mut list, &mut editing, false);
+            chat_view(ui, &t, &id, &s, &mut list, &mut editing, chat_view::Group::default());
         });
         texts = out.shapes.iter().filter_map(|s| if let egui::Shape::Text(x) = &s.shape { Some((x.galley.text().to_string(), x.pos.y)) } else { None }).collect::<Vec<_>>();
         // The marker's line, in its blue.

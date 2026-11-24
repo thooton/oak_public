@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 mod defs;
-pub use defs::{browser_help, chat_definitions, definitions_with_kits, kit_help, kit_of, kits_for};
+pub use defs::{browser_help, chat_definitions, definitions_with_kits, kit_help, kit_of, kits_for, models_text};
 mod image_search;
 mod search;
 pub use image_search::{count as image_count, images, wanted as wants_images};
@@ -64,6 +64,10 @@ const FAMILIES: &[(&str, &[(&str, &str)])] = &[
     ("HEARTBEAT", &[("start", "HEARTBEAT_START"), ("stop", "HEARTBEAT_STOP")]),
     ("PROGRESS", &[("set", "PROGRESS_SET"), ("remove", "PROGRESS_REMOVE")]),
     ("GOAL", &[("justify", "GOAL_JUSTIFICATION"), ("finish", "GOAL_FINISH")]),
+    ("SWARM", &[
+        ("status", "SWARM_STATUS"), ("models", "SWARM_MODELS"), ("add", "SWARM_ADD"), ("model", "SWARM_MODEL"), ("kill", "SWARM_KILL"), ("title", "SWARM_TITLE"),
+        ("post", "SWARM_POST"), ("read", "SWARM_READ"), ("wait", "SWARM_WAIT"),
+    ]),
     ("AGENT", &[("new", "AGENT_NEW"), ("send", "AGENT_SEND"), ("wait", "AGENT_WAIT"), ("list", "AGENT_LIST"), ("set", "AGENT_SET"), ("pause", "AGENT_PAUSE"), ("resume", "AGENT_RESUME"), ("stop", "AGENT_STOP"), ("delete", "AGENT_DELETE")]),
     ("BROWSER", &[
         ("open", "BROWSER_OPEN"), ("close", "BROWSER_CLOSE"), ("attach", "BROWSER_ATTACH"),

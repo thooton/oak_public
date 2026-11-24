@@ -48,12 +48,37 @@ pub(crate) struct SessionInfo {
     /// For a subagent: its number, and the session that started it
     /// (conversation and title).
     pub(crate) parent: Option<(u64, String, String)>,
+    /// In a swarm (/swarm): its row's text, its tip, and the conversation a
+    /// click opens (a member's coordinator).
+    pub(crate) swarm: Option<(String, String, Option<String>)>,
     /// Draws the separate agent and system prompt note (cloud sessions).
     pub(crate) note_separate_system: bool,
     /// A chat (`Conversation::chat`): no folder, no goal, no Freebuff.
     pub(crate) chat: bool,
     /// In Code Mode (`Conversation::code_mode`): no Freebuff.
     pub(crate) code_mode: bool,
+}
+
+/// A swarm's row in the session box (`SessionInfo::swarm`): for the
+/// coordinator its title and how many members work, for a member its name
+/// and the swarm's (a click opens the coordinator).
+fn swarm_row(seat: &store::Seat) -> (String, String, Option<String>) {
+    let sw = crate::swarm::get(&seat.swarm);
+    let s = sw.lock().unwrap();
+    let title = if s.roster.title.is_empty() { "untitled".to_string() } else { s.roster.title.clone() };
+    let posts = s.posts.len();
+    if seat.name == crate::swarm::COORDINATOR {
+        let live: Vec<&crate::swarm::Member> = s.roster.members.iter().filter(|m| !m.killed && m.name != seat.name).collect();
+        let working = live.iter().filter(|m| agent::swarm::state_of(m).0 == agent::swarm::MemberState::Working).count();
+        let text = format!("{title}, {working} of {} working", live.len());
+        let tip = format!("This conversation coordinates the swarm \"{title}\": {} member{}, {posts} post{} on its board. Its tabs show the board, members and graph.", live.len(), plural(live.len()), plural(posts));
+        (text, tip, None)
+    } else {
+        let killed = if seat.killed { ", removed" } else { "" };
+        let text = format!("@{} in {title}{killed}", seat.name);
+        let tip = format!("A member of the swarm \"{title}\", talking on its board ({posts} post{}). Click to open its coordinator.", plural(posts));
+        (text, tip, Some(seat.swarm.clone()))
+    }
 }
 
 /// What a subagent in the session box is doing.
@@ -114,6 +139,7 @@ impl SessionInfo {
             notes: vec![],
             agents: vec![],
             parent: None,
+            swarm: None,
             note_separate_system: false,
             chat: false,
             code_mode: false,
@@ -150,6 +176,7 @@ impl SessionInfo {
                 Command::Goal(g, endless) => (goal, goal_endless) = (g, endless),
                 Command::Effort(e) => effort = e,
                 Command::Model(p, m) => (provider, model) = (p, m),
+                Command::Swarm(_) => {}
             }
         }
         let title = if c.title.is_empty() {
@@ -181,6 +208,7 @@ impl SessionInfo {
                 .map(|a| (a.id, a.name.clone(), a.conv.clone(), AgentState::Idle))
                 .collect(),
             parent: c.parent.clone().map(|p| (c.agent_id, p, String::new())),
+            swarm: c.swarm.as_ref().map(swarm_row),
             note_separate_system: crate::cloud::is_key(&c.id),
             chat,
             code_mode: c.code_mode,
@@ -1117,8 +1145,22 @@ fn model_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, act: &mut BoxActions) 
 
 /// The session box's links: the parent, the subagents and the heartbeats.
 fn link_rows(ui: &mut Ui, t: &Theme, info: &SessionInfo, font: &FontId, act: &mut BoxActions) {
+    // In a swarm: the coordinator's swarm, or the member's seat (a click
+    // opens its coordinator, which its parent row would too).
+    if let Some((text, tip, open)) = &info.swarm {
+        match open {
+            Some(conv) => {
+                if open_row(ui, t, font, "swarm  ", text, t.ink2, tip.clone()) {
+                    act.open = Some(conv.clone());
+                }
+            }
+            None => {
+                ui.add(egui::Label::new(labeled(t, font, "swarm  ", text, t.ink2)).truncate()).on_hover_text(tip);
+            }
+        }
+    }
     // A subagent: the session that started it; a click opens it.
-    if let Some((n, conv, title)) = &info.parent {
+    if let Some((n, conv, title)) = info.parent.as_ref().filter(|_| info.swarm.as_ref().is_none_or(|s| s.2.is_none())) {
         let title = if title.is_empty() { "Untitled" } else { title };
         let tip = format!("Parent session: {title}");
         if open_row(

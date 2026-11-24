@@ -375,7 +375,7 @@ fn queued_switch(s: &Session, model: &str, effort: &str) -> Option<(String, Stri
         match cmd {
             Command::Model(_, x) => m = x.clone(),
             Command::Effort(x) => e = x.clone(),
-            Command::Goal(..) => {}
+            Command::Goal(..) | Command::Swarm(_) => {}
         }
     }
     let e = effort_for(&m, &e);
@@ -396,7 +396,7 @@ pub(crate) fn on_model(word: &str, model: &str, provider: crate::providers::Kind
         || m.split(['-', '/', ':', ' ']).any(|t| t == w && t.chars().any(|c| c.is_ascii_alphabetic()))
 }
 
-fn model_and_effort(input: &Value) -> Result<(Option<String>, Option<String>), String> {
+pub(super) fn model_and_effort(input: &Value) -> Result<(Option<String>, Option<String>), String> {
     let model = input["model"].as_str().map(str::trim).filter(|m| !m.is_empty());
     if let Some(m) = model {
         let known: Vec<api::Model> = api::known_models().into_iter().filter(|k| k.provider != api::Provider::Local).collect();

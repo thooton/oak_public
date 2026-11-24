@@ -156,7 +156,7 @@ read any file), else from the file. A conversation's messages are read when firs
 request sends them (from the summary's cut on). Messages on disk as they are are let go again
 when nothing needs them (`agent::forget_messages`: all of a conversation not shown for ten
 minutes, else those well above its view; never while it works). A save writes only the
-messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `code-mode/` (each Code Mode conversation's saved REPL context), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
+messages that changed and copies the rest from the old file. Beside it: `settings.json`, `plugins.json` (the plugins switched off), `plugin-prefs.json` (what plugins keep through `prefs_set`, by plugin id), `protocols/` (the user's protocols' files), `protocols.json` (the protocols switched off), `protocol-cache.json` (what each MCP server offered at its last connection), `protocol-logs/` (each stdio server's stderr, its newest run; all four were named `mcp…` before and are moved), `code-mode/` (each Code Mode conversation's saved REPL context), `swarms/` (each swarm's board, `board.jsonl`, and roster, `roster.json`, under its coordinator's conversation id; deleted with it), `blender/` (installed add-on support files; running instances instead use their agent's scratchpad), `models.json`, the
 login files (`accounts.json`, `codex.json`, `antigravity.json`, `openrouter.json`, `nodeclub.json`,
 `refuseless.json`, `musecode.json`, `freebuff.json`, `freebuff-device.json`, `freebuff-device-key.json`, `local.json`,
 `quick.json`;
@@ -646,7 +646,7 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   Notes reminder nudges the model at 85% of it), heartbeats, progress meters (a
   shell command whose output's last line is `x/y`, `N%` or a number; `src/progress.rs`) and
   subagents (`src/agent/subagents.rs`; sessions message each other, and a subagent's final reply
-  reaches the main session by itself). AGENT pause and resume take an agent's `id` or a `model`
+  reaches the main session by itself, except a swarm member's: see Swarms). AGENT pause and resume take an agent's `id` or a `model`
   (id, family word such as opus or sol, or provider), acting on every agent on it and naming the
   ones left alone.
 - Files changed on disk by someone else are reported to the model before its next request
@@ -676,8 +676,8 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   new name). Subagents keep theirs, since sessions address them by it. Fork (a conversation's tab
   or Home row right-click menu; `src/fork.rs`) starts a new conversation with the transcript,
   summary, notes, marks, loaded kits and session memory of the one it came from, but none of its
-  running work: no tasks, subagents, goal, heartbeats, meters, inbox, seat or usage totals. The
-  fork gets its own title ("Fork: …"), id, scratchpad and tab, and waits for the user; the source
+  running work: no tasks, subagents, goal, heartbeats, meters, inbox, seat, swarm (nor the SWARM
+  kit) or usage totals. The fork gets its own title ("Fork: …"), id, scratchpad and tab, and waits for the user; the source
   carries on as it is. Its prefix's pin is let go, so its first request renders the system prompt
   for it rather than sending the source's (which named the source's scratchpad). Right-clicking a
   message or one of the model's items also offers Fork from here, which copies the conversation up
@@ -694,6 +694,50 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   On Windows Oak sets up Direct3D 12 alone (the other backends cost a quarter of a second at
   every start); should that fail it starts again with every backend (`OAK_GPU_ALL_BACKENDS`).
   `WGPU_BACKEND` picks another.
+
+**Slash commands** (`composer::slash`). The message box knows two, and only at its very first
+character, followed by a space, a line break or nothing: `/goal <goal>` sets the conversation's
+goal as the session box does (not endless), and `/swarm <task>` makes it a swarm's coordinator
+(below). While one is typed the box's border is green for /goal and yellow for /swarm. On the New
+screen either starts a new conversation with it (its title from the text's first line); anywhere
+else (`/goals`, mid-text, a plugin's tab or a cloud session) it is ordinary text. A chat refuses
+both, Code Mode and super agents refuse /swarm, and an empty command says what to write, each as a
+hint, keeping the text.
+
+**Swarms** (`src/swarm.rs`, `src/agent/swarm.rs`, `src/swarm_view.rs`), after Antigravity's.
+/swarm makes a conversation (one the user started, not a chat, side chat, Code Mode, local or
+plugin model) the coordinator: its task goes to the model as a hidden message, the transcript
+marks "swarm started on …", and the conversation gets a seat (`Conversation::swarm`, `store::Seat`,
+name `coordinator`). One with nothing sent yet has the SWARM kit from its first request; one under
+way is told to LOAD it (LOAD refuses SWARM without a seat). The kit holds its text (`{{#swarm}}` in
+`prompts/tools.md`: the coordinator's from Antigravity's coordinator skill, the members' from its
+worker prompt) and one tool family, SWARM: status, models, add, model, kill, title, post, read,
+wait. Members are the coordinator's subagents (`<coordinator>-agentN`, titled `@name`, the
+coordinator's folder, role and, unless `model` pins another, model), each with a seat and the
+kit from its start; they get the worker text in place of the subagent paragraph (`{{#member}}` and
+`{{#solo}}`) and no AGENT tools. add takes a name (lowercase, unique for good; all, coordinator,
+monitor and user are reserved), a brief, and `n` or `tasks` for a numbered group (name-1…); the
+brief is posted to the board as the adder ("@name brief"), which is the member's first message.
+The board is append-only and shared, with sequence numbers: a post goes at once to the members it
+names (@name, @group for a numbered group, @all) and those asleep for any post, as
+`<agent-message from="@x" type="board post" seq="N">`, waking them; a post naming nobody waits to
+be read. Members' turns end without a final reply (no report to the parent); ending a turn, or
+SWARM wait (which ends the turn once the reply's calls are in, unless something came meanwhile,
+or returns at once the posts after `since` that would wake it), parks a member at no cost. A
+member may add helpers, and kill or switch the model of those it added and itself; the coordinator
+any member, and only it sets the title. Kill is for good: the member stops at once, its tasks are
+killed, what comes for it is dropped and the user can't message it (a hint says so); its
+conversation stays. Oak's own monitor costs no tokens: a few seconds after any member's turn ends,
+if every member that isn't killed is waiting (none working or paused), the coordinator's last post
+doesn't start with [done], and someone posted since its last stall post, it posts
+"@coordinator [stall] …" as @monitor, naming who waits and whose turn failed.
+The coordinator's tab has a strip over its transcript (Chat, Board, Members, Graph, then the
+swarm's title and how many members work): Board shows every post live, mentions colored; Members
+each one's state (working, waiting, stopped, killed), model, who added it and its posts (a click
+opens it, the right-click menu removes it); Graph the members around the coordinator with an
+arrow for who named whom. Under its transcript "n subagents running" counts the members at work,
+and its session box has a swarm row (title, how many work); a member's says its name and swarm
+and opens the coordinator. The workspace is the shared folder (no per-member copies).
 
 **Chats** (`Conversation::chat`). The New screen's Chat, beside Local folder, starts a
 conversation that is no project: no folder, role or goal, just a model and effort. Its system
