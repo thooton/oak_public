@@ -808,7 +808,8 @@ impl Instance {
         let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
         let url = tree["frameTree"]["frame"]["url"].as_str().unwrap_or("").to_string();
         // A plain Chrome's user agent, not HeadlessChrome's.
-        if self.user_agent.lock().unwrap().is_empty()
+        let need_ua = self.user_agent.lock().unwrap().is_empty();
+        if need_ua
             && let Ok(v) = call("Browser.getVersion", json!({}))
         {
             *self.user_agent.lock().unwrap() = v["userAgent"].as_str().unwrap_or("").replace("HeadlessChrome", "Chrome");
@@ -819,7 +820,8 @@ impl Instance {
         if let Err(e) = self.apply_emulation(cdp, &emulation) {
             self.update_view(|v| v.note(format!("The overrides set with emulate couldn't all be applied again: {e}")));
         }
-        if self.console.lock().unwrap().is_some() {
+        let console_on = self.console.lock().unwrap().is_some();
+        if console_on {
             let _ = call("Runtime.enable", json!({}));
             let _ = call("Log.enable", json!({}));
         }
@@ -837,8 +839,9 @@ impl Instance {
     }
 
     fn attach_target_locked(&self, target_id: &str, activate: bool, from_page: bool) -> Result<u64, String> {
-        if let Some(id) = self.tabs.lock().unwrap().list.iter().find(|t| t.target == target_id).map(|t| t.id) {
-            if activate {
+        let existing = self.tabs.lock().unwrap().list.iter().find(|t| t.target == target_id).map(|t| t.id);
+        if let Some(id) = existing {
+            if activate && !from_page {
                 let _ = self.switch_tab_impl(id);
             }
             return Ok(id);
@@ -885,7 +888,8 @@ impl Instance {
         }
         if activate {
             self.on_tab_switched();
-            if let Some(root) = self.root.lock().unwrap().clone() {
+            let root = self.root.lock().unwrap().clone();
+            if let Some(root) = root {
                 root.send("Target.activateTarget", json!({"targetId": target_id}));
             }
         }
@@ -969,7 +973,8 @@ impl Instance {
             (removed.id, removed.target, removed.cdp, new_target)
         };
         cdp.close();
-        if let Some(root) = self.root.lock().unwrap().clone() {
+        let root = self.root.lock().unwrap().clone();
+        if let Some(root) = root {
             if !target.is_empty() {
                 let _ = root.call_for("Target.closeTarget", json!({"targetId": target}), Duration::from_secs(5));
             }
