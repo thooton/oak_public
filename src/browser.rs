@@ -487,6 +487,7 @@ impl Instance {
         reap_stale(&self.profile);
         let vp = *self.viewport.lock().unwrap();
         let mut cmd = Command::new(&exe);
+        crate::oom::isolate(&mut cmd);
         cmd.args([
             "--headless=new",
             "--remote-debugging-port=0",

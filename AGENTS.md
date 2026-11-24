@@ -594,6 +594,11 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   removals of the home folder, the working folder or `.git`, disk commands, git commands that
   discard work, killing Oak) and `src/sleeps.rs` refuses sleeps over 5 seconds; the error says
   what to do instead. On Linux each command leads its own process group, killed with it.
+  On Linux an out-of-memory kill takes Oak's commands, never Oak (`src/oom.rs`): the agent's
+  and Quick's commands, MCP servers, Chrome and the Node.js REPL run with `oom_score_adj` 1000
+  (the kernel's first pick) in a systemd scope of their own, `oak-commands-<pid>.scope` beside
+  Oak's unit, with OOMPolicy=continue. The desktop starts Oak as a unit whose OOMPolicy is
+  `stop`, so a command killed for memory inside it used to take Oak down with it.
 - Smart context (`src/rolling.rs`): past a trigger (120k tokens by default) the older part is
   summarized in the background and the newest ~40k stay verbatim. The summary request (in the
   background, or blocking when a request is refused as too long) sends the chat request's system

@@ -2653,6 +2653,7 @@ fn execute(input: &Value, folder: &std::path::Path) -> Result<String, String> {
     let mut cmd = {
         let mut c = std::process::Command::new("bash");
         c.arg("-lc").arg(command);
+        crate::oom::isolate(&mut c);
         c
     };
     cmd.current_dir(folder)

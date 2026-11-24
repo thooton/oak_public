@@ -123,6 +123,7 @@ fn bash(args: &[&str]) -> Command {
         cmd.env("PATH", path);
     }
     cmd.args(args).process_group(0);
+    crate::oom::isolate(&mut cmd);
     cmd
 }
 

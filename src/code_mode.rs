@@ -350,6 +350,7 @@ fn start(node: &Path, snapshot: &Path) -> Result<Host, String> {
         std::fs::write(&script, HOST_JS).map_err(|e| format!("Couldn't write the REPL's host to {}: {e}", script.display()))?;
     }
     let mut cmd = Command::new(node);
+    crate::oom::isolate(&mut cmd);
     cmd.arg(&script).arg(snapshot).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     no_window(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't start Node.js ({}): {e}", node.display()))?;

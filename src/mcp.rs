@@ -987,6 +987,7 @@ impl Stdio {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
+        crate::oom::isolate(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("Couldn't start {}: {e}", program.display()))?;
         #[cfg(windows)]
         let job = crate::cdp::job_object(&child);

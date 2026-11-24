@@ -401,6 +401,7 @@ fn chrome(extra: &[String], url: &str, shot: Option<&Path>) -> Result<Vec<u8>, S
     let exe = browser().ok_or("No Chrome found (looked for Chrome, Chromium, Brave and Edge).")?;
     let profile = std::env::temp_dir().join(format!("oak-chrome-{}-{}", std::process::id(), crate::api::now_ms()));
     let mut cmd = Command::new(&exe);
+    crate::oom::isolate(&mut cmd);
     cmd.args([
         "--headless", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
         "--disable-extensions", "--disable-sync", "--disable-background-networking", "--disable-component-update",

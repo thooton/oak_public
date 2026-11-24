@@ -44,6 +44,7 @@ mod mix;
 mod musecode;
 mod nodeclub;
 mod oak;
+mod oom;
 mod openrouter;
 mod prefix;
 mod progress;
@@ -1096,6 +1097,7 @@ pub fn main() -> eframe::Result {
         std::process::exit(plugins::report());
     }
     gpu::init();
+    oom::prepare();
     let started = std::time::Instant::now();
     tasks::init();
     store::make_private();
