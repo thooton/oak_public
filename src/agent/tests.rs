@@ -1742,6 +1742,59 @@ fn calls_start_while_the_reply_streams() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A file the model read and then changed with a command (sed, a Python
+/// rewrite) isn't reported back to it as changed on disk; a change made
+/// outside Oak afterwards is.
+#[test]
+fn own_commands_changes_are_not_reported() {
+    let dir = std::env::temp_dir().join(format!("oak-own-changes-{}", api::now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+    let (w, s) = idle_worker(
+        "own-changes",
+        Conversation {
+            folder: dir.clone(),
+            ..Default::default()
+        },
+    );
+    let call = |id: &str, name: &str, input: Value| json!({"type": "tool_call", "id": id, "name": name, "input": input});
+    let turn = |calls: Vec<Value>| {
+        std::thread::scope(|scope| {
+            w.push("assistant", calls.clone());
+            Batch::new(&w, scope).finish(&calls, oak::stop::TOOL_CALLS);
+        });
+        w.report_changes();
+    };
+    let reported = || {
+        s.conv
+            .lock()
+            .unwrap()
+            .marks
+            .iter()
+            .filter(|m| m.kind == MarkKind::FilesChanged)
+            .count()
+    };
+    s.conv
+        .lock()
+        .unwrap()
+        .messages
+        .push(json!({"role": "user", "content": [oak::text("go")]}));
+    turn(vec![call("c1", "READ", json!({"path": "a.txt"}))]);
+    turn(vec![call(
+        "c2",
+        "EXECUTE",
+        json!({"command": "sed -i 's/two/TWO/' a.txt", "summary": "Edit", "timeout": 20}),
+    )]);
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\nTWO\n");
+    assert_eq!(reported(), 0, "the model's own sed isn't news to it");
+    // Someone else changes it: reported before the next request.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(dir.join("a.txt"), "one\nthree\n").unwrap();
+    turn(vec![call("c3", "READ", json!({"path": "missing.txt"}))]);
+    assert_eq!(reported(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A call of Quick's snippet (`quick::calls`) runs in the reply's batch
 /// as any model's call does, and what it returns goes to the Quick turn
 /// waiting for it.

@@ -2335,15 +2335,9 @@ impl Worker {
                 }
                 continue;
             }
-            // Files OAK's own commands changed aren't news to the model.
-            if calls.iter().any(|b| {
-                matches!(b["name"].as_str(), Some("EXECUTE" | "TASK_NEW"))
-                    || (b["name"] == "TASK" && b["input"]["action"] == "new")
-            }) {
-                let t = Instant::now();
-                self.files.lock().unwrap().refresh();
-                self.bench("files_refresh", json!({"ms": ms_since(t)}));
-            }
+            // Files OAK's own commands changed aren't news to the model
+            // (`Batch::finish` does this for the turns Oak runs itself).
+            self.absorb_own_changes(&calls);
             // A done turn is the turn: its reply is written, its work (if the
             // provider ran any) is in the transcript, and Oak asks for
             // nothing more, unless a goal isn't finished: that keeps Quick

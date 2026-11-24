@@ -313,6 +313,19 @@ impl Worker {
         self.push("user", vec![context_block(&message)]);
     }
 
+    /// After `calls` ran: when any ran a command (EXECUTE, TASK new, or a
+    /// Code Mode REPL script, which runs code and commands), takes in what
+    /// changed on disk without reporting it, so a `sed` or a Python
+    /// rewrite the model ran itself isn't told back to it as someone
+    /// else's change. A background task's later writes still are.
+    pub(crate) fn absorb_own_changes(&self, calls: &[Value]) {
+        if calls.iter().any(runs_commands) {
+            let t = Instant::now();
+            self.files.lock().unwrap().refresh();
+            self.bench("files_refresh", json!({"ms": ms_since(t)}));
+        }
+    }
+
     /// Remembers a file the model just read, wrote or edited, as it is now.
     pub(super) fn track(&self, name: &str, input: &Value) {
         if let ("READ" | "WRITE" | "EDIT", Some(p)) = (name, input["path"].as_str()) {
@@ -1727,9 +1740,16 @@ impl<'scope, 'env> Batch<'scope, 'env> {
             c.save();
         }
         drop(c);
+        self.w.absorb_own_changes(&self.calls);
         self.w.ctx.request_repaint();
         self.stopped.load(Ordering::SeqCst)
     }
+}
+
+/// Whether a call runs a command or code that may change files.
+fn runs_commands(call: &Value) -> bool {
+    matches!(call["name"].as_str(), Some("EXECUTE" | "TASK_NEW" | "REPL"))
+        || (call["name"] == "TASK" && call["input"]["action"] == "new")
 }
 
 /// Results held for a reply that never made it to the transcript go to it

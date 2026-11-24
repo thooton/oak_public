@@ -643,7 +643,8 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   (id, family word such as opus or sol, or provider), acting on every agent on it and naming the
   ones left alone.
 - Files changed on disk by someone else are reported to the model before its next request
-  (`src/changes.rs`). Instruction files (CLAUDE.md, AGENTS.md) and project memory are off for now
+  (`src/changes.rs`). What the model's own commands changed (EXECUTE, TASK new, a REPL script,
+  taken in once a reply's calls finish) isn't reported; a background task's later writes are. Instruction files (CLAUDE.md, AGENTS.md) and project memory are off for now
   (`src/instructions.rs`).
 - Messages sent while Oak works are queued for its next request. Pause lets the request and
   commands under way finish; ultrapause stops everything at once. A pause survives a restart, even one
