@@ -18,6 +18,7 @@ use egui::TextureHandle;
 use std::sync::Arc;
 
 const BAR_H: f32 = 34.0;
+const TAB_BAR_H: f32 = 28.0;
 /// Seconds the browser takes to fade in as it opens, and out as it closes.
 const FADE: f32 = 0.2;
 /// Seconds the preview takes to grow into the lightbox, and back.
@@ -45,6 +46,8 @@ enum Icon {
     Cross,
     /// Back to the preview: a bar, as a window's minimize.
     Shrink,
+    /// Open a new tab.
+    Plus,
 }
 
 /// The pointer's state over the page, between frames.
@@ -128,7 +131,8 @@ fn tick(ctx: &egui::Context, conv: &str) -> (Option<Arc<Instance>>, ViewState) {
                 s.page_at.get_or_insert(ctx.input(|i| i.time));
             }
             s.size = i.viewport_css();
-            let (_, page, k) = lightbox_layout(lightbox_area(ctx), s.size);
+            let top_h = BAR_H + if i.attached() { 0.0 } else { TAB_BAR_H };
+            let (_, page, k) = lightbox_layout_with(lightbox_area(ctx), s.size, top_h);
             let ppp = ctx.pixels_per_point();
             let cast = if s.expanded { page.size() } else { s.preview.map_or(vec2(480.0, 270.0), |r| r.size()) } * ppp;
             i.shown(k * ppp, [cast.x.ceil() as u32, cast.y.ceil() as u32]);
@@ -192,15 +196,19 @@ fn lightbox_area(ctx: &egui::Context) -> Rect {
 /// frame (the toolbar and the page), the page, and its scale (points per
 /// CSS pixel). Scaled to fit, never above 1:1, with the caption under it.
 fn lightbox_layout(area: Rect, size: (u32, u32)) -> (Rect, Rect, f32) {
+    lightbox_layout_with(area, size, BAR_H)
+}
+
+fn lightbox_layout_with(area: Rect, size: (u32, u32), top_h: f32) -> (Rect, Rect, f32) {
     let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
     let margin = vec2((area.width() * 0.03).max(24.0), (area.height() * 0.03).max(20.0));
     let room = area.shrink2(margin);
-    let room_h = (room.height() - BAR_H - CAPTION_H).max(40.0);
+    let room_h = (room.height() - top_h - CAPTION_H).max(40.0);
     let k = (room.width() / w).min(room_h / h).clamp(0.02, 1.0);
-    let frame_size = vec2(w * k, h * k + BAR_H);
+    let frame_size = vec2(w * k, h * k + top_h);
     let center = egui::pos2(room.center().x, room.top() + (room.height() - CAPTION_H) / 2.0);
     let frame = Rect::from_center_size(center, frame_size);
-    let page = Rect::from_min_max(frame.min + vec2(0.0, BAR_H), frame.max);
+    let page = Rect::from_min_max(frame.min + vec2(0.0, top_h), frame.max);
     (frame, page, k)
 }
 
@@ -297,12 +305,17 @@ impl App {
                 }
                 p.rect_stroke(r, 5.0, Stroke::new(1.0, if hover > 0.5 { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
                 if let Some(inst) = &inst {
-                    let (title, url) = {
+                    let (title, url, tab_count) = {
                         let v = inst.view.lock().unwrap();
-                        (v.title.clone(), shown_url(&v.url))
+                        (v.title.clone(), shown_url(&v.url), v.tabs.len())
                     };
                     let what = [title, url].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
-                    let tip = if what.is_empty() { "Open the browser (Ctrl+Shift+B)".to_string() } else { format!("{what}\nClick to open (Ctrl+Shift+B)") };
+                    let tabs_note = if tab_count > 1 { format!(" ({tab_count} tabs)") } else { String::new() };
+                    let tip = if what.is_empty() {
+                        format!("Open the browser{tabs_note} (Ctrl+Shift+B)")
+                    } else {
+                        format!("{what}\nClick to open{tabs_note} (Ctrl+Shift+B)")
+                    };
                     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked() {
                         set_expanded(ui.ctx(), &conv, &mut s, true);
                     }
@@ -340,9 +353,9 @@ fn page_picture(p: &egui::Painter, t: &Theme, tex: Option<&TextureHandle>, rect:
 /// Over the preview: how the browser is doing when it isn't showing a
 /// page, a dialog waiting, and the model's cursor (`k`: points per CSS px).
 fn preview_overlays(ui: &Ui, p: &egui::Painter, t: &Theme, inst: &Arc<Instance>, r: Rect, k: f32) {
-    let (status, dialog) = {
+    let (status, dialog, tab_count) = {
         let v = inst.view.lock().unwrap();
-        (v.status.clone(), v.dialog.is_some())
+        (v.status.clone(), v.dialog.is_some(), v.tabs.len())
     };
     let line = |text: &str, color: Color32| {
         let g = p.layout(text.to_string(), FontId::proportional(11.5), color, r.width() - 20.0);
@@ -359,6 +372,12 @@ fn preview_overlays(ui: &Ui, p: &egui::Painter, t: &Theme, inst: &Arc<Instance>,
             line("The browser stopped. Click to see why.", t.error);
         }
         Status::Ready => {
+            if tab_count > 1 {
+                let g = p.layout_no_wrap(format!("{tab_count} tabs"), FontId::proportional(10.5), Color32::WHITE);
+                let tag = Rect::from_min_size(egui::pos2(r.right() - g.size().x - 16.0, r.top() + 6.0), g.size() + vec2(10.0, 4.0));
+                p.rect_filled(tag, 4.0, Color32::from_black_alpha(180));
+                p.galley(tag.min + vec2(5.0, 2.0), g, Color32::WHITE);
+            }
             if dialog {
                 let g = p.layout_no_wrap("The page is waiting on a dialog".into(), FontId::proportional(11.0), Color32::WHITE);
                 let tag = Rect::from_min_size(egui::pos2(r.left() + 6.0, r.bottom() - g.size().y - 12.0), g.size() + vec2(10.0, 6.0));
@@ -437,7 +456,9 @@ fn paint_cursor(p: &egui::Painter, tip: egui::Pos2, size: f32, tag: bool, alpha:
 /// caption.
 fn lightbox(ctx: &egui::Context, t: &Theme, conv: &str, inst: Option<&Arc<Instance>>, s: &mut ViewState, e: f32) {
     let area = lightbox_area(ctx);
-    let (frame, page, k) = lightbox_layout(area, s.size);
+    let show_tabs = inst.is_some_and(|i| !i.attached());
+    let top_h = BAR_H + if show_tabs { TAB_BAR_H } else { 0.0 };
+    let (frame, page, k) = lightbox_layout_with(area, s.size, top_h);
     let ease = 1.0 - (1.0 - e).powi(3);
     let a = s.alpha;
     let full = e >= 1.0 && a >= 1.0;
@@ -464,7 +485,14 @@ fn lightbox(ctx: &egui::Context, t: &Theme, conv: &str, inst: Option<&Arc<Instan
             collapse = true;
         }
         p.rect_stroke(frame, 0.0, Stroke::new(1.0, t.line), egui::StrokeKind::Outside);
-        let bar = Rect::from_min_max(frame.min, egui::pos2(frame.right(), frame.top() + BAR_H));
+        let bar_top = if show_tabs {
+            let strip = Rect::from_min_max(frame.min, egui::pos2(frame.right(), frame.top() + TAB_BAR_H));
+            tab_strip(ui, t, inst, strip);
+            frame.top() + TAB_BAR_H
+        } else {
+            frame.top()
+        };
+        let bar = Rect::from_min_max(egui::pos2(frame.left(), bar_top), egui::pos2(frame.right(), bar_top + BAR_H));
         collapse |= toolbar(ui, t, inst, bar);
         page_view(ui, t, inst, page, k);
         let pct = (k * 100.0).round();
@@ -537,6 +565,98 @@ fn paint_icon(p: &egui::Painter, c: egui::Pos2, icon: Icon, color: Color32) {
         Icon::Shrink => {
             p.line_segment([c + vec2(-5.5, 4.0), c + vec2(5.5, 4.0)], stroke);
         }
+        Icon::Plus => {
+            let h = 5.0;
+            p.line_segment([c + vec2(-h, 0.0), c + vec2(h, 0.0)], stroke);
+            p.line_segment([c + vec2(0.0, -h), c + vec2(0.0, h)], stroke);
+        }
+    }
+}
+
+fn tab_label(tab: &browser::TabInfo) -> String {
+    if !tab.title.is_empty() {
+        tab.title.clone()
+    } else if tab.loading {
+        "Loading…".into()
+    } else if !tab.url.is_empty() && tab.url != "about:blank" {
+        tab.url.strip_prefix("https://").or_else(|| tab.url.strip_prefix("http://")).unwrap_or(&tab.url).to_string()
+    } else {
+        "New tab".into()
+    }
+}
+
+/// The tab strip over the toolbar: switch, close (x or middle-click) and `+` for a new tab.
+fn tab_strip(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, strip: Rect) {
+    let p = ui.painter().clone();
+    p.rect_filled(strip, 0.0, t.bg);
+    p.hline(strip.x_range(), strip.bottom() - 0.5, Stroke::new(1.0, t.line));
+    let (tabs, ready) = {
+        let v = inst.view.lock().unwrap();
+        (v.tabs.clone(), v.status == Status::Ready)
+    };
+    let can_close = tabs.len() > 1;
+    let plus_w = 28.0;
+    let avail = (strip.width() - plus_w - 8.0).max(40.0);
+    let count = tabs.len().max(1) as f32;
+    let tab_w = (avail / count).clamp(48.0, 190.0);
+    let top_round = CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 };
+    let mut drawn = 0usize;
+    for (idx, tab) in tabs.iter().enumerate() {
+        let x = strip.left() + 4.0 + idx as f32 * tab_w;
+        if x + 28.0 > strip.right() - plus_w {
+            break;
+        }
+        drawn += 1;
+        let w = tab_w.min(strip.right() - plus_w - 4.0 - x);
+        let r = Rect::from_min_size(egui::pos2(x, strip.top() + 3.0), vec2((w - 2.0).max(20.0), strip.height() - 3.0));
+        let show_x = can_close && r.width() >= 56.0;
+        let resp = ui.interact(r, Id::unique(("browser-tab", &inst.conv, tab.id)), Sense::click());
+        let close_r = Rect::from_center_size(egui::pos2(r.right() - 12.0, r.center().y), vec2(16.0, 16.0));
+        let close_resp = show_x.then(|| ui.interact(close_r, Id::unique(("browser-tab-close", &inst.conv, tab.id)), Sense::click()));
+        let close_clicked = close_resp.as_ref().is_some_and(|c| c.clicked());
+        let close_middle = close_resp.as_ref().is_some_and(|c| c.middle_clicked());
+        let close_hovered = close_resp.as_ref().is_some_and(|c| c.hovered());
+        let hovered = resp.hovered() || close_hovered;
+        if tab.active {
+            p.rect_filled(r, top_round, t.panel);
+            p.rect_stroke(r, top_round, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+            p.hline(Rangef::new(r.left() + 1.0, r.right() - 1.0), strip.bottom() - 0.5, Stroke::new(1.5, t.panel));
+        } else if hovered {
+            p.rect_filled(r, top_round, t.panel2.gamma_multiply(0.5));
+        }
+        let text_right = if show_x { close_r.left() - 2.0 } else { r.right() - 6.0 };
+        let text_rect = Rect::from_min_max(egui::pos2(r.left() + 8.0, r.top()), egui::pos2(text_right.max(r.left() + 8.0), r.bottom()));
+        let tp = p.with_clip_rect(text_rect);
+        let ink = if tab.active { t.ink } else if hovered { t.ink2 } else { t.ink3 };
+        tp.text(egui::pos2(text_rect.left(), r.center().y), Align2::LEFT_CENTER, tab_label(tab), FontId::proportional(11.5), ink);
+        if show_x && (tab.active || hovered) {
+            if close_hovered {
+                p.rect_filled(close_r, 3.0, t.panel2);
+            }
+            let s = 3.5;
+            let c = close_r.center();
+            let st = Stroke::new(1.3, if close_hovered { t.ink } else { t.ink3 });
+            p.line_segment([c + vec2(-s, -s), c + vec2(s, s)], st);
+            p.line_segment([c + vec2(-s, s), c + vec2(s, -s)], st);
+        }
+        let tip = [tab.title.clone(), shown_url(&tab.url)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
+        if let Some(cr) = close_resp {
+            let _ = cr.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Close tab");
+        }
+        if ready {
+            if close_clicked || (can_close && (resp.middle_clicked() || close_middle)) {
+                inst.user_close_tab(tab.id);
+            } else if resp.clicked() && !tab.active {
+                inst.user_switch_tab(tab.id);
+            }
+        }
+    }
+    let plus_x = (strip.left() + 4.0 + drawn as f32 * tab_w).min(strip.right() - plus_w);
+    let plus_r = Rect::from_min_size(egui::pos2(plus_x, strip.top() + 2.0), vec2(26.0, strip.height() - 4.0));
+    if bar_button(ui, t, plus_r, Id::unique(("browser-new-tab", &inst.conv)), Icon::Plus, "New tab", ready) {
+        inst.user_new_tab();
     }
 }
 

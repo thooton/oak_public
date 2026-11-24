@@ -794,8 +794,10 @@ transcript or a plugin's chat scrolls it as browsers do (`src/autoscroll.rs`): t
 below the ring left where it was pressed, the faster; letting go after moving with the button held
 ends it, and after a plain click it runs until the next click, Esc or the wheel. The clicks it
 takes reach nothing else, so the text selection stays, and a middle click on a tab still closes
-it. The browser (`src/browser.rs`, its view `src/browser_view.rs`) is a real Chromium page per
-conversation that only the model opens and closes (the BROWSER kit's open and close, when the user
+it. The browser (`src/browser.rs`, its view `src/browser_view.rs`) is a real Chromium per
+conversation (supporting multiple tabs via `tabs`, `new_tab`, `switch_tab` and `close_tab`, plus a
+tab strip in the expanded view, with popups and `target="_blank"` links opening new tabs) that only
+the model opens and closes (the BROWSER kit's open and close, when the user
 asks); there is no button for it. It fades in and out as it does, and while it is open a
 see-through preview sits beside the transcript, between the column and the minimap (over the
 transcript's corner when there is no room). A click on it, or Ctrl+Shift+B, expands it over the

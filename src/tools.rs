@@ -68,6 +68,7 @@ const FAMILIES: &[(&str, &[(&str, &str)])] = &[
     ("BROWSER", &[
         ("open", "BROWSER_OPEN"), ("close", "BROWSER_CLOSE"), ("attach", "BROWSER_ATTACH"),
         ("goto", "BROWSER_GOTO"), ("back", "BROWSER_BACK"), ("forward", "BROWSER_FORWARD"), ("reload", "BROWSER_RELOAD"),
+        ("tabs", "BROWSER_TABS"), ("new_tab", "BROWSER_NEW_TAB"), ("switch_tab", "BROWSER_SWITCH_TAB"), ("close_tab", "BROWSER_CLOSE_TAB"),
         ("read", "BROWSER_READ"), ("click", "BROWSER_CLICK"), ("hover", "BROWSER_HOVER"), ("drag", "BROWSER_DRAG"),
         ("type", "BROWSER_TYPE"), ("key", "BROWSER_KEY"), ("scroll", "BROWSER_SCROLL"), ("wait", "BROWSER_WAIT"),
         ("screenshot", "BROWSER_SCREENSHOT"), ("eval", "BROWSER_EVAL"), ("resize", "BROWSER_RESIZE"),

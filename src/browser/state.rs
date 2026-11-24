@@ -701,6 +701,11 @@ impl Instance {
             return Err(format!("Couldn't apply the overrides ({err}); they are as they were. {}", old.describe()));
         }
         *self.emulation.lock().unwrap() = e.clone();
+        for other in self.all_pages() {
+            if !std::ptr::eq(Arc::as_ptr(&other), page as *const Cdp) {
+                let _ = self.apply_emulation_from(&other, &e, &old);
+            }
+        }
         let later = if e == old { "" } else { " Requests from now on see them; reload the page for its scripts to start with them." };
         Ok(format!("{}{later}", e.describe()) + &self.notes())
     }
@@ -826,6 +831,12 @@ impl Instance {
                 return Err(e.to_string());
             }
             let _ = page.call("Log.enable", json!({}));
+            for other in self.all_pages() {
+                if !std::ptr::eq(Arc::as_ptr(&other), page as *const Cdp) {
+                    let _ = other.call("Runtime.enable", json!({}));
+                    let _ = other.call("Log.enable", json!({}));
+                }
+            }
             // What the page logged before comes as events: a moment for them.
             std::thread::sleep(Duration::from_millis(400));
         }

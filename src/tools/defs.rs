@@ -230,7 +230,7 @@ fn families(tools: Vec<Value>, agent: bool) -> Vec<Value> {
 }
 
 /// What BROWSER is, before its actions.
-const BROWSER_INTRO: &str = "Oak's browser: a real Chromium page, which exists from action=open to action=close. The user sees it as a preview beside the transcript and can expand it to use it at the same time. One page. Coordinates are viewport CSS pixels, as in its screenshots. Only use it when the user explicitly asks you to use the browser tool.";
+const BROWSER_INTRO: &str = "Oak's browser: a real Chromium, which exists from action=open to action=close. The user sees it as a preview beside the transcript and can expand it to use it at the same time. Supports multiple tabs (tabs, new_tab, switch_tab, close_tab); actions go to the active tab. Coordinates are viewport CSS pixels, as in its screenshots. Only use it when the user explicitly asks you to use the browser tool.";
 
 /// BROWSER action=help: each action, what it does and its fields.
 pub fn browser_help() -> String {
@@ -404,6 +404,13 @@ fn definitions_with(agent: bool) -> Value {
     // The browser's state and records, before its help (apart: one json!
     // for them all is past the macro's recursion limit).
     let more = json!([
+        tool("BROWSER_TABS", "list open tabs (id, title, URL, and which is active)", json!({}), &[]),
+        tool("BROWSER_NEW_TAB", "open a new tab (at `url` if given) and switch to it",
+            json!({"url": {"type": "string"}}), &[]),
+        tool("BROWSER_SWITCH_TAB", "switch to tab `id` (from tabs)",
+            json!({"id": {"type": "integer"}}), &["id"]),
+        tool("BROWSER_CLOSE_TAB", "close tab `id` (default the active tab); refuses to close the last tab (use action=close to end the browser)",
+            json!({"id": {"type": "integer"}}), &[]),
         tool("BROWSER_COOKIES", "the cookies `url` (default the page's) gets, or every site's with `all`; with `path`, saves them there instead (.json, else Netscape cookies.txt for curl -b)",
             json!({"url": {"type": "string"}, "all": {"type": "boolean"}, "path": {"type": "string", "description": "A file, relative to the working folder"}}), &[]),
         tool("BROWSER_SET_COOKIES", "set `cookies` (each: name, value, url or domain (default the page's site), path, expires (Unix seconds), httpOnly, secure, sameSite), or load them from the file at `path` (JSON as cookies saves, Playwright's or a browser extension's export, or cookies.txt)",

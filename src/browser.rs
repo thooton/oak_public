@@ -4,15 +4,16 @@
 //! Nothing runs until the model opens a conversation's browser: that starts
 //! a headless Chromium on the conversation's own profile (cookies, logins
 //! and storage stay on disk until the conversation is deleted) and drives
-//! its one page over the DevTools protocol. Its viewport is its own size
+//! its tabs over the DevTools protocol. Its viewport is its own size
 //! (1920x1080 CSS pixels unless the model resizes it), not the window's:
 //! the view (`browser_view.rs`) scales it down to a preview beside the
-//! transcript, or to the lightbox the user expands it into. The page's
+//! transcript, or to the lightbox the user expands it into. The active tab's
 //! frames stream in (a screencast, at the size shown, only while it is on
-//! screen), and the user's pointer, wheel and keys go to the page as input
-//! events, as the model's clicks and keys do. Closing ends the browser;
-//! the other calls fail while it is closed. Popups and new tabs open in the
-//! one page.
+//! screen), and the user's pointer, wheel and keys go to the active tab as
+//! input events, as the model's clicks and keys do. Closing ends the browser;
+//! the other calls fail while it is closed. Popups and new tabs open as tabs
+//! of their own, and both the user and the model can open, switch and close
+//! tabs.
 //!
 //! The model can open it on a named profile instead, shared between
 //! conversations (one browser at a time on each), and manage its cookies,
@@ -23,7 +24,7 @@ mod state;
 
 pub(crate) use state::model_profiles;
 
-use crate::cdp::{Cdp, Listener};
+use crate::cdp::Cdp;
 use base64::Engine as _;
 use eframe::egui;
 use serde_json::{Value, json};
@@ -136,10 +137,44 @@ enum Actor {
     Agent,
 }
 
+/// Summary of an open tab, for the view's tab strip.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TabInfo {
+    pub(crate) id: u64,
+    pub(crate) title: String,
+    pub(crate) url: String,
+    pub(crate) loading: bool,
+    pub(crate) active: bool,
+}
+
+/// One open page tab in the browser.
+struct PageTab {
+    id: u64,
+    target: String,
+    cdp: Arc<Cdp>,
+    main_frame: String,
+    url: String,
+    title: String,
+    loading: bool,
+    back: bool,
+    forward: bool,
+    dialog: Option<Dialog>,
+    navs: u64,
+}
+
+/// Open tabs and which one is active.
+#[derive(Default)]
+struct TabsState {
+    next_id: u64,
+    active: u64,
+    list: Vec<PageTab>,
+}
+
 /// What the view shows, and what the model is told after its next call.
 #[derive(Default)]
 pub(crate) struct View {
     pub(crate) status: Status,
+    pub(crate) tabs: Vec<TabInfo>,
     pub(crate) url: String,
     pub(crate) title: String,
     pub(crate) loading: bool,
@@ -211,17 +246,19 @@ pub(crate) struct Instance {
     net: Mutex<state::NetLog>,
     ctx: egui::Context,
     pub(crate) view: Mutex<View>,
-    /// The page's DevTools session, once it is up.
-    page: Mutex<Option<Arc<Cdp>>>,
-    /// The browser's own (for closing it gently, so its cookies are saved).
+    /// Open tabs and which one is active.
+    tabs: Mutex<TabsState>,
+    /// Channel carrying `(tab_id, event)` from tabs and root (id 0) to `run`.
+    ev_tx: Mutex<Option<Sender<(u64, Value)>>>,
+    /// Serializes tab creation/attachment/closing.
+    tab_op: Mutex<()>,
+    /// The browser's own (for closing it gently, so its cookies are saved, and managing tabs).
     root: Mutex<Option<Arc<Cdp>>>,
     child: Mutex<Option<Child>>,
     #[cfg(windows)]
     job: Mutex<usize>,
     closed: AtomicBool,
     port: AtomicU16,
-    target: Mutex<String>,
-    main_frame: Mutex<String>,
     viewport: Mutex<Viewport>,
     /// When the view last drew it.
     drawn: Mutex<Instant>,
@@ -320,15 +357,15 @@ fn open_on(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<Strin
         net: Mutex::new(state::NetLog::default()),
         ctx: ctx.clone(),
         view: Mutex::new(View::default()),
-        page: Mutex::new(None),
+        tabs: Mutex::new(TabsState::default()),
+        ev_tx: Mutex::new(None),
+        tab_op: Mutex::new(()),
         root: Mutex::new(None),
         child: Mutex::new(None),
         #[cfg(windows)]
         job: Mutex::new(0),
         closed: AtomicBool::new(false),
         port: AtomicU16::new(0),
-        target: Mutex::new(String::new()),
-        main_frame: Mutex::new(String::new()),
         viewport: Mutex::new(Viewport { w: DEFAULT_W, h: DEFAULT_H, scale: 1.0, mobile: false }),
         drawn: Mutex::new(Instant::now()),
         cast: Mutex::new([DEFAULT_W, DEFAULT_H]),
@@ -464,16 +501,115 @@ fn reap_stale(profile: &Path) {
 
 impl Instance {
     fn page(&self) -> Option<Arc<Cdp>> {
-        self.page.lock().unwrap().clone()
+        let t = self.tabs.lock().unwrap();
+        t.list.iter().find(|tab| tab.id == t.active).or_else(|| t.list.first()).map(|tab| tab.cdp.clone())
+    }
+
+    pub(super) fn all_pages(&self) -> Vec<Arc<Cdp>> {
+        self.tabs.lock().unwrap().list.iter().map(|tab| tab.cdp.clone()).collect()
+    }
+
+    fn active_tab(&self) -> Option<(u64, Arc<Cdp>)> {
+        let t = self.tabs.lock().unwrap();
+        t.list.iter().find(|tab| tab.id == t.active).or_else(|| t.list.first()).map(|tab| (tab.id, tab.cdp.clone()))
+    }
+
+    fn tab_cdp(&self, id: u64) -> Option<Arc<Cdp>> {
+        self.tabs.lock().unwrap().list.iter().find(|tab| tab.id == id).map(|tab| tab.cdp.clone())
     }
 
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
 
-    /// Starts the browser and readies its page; the page's events, for
-    /// the loop.
-    fn start(&self) -> Result<Listener, String> {
+    fn forward_events(&self, tab_id: u64, cdp: &Arc<Cdp>) {
+        let Some(tx) = self.ev_tx.lock().unwrap().clone() else { return };
+        let listener = cdp.listen();
+        std::thread::spawn(move || {
+            while let Ok(ev) = listener.rx.recv() {
+                let closed = ev["method"] == "__closed__";
+                if tx.send((tab_id, ev)).is_err() || closed {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn wake_loop(&self) {
+        if let Some(tx) = self.ev_tx.lock().unwrap().as_ref() {
+            let _ = tx.send((0, json!({"method": "__wake__"})));
+        }
+    }
+
+    /// Mirrors the tabs list and active tab's state into `self.view` and repaints.
+    fn sync_view(&self) {
+        let (infos, active) = {
+            let t = self.tabs.lock().unwrap();
+            let infos: Vec<TabInfo> = t
+                .list
+                .iter()
+                .map(|tab| TabInfo {
+                    id: tab.id,
+                    title: tab.title.clone(),
+                    url: tab.url.clone(),
+                    loading: tab.loading,
+                    active: tab.id == t.active,
+                })
+                .collect();
+            let active = t
+                .list
+                .iter()
+                .find(|tab| tab.id == t.active)
+                .or_else(|| t.list.first())
+                .map(|tab| (tab.url.clone(), tab.title.clone(), tab.loading, tab.back, tab.forward, tab.dialog.clone(), tab.navs));
+            (infos, active)
+        };
+        self.update_view(|v| {
+            v.tabs = infos;
+            if let Some((url, title, loading, back, forward, dialog, navs)) = active {
+                v.url = url;
+                v.title = title;
+                v.loading = loading;
+                v.back = back;
+                v.forward = forward;
+                v.dialog = dialog;
+                v.navs = navs;
+            }
+        });
+    }
+
+    fn mutate_tab(&self, id: u64, f: impl FnOnce(&mut PageTab)) {
+        {
+            let mut t = self.tabs.lock().unwrap();
+            if let Some(tab) = t.list.iter_mut().find(|tab| tab.id == id) {
+                f(tab);
+            }
+        }
+        self.sync_view();
+    }
+
+    fn mutate_active_tab(&self, f: impl FnOnce(&mut PageTab)) {
+        {
+            let mut t = self.tabs.lock().unwrap();
+            let active = t.active;
+            if let Some(tab) = t.list.iter_mut().find(|tab| tab.id == active) {
+                f(tab);
+            }
+        }
+        self.sync_view();
+    }
+
+    fn on_tab_switched(&self) {
+        self.update_view(|v| {
+            v.select = None;
+            v.cursor = egui::CursorIcon::Default;
+            v.agent_at = None;
+            v.agent_ptr = None;
+        });
+    }
+
+    /// Starts the browser and readies its first tab.
+    fn start(&self) -> Result<(), String> {
         if let Some(tab) = self.tab {
             return self.start_attached(tab);
         }
@@ -530,17 +666,38 @@ impl Instance {
         let ws = self.devtools_ws(&rx)?;
         let port = ws.trim_start_matches("ws://").split(['/', ':']).nth(1).and_then(|p| p.parse::<u16>().ok()).ok_or(format!("Unexpected DevTools address {ws}"))?;
         self.port.store(port, Ordering::SeqCst);
-        *self.root.lock().unwrap() = Cdp::connect(&ws).ok();
-        let cdp = self.open_page(port)?;
-        let events = cdp.listen();
-        self.set_up_page(&cdp)?;
+        let root = Cdp::connect(&ws).ok();
+        *self.root.lock().unwrap() = root.clone();
+        let (target, cdp) = self.open_page(port)?;
+        self.forward_events(1, &cdp);
+        let (main_frame, url) = self.set_up_page(&cdp)?;
         // The viewport may have changed while Chromium was starting. Apply
-        // its latest size and publish the page under the same lock, so a
+        // its latest size and publish the tab under the same lock, so a
         // draw cannot update the size before there is a page to send it to.
         {
             let vp = self.viewport.lock().unwrap();
             apply_viewport(&cdp, *vp);
-            *self.page.lock().unwrap() = Some(cdp.clone());
+            let mut tabs = self.tabs.lock().unwrap();
+            tabs.next_id = 1;
+            tabs.active = 1;
+            tabs.list.push(PageTab {
+                id: 1,
+                target,
+                cdp: cdp.clone(),
+                main_frame,
+                url,
+                title: String::new(),
+                loading: false,
+                back: false,
+                forward: false,
+                dialog: None,
+                navs: 0,
+            });
+        }
+        self.sync_view();
+        if let Some(root) = root {
+            self.forward_events(0, &root);
+            root.send("Target.setDiscoverTargets", json!({"discover": true}));
         }
         // Where it was when it was last closed.
         let last = std::fs::read_to_string(self.profile.join("oak-last-url")).unwrap_or_default();
@@ -548,25 +705,42 @@ impl Instance {
         if !last.is_empty() && last != "about:blank" {
             cdp.send("Page.navigate", json!({"url": last}));
         }
-        Ok(events)
+        Ok(())
     }
 
     /// Attaches to the user's tab `tab` through the extension and readies
     /// it as little as the tools need: its events, main frame and network
     /// log; its size is the tab's.
-    fn start_attached(&self, tab: i64) -> Result<Listener, String> {
+    fn start_attached(&self, tab: i64) -> Result<(), String> {
         let cdp = bridge::attach(tab)?;
-        let events = cdp.listen();
+        self.forward_events(1, &cdp);
         let call = |m: &str, p: Value| cdp.call(m, p).map_err(|e| e.to_string());
         call("Page.enable", json!({}))?;
         let tree = call("Page.getFrameTree", json!({}))?;
-        *self.main_frame.lock().unwrap() = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
+        let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
         let url = tree["frameTree"]["frame"]["url"].as_str().unwrap_or("").to_string();
         let _ = call("Network.enable", json!({"maxPostDataSize": state::POST_MAX}));
-        *self.page.lock().unwrap() = Some(cdp.clone());
+        {
+            let mut tabs = self.tabs.lock().unwrap();
+            tabs.next_id = 1;
+            tabs.active = 1;
+            tabs.list.push(PageTab {
+                id: 1,
+                target: String::new(),
+                cdp,
+                main_frame,
+                url,
+                title: String::new(),
+                loading: false,
+                back: false,
+                forward: false,
+                dialog: None,
+                navs: 0,
+            });
+        }
         self.sync_size();
-        self.update_view(|v| v.url = url);
-        Ok(events)
+        self.sync_view();
+        Ok(())
     }
 
     /// An attached tab's viewport: the size the user's window gives it.
@@ -609,9 +783,9 @@ impl Instance {
         }
     }
 
-    /// Connects to the browser's one page: the tab it opened with (or a
+    /// Connects to the browser's initial page: the tab it opened with (or a
     /// new one).
-    fn open_page(&self, port: u16) -> Result<Arc<Cdp>, String> {
+    fn open_page(&self, port: u16) -> Result<(String, Arc<Cdp>), String> {
         let targets = http_json(port, "GET", "/json/list")?;
         let page = targets.as_array().into_iter().flatten().find(|t| t["type"] == "page").cloned();
         let page = match page {
@@ -619,20 +793,24 @@ impl Instance {
             None => http_json(port, "PUT", "/json/new?about:blank")?,
         };
         let ws = page["webSocketDebuggerUrl"].as_str().ok_or("The browser gave no address for its page.")?;
-        *self.target.lock().unwrap() = page["id"].as_str().unwrap_or("").to_string();
-        Cdp::connect(ws).map_err(|e| e.to_string())
+        let id = page["id"].as_str().unwrap_or("").to_string();
+        let cdp = Cdp::connect(ws).map_err(|e| e.to_string())?;
+        Ok((id, cdp))
     }
 
-    /// Readies the page: its events and main frame, a plain Chrome's user
-    /// agent (or the model's overrides), one page only, file choosers,
-    /// downloads, and the network log.
-    fn set_up_page(&self, cdp: &Arc<Cdp>) -> Result<(), String> {
+    /// Readies a page tab: its events and main frame, a plain Chrome's user
+    /// agent (or the model's overrides), file choosers, downloads, and the
+    /// network log.
+    fn set_up_page(&self, cdp: &Arc<Cdp>) -> Result<(String, String), String> {
         let call = |m: &str, p: Value| cdp.call(m, p).map_err(|e| e.to_string());
         call("Page.enable", json!({}))?;
         let tree = call("Page.getFrameTree", json!({}))?;
-        *self.main_frame.lock().unwrap() = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
+        let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
+        let url = tree["frameTree"]["frame"]["url"].as_str().unwrap_or("").to_string();
         // A plain Chrome's user agent, not HeadlessChrome's.
-        if let Ok(v) = call("Browser.getVersion", json!({})) {
+        if self.user_agent.lock().unwrap().is_empty()
+            && let Ok(v) = call("Browser.getVersion", json!({}))
+        {
             *self.user_agent.lock().unwrap() = v["userAgent"].as_str().unwrap_or("").replace("HeadlessChrome", "Chrome");
         }
         // (Pages can't tell the Network domain is on, unlike Runtime's.)
@@ -641,24 +819,254 @@ impl Instance {
         if let Err(e) = self.apply_emulation(cdp, &emulation) {
             self.update_view(|v| v.note(format!("The overrides set with emulate couldn't all be applied again: {e}")));
         }
-        let _ = call("Page.addScriptToEvaluateOnNewDocument", json!({"source": ONE_PAGE_JS}));
+        if self.console.lock().unwrap().is_some() {
+            let _ = call("Runtime.enable", json!({}));
+            let _ = call("Log.enable", json!({}));
+        }
         let _ = call("Page.setInterceptFileChooserDialog", json!({"enabled": true}));
         let _ = call("Emulation.setFocusEmulationEnabled", json!({"enabled": true}));
         let downloads = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir);
         let _ = call("Page.setDownloadBehavior", json!({"behavior": "allow", "downloadPath": downloads.display().to_string()}));
+        Ok((main_frame, url))
+    }
+
+    /// Attaches a Chromium page target as a tab (idempotent if already tracked).
+    fn attach_target(&self, target_id: &str, activate: bool, from_page: bool) -> Result<u64, String> {
+        let _guard = self.tab_op.lock().unwrap();
+        self.attach_target_locked(target_id, activate, from_page)
+    }
+
+    fn attach_target_locked(&self, target_id: &str, activate: bool, from_page: bool) -> Result<u64, String> {
+        if let Some(id) = self.tabs.lock().unwrap().list.iter().find(|t| t.target == target_id).map(|t| t.id) {
+            if activate {
+                let _ = self.switch_tab_impl(id);
+            }
+            return Ok(id);
+        }
+        let port = self.port.load(Ordering::SeqCst);
+        if port == 0 || self.is_closed() {
+            return Err("The browser isn't running.".into());
+        }
+        let ws = format!("ws://127.0.0.1:{port}/devtools/page/{target_id}");
+        let cdp = Cdp::connect(&ws).map_err(|e| e.to_string())?;
+        let id = {
+            let mut t = self.tabs.lock().unwrap();
+            t.next_id += 1;
+            t.next_id
+        };
+        self.forward_events(id, &cdp);
+        let (main_frame, url) = match self.set_up_page(&cdp) {
+            Ok(v) => v,
+            Err(e) => {
+                cdp.close();
+                return Err(e);
+            }
+        };
+        {
+            let vp = self.viewport.lock().unwrap();
+            apply_viewport(&cdp, *vp);
+            let mut t = self.tabs.lock().unwrap();
+            t.list.push(PageTab {
+                id,
+                target: target_id.to_string(),
+                cdp,
+                main_frame,
+                url: url.clone(),
+                title: String::new(),
+                loading: false,
+                back: false,
+                forward: false,
+                dialog: None,
+                navs: 0,
+            });
+            if activate {
+                t.active = id;
+            }
+        }
+        if activate {
+            self.on_tab_switched();
+            if let Some(root) = self.root.lock().unwrap().clone() {
+                root.send("Target.activateTarget", json!({"targetId": target_id}));
+            }
+        }
+        self.sync_view();
+        if activate {
+            self.wake_loop();
+        }
+        if from_page {
+            let u = if url.is_empty() || url == "about:blank" { String::new() } else { format!(" ({url})") };
+            self.update_view(|v| v.note(format!("The page opened a new tab #{id}{u}{}.", if activate { " and switched to it" } else { "" })));
+        }
+        Ok(id)
+    }
+
+    /// Creates a new tab (at `url`, if given) and switches to it.
+    fn new_tab_impl(&self, url: Option<&str>) -> Result<u64, String> {
+        let id = {
+            let _guard = self.tab_op.lock().unwrap();
+            let root = self.root.lock().unwrap().clone().ok_or_else(|| "The browser isn't running.".to_string())?;
+            let r = root.call("Target.createTarget", json!({"url": "about:blank"})).map_err(|e| e.to_string())?;
+            let tid = r["targetId"].as_str().ok_or("The browser gave no id for the new tab.")?;
+            self.attach_target_locked(tid, true, false)?
+        };
+        if let Some(u) = url {
+            let cdp = self.tab_cdp(id).ok_or("The new tab closed immediately.")?;
+            let r = cdp.call("Page.navigate", json!({"url": u})).map_err(|e| e.to_string())?;
+            if let Some(e) = r["errorText"].as_str().filter(|e| !e.is_empty()) {
+                return Err(format!("Couldn't open {u}: {e}"));
+            }
+            self.mutate_tab(id, |t| t.loading = true);
+        }
+        Ok(id)
+    }
+
+    /// Switches the active tab to `id`.
+    fn switch_tab_impl(&self, id: u64) -> Result<(), String> {
+        let target = {
+            let mut t = self.tabs.lock().unwrap();
+            let Some(tab) = t.list.iter().find(|tab| tab.id == id) else {
+                let ids: Vec<String> = t.list.iter().map(|tab| format!("#{}", tab.id)).collect();
+                return Err(format!("No tab #{id} (open: {}).", ids.join(", ")));
+            };
+            t.active = id;
+            tab.target.clone()
+        };
+        self.on_tab_switched();
+        if !target.is_empty()
+            && let Some(root) = self.root.lock().unwrap().clone()
+        {
+            root.send("Target.activateTarget", json!({"targetId": target}));
+        }
+        self.sync_view();
+        self.wake_loop();
         Ok(())
+    }
+
+    /// Closes tab `id` (or the active tab when None). Refuses to close the last tab.
+    fn close_tab_impl(&self, id: Option<u64>) -> Result<u64, String> {
+        let _guard = self.tab_op.lock().unwrap();
+        let (closed_id, target, cdp, new_active_target) = {
+            let mut t = self.tabs.lock().unwrap();
+            if t.list.len() <= 1 {
+                return Err("Can't close the last tab: use BROWSER action=close to close the browser.".into());
+            }
+            let want = id.unwrap_or(t.active);
+            let Some(pos) = t.list.iter().position(|tab| tab.id == want) else {
+                let ids: Vec<String> = t.list.iter().map(|tab| format!("#{}", tab.id)).collect();
+                return Err(format!("No tab #{want} (open: {}).", ids.join(", ")));
+            };
+            let removed = t.list.remove(pos);
+            let new_target = if t.active == want {
+                let next = &t.list[pos.min(t.list.len() - 1)];
+                t.active = next.id;
+                Some(next.target.clone())
+            } else {
+                None
+            };
+            (removed.id, removed.target, removed.cdp, new_target)
+        };
+        cdp.close();
+        if let Some(root) = self.root.lock().unwrap().clone() {
+            if !target.is_empty() {
+                let _ = root.call_for("Target.closeTarget", json!({"targetId": target}), Duration::from_secs(5));
+            }
+            if let Some(nt) = new_active_target.as_deref().filter(|s| !s.is_empty()) {
+                root.send("Target.activateTarget", json!({"targetId": nt}));
+            }
+        }
+        if new_active_target.is_some() {
+            self.on_tab_switched();
+        }
+        self.sync_view();
+        self.wake_loop();
+        Ok(closed_id)
+    }
+
+    /// Handles a tab's session ending on its own (page `window.close()`, crash, or browser exit).
+    /// Returns true if no tabs remain (so the browser loop should exit).
+    fn handle_tab_closed(&self, id: u64) -> bool {
+        let (empty, new_active_target) = {
+            let mut t = self.tabs.lock().unwrap();
+            let mut new_target = None;
+            if let Some(pos) = t.list.iter().position(|tab| tab.id == id) {
+                t.list.remove(pos);
+                if t.active == id
+                    && !t.list.is_empty()
+                {
+                    let next = &t.list[pos.min(t.list.len() - 1)];
+                    t.active = next.id;
+                    new_target = Some(next.target.clone());
+                }
+            }
+            (t.list.is_empty(), new_target)
+        };
+        if empty {
+            return true;
+        }
+        if let Some(nt) = new_active_target {
+            self.on_tab_switched();
+            if !nt.is_empty()
+                && let Some(root) = self.root.lock().unwrap().clone()
+            {
+                root.send("Target.activateTarget", json!({"targetId": nt}));
+            }
+        }
+        self.sync_view();
+        self.wake_loop();
+        false
+    }
+
+    fn remove_tab_by_target(&self, target_id: &str) {
+        let id = self.tabs.lock().unwrap().list.iter().find(|t| t.target == target_id).map(|t| t.id);
+        if let Some(id) = id {
+            let _ = self.handle_tab_closed(id);
+        }
+    }
+
+    /// User clicked `+` in the tab strip.
+    pub(crate) fn user_new_tab(self: &Arc<Self>) {
+        if self.tab.is_some() {
+            return;
+        }
+        let i = self.clone();
+        std::thread::spawn(move || {
+            i.view.lock().unwrap().actor = Actor::User;
+            let _ = i.new_tab_impl(None);
+        });
+    }
+
+    /// User clicked a tab in the tab strip.
+    pub(crate) fn user_switch_tab(&self, id: u64) {
+        if self.tab.is_some() {
+            return;
+        }
+        self.view.lock().unwrap().actor = Actor::User;
+        let _ = self.switch_tab_impl(id);
+    }
+
+    /// User clicked `×` or middle-clicked a tab in the tab strip.
+    pub(crate) fn user_close_tab(self: &Arc<Self>, id: u64) {
+        if self.tab.is_some() {
+            return;
+        }
+        let i = self.clone();
+        std::thread::spawn(move || {
+            i.view.lock().unwrap().actor = Actor::User;
+            let _ = i.close_tab_impl(Some(id));
+        });
     }
 
     /// Ends the browser: gently (so it saves its cookies), else killed.
     fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.probe.lock().unwrap().take();
+        self.ev_tx.lock().unwrap().take();
         if let Some(root) = self.root.lock().unwrap().take() {
             let _ = root.call_for("Browser.close", json!({}), Duration::from_secs(3));
             root.close();
         }
-        if let Some(page) = self.page.lock().unwrap().take() {
-            page.close();
+        for tab in std::mem::take(&mut self.tabs.lock().unwrap().list) {
+            tab.cdp.close();
         }
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let t = Instant::now();
@@ -696,19 +1104,18 @@ fn apply_viewport(cdp: &Cdp, vp: Viewport) {
     cdp.send("Emulation.setTouchEmulationEnabled", json!({"enabled": vp.mobile}));
 }
 
-/// The browser's thread: starts it, then follows its page until it is closed.
+/// The browser's thread: starts it, then follows its tabs until it is closed.
 fn run(inst: Arc<Instance>) {
-    let events = match inst.start() {
-        Ok(e) => e,
-        Err(e) => {
-            if !inst.is_closed() {
-                inst.update_view(|v| v.status = Status::Failed(e));
-                // What did start goes, but the view stays to say why.
-                inst.shutdown_process();
-            }
-            return;
+    let (ev_tx, ev_rx) = mpsc::channel::<(u64, Value)>();
+    *inst.ev_tx.lock().unwrap() = Some(ev_tx);
+    if let Err(e) = inst.start() {
+        if !inst.is_closed() {
+            inst.update_view(|v| v.status = Status::Failed(e));
+            // What did start goes, but the view stays to say why.
+            inst.shutdown_process();
         }
-    };
+        return;
+    }
     inst.update_view(|v| v.status = Status::Ready);
     // The cursor reader: the newest pointer position, one at a time.
     let (ptx, prx) = mpsc::channel::<(f32, f32)>();
@@ -725,33 +1132,43 @@ fn run(inst: Arc<Instance>) {
             i.read_cursor(at);
         }
     });
-    inst.refresh_history();
-    // The frames' size while they stream.
-    let mut casting: Option<[u32; 2]> = None;
+    if let Some((id, _)) = inst.active_tab() {
+        inst.refresh_history_for(id);
+    }
+    // The active tab and frame size while screencasting.
+    let mut casting: Option<(u64, Arc<Cdp>, [u32; 2])> = None;
     loop {
         if inst.is_closed() {
             return;
         }
-        match events.rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(ev) if ev["method"] == "__closed__" => break,
-            Ok(ev) => inst.event(&ev),
+        match ev_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok((tab_id, ev)) if ev["method"] == "__closed__" => {
+                if tab_id == 0 || inst.handle_tab_closed(tab_id) {
+                    break;
+                }
+            }
+            Ok((_, ev)) if ev["method"] == "__wake__" => {}
+            Ok((tab_id, ev)) => inst.event(tab_id, &ev),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        // Frames only while the view is on screen, at the size it shows
-        // them (the preview's small, the expanded view's large).
+        // Frames only while the view is on screen, from the active tab, at the
+        // size it shows them (the preview's small, the expanded view's large).
         let shown = inst.drawn.lock().unwrap().elapsed() < SHOWN_GRACE;
-        let want = shown.then(|| *inst.cast.lock().unwrap());
-        if want != casting
-            && let Some(page) = inst.page()
-        {
-            if casting.is_some() {
-                page.send("Page.stopScreencast", json!({}));
+        let want = shown.then(|| *inst.cast.lock().unwrap()).zip(inst.active_tab());
+        let changed = match (&casting, &want) {
+            (None, None) => false,
+            (Some((cid, _, csz)), Some((wsz, (wid, _)))) => cid != wid || csz != wsz,
+            _ => true,
+        };
+        if changed {
+            if let Some((_, old_cdp, _)) = casting.take() {
+                old_cdp.send("Page.stopScreencast", json!({}));
             }
-            if let Some([w, h]) = want {
-                page.send("Page.startScreencast", json!({"format": "jpeg", "quality": 85, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1}));
+            if let Some(([w, h], (wid, new_cdp))) = want {
+                new_cdp.send("Page.startScreencast", json!({"format": "jpeg", "quality": 85, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1}));
+                casting = Some((wid, new_cdp, [w, h]));
             }
-            casting = want;
         }
     }
     if !inst.is_closed() {
@@ -769,8 +1186,9 @@ fn run(inst: Arc<Instance>) {
 impl Instance {
     /// Ends the process without marking it closed (it shows why).
     fn shutdown_process(&self) {
-        if let Some(page) = self.page.lock().unwrap().take() {
-            page.close();
+        self.ev_tx.lock().unwrap().take();
+        for tab in std::mem::take(&mut self.tabs.lock().unwrap().list) {
+            tab.cdp.close();
         }
         if let Some(root) = self.root.lock().unwrap().take() {
             root.close();
@@ -788,56 +1206,101 @@ impl Instance {
         self.ctx.request_repaint();
     }
 
-    fn is_main(&self, frame: &Value) -> bool {
-        frame.as_str().is_some_and(|f| *self.main_frame.lock().unwrap() == f)
+    fn is_main(&self, tab_id: u64, frame: &Value) -> bool {
+        frame.as_str().is_some_and(|f| {
+            self.tabs
+                .lock()
+                .unwrap()
+                .list
+                .iter()
+                .find(|t| t.id == tab_id)
+                .is_some_and(|t| t.main_frame == f)
+        })
     }
 
-    /// One event from the page.
-    fn event(self: &Arc<Self>, ev: &Value) {
+    fn is_active(&self, tab_id: u64) -> bool {
+        self.tabs.lock().unwrap().active == tab_id
+    }
+
+    /// One event from a tab (or `tab_id == 0` for the browser root).
+    fn event(self: &Arc<Self>, tab_id: u64, ev: &Value) {
         let p = &ev["params"];
-        let Some(page) = self.page() else { return };
-        match ev["method"].as_str().unwrap_or("") {
+        let method = ev["method"].as_str().unwrap_or("");
+        if tab_id == 0 {
+            match method {
+                "Target.targetCreated" => {
+                    let info = &p["targetInfo"];
+                    if info["type"] == "page"
+                        && let Some(tid) = info["targetId"].as_str().filter(|s| !s.is_empty())
+                    {
+                        let already = self.tabs.lock().unwrap().list.iter().any(|t| t.target == tid);
+                        if !already {
+                            let i = self.clone();
+                            let tid = tid.to_string();
+                            std::thread::spawn(move || {
+                                if let Ok(id) = i.attach_target(&tid, true, true) {
+                                    i.refresh_history_for(id);
+                                }
+                            });
+                        }
+                    }
+                }
+                "Target.targetDestroyed" => {
+                    if let Some(tid) = p["targetId"].as_str() {
+                        self.remove_tab_by_target(tid);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        let Some(page) = self.tab_cdp(tab_id) else { return };
+        match method {
             "Page.screencastFrame" => {
                 // Acknowledged once decoded, so frames come no faster than
                 // they can be shown.
-                let image = B64.decode(p["data"].as_str().unwrap_or("")).ok().and_then(|b| image::load_from_memory_with_format(&b, image::ImageFormat::Jpeg).ok());
-                if let Some(img) = image {
-                    let rgba = img.to_rgba8();
-                    let size = [rgba.width() as usize, rgba.height() as usize];
-                    self.update_view(|v| v.frame = Some(egui::ColorImage::from_rgba_unmultiplied(size, &rgba)));
+                if self.is_active(tab_id) {
+                    let image = B64.decode(p["data"].as_str().unwrap_or("")).ok().and_then(|b| image::load_from_memory_with_format(&b, image::ImageFormat::Jpeg).ok());
+                    if let Some(img) = image {
+                        let rgba = img.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        self.update_view(|v| v.frame = Some(egui::ColorImage::from_rgba_unmultiplied(size, &rgba)));
+                    }
                 }
                 page.send("Page.screencastFrameAck", json!({"sessionId": p["sessionId"]}));
             }
             "Page.frameNavigated" if p["frame"]["parentId"].is_null() => {
                 let f = &p["frame"];
-                *self.main_frame.lock().unwrap() = f["id"].as_str().unwrap_or("").to_string();
+                let mf = f["id"].as_str().unwrap_or("").to_string();
                 let url = format!("{}{}", f["url"].as_str().unwrap_or(""), f["urlFragment"].as_str().unwrap_or(""));
-                self.set_url(url);
-                self.view.lock().unwrap().navs += 1;
+                self.set_tab_url(tab_id, url, Some(mf), true);
             }
-            "Page.navigatedWithinDocument" if self.is_main(&p["frameId"]) => {
-                self.set_url(p["url"].as_str().unwrap_or("").to_string());
-                self.refresh_history();
+            "Page.navigatedWithinDocument" if self.is_main(tab_id, &p["frameId"]) => {
+                self.set_tab_url(tab_id, p["url"].as_str().unwrap_or("").to_string(), None, false);
+                self.refresh_history_for(tab_id);
             }
-            "Page.frameStartedLoading" | "Page.frameRequestedNavigation" if self.is_main(&p["frameId"]) => self.update_view(|v| v.loading = true),
-            "Page.frameStoppedLoading" if self.is_main(&p["frameId"]) => {
-                self.view.lock().unwrap().loading = false;
-                self.refresh_history();
+            "Page.frameStartedLoading" | "Page.frameRequestedNavigation" if self.is_main(tab_id, &p["frameId"]) => {
+                self.mutate_tab(tab_id, |t| t.loading = true);
             }
-            "Page.domContentEventFired" | "Page.loadEventFired" => self.refresh_title(),
+            "Page.frameStoppedLoading" if self.is_main(tab_id, &p["frameId"]) => {
+                self.mutate_tab(tab_id, |t| t.loading = false);
+                self.refresh_history_for(tab_id);
+            }
+            "Page.domContentEventFired" | "Page.loadEventFired" => self.refresh_title_for(tab_id),
             "Page.javascriptDialogOpening" => {
                 let d = Dialog {
                     kind: p["type"].as_str().unwrap_or("alert").to_string(),
                     message: p["message"].as_str().unwrap_or("").to_string(),
                     default: p["defaultPrompt"].as_str().unwrap_or("").to_string(),
                 };
-                self.update_view(|v| {
-                    v.note(format!("The page opened a {} dialog: {:?}", d.kind, d.message));
-                    v.dialog = Some(d);
-                });
+                let multi = self.tabs.lock().unwrap().list.len() > 1;
+                let where_ = if multi { format!("Tab #{tab_id}") } else { "The page".into() };
+                let note = format!("{where_} opened a {} dialog: {:?}", d.kind, d.message);
+                self.mutate_tab(tab_id, |t| t.dialog = Some(d));
+                self.update_view(|v| v.note(note));
             }
-            "Page.javascriptDialogClosed" => self.update_view(|v| v.dialog = None),
-            "Page.fileChooserOpened" => {
+            "Page.javascriptDialogClosed" => self.mutate_tab(tab_id, |t| t.dialog = None),
+            "Page.fileChooserOpened" if self.is_active(tab_id) => {
                 let chooser = Chooser { node: p["backendNodeId"].as_i64().unwrap_or(0), multiple: p["mode"] == "selectMultiple" };
                 self.update_view(|v| match v.actor {
                     Actor::User => v.chooser = Some(chooser),
@@ -861,20 +1324,6 @@ impl Instance {
                     v.note(text);
                 }
             }),
-            "Page.windowOpen" if self.tab.is_some() => {} // the user's browser opens it as it would
-            "Page.windowOpen" => {
-                // A new window the page script didn't catch: its address
-                // opens here, and the window goes.
-                let url = p["url"].as_str().unwrap_or("").to_string();
-                if !url.is_empty() {
-                    page.send("Page.navigate", json!({"url": url}));
-                }
-                let i = self.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(400));
-                    i.close_other_tabs();
-                });
-            }
             "Inspector.targetCrashed" => self.update_view(|v| {
                 v.notice("The page crashed. Reload it.".into());
                 v.note("The page crashed; reload it.".into());
@@ -884,47 +1333,55 @@ impl Instance {
         }
     }
 
-    /// Any tab but the page goes (single page per conversation).
-    fn close_other_tabs(&self) {
-        let port = self.port.load(Ordering::SeqCst);
-        let ours = self.target.lock().unwrap().clone();
-        let Ok(list) = http_json(port, "GET", "/json/list") else { return };
-        for t in list.as_array().into_iter().flatten() {
-            if t["type"] == "page" && t["id"].as_str().is_some_and(|id| id != ours) {
-                let _ = http_json(port, "GET", &format!("/json/close/{}", t["id"].as_str().unwrap_or("")));
+    fn set_tab_url(&self, tab_id: u64, url: String, main_frame: Option<String>, count_nav: bool) {
+        let save = {
+            let mut t = self.tabs.lock().unwrap();
+            let active = t.active == tab_id;
+            let mut changed = false;
+            if let Some(tab) = t.list.iter_mut().find(|tab| tab.id == tab_id) {
+                if let Some(mf) = main_frame {
+                    tab.main_frame = mf;
+                }
+                if tab.url != url {
+                    tab.url = url.clone();
+                    changed = true;
+                }
+                if count_nav {
+                    tab.navs += 1;
+                }
             }
-        }
-    }
-
-    fn set_url(&self, url: String) {
-        if self.tab.is_none() && url != self.view.lock().unwrap().url {
+            self.tab.is_none() && active && changed
+        };
+        if save {
             let _ = std::fs::write(self.profile.join("oak-last-url"), &url);
         }
-        self.update_view(|v| v.url = url);
+        self.sync_view();
     }
 
-    /// Back and forward, and the title, from the page.
-    fn refresh_history(&self) {
-        let Some(page) = self.page() else { return };
+    /// Back and forward, and the title, from tab `tab_id`.
+    fn refresh_history_for(&self, tab_id: u64) {
+        let Some(page) = self.tab_cdp(tab_id) else { return };
         if let Ok(h) = page.call_for("Page.getNavigationHistory", json!({}), Duration::from_secs(5)) {
             let at = h["currentIndex"].as_i64().unwrap_or(0);
             let n = h["entries"].as_array().map_or(0, |e| e.len()) as i64;
-            let mut v = self.view.lock().unwrap();
-            v.back = at > 0;
-            v.forward = at + 1 < n;
-            if let Some(e) = h["entries"].get(at as usize) {
-                v.title = e["title"].as_str().unwrap_or("").to_string();
-            }
+            let title = h["entries"].get(at as usize).and_then(|e| e["title"].as_str()).map(String::from);
+            self.mutate_tab(tab_id, |t| {
+                t.back = at > 0;
+                t.forward = at + 1 < n;
+                if let Some(title) = title {
+                    t.title = title;
+                }
+            });
         }
-        self.refresh_title();
+        self.refresh_title_for(tab_id);
     }
 
-    fn refresh_title(&self) {
-        let Some(page) = self.page() else { return };
+    fn refresh_title_for(&self, tab_id: u64) {
+        let Some(page) = self.tab_cdp(tab_id) else { return };
         if let Ok(r) = page.call_for("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true}), Duration::from_secs(3))
             && let Some(t) = r["result"]["value"].as_str()
         {
-            self.update_view(|v| v.title = t.to_string());
+            self.mutate_tab(tab_id, |tab| tab.title = t.to_string());
         }
     }
 
@@ -1023,7 +1480,7 @@ impl Instance {
         (v.w, v.h)
     }
 
-    /// Changes the viewport (and the page, if it is up, follows).
+    /// Changes the viewport (and every open tab, if it is up, follows).
     fn set_viewport(&self, f: impl FnOnce(&mut Viewport)) {
         let mut cur = self.viewport.lock().unwrap();
         let mut vp = *cur;
@@ -1032,10 +1489,10 @@ impl Instance {
             *cur = vp;
             // (Under the lock, so start() can't publish its page between.)
             // The user's tab keeps its own size.
-            if self.tab.is_none()
-                && let Some(page) = self.page()
-            {
-                apply_viewport(&page, vp);
+            if self.tab.is_none() {
+                for page in self.all_pages() {
+                    apply_viewport(&page, vp);
+                }
             }
             drop(cur);
             self.ctx.request_repaint();
@@ -1164,7 +1621,7 @@ impl Instance {
         if let Some(page) = self.user() {
             page.send("Page.handleJavaScriptDialog", json!({"accept": accept, "promptText": text}));
         }
-        self.view.lock().unwrap().dialog = None;
+        self.mutate_active_tab(|t| t.dialog = None);
     }
 
     /// The file chooser the user opened, to show (once).
@@ -1338,29 +1795,6 @@ fn parse_combo(combo: &str) -> Result<(KeyInfo, i64), String> {
 }
 
 // ------------------------------------------------------------ page scripts
-
-/// Each frame of the page: new windows and other targets open in the page
-/// itself, as there is only the one.
-const ONE_PAGE_JS: &str = r#"(() => {
-  if (window.__oakOnePage) return;
-  window.__oakOnePage = true;
-  const top_ = window === window.top;
-  const go = (u) => {
-    if (u === undefined || u === null || String(u) === '') return window;
-    const href = new URL(String(u), location.href).href;
-    try { if (top_) location.href = href; else window.top.location.href = href; } catch (e) { location.href = href; }
-    return window;
-  };
-  try { window.open = function (u) { return go(u); }; } catch (e) {}
-  const keep = (t) => !t || /^_(self|top|parent)$/i.test(t);
-  const fix = (e) => {
-    const a = e.target && e.target.closest && e.target.closest('a[target], area[target]');
-    if (a && !keep(a.target)) a.target = top_ ? '_self' : '_top';
-  };
-  document.addEventListener('click', fix, true);
-  document.addEventListener('auxclick', fix, true);
-  document.addEventListener('submit', (e) => { const f = e.target; if (f && !keep(f.target)) f.target = top_ ? '_self' : '_top'; }, true);
-})();"#;
 
 /// The selection (in a text field or the page), for copying.
 const SELECTION_JS: &str = r#"(() => {
@@ -1796,7 +2230,13 @@ impl Instance {
     fn report(&self, done: &str) -> String {
         let mut v = self.view.lock().unwrap();
         let title = if v.title.is_empty() { String::new() } else { format!("{:?} ", v.title) };
-        let mut out = format!("{done}\nPage: {title}{}", v.url);
+        let tab_note = if v.tabs.len() > 1 {
+            let active = v.tabs.iter().find(|t| t.active).map(|t| t.id).unwrap_or(1);
+            format!(" (tab #{active} of {})", v.tabs.len())
+        } else {
+            String::new()
+        };
+        let mut out = format!("{done}\nPage{tab_note}: {title}{}", v.url);
         if v.loading {
             out += " (still loading)";
         }
@@ -1807,6 +2247,20 @@ impl Instance {
             out += &format!("\nA {} dialog is open ({:?}): the page waits until you answer it with BROWSER action=dialog.", d.kind, d.message);
         }
         out
+    }
+
+    fn list_tabs(&self) -> String {
+        let t = self.tabs.lock().unwrap();
+        let n = t.list.len();
+        let mut out = format!("{n} tab{}:", crate::plural(n));
+        for tab in &t.list {
+            let mark = if tab.id == t.active { " (active)" } else { "" };
+            let title = if tab.title.is_empty() { String::new() } else { format!("{:?} ", tab.title) };
+            let loading = if tab.loading { " (loading)" } else { "" };
+            out += &format!("\n#{} {title}{}{loading}{mark}", tab.id, tab.url);
+        }
+        drop(t);
+        out + &self.notes()
     }
 
     /// The model's pointer goes to (x, y), CSS pixels: the page gets the
@@ -1890,7 +2344,9 @@ impl Instance {
     /// One of the model's calls (all but screenshot).
     fn call(&self, name: &str, input: &Value, folder: &Path) -> Result<String, String> {
         let page = self.ready()?;
+        let tab_action = matches!(name, "BROWSER_TABS" | "BROWSER_NEW_TAB" | "BROWSER_SWITCH_TAB" | "BROWSER_CLOSE_TAB");
         if name != "BROWSER_DIALOG"
+            && !tab_action
             && let Some(d) = self.dialog_open()
         {
             return Err(d);
@@ -1901,6 +2357,7 @@ impl Instance {
                 "BROWSER_EMULATE" => Some("emulate"),
                 "BROWSER_COOKIES" | "BROWSER_SET_COOKIES" | "BROWSER_DELETE_COOKIES" => Some("its cookies"),
                 "BROWSER_CLEAR_DATA" => Some("clear_data"),
+                "BROWSER_TABS" | "BROWSER_NEW_TAB" | "BROWSER_SWITCH_TAB" | "BROWSER_CLOSE_TAB" => Some("tabs"),
                 _ => None,
             } {
                 let hint = if what == "its cookies" { " Read the page's own with eval (document.cookie) if needed." } else { "" };
@@ -1912,13 +2369,32 @@ impl Instance {
         let str_of = |k: &str| input[k].as_str().unwrap_or("");
         self.view.lock().unwrap().actor = Actor::Agent;
         match name {
+            "BROWSER_TABS" => Ok(self.list_tabs()),
+            "BROWSER_NEW_TAB" => {
+                let url = input["url"].as_str().map(str::trim).filter(|u| !u.is_empty()).map(|u| address(u, false));
+                let id = self.new_tab_impl(url.as_deref())?;
+                if url.is_some() {
+                    self.settle(0);
+                }
+                Ok(self.report(&format!("Opened tab #{id}.")))
+            }
+            "BROWSER_SWITCH_TAB" => {
+                let id = input["id"].as_u64().ok_or("Give `id`: the tab number from tabs.")?;
+                self.switch_tab_impl(id)?;
+                Ok(self.report(&format!("Switched to tab #{id}.")))
+            }
+            "BROWSER_CLOSE_TAB" => {
+                let id = input["id"].as_u64();
+                let closed_id = self.close_tab_impl(id)?;
+                Ok(self.report(&format!("Closed tab #{closed_id}.")))
+            }
             "BROWSER_GOTO" => {
                 let url = address(str_of("url"), false);
                 let r = page.call("Page.navigate", json!({"url": url})).map_err(|e| e.to_string())?;
                 if let Some(e) = r["errorText"].as_str().filter(|e| !e.is_empty()) {
                     return Err(format!("Couldn't open {url}: {e}"));
                 }
-                self.view.lock().unwrap().loading = true;
+                self.mutate_active_tab(|t| t.loading = true);
                 self.settle(navs);
                 Ok(self.report("Opened."))
             }
@@ -1929,7 +2405,7 @@ impl Instance {
             }
             "BROWSER_RELOAD" => {
                 page.call("Page.reload", json!({})).map_err(|e| e.to_string())?;
-                self.view.lock().unwrap().loading = true;
+                self.mutate_active_tab(|t| t.loading = true);
                 self.settle(navs);
                 Ok(self.report("Reloaded."))
             }
@@ -1993,7 +2469,7 @@ impl Instance {
                 }
                 let accept = input["accept"].as_bool().unwrap_or(true);
                 page.call("Page.handleJavaScriptDialog", json!({"accept": accept, "promptText": str_of("text")})).map_err(|e| e.to_string())?;
-                self.view.lock().unwrap().dialog = None;
+                self.mutate_active_tab(|t| t.dialog = None);
                 self.settle(navs);
                 Ok(self.report(if accept { "Accepted the dialog." } else { "Dismissed the dialog." }))
             }

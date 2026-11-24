@@ -224,7 +224,12 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             agent::every(input["interval_minutes"].as_u64().unwrap_or(0))
         ),
         "PROGRESS_REMOVE" => format!("meter {}", input["id"]),
-        "FETCH" | "SCREENSHOT" | "BROWSER_GOTO" => s("url"),
+        "FETCH" | "SCREENSHOT" | "BROWSER_GOTO" | "BROWSER_NEW_TAB" => s("url"),
+        "BROWSER_SWITCH_TAB" => format!("tab {}", input["id"]),
+        "BROWSER_CLOSE_TAB" => input["id"]
+            .as_u64()
+            .map(|id| format!("tab {id}"))
+            .unwrap_or_default(),
         "BROWSER_OPEN" => {
             let mut parts: Vec<String> = vec![];
             if let Some(p) = input["profile"].as_str().filter(|p| !p.is_empty()) {
