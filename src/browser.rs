@@ -924,12 +924,12 @@ impl Instance {
     fn switch_tab_impl(&self, id: u64) -> Result<(), String> {
         let target = {
             let mut t = self.tabs.lock().unwrap();
-            let Some(tab) = t.list.iter().find(|tab| tab.id == id) else {
+            let Some(target) = t.list.iter().find(|tab| tab.id == id).map(|tab| tab.target.clone()) else {
                 let ids: Vec<String> = t.list.iter().map(|tab| format!("#{}", tab.id)).collect();
                 return Err(format!("No tab #{id} (open: {}).", ids.join(", ")));
             };
             t.active = id;
-            tab.target.clone()
+            target
         };
         self.on_tab_switched();
         if !target.is_empty()
@@ -957,9 +957,12 @@ impl Instance {
             };
             let removed = t.list.remove(pos);
             let new_target = if t.active == want {
-                let next = &t.list[pos.min(t.list.len() - 1)];
-                t.active = next.id;
-                Some(next.target.clone())
+                let (next_id, next_target) = {
+                    let next = &t.list[pos.min(t.list.len() - 1)];
+                    (next.id, next.target.clone())
+                };
+                t.active = next_id;
+                Some(next_target)
             } else {
                 None
             };
@@ -993,9 +996,12 @@ impl Instance {
                 if t.active == id
                     && !t.list.is_empty()
                 {
-                    let next = &t.list[pos.min(t.list.len() - 1)];
-                    t.active = next.id;
-                    new_target = Some(next.target.clone());
+                    let (next_id, next_target) = {
+                        let next = &t.list[pos.min(t.list.len() - 1)];
+                        (next.id, next.target.clone())
+                    };
+                    t.active = next_id;
+                    new_target = Some(next_target);
                 }
             }
             (t.list.is_empty(), new_target)
