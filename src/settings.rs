@@ -864,24 +864,51 @@ impl App {
         done
     }
 
-    /// Adding the user's own llama.cpp server from Home: its address (the
-    /// launcher's `--port`). True once added.
+    /// Adding the user's own llama.cpp server from Home, or changing the
+    /// one added (`LocalForm::edit`): its address (the launcher's
+    /// `--port`), and optionally a name for its model and a cap on its
+    /// context (empty: what the server says). True once saved.
     pub(crate) fn local_add_box(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
-        let (mut add, mut cancel) = (false, false);
+        let (mut add, mut cancel, mut enter) = (false, false, false);
+        let f = &mut self.local_form;
+        let known = crate::local::server().filter(|_| f.editing);
         side_box(ui, t, w, |ui| {
-            caption(ui, "Add local llama.cpp server", t.ink2);
-            let edit = TextEdit::singleline(&mut self.local_url)
-                .id(Id::unique("add-local-url"))
-                .hint_text(crate::local::DEFAULT_URL);
-            (add, cancel) = add_field(ui, t, edit, None, None, |_| {});
+            caption(ui, if f.editing { "Edit local llama.cpp server" } else { "Add local llama.cpp server" }, t.ink2);
+            fn small(edit: TextEdit<'_>) -> TextEdit<'_> {
+                edit.font(egui::TextStyle::Small).margin(egui::Margin::symmetric(4, 2)).desired_width(f32::INFINITY)
+            }
+            let url = crate::text_menu::add(ui, small(TextEdit::singleline(&mut f.url).id(Id::unique("add-local-url")).hint_text(crate::local::DEFAULT_URL)));
+            enter |= crate::widgets::left_with(ui, &url, egui::Key::Enter);
+            // The hints say what is used when the field is left empty.
+            let auto_name = known.as_ref().map_or("Name (from the server)".to_string(), |s| {
+                format!("Name ({}, from the server)", crate::local::Server { name: String::new(), ..s.clone() }.display_name())
+            });
+            let name = crate::text_menu::add(ui, small(TextEdit::singleline(&mut f.name).id(Id::unique("add-local-name")).hint_text(auto_name)));
+            enter |= crate::widgets::left_with(ui, &name, egui::Key::Enter);
+            let auto_ctx = match known.as_ref().map(|s| s.context) {
+                Some(n) if n > 0 => format!("Context ({}, the server's)", crate::local::context_text(n)),
+                _ => "Context (the server's, e.g. 64k)".to_string(),
+            };
+            let edit = TextEdit::singleline(&mut f.context).id(Id::unique("add-local-context")).hint_text(auto_ctx);
+            let label = if f.editing { "Save" } else { "Add" };
+            (add, cancel) = crate::widgets::labeled_add_field(ui, t, edit, None, f.error.as_ref(), |ui| {
+                caption(ui, "Empty fields: what the server says when it runs.", t.ink3);
+            }, label);
         });
-        let done = add && !cancel;
-        if done {
-            crate::local::add(&self.local_url);
+        let add = (add || enter) && !cancel;
+        let mut done = false;
+        if add {
+            match crate::local::parse_context(&f.context) {
+                Ok(limit) => {
+                    crate::local::add(&f.url, &f.name, limit);
+                    done = true;
+                }
+                Err(e) => f.error = Some(e),
+            }
         }
         if cancel || done {
             self.adding_local = false;
-            self.local_url.clear();
+            self.local_form = LocalForm::default();
         }
         done
     }
@@ -975,6 +1002,25 @@ pub(crate) struct KeyForm {
     pub(crate) open: bool,
     key: String,
     error: Option<String>,
+}
+
+/// The local server's box on Home: what is typed, whether it changes the
+/// server added rather than adding one, and why saving failed.
+#[derive(Default)]
+pub(crate) struct LocalForm {
+    url: String,
+    name: String,
+    context: String,
+    editing: bool,
+    error: Option<String>,
+}
+
+impl LocalForm {
+    /// The box filled in with the server added, to change it.
+    pub(crate) fn edit(s: &crate::local::Server) -> Self {
+        let context = if s.context_limit > 0 { crate::local::context_text(s.context_limit) } else { String::new() };
+        LocalForm { url: s.url.clone(), name: s.name.clone(), context, editing: true, error: None }
+    }
 }
 
 /// The OpenRouter, NodeClub, Refuseless and Muse Code key boxes from Home: a caption, the key in a
@@ -1239,12 +1285,9 @@ fn connections() -> [(&'static str, Conn, String); 9] {
         Some(s) => (
             Conn::Ok,
             format!(
-                "{}, {}",
-                if s.alias.is_empty() {
-                    "llama.cpp"
-                } else {
-                    &s.alias
-                },
+                "{}, {} context, {}",
+                s.display_name(),
+                local::context_text(s.window()),
                 s.url
             ),
         ),

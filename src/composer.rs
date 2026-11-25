@@ -1279,16 +1279,27 @@ pub(crate) fn freebuff_panel(ui: &mut Ui, t: &Theme, a: Option<&crate::freebuff:
 }
 
 /// The user's own llama.cpp server, in the box a Claude account goes in:
-/// its address and the tokens used through it, all time (prompts, from the
-/// server's cache and written, on hover).
+/// its model's name, its address, the context Oak uses (where that comes
+/// from on hover) and the tokens used through it, all time (prompts, from
+/// the server's cache and written, on hover).
 pub(crate) fn local_panel(ui: &mut Ui, t: &Theme, w: f32) -> egui::Response {
     side_box(ui, t, w, |ui| {
-        head_row(ui, t, "Local llama.cpp", Some("free"));
         let Some(s) = crate::local::server() else {
+            head_row(ui, t, "Local llama.cpp", Some("free"));
             caption(ui, "No server added", t.ink3);
             return;
         };
+        head_row(ui, t, &s.display_name(), Some("free"));
         key_line(ui, &s.url, t.ink3);
+        let window = crate::local::context_text(s.window());
+        let from = match (s.context_limit, s.context) {
+            (0, 0) => "Oak's default: the server hasn't said its own yet (Oak reads it while the server runs)".to_string(),
+            (0, _) => "The server's (its -c)".to_string(),
+            (_, 0) => "Set by you (the server hasn't said its own yet)".to_string(),
+            (cap, n) if cap > n => format!("The server's: you set {}, more than it has", crate::local::context_text(cap)),
+            (_, n) => format!("Set by you; the server has {}", crate::local::context_text(n)),
+        };
+        kv(ui, t, "Context", &window, t.ink).on_hover_text(format!("{from}. Right-click the server on Home to change it."));
         kv(ui, t, "Tokens used", &crate::local::tokens_text(s.total()), t.ink).on_hover_text(format!(
             "{} prompt tokens processed, {} read from the server's cache, {} written, over {} requests",
             crate::local::tokens_text(s.input),

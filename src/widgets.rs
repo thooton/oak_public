@@ -229,6 +229,20 @@ pub fn add_field(
     error: Option<&String>,
     note: impl FnOnce(&mut Ui),
 ) -> (bool, bool) {
+    labeled_add_field(ui, t, edit, secret, error, note, "Add")
+}
+
+/// `add_field` with `label` on its Add button ("Save" for a box changing
+/// what was added).
+pub fn labeled_add_field(
+    ui: &mut Ui,
+    t: &Theme,
+    edit: TextEdit,
+    secret: Option<&str>,
+    error: Option<&String>,
+    note: impl FnOnce(&mut Ui),
+    label: &str,
+) -> (bool, bool) {
     let edit = edit
         .font(egui::TextStyle::Small)
         .margin(Margin::symmetric(4, 2));
@@ -246,7 +260,7 @@ pub fn add_field(
     }
     ui.horizontal(|ui| {
         ui.spacing_mut().button_padding = vec2(8.0, 1.0);
-        let add = ui.button(RichText::new("Add").small()).clicked() || enter;
+        let add = ui.button(RichText::new(label).small()).clicked() || enter;
         (add, ui.button(RichText::new("Cancel").small()).clicked())
     })
     .inner

@@ -569,7 +569,12 @@ impl App {
         }
         // Removals and moves can wait on a vault: they run in the
         // background, and the column says when they are done.
-        if let Some(act) = act {
+        if let Some(AccountAct::EditLocal) = act {
+            if let Some(s) = local::server() {
+                self.local_form = settings::LocalForm::edit(&s);
+                self.adding_local = true;
+            }
+        } else if let Some(act) = act {
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
@@ -1072,6 +1077,9 @@ pub(crate) fn add_box(ui: &mut Ui, t: &Theme, add: &mut AddAccount, w: f32) -> (
 enum AccountAct {
     Remove(Provider, String),
     Move(Provider, Vec<String>),
+    /// To change the local server's address, name or context (opens its
+    /// box; nothing runs in the background).
+    EditLocal,
 }
 
 /// Does `act` (off the UI thread: it may wait on a vault).
@@ -1093,7 +1101,7 @@ fn run_account_act(act: AccountAct) -> Result<(), String> {
             local::remove();
             Ok(())
         }
-        AccountAct::Remove(Provider::Plugin, _) => Ok(()),
+        AccountAct::Remove(Provider::Plugin, _) | AccountAct::EditLocal => Ok(()),
         AccountAct::Move(p, ids) => ids.iter().try_for_each(|id| match p {
             Provider::Claude => {
                 api::move_to_vault(id.parse().map_err(|_| "No such account.".to_string())?)
@@ -1185,6 +1193,10 @@ fn account_card(
                 .clicked()
         {
             *act = Some(AccountAct::Move(id.0, vec![id.1.to_string()]));
+            ui.close();
+        }
+        if id.0 == Provider::Local && ui.button("Edit server").clicked() {
+            *act = Some(AccountAct::EditLocal);
             ui.close();
         }
         if ui.button(remove).clicked() {

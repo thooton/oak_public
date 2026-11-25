@@ -332,7 +332,7 @@ struct App {
     adding_refuseless: settings::KeyForm,
     adding_musecode: settings::KeyForm,
     adding_local: bool,
-    local_url: String,
+    local_form: settings::LocalForm,
     /// A Codex sign-in under way from Home; the address pasted for it; why
     /// the last one failed.
     codex_login: Option<codex::Login>,

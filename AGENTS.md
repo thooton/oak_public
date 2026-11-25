@@ -418,7 +418,11 @@ can't read.
   `quick::so_far`): the user turns, calls, results and replies since, without what the request
   sends anyway. With nothing new from the user it is told to carry on from there (`CARRY_ON_SO_FAR`).
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
-  the prompt, and is never offered to subagents (it serves one request at a time).
+  the prompt, and is never offered to subagents (it serves one request at a time). Its model's name
+  and context come from the server (`/v1/models`, `/props`), read at start, on adding it and after
+  requests that reach it (at most once a minute), so a server started after Oak or restarted with
+  another `-c` is picked up; every `local/` id is the one server's model. Home's right-click
+  "Edit server" sets a name and a context cap (never past the server's own window).
 - Plugins' models (`src/provided.rs`, `oak_sdk::ModelProvider`, interface version 10) are one
   provider, `Kind::Plugin`, named after the plugins' providers ("Duck.ai") in the pickers and
   shown with the plugin's logo. Their ids are `plugin:<provider>/<model>`; each request goes to the
