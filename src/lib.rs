@@ -94,6 +94,9 @@ mod fork;
 mod geometry;
 mod glass;
 mod gpu;
+mod gravity;
+mod gravity_home;
+mod gravity_side;
 mod highlight;
 mod home;
 mod markdown;
@@ -711,6 +714,10 @@ impl eframe::App for App {
         view::show_toasts(ui.ctx(), &t, TITLE_H + TABS_H + 10.0);
         view::begin_frame();
         let plain = egui::Frame::new().fill(t.bg);
+        // Antigravity: the title bar and the sidebar are the shell the
+        // page's pane sits in.
+        let round = gravity::is(&t);
+        let chrome = egui::Frame::new().fill(if round { gravity::shell() } else { t.bg });
         // A clicked image, over everything but the title bar.
         let style = images::ViewerStyle {
             ink: t.ink,
@@ -743,7 +750,7 @@ impl eframe::App for App {
         }
         egui::Panel::top("title-bar")
             .exact_size(TITLE_H)
-            .frame(plain)
+            .frame(chrome)
             .show_separator_line(false)
             .show(ui, |ui| {
                 title_bar(ui, &t);
@@ -777,10 +784,21 @@ impl eframe::App for App {
         for id in agent::take_deleted() {
             self.forget(&id);
         }
-        egui::Panel::top("tabs")
-            .exact_size(TABS_H)
-            .frame(plain)
-            .show(ui, |ui| self.tab_bar(ui, &t));
+        // Antigravity has the tabs down a sidebar, the others in a strip.
+        if round {
+            let side_w = (ui.available_width() * 0.21).clamp(178.0, gravity::SIDE_W);
+            egui::Panel::left("antigravity-tabs")
+                .exact_size(side_w)
+                .resizable(false)
+                .frame(chrome)
+                .show_separator_line(false)
+                .show(ui, |ui| self.side_bar(ui, &t));
+        } else {
+            egui::Panel::top("tabs")
+                .exact_size(TABS_H)
+                .frame(plain)
+                .show(ui, |ui| self.tab_bar(ui, &t));
+        }
         // Subagents the models started since the last frame.
         for (id, s) in agent::take_spawned() {
             self.sessions.insert(id, s);
@@ -793,6 +811,26 @@ impl eframe::App for App {
         }
         // Keeps the usage countdowns current.
         ui.ctx().request_repaint_after(Duration::from_secs(30));
+        if round {
+            // The page in its pane, inset from the window's edges, its
+            // corners cut round over whatever it paints.
+            let area = ui.available_rect_before_wrap();
+            let pane = gravity::pane(area);
+            ui.painter().rect_filled(area, 0.0, gravity::shell());
+            ui.scope_builder(UiBuilder::new().max_rect(pane), |ui| {
+                ui.shrink_clip_rect(pane);
+                self.show_page(ui, &t, plain);
+            });
+            gravity::mask_pane(ui.ctx(), &t, pane);
+        } else {
+            self.show_page(ui, &t, plain);
+        }
+    }
+}
+
+impl App {
+    /// The page shown under the tabs.
+    fn show_page(&mut self, ui: &mut Ui, t: &Theme, plain: egui::Frame) {
         let mut central = |f: &mut dyn FnMut(&mut Ui)| {
             egui::CentralPanel::default()
                 .frame(plain)
@@ -800,22 +838,22 @@ impl eframe::App for App {
         };
         match self.page {
             Page::Home => {
-                central(&mut |ui| self.home(ui, &t));
+                central(&mut |ui| self.home(ui, t));
             }
             Page::Settings => {
-                central(&mut |ui| self.settings_page(ui, &t));
+                central(&mut |ui| self.settings_page(ui, t));
             }
             Page::PluginSettings => {
-                central(&mut |ui| self.plugin_settings_page(ui, &t));
+                central(&mut |ui| self.plugin_settings_page(ui, t));
             }
             Page::Usage => {
                 let mut back = false;
-                central(&mut |ui| back = usage_view::page(ui, &t, &mut self.usage));
+                central(&mut |ui| back = usage_view::page(ui, t, &mut self.usage));
                 if back {
                     self.page = Page::Home;
                 }
             }
-            Page::Chats => self.chats_page(ui, &t, plain),
+            Page::Chats => self.chats_page(ui, t, plain),
             Page::Plugin => match plugins::parts()
                 .home_tabs
                 .iter()
@@ -830,9 +868,6 @@ impl eframe::App for App {
             },
         }
     }
-}
-
-impl App {
     /// The chats page: the side chat's pane right of the chat and its
     /// message box, what's open, its box at the corner and the browser's
     /// preview beside it (or the browser expanded over it all); then what

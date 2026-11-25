@@ -704,11 +704,14 @@ fn work_out_preview(view: &mut View) {
 /// True when clicked.
 pub fn preview(ui: &mut Ui, t: &Theme, rect: Rect, view: &mut View) -> bool {
     work_out_preview(view);
-    let pv = &view.preview.as_ref().unwrap().2;    let resp = ui.interact(rect, Id::unique("usage-preview"), Sense::click());
+    let pv = &view.preview.as_ref().unwrap().2;
+    let resp = ui.interact(rect, Id::unique("usage-preview"), Sense::click());
     let lit = resp.hovered();
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 0.0, t.panel);
-    p.rect_stroke(rect, 0.0, Stroke::new(1.0, if lit { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
+    let round = crate::gravity::round(t, 12.0);
+    let fill = if round > 0.0 { t.panel2.gamma_multiply(0.65) } else { t.panel };
+    p.rect_filled(rect, round, fill);
+    p.rect_stroke(rect, round, Stroke::new(1.0, if lit { t.ink3 } else { t.line }), egui::StrokeKind::Inside);
     let x = rect.left() + 10.0;
     p.text(pos2(x, rect.top() + 8.0), Align2::LEFT_TOP, "API $ per 1% of 5h", font(SMALL), t.ink3);
     // The expand mark: two corners pointing out.
@@ -730,6 +733,9 @@ pub fn preview(ui: &mut Ui, t: &Theme, rect: Rect, view: &mut View) -> bool {
             };
             p.text(pos2(r.right() + 7.0, r.bottom() - 3.0), Align2::LEFT_BOTTOM, note, font(SMALL), t.ink3);
             sparkline(&p, t, Rect::from_min_max(pos2(x, rect.top() + 54.0), pos2(rect.right() - 12.0, rect.bottom() - 9.0)), &pv.mean, Trend::Accent);
+        }
+        None if round > 0.0 => {
+            p.text(rect.center(), Align2::CENTER_CENTER, "No measurements yet", font(12.5), t.ink3);
         }
         None => {
             p.text(pos2(x, rect.top() + 23.0), Align2::LEFT_TOP, "—", font(20.0), t.ink3);

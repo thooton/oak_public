@@ -51,11 +51,21 @@ impl App {
     /// It scrolls, so all of a long form (many models) can be reached
     /// above the message box.
     pub(crate) fn new_screen(&mut self, ui: &mut Ui, t: &Theme) {
-        let top = ui.available_height() * 0.14;
+        let gravity = crate::gravity::is(t);
+        let top = ui.available_height() * if gravity { 0.08 } else { 0.14 };
         ScrollArea::vertical().id_salt("new-screen").auto_shrink([false, false]).show(ui, |ui| column(ui, 640.0, |ui| {
             ui.add_space(top);
-            let kind = self.new_kind();
-            ui.heading(kind.map_or_else(|| "New conversation".to_string(), |k| k.heading()));
+            let title = self.new_kind().map_or_else(|| "New conversation".to_string(), |k| k.heading());
+            if gravity {
+                ui.horizontal(|ui| {
+                    let (logo, _) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::hover());
+                    crate::gravity::paint_logo(ui.painter(), logo, None);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(title).size(23.0));
+                });
+            } else {
+                ui.heading(title);
+            }
             ui.add_space(16.0);
             self.where_row(ui);
             ui.add_space(18.0);

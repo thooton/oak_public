@@ -105,11 +105,12 @@ pub fn icon_button(
 ) -> bool {
     let resp = ui.interact(rect, id, Sense::click());
     let color = if resp.hovered() { t.ink } else { t.ink2 };
+    let round = crate::gravity::round(t, 8.0);
     ui.painter()
-        .rect_filled(rect, 0.0, if resp.hovered() { t.panel2 } else { t.bg });
+        .rect_filled(rect, round, if resp.hovered() { t.panel2 } else { t.bg });
     ui.painter().rect_stroke(
         rect,
-        0.0,
+        round,
         Stroke::new(1.0, t.line),
         egui::StrokeKind::Inside,
     );
@@ -311,10 +312,11 @@ pub fn switch(ui: &mut Ui, t: &Theme, on: bool, size: egui::Vec2) -> egui::Respo
 
 /// A `switch`'s face in `rect`, for one whose clicks are taken elsewhere.
 pub fn paint_switch(p: &egui::Painter, t: &Theme, rect: Rect, on: bool, hovered: bool) {
-    p.rect_filled(rect, 0.0, if on { t.accent } else { t.panel2 });
+    let round = crate::gravity::round(t, rect.height() / 2.0);
+    p.rect_filled(rect, round, if on { t.accent } else { t.panel2 });
     p.rect_stroke(
         rect,
-        0.0,
+        round,
         Stroke::new(1.0, if hovered { t.ink3 } else { t.line }),
         egui::StrokeKind::Inside,
     );
@@ -330,7 +332,8 @@ pub fn paint_switch(p: &egui::Painter, t: &Theme, rect: Rect, on: bool, hovered:
         ),
         egui::Vec2::splat(rect.height() - 6.0),
     );
-    p.rect_filled(knob, 0.0, if on { t.bg } else { t.ink3 });
+    let ink = if on && round > 0.0 { t.ink } else if on { t.bg } else { t.ink3 };
+    p.rect_filled(knob, crate::gravity::round(t, knob.height() / 2.0), ink);
 }
 
 /// A page's card (Settings, Usage) on the page color: at most `max_w`
@@ -357,12 +360,13 @@ pub fn page_card(
         egui::pos2(card.right(), card.top() + crate::home::HOME_HEAD),
     );
     let p = ui.painter();
-    if let Some(fill) = fill {
-        p.rect_filled(card, 0.0, fill);
+    let round = crate::gravity::round(t, 14.0);
+    if let Some(fill) = fill.or_else(|| (round > 0.0).then_some(t.panel)) {
+        p.rect_filled(card, round, fill);
     }
     p.rect_stroke(
         card,
-        0.0,
+        round,
         Stroke::new(1.0, t.line),
         egui::StrokeKind::Inside,
     );
@@ -385,7 +389,7 @@ pub fn close_button(ui: &mut Ui, t: &Theme, rect: Rect, id: &str) -> bool {
     let resp = ui.interact(rect, Id::unique(id), Sense::click());
     let lit = resp.hovered();
     if lit {
-        ui.painter().rect_filled(rect, 0.0, t.panel2);
+        ui.painter().rect_filled(rect, crate::gravity::round(t, 8.0), t.panel2);
     }
     draw_x(ui.painter(), rect, if lit { t.ink } else { t.ink3 });
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -421,6 +425,7 @@ pub fn dialog(id: &str, t: &Theme) -> egui::Modal {
         .frame(
             egui::Frame::new()
                 .fill(t.panel)
+                .corner_radius(crate::gravity::radius(t, 14.0))
                 .stroke(Stroke::new(1.0, t.line))
                 .inner_margin(Margin::same(18)),
         )
@@ -475,6 +480,7 @@ pub fn inset<R>(
 ) -> R {
     egui::Frame::new()
         .fill(fill)
+        .corner_radius(crate::gravity::radius(t, 10.0))
         .stroke(Stroke::new(1.0, t.line))
         .inner_margin(Margin::same(margin))
         .show(ui, |ui| {

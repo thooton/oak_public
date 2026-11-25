@@ -217,8 +217,8 @@ The message box stays docked to the bottom as drafts, attachments and notices ch
 including in a side chat.
 A click on the session box's folder opens it in the system's file manager; its right-click menu
 has Open folder and Copy path (a folder that no longer exists can only be copied).
-Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme row offers Oak's two
-built-in themes (Oak, and Liquid Glass) and those plugins add, and its Font row shows once a plugin adds a choice to IBM
+Settings is the gear in a conversation's bottom left corner and Home's bottom right one; its Theme row offers Oak's three
+built-in themes (Oak, Liquid Glass and Antigravity) and those plugins add, and its Font row shows once a plugin adds a choice to IBM
 Plex Sans. Plugins are managed on Home, not in Settings, and so are their
 settings: Settings holds none of a plugin's controls.
 Liquid Glass (`src/glass.rs`, id `glass`) is Antigravity's colors (its Hub's dark Onyx theme) with the iOS 27 dark
@@ -234,6 +234,16 @@ place, over the flat panel (what shows if the GPU part can't draw); the theme's 
 fills at a few percent. Glass shows what was painted under it this frame, glass under glass included: before egui's
 pass Oak draws each group's backdrop (glass that sees the same one) into a texture of its own with a second egui
 renderer, and blurs it.
+Antigravity (`src/gravity.rs`, id `antigravity`) is based on the desktop Hub's dark Onyx, with cooler
+surfaces, the arch's colors as accents, rounded controls, panels and dialogs, and the page inset in a
+rounded pane. Its left sidebar (`src/gravity_side.rs`) replaces the horizontal tab strip: New
+conversation, Home, Conversations and Usage, a scrollable list of open tabs with the same shortcuts
+and menus, and Settings at the foot. Home (`src/gravity_home.rs`) starts as a desktop over the chosen
+wallpaper, with a local clock (the ring shows seconds), a calendar marking the dates of conversations'
+latest activity, counts, recent conversations, running and paused work, and a usage preview. The tiles
+reflow and scroll in smaller windows. The dock replaces Home's corner buttons, opening the same lists
+and providers menu (with plugin tabs and links), a new conversation or Settings. It stays visible when
+the menu opens. Theme switches leave the open tabs, conversations and wallpaper alone.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
 plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
 is clipped to the corner so it cannot move or cover the rest of the composer. The rows sit in the

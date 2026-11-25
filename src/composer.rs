@@ -175,10 +175,12 @@ impl App {
             // green, /swarm yellow.
             let stroke = match slash(&self.input) {
                 Some((cmd, _)) => Stroke::new(1.5, cmd.color()),
+                None if focused && crate::gravity::is(t) => Stroke::new(1.0, t.accent.gamma_multiply(0.7)),
                 None if focused => v.selection.stroke,
+                None if crate::gravity::is(t) => Stroke::new(1.0, t.line),
                 None => v.widgets.inactive.bg_stroke,
             };
-            egui::Frame::new().fill(t.panel).stroke(stroke).show(ui, |ui| {
+            egui::Frame::new().fill(t.panel).stroke(stroke).corner_radius(crate::gravity::radius(t, 16.0)).show(ui, |ui| {
                 let w = ui.available_width();
                 ScrollArea::vertical()
                     .id_salt("composer-scroll")
@@ -844,8 +846,9 @@ fn square_button_as(ui: &mut Ui, t: &Theme, small: bool, look: Look, tip: &str, 
         _ => (t.panel, t.line, t.ink2),
     };
     let p = ui.painter();
-    p.rect_filled(rect, 0.0, fill);
-    p.rect_stroke(rect, 0.0, Stroke::new(1.0, border), egui::StrokeKind::Inside);
+    let round = crate::gravity::round(t, 8.0);
+    p.rect_filled(rect, round, fill);
+    p.rect_stroke(rect, round, Stroke::new(1.0, border), egui::StrokeKind::Inside);
     draw(p, rect, ink);
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -952,7 +955,7 @@ pub(crate) fn side_box<R>(ui: &mut Ui, t: &Theme, w: f32, f: impl FnOnce(&mut Ui
 
 /// `side_box` with its border in `stroke`.
 pub(crate) fn framed_box<R>(ui: &mut Ui, t: &Theme, stroke: Color32, w: f32, f: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
-    egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, stroke)).inner_margin(Margin::symmetric(10, 7)).show(ui, |ui| {
+    egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, stroke)).corner_radius(crate::gravity::radius(t, 12.0)).inner_margin(Margin::symmetric(10, 7)).show(ui, |ui| {
         // The box sits in the composer's row: lay its own rows out top to bottom.
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             ui.set_width(w - 22.0);

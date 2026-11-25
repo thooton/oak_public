@@ -76,7 +76,7 @@ pub fn corner_area(ctx: &egui::Context, name: &str, area: Rect, f: impl FnOnce(&
 /// A box in the session column, `w` wide: `pad_y` above and below what
 /// `f` adds, `gap` between its rows.
 pub fn panel_box(ui: &mut Ui, t: &Theme, w: f32, pad_y: i8, gap: f32, f: impl FnOnce(&mut Ui)) {
-    let r = egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.line)).inner_margin(Margin::symmetric(12, pad_y)).show(ui, |ui| {
+    let r = egui::Frame::new().fill(t.panel).stroke(Stroke::new(1.0, t.line)).corner_radius(crate::gravity::radius(t, 12.0)).inner_margin(Margin::symmetric(12, pad_y)).show(ui, |ui| {
         ui.set_width(w - 26.0);
         ui.spacing_mut().item_spacing.y = gap;
         f(ui);
@@ -154,7 +154,7 @@ pub fn list_rows(ui: &mut Ui, t: &Theme, salt: &str, n: usize, empty: &str, mut 
         for i in shown {
             let (rect, resp) = ui.allocate_exact_size(vec2(w, 58.0), Sense::click());
             if resp.hovered() {
-                ui.painter().rect_filled(rect, 0.0, t.tool_hover);
+                ui.painter().rect_filled(rect, crate::gravity::round(t, 8.0), t.tool_hover);
             }
             if i + 1 < n {
                 ui.painter().hline(rect.left() + 12.0..=rect.right() - 12.0, rect.bottom() - 0.5, Stroke::new(1.0, soft));

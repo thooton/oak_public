@@ -107,6 +107,7 @@ fn file_chip(ui: &mut Ui, t: &Theme, block: &Value) -> egui::Response {
     };
     egui::Frame::new()
         .fill(t.panel)
+        .corner_radius(crate::gravity::radius(t, 10.0))
         .stroke(Stroke::new(1.0, t.line))
         .inner_margin(Margin {
             left: 8,
@@ -1779,6 +1780,7 @@ fn limit_box(ui: &mut Ui, t: &Theme, m: &Mark) {
     ui.add_space(6.0);
     egui::Frame::new()
         .fill(t.panel)
+        .corner_radius(crate::gravity::radius(t, 10.0))
         .stroke(Stroke::new(1.0, if waiting { t.accent } else { t.line }))
         .inner_margin(Margin::symmetric(12, 10))
         .show(ui, |ui| {
@@ -3174,6 +3176,7 @@ pub(crate) fn transcript_unit(
                     |ui| {
                         egui::Frame::new()
                             .fill(t.panel)
+                            .corner_radius(crate::gravity::radius(t, 10.0))
                             .stroke(Stroke::new(1.0, t.line))
                             .inner_margin(Margin {
                                 left: 12,
@@ -3721,6 +3724,7 @@ fn display_view(ui: &mut Ui, t: &Theme, b: &Value, results: &Results) {
         } else {
             egui::Frame::new()
                 .fill(t.panel)
+                .corner_radius(crate::gravity::radius(t, 10.0))
                 .stroke(Stroke::new(1.0, t.line))
                 .inner_margin(Margin::symmetric(10, 6))
                 .show(ui, |ui| {
@@ -3918,6 +3922,7 @@ fn ask_card(ui: &mut Ui, t: &Theme, title: &str, f: impl FnOnce(&mut Ui)) {
     ui.add_space(6.0);
     egui::Frame::new()
         .fill(t.panel)
+        .corner_radius(crate::gravity::radius(t, 10.0))
         .stroke(Stroke::new(1.0, t.accent))
         .inner_margin(Margin::same(14))
         .show(ui, |ui| {
@@ -3943,6 +3948,7 @@ pub(crate) fn queue_view(
         if let Some(e) = editing.as_mut().filter(|e| e.conv == conv && e.id == q.id) {
             egui::Frame::new()
                 .fill(t.panel)
+                .corner_radius(crate::gravity::radius(t, 10.0))
                 .stroke(Stroke::new(1.0, t.accent))
                 .inner_margin(Margin::same(10))
                 .show(ui, |ui| {

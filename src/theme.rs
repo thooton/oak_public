@@ -1,5 +1,7 @@
-//! Themes (colors only: `oak_sdk::theme`; Oak's own and Liquid Glass are
-//! built in, plugins add others) and egui's style from them.
+//! Themes (colors: `oak_sdk::theme`; Oak's own, Liquid Glass and
+//! Antigravity are built in, plugins add others) and egui's style from
+//! them. Antigravity (`gravity.rs`) also rounds egui's corners and pads its
+//! buttons more.
 
 use super::*;
 pub(crate) use oak_sdk::theme::{Theme, hex, mix};
@@ -10,11 +12,19 @@ pub(crate) const OAK: &str = "oak";
 /// The id of Liquid Glass (`glass`: Antigravity's colors, as glass).
 pub(crate) const GLASS: &str = crate::glass::ID;
 
-/// The themes Settings offers: Oak's own, Liquid Glass, then the plugins',
-/// as (id, name).
+/// The id of Antigravity (`antigravity`: the Hub's look, its shapes and
+/// layout too).
+pub(crate) const GRAVITY: &str = crate::gravity::ID;
+
+/// The themes Settings offers: Oak's own, Liquid Glass, Antigravity, then
+/// the plugins', as (id, name).
 pub(crate) fn themes() -> Vec<(String, String)> {
-    let mut list = vec![(OAK.to_string(), "Oak".to_string()), (GLASS.to_string(), crate::glass::NAME.to_string())];
-    list.extend(crate::plugins::parts().themes.iter().map(|d| (d.id(), d.name())).filter(|(id, _)| id != OAK && id != GLASS));
+    let mut list = vec![
+        (OAK.to_string(), "Oak".to_string()),
+        (GLASS.to_string(), crate::glass::NAME.to_string()),
+        (GRAVITY.to_string(), crate::gravity::NAME.to_string()),
+    ];
+    list.extend(crate::plugins::parts().themes.iter().map(|d| (d.id(), d.name())).filter(|(id, _)| id != OAK && id != GLASS && id != GRAVITY));
     list
 }
 
@@ -25,11 +35,20 @@ pub(crate) fn theme(id: &str) -> Theme {
     if id == GLASS {
         return crate::glass::theme();
     }
+    if id == GRAVITY {
+        return crate::gravity::theme();
+    }
     crate::plugins::parts().themes.iter().find(|d| id != OAK && d.id() == id).map_or_else(Theme::oak, |d| d.theme())
 }
 
 pub(crate) fn apply_theme(ctx: &egui::Context, t: &Theme) {
     ctx.set_visuals(visuals(t));
+    // Antigravity's buttons are roomier, as the Hub's are.
+    let round = crate::gravity::is(t);
+    ctx.all_styles_mut(|s| {
+        s.spacing.button_padding = if round { vec2(12.0, 6.0) } else { vec2(10.0, 5.0) };
+        s.spacing.menu_margin = if round { Margin::same(8) } else { Margin::same(6) };
+    });
 }
 
 /// egui's colors from `t` (also a look's scope's: `view::look_scope`).
@@ -72,6 +91,25 @@ pub(crate) fn visuals(t: &Theme) -> egui::Visuals {
         v.selection.bg_fill = crate::glass::SELECT;
         v.window_shadow = egui::Shadow::NONE;
         v.popup_shadow = egui::Shadow::NONE;
+    }
+    // Antigravity's corners are round, its floating surfaces cast a soft
+    // shadow, and a field or button sits a step above the page.
+    if crate::gravity::is(t) {
+        v.window_corner_radius = CornerRadius::same(14);
+        v.menu_corner_radius = CornerRadius::same(10);
+        v.window_shadow = egui::Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(140) };
+        v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(110) };
+        v.selection.bg_fill = t.accent.gamma_multiply(0.30);
+        v.extreme_bg_color = mix(t.bg, t.ink, 0.03);
+        for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+            w.corner_radius = CornerRadius::same(8);
+        }
+        v.widgets.inactive.bg_fill = mix(t.bg, t.ink, 0.07);
+        v.widgets.inactive.weak_bg_fill = v.widgets.inactive.bg_fill;
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::TRANSPARENT);
+        v.widgets.hovered.bg_fill = mix(t.bg, t.ink, 0.12);
+        v.widgets.hovered.weak_bg_fill = v.widgets.hovered.bg_fill;
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, t.line);
     }
     v
 }

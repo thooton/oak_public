@@ -57,8 +57,14 @@ pub(crate) fn title_bar(ui: &mut Ui, t: &Theme) {
     let r = ui.max_rect();
     let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
     let p = ui.painter().clone();
-    p.rect_filled(r, 0.0, t.bg);
-    p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t.line));
+    let round = crate::gravity::is(t);
+    if round {
+        // Antigravity: the shell, no line under it, and the arch before the name.
+        p.rect_filled(r, 0.0, crate::gravity::shell());
+    } else {
+        p.rect_filled(r, 0.0, t.bg);
+        p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t.line));
+    }
     let close = Rect::from_min_max(egui::pos2(r.right() - CAPTION_W, r.top()), r.max);
     let max = close.translate(vec2(-CAPTION_W, 0.0));
     let min = max.translate(vec2(-CAPTION_W, 0.0));
@@ -69,7 +75,13 @@ pub(crate) fn title_bar(ui: &mut Ui, t: &Theme) {
     } else if resp.drag_started_by(egui::PointerButton::Primary) {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
-    p.text(egui::pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, "Oak", FontId::proportional(12.0), t.ink3);
+    if round {
+        let logo = Rect::from_center_size(egui::pos2(r.left() + 24.0, r.center().y), vec2(20.0, 20.0));
+        crate::gravity::paint_logo(&p, logo, None);
+        p.text(egui::pos2(logo.right() + 8.0, r.center().y), Align2::LEFT_CENTER, "Oak", FontId::proportional(13.0), t.ink2);
+    } else {
+        p.text(egui::pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, "Oak", FontId::proportional(12.0), t.ink3);
+    }
     for (i, rect) in [min, max, close].into_iter().enumerate() {
         let resp = ui.interact(rect, Id::unique(("caption", i)), Sense::click());
         let (bg, fg) = match (i, resp.is_pointer_button_down_on(), resp.hovered()) {

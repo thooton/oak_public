@@ -225,7 +225,7 @@ impl App {
     /// What `id`'s tab shows: its title, whether it is paused and whether
     /// at work, and the icon before its title (with its font): a cloud
     /// session's provider, a plugin tab's, or its role's.
-    fn tab_look(&self, id: &str) -> (String, bool, bool, Option<(String, FontId)>) {
+    pub(crate) fn tab_look(&self, id: &str) -> (String, bool, bool, Option<(String, FontId)>) {
         if let Some(s) = self.sessions.get(id) {
             let c = s.conv.lock().unwrap();
             let title = if c.title.is_empty() { "Untitled".to_string() } else { c.title.clone() };
@@ -279,7 +279,7 @@ impl App {
     }
 
     /// Shows Home; on Home already, opens or closes its menu.
-    fn go_home_or_toggle_menu(&mut self) {
+    pub(crate) fn go_home_or_toggle_menu(&mut self) {
         if self.page == Page::Home {
             self.home_menu = !self.home_menu;
         } else {
@@ -289,7 +289,7 @@ impl App {
 
     /// Alt+H, the browsers' tab shortcuts and Ctrl+T; and the tabs whose
     /// conversation, session, bot or agent has gone are dropped.
-    fn tab_bar_keys(&mut self, ui: &mut Ui) {
+    pub(crate) fn tab_bar_keys(&mut self, ui: &mut Ui) {
         // (On Home already, it opens or closes Home's menu.)
         if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::H)) {
             self.go_home_or_toggle_menu();
@@ -557,7 +557,7 @@ impl Strip {
 /// A tab's right-click menu: the closes (`n` tabs, this one `i`, `on` if
 /// shown, `any_inactive` if there are inactive tabs) and reopening a closed tab, which sets `reopen`. Gives the close
 /// picked.
-fn tab_menu(ui: &mut Ui, i: usize, n: usize, on: bool, any_inactive: bool, can_reopen: bool, reopen: &mut bool) -> Option<TabClose> {
+pub(crate) fn tab_menu(ui: &mut Ui, i: usize, n: usize, on: bool, any_inactive: bool, can_reopen: bool, reopen: &mut bool) -> Option<TabClose> {
     let mut picked = None;
     for (label, action, enabled, divider) in [
         ("Close tab", TabClose::One, true, false),

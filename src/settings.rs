@@ -303,8 +303,7 @@ impl App {
         }
     }
 
-    /// The Theme row: Oak's, and those plugins add (the row shows once
-    /// there is a choice).
+    /// The Theme row: the built-in themes and those plugins add.
     fn theme_row(&mut self, ui: &mut Ui, t: &Theme) {
         let themes = crate::theme::themes();
         // One whose plugin isn't loaded stays the setting; Oak's shows.
@@ -317,7 +316,7 @@ impl App {
             return;
         }
         caption(ui, "Theme", t.ink3);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (id, name) in &themes {
                 if ui.selectable_label(now == *id, name).clicked() && now != *id {
                     self.settings.theme = id.clone();

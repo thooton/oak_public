@@ -2,6 +2,8 @@
 //! on it, and the menu, opened from the bottom right corner: the box with
 //! the conversations (or another of its tabs: Cloud, those plugins add,
 //! Plugins; plugins' links at the row's end) on the left and the accounts on the right.
+//! Antigravity replaces the bare wallpaper and corner buttons with
+//! desktop tiles and a dock (`gravity_home.rs`).
 
 use super::*;
 use crate::api::Provider;
@@ -21,18 +23,32 @@ impl App {
     /// shut at start, and a click on the wallpaper or Esc shuts it again.
     pub(crate) fn home(&mut self, ui: &mut Ui, t: &Theme) {
         let rect = ui.max_rect();
+        let round = crate::gravity::is(t);
         self.paint_wallpaper(ui, rect);
+        // Antigravity: the wallpaper dimmed under the desktop's tiles.
+        if round {
+            ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(if self.home_menu { 150 } else { 105 }));
+        }
         // First, so what is drawn over it (a plugin's, the menu) takes the
         // clicks meant for it.
         let backdrop = ui.interact(rect, Id::unique("home-wallpaper"), Sense::click());
         for h in &crate::plugins::parts().hooks {
             h.home_scene(ui, self);
         }
+        if round && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+            self.home_menu = true;
+            self.home_list = LOCAL_TAB.into();
+            ui.memory_mut(|m| m.request_focus(Id::unique("home-chat-search")));
+        }
+        if round && !self.home_menu {
+            self.desktop(ui, t, rect);
+        }
         if self.home_menu {
             let opacity = ui
                 .ctx()
                 .animate_bool_with_time(Id::unique("home-menu"), true, 0.12);
-            let g = home_grid(rect);
+            // (Antigravity's menu keeps clear of the dock.)
+            let g = home_grid(if round { crate::gravity_home::above_dock(rect) } else { rect });
             self.home_menu_rect = Some(g.card);
             ui.scope(|ui| {
                 ui.set_opacity(opacity);
@@ -49,7 +65,11 @@ impl App {
                 ui.memory_mut(|m| m.request_focus(Id::unique("home-chat-search")));
             }
         }
-        self.home_corner(ui, t, rect);
+        if round {
+            self.home_buttons_rect = Some(self.dock(ui, t, rect));
+        } else {
+            self.home_corner(ui, t, rect);
+        }
         self.delete_chat_dialog(ui.ctx(), t);
         self.reset_dialog(ui.ctx(), t);
         let calm =
@@ -354,7 +374,7 @@ impl App {
     }
 
     /// The conversations, the latest first.
-    fn chat_rows(&self) -> Vec<ChatRow> {
+    pub(crate) fn chat_rows(&self) -> Vec<ChatRow> {
         let mut rows: Vec<ChatRow> = self
             .sessions
             .iter()
@@ -1000,10 +1020,14 @@ pub(crate) fn home_grid(area: Rect) -> HomeGrid {
 /// The solid box, its heading strip and, `split`, the line between the
 /// chats and the accounts (Settings has one cell).
 fn paint_grid(p: &egui::Painter, t: &Theme, g: &HomeGrid, split: bool) {
-    p.rect_filled(g.card, 0.0, t.panel);
+    let r = crate::gravity::round(t, 18.0);
+    if r > 0.0 {
+        p.add(egui::Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(140) }.as_shape(g.card, r as u8));
+    }
+    p.rect_filled(g.card, r, t.panel);
     p.rect_stroke(
         g.card,
-        0.0,
+        r,
         Stroke::new(1.0, t.line),
         egui::StrokeKind::Inside,
     );
@@ -2066,7 +2090,9 @@ fn home_tabs_inner(ui: &mut Ui, t: &Theme, head: Rect, on: &str) -> Option<Strin
             resp = resp.on_hover_text(&tab.tip);
         }
         let lit = i == on_idx;
-        if lit {
+        if lit && crate::gravity::is(t) {
+            ui.painter().rect_filled(rect.shrink2(vec2(2.0, 4.0)), 8.0, crate::gravity::selected());
+        } else if lit {
             ui.painter().hline(
                 rect.left() + 6.0..=rect.right() - 6.0,
                 rect.bottom() - 1.0,
@@ -2193,11 +2219,12 @@ fn tab_face(
     let p = ui.painter();
     if hover {
         // Under the box's top border, which the tab's top edge sits on.
-        p.rect_filled(
-            Rect::from_min_max(egui::pos2(rect.left(), rect.top() + 1.0), rect.max),
-            0.0,
-            t.tool_hover,
-        );
+        let face = if crate::gravity::is(t) {
+            rect.shrink2(vec2(2.0, 4.0))
+        } else {
+            Rect::from_min_max(egui::pos2(rect.left(), rect.top() + 1.0), rect.max)
+        };
+        p.rect_filled(face, crate::gravity::round(t, 8.0), t.tool_hover);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let mut tx = rect.left() + 12.0;
