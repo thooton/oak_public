@@ -164,8 +164,12 @@ pub fn draw_pencil(p: &egui::Painter, r: Rect, c: Color32) {
 /// the browser itself).
 pub const LINK_COPIED: &str = "Sign-in link copied. Paste it in your browser.";
 
+pub fn sign_in_hint(copied: bool) -> &'static str {
+    if copied { LINK_COPIED } else { "Open the sign-in link in your browser." }
+}
+
 /// An adding box's heading, with a link that copies the sign-in page's
-/// `url` again.
+/// `url`.
 pub fn sign_in_heading(ui: &mut Ui, t: &Theme, title: &str, url: &str) {
     ui.horizontal(|ui| {
         caption(ui, title, t.ink2);
@@ -175,7 +179,7 @@ pub fn sign_in_heading(ui: &mut Ui, t: &Theme, title: &str, url: &str) {
                     .sense(Sense::click()),
             );
             if again
-                .on_hover_text("Copy the sign-in link again")
+                .on_hover_text("Copy the sign-in link")
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {

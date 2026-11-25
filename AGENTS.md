@@ -1145,3 +1145,8 @@ The table only grows at its end and structs only at theirs, so a plugin built on
 every later Oak, and it can be written in any language (`sdk/include/oak_plugin.h`); `oak-sdk`
 is the Rust wrapper, shaped like egui. Changing the interface: `sdk/src/abi.rs` only, at the
 ends, then `OAK_WRITE_HEADER=1 OAK_WRITE_ABI=1 cargo test -p oak-sdk` (docs/PLUGINS.md).
+
+Plugins can start the same browser sign-ins as Home's **+ Add account**. Oak returns the
+link without opening it or copying it, and keeps the sign-in state and account credentials.
+The pending Claude, Codex, or Antigravity form can be shown by the plugin or on Home;
+Quick and Freebuff complete in the background.

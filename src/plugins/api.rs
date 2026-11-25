@@ -779,6 +779,23 @@ impl HostApi for Oak {
         give_result(app(|a| a.plugin_start_conversation(new)).unwrap_or_else(|| Err("Oak's window isn't there to start it in.".into())), out, out_user)
     }
 
+    unsafe extern "C" fn app_start_sign_in(provider: OakStr, out: OakSink, out_user: *mut c_void) -> bool {
+        let Some(provider) = crate::api::Provider::from_id(str_of(provider)) else {
+            return give_result(Err("Unknown sign-in provider.".into()), out, out_user);
+        };
+        let result = match super::context() {
+            Some(ctx) => app(|a| a.start_sign_in(&ctx, provider)),
+            None => None,
+        };
+        give_result(result.unwrap_or_else(|| Err("Oak's window isn't available to start a sign-in.".into())), out, out_user)
+    }
+
+    unsafe extern "C" fn app_sign_in_form(ui: *mut OakUi) -> bool {
+        let (ui, t) = (ui_of(ui), theme());
+        let width = ui.available_width();
+        app(|a| a.sign_in_form(ui, &t, width)).unwrap_or(false)
+    }
+
     unsafe extern "C" fn app_local_form(ui: *mut OakUi) {
         let (ui, t) = (ui_of(ui), theme());
         app(|a| a.local_rows(ui, &t));
@@ -2231,6 +2248,48 @@ mod tests {
         assert!(plugin_request(&json!({"provider": "nowhere", "model": "m", "messages": msgs})).unwrap_err().contains("nowhere"));
         assert!(plugin_request(&json!({"model": "m", "messages": []})).is_err());
         assert!(plugin_request(&json!({"messages": msgs})).is_err());
+    }
+
+    /// A plugin receives Home's actual sign-in URL and can host its code form.
+    #[test]
+    fn plugin_can_start_and_show_account_sign_in() {
+        use oak_sdk::App as _;
+        oak_sdk::rt::attach(&TABLE);
+        let mut window = oak_sdk::host::Window::default();
+        assert!(window.start_sign_in("claude").is_err(), "requires the window");
+
+        let (ctx, theme) = test_ctx(true, true);
+        let mut time = 0.0;
+        let mut app = App::default();
+        let mut url = String::new();
+        let out = run_frame(&ctx, vec2(800.0, 600.0), &mut time, 0.05, vec![], |ui| {
+            crate::plugins::begin_frame(ui.ctx(), &theme);
+            with_app(&mut app, || {
+                let ui = &mut unsafe { sdk::Ui::from_raw(ui_ptr(ui)) };
+                assert!(!window.sign_in_form(ui));
+                assert!(window.start_sign_in("openrouter").is_err());
+                url = window.start_sign_in("claude").unwrap();
+                assert!(window.start_sign_in("codex").is_err(), "cannot overwrite the pending form");
+                assert!(window.sign_in_form(ui));
+            });
+        });
+        assert_eq!(url, app.adding.as_ref().unwrap().login.url);
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        assert_eq!(parsed.scheme(), "https");
+        assert!(parsed.query_pairs().any(|(k, v)| k == "code_challenge_method" && v == "S256"));
+        assert!(crate::app_hover_test::copied(&out).is_empty(), "plugins decide whether to copy the link");
+        assert!(texts(&painted(&out)).contains("Authorization code"));
+
+        let mut draw = |events| run_frame(&ctx, vec2(800.0, 600.0), &mut time, 0.05, events, |ui| {
+            with_app(&mut app, || {
+                window.sign_in_form(&mut unsafe { sdk::Ui::from_raw(ui_ptr(ui)) });
+            });
+        });
+        let shown = painted(&out);
+        let copied = draw(click(rect_of(&shown, "copy link").center(), Primary));
+        assert_eq!(crate::app_hover_test::copied(&copied), vec![url]);
+        draw(click(rect_of(&shown, "Cancel").center(), Primary));
+        assert!(app.adding.is_none());
     }
 
     /// Draws a frame of `page` through the SDK's wrappers, which call

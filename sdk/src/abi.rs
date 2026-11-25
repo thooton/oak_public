@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 11;
+pub const OAK_API_VERSION: u32 = 12;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -2041,6 +2041,19 @@ c_api! {
     /// gives the box the keyboard with the cursor after it.
     /// `OAK_INSERT_SPACED`: spaced from the text either side.
     fn app_insert_input(text: OakStr, flags: u32);
+
+    // Version 12: account sign-in (UI thread, with the window lent).
+
+    /// Starts the same browser sign-in as Home, without opening or copying
+    /// the link. Call on a user action. `provider`: "claude", "codex",
+    /// "antigravity", "freebuff" or "quick". True: `out` got the URL;
+    /// false: why it couldn't start. Oak keeps the account as on Home.
+    fn app_start_sign_in(provider: OakStr, out: OakSink, out_user: *mut c_void) -> bool;
+    /// Draws Oak's pending Claude, Codex or Antigravity form, including
+    /// the field to paste the code or callback URL. True if it was active.
+    /// Draw it once per frame in the plugin or leave it on Home. Freebuff
+    /// and Quick need no form; they finish in the background.
+    fn app_sign_in_form(ui: *mut OakUi) -> bool;
 }
 
 /// The C header: everything declared above, in C.

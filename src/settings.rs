@@ -847,7 +847,7 @@ impl App {
                     .hint_text("Callback URL");
                 (add, cancel) = add_field(ui, t, edit, None, self.codex_error.as_ref(), |ui| {
                     if login.listening {
-                        caption(ui, crate::widgets::LINK_COPIED, t.ink3);
+                        caption(ui, crate::widgets::sign_in_hint(self.sign_in_copied), t.ink3);
                     } else {
                         ui.label(RichText::new("Paste the callback URL after sign-in.").small().color(t.ink3))
                             .on_hover_text("localhost:1455 is unavailable. Copy the callback URL even if the page fails to load.");
@@ -900,7 +900,7 @@ impl App {
                     self.antigravity_error.as_ref(),
                     |ui| {
                         if login.listening {
-                            caption(ui, crate::widgets::LINK_COPIED, t.ink3);
+                            caption(ui, crate::widgets::sign_in_hint(self.sign_in_copied), t.ink3);
                         } else {
                             ui.label(RichText::new("Paste the callback URL after sign-in.").small().color(t.ink3))
                             .on_hover_text("localhost:51121 is unavailable. Copy the callback URL even if the page fails to load.");

@@ -322,6 +322,8 @@ struct App {
     /// A sign-in with no box of its own (Quick, Freebuff) whose link was
     /// copied for the browser: said under the accounts while it waits.
     link_copied: Option<crate::api::Provider>,
+    /// Whether Home copied the link for the current sign-in form.
+    sign_in_copied: bool,
     /// A removal or move of accounts, running in the background.
     account_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// The providers whose accounts show under their box on Home.

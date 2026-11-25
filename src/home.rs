@@ -645,12 +645,11 @@ impl App {
     /// login, a local server or a key, or a Claude login's code. True when
     /// one showed.
     fn adding_form(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
+        if self.sign_in_form(ui, t, w) {
+            return true;
+        }
         // True once added.
-        let added = if self.codex_login.is_some() {
-            Some(self.codex_add_box(ui, t, w))
-        } else if self.antigravity_login.is_some() {
-            Some(self.antigravity_add_box(ui, t, w))
-        } else if self.adding_local {
+        let added = if self.adding_local {
             Some(self.local_add_box(ui, t, w))
         } else if self.adding_openrouter.open {
             Some(self.openrouter_add_box(ui, t, w))
@@ -663,6 +662,21 @@ impl App {
         } else {
             None
         };
+        if added == Some(true) {
+            self.accounts_changed(ui.ctx());
+        }
+        added.is_some()
+    }
+
+    /// The pending browser sign-in that needs a form, on Home or in a plugin.
+    pub(crate) fn sign_in_form(&mut self, ui: &mut Ui, t: &Theme, w: f32) -> bool {
+        let added = if self.codex_login.is_some() {
+            Some(self.codex_add_box(ui, t, w))
+        } else if self.antigravity_login.is_some() {
+            Some(self.antigravity_add_box(ui, t, w))
+        } else {
+            None
+        };
         if let Some(added) = added {
             if added {
                 self.accounts_changed(ui.ctx());
@@ -672,7 +686,7 @@ impl App {
         let Some(add) = &mut self.adding else {
             return false;
         };
-        let (done, cancel) = add_box(ui, t, add, w);
+        let (done, cancel) = add_box(ui, t, add, w, self.sign_in_copied);
         if cancel {
             self.adding = None;
         } else if done && !add.code.trim().is_empty() {
@@ -690,94 +704,105 @@ impl App {
     /// Starts adding what was picked from "+ Add account". Sign-in links
     /// go on the clipboard for the user to paste in their browser.
     fn start_adding(&mut self, ctx: &egui::Context, pick: Add) {
-        match pick {
-            Add::Claude => {
+        let provider = match pick {
+            Add::Browser(provider) => provider,
+            Add::OpenRouter => return self.adding_openrouter.open = true,
+            Add::NodeClub => return self.adding_nodeclub.open = true,
+            Add::Refuseless => return self.adding_refuseless.open = true,
+            Add::MuseCode => return self.adding_musecode.open = true,
+            Add::Local => return self.adding_local = true,
+        };
+        match self.start_sign_in(ctx, provider) {
+            Ok(url) => {
+                ctx.copy_text(url);
+                self.sign_in_copied = true;
+                if matches!(provider, Provider::Quick | Provider::Freebuff) {
+                    self.link_copied = Some(provider);
+                }
+            }
+            Err(e) => self.account_note = Some(e),
+        }
+    }
+
+    /// Starts a built-in browser sign-in for Home or a plugin. The caller
+    /// presents the URL; Oak keeps the verifier, callbacks and credentials.
+    pub(crate) fn start_sign_in(&mut self, ctx: &egui::Context, provider: Provider) -> Result<String, String> {
+        if self.adding_form_open() {
+            return Err("Finish or cancel the account form that's already open.".into());
+        }
+        let url = match provider {
+            Provider::Claude => {
                 let login = api::start_login();
-                ctx.copy_text(login.url.clone());
+                let url = login.url.clone();
                 self.adding = Some(AddAccount {
                     login,
                     code: String::new(),
                     error: None,
                 });
+                url
             }
-            Add::Codex => {
+            Provider::Codex => {
                 let login = codex::start_login();
-                ctx.copy_text(login.url.clone());
+                let url = login.url.clone();
                 self.codex_login = Some(login);
+                url
             }
-            Add::Antigravity => {
+            Provider::Antigravity => {
                 let login = antigravity::start_login();
-                ctx.copy_text(login.url.clone());
+                let url = login.url.clone();
                 self.antigravity_login = Some(login);
+                url
             }
-            Add::OpenRouter => self.adding_openrouter.open = true,
-            Add::NodeClub => self.adding_nodeclub.open = true,
-            Add::Refuseless => self.adding_refuseless.open = true,
-            Add::MuseCode => self.adding_musecode.open = true,
-            Add::Quick => match crate::quick::login::start() {
-                Ok(url) => {
-                    ctx.copy_text(url);
-                    self.link_copied = Some(Provider::Quick);
-                    // Keep polling until the browser approves it.
-                    let ctx = ctx.clone();
-                    std::thread::spawn(move || {
-                        for _ in 0..300 {
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                            match crate::quick::login::state() {
-                                Some(crate::quick::login::State::Done) => {
-                                    // The picker has to learn Quick's models
-                                    // now, as it does for any other sign-in.
-                                    crate::api::note_signed_in();
-                                    ctx.request_repaint();
-                                    return;
-                                }
-                                Some(crate::quick::login::State::Failed(_)) | None => {
-                                    ctx.request_repaint();
-                                    return;
-                                }
-                                _ => {}
-                            }
+            Provider::Quick => {
+                let url = crate::quick::login::start()?;
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..300 {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if !matches!(crate::quick::login::state(), Some(crate::quick::login::State::Waiting { .. })) {
+                            ctx.request_repaint();
+                            return;
                         }
-                    });
+                    }
+                });
+                url
+            }
+            Provider::Freebuff => {
+                if freebuff::login_pending() {
+                    return Err("A Freebuff sign-in is already waiting for browser approval.".into());
                 }
-                Err(e) => self.account_note = Some(e),
-            },
-            Add::Local => self.adding_local = true,
-            Add::Freebuff => match freebuff::login_start() {
-                Ok(url) => {
-                    ctx.copy_text(url);
-                    self.link_copied = Some(Provider::Freebuff);
-                    // Keep polling until the browser approves it.
-                    let ctx = ctx.clone();
-                    std::thread::spawn(move || {
-                        for _ in 0..150 {
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                            if freebuff::login_poll() {
-                                freebuff::refresh_session();
-                                ctx.request_repaint();
-                                break;
-                            }
+                let url = freebuff::login_start()?;
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..150 {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if freebuff::login_poll() {
+                            freebuff::refresh_session();
+                            api::note_signed_in();
+                            ctx.request_repaint();
+                            return;
                         }
-                    });
-                }
-                Err(e) => self.account_note = Some(e),
-            },
-        }
+                    }
+                    freebuff::login_expire();
+                    ctx.request_repaint();
+                });
+                url
+            }
+            _ => return Err("This provider doesn't support browser sign-in in Oak.".into()),
+        };
+        self.sign_in_copied = false;
+        Ok(url)
     }
 }
 
 /// What "+ Add account" can add.
 #[derive(Clone, Copy)]
 enum Add {
-    Claude,
-    Codex,
-    Antigravity,
+    Browser(Provider),
     OpenRouter,
     NodeClub,
-    Freebuff,
     Refuseless,
     MuseCode,
-    Quick,
     Local,
 }
 
@@ -806,7 +831,7 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
         .on_hover_text(tip)
         .clicked()
     {
-        pick = Some(Add::Claude);
+        pick = Some(Add::Browser(Provider::Claude));
     }
     let remote = if shared {
         format!(" Shared through {}.", api::vault_name())
@@ -818,13 +843,13 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
             Provider::Codex,
             "Codex account",
             "ChatGPT plan, Codex models.",
-            Add::Codex,
+            Add::Browser(Provider::Codex),
         ),
         (
             Provider::Antigravity,
             "Antigravity account",
             "Google Antigravity (Gemini, Claude, GPT-OSS), sign in with Google.",
-            Add::Antigravity,
+            Add::Browser(Provider::Antigravity),
         ),
         (
             Provider::OpenRouter,
@@ -848,7 +873,7 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
             Provider::Freebuff,
             "Freebuff account",
             "Freebuff, sign in in the browser; its models run a separate system.",
-            Add::Freebuff,
+            Add::Browser(Provider::Freebuff),
         ),
         (
             Provider::Refuseless,
@@ -860,7 +885,7 @@ fn add_menu(ui: &mut Ui) -> Option<Add> {
             Provider::Quick,
             "AWS Quick account",
             "Amazon Quick, sign in in the browser. Its models run Quick's own agent, with the tools Oak runs in your folder.",
-            Add::Quick,
+            Add::Browser(Provider::Quick),
         ),
     ] {
         if item(ui, provider, label)
@@ -1059,14 +1084,14 @@ fn cell_heading(p: &egui::Painter, t: &Theme, rect: Rect, text: &str) {
 
 /// Signing in another account: the code from the sign-in page goes in
 /// here. Returns (Add pressed, Cancel pressed).
-pub(crate) fn add_box(ui: &mut Ui, t: &Theme, add: &mut AddAccount, w: f32) -> (bool, bool) {
+fn add_box(ui: &mut Ui, t: &Theme, add: &mut AddAccount, w: f32, copied: bool) -> (bool, bool) {
     side_box(ui, t, w, |ui| {
         sign_in_heading(ui, t, "Add account", &add.login.url);
         let edit = TextEdit::singleline(&mut add.code)
             .id(Id::unique("add-account-code"))
             .hint_text("Authorization code");
         add_field(ui, t, edit, None, add.error.as_ref(), |ui| {
-            caption(ui, LINK_COPIED, t.ink3);
+            caption(ui, crate::widgets::sign_in_hint(copied), t.ink3);
         })
     })
     .inner

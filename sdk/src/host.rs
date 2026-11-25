@@ -581,6 +581,18 @@ pub trait App {
     /// The New screen's rows for a conversation on this machine: the
     /// folder, the model and the effort.
     fn local_form(&mut self, ui: &mut Ui);
+    /// Starts Oak's normal browser sign-in on a user action (interface 12).
+    /// `provider`: `claude`, `codex`, `antigravity`, `freebuff` or `quick`.
+    /// Returns the URL without opening a browser or writing the clipboard.
+    /// Oak keeps the sign-in state and stores the account as it would on Home.
+    fn start_sign_in(&mut self, _provider: &str) -> Result<String, String> {
+        Err("This window cannot start a sign-in.".into())
+    }
+    /// Shows the pending Claude, Codex or Antigravity sign-in form, if any
+    /// (interface 12). Draw it each frame in one place, or use the same form
+    /// on Home. Freebuff and Quick finish automatically in the background.
+    /// True if the form was active, not whether sign-in succeeded.
+    fn sign_in_form(&mut self, _ui: &mut Ui) -> bool { false }
     /// Draws a transcript the plugin has, as a conversation's is drawn,
     /// read-only. `key` is its tab; `version` changes when the transcript
     /// does (`make` is called only then); `tail` draws what follows the
@@ -789,6 +801,16 @@ impl App for Window {
     fn local_form(&mut self, ui: &mut Ui) {
         self.settle();
         unsafe { (api().app_local_form)(ui.as_raw()) };
+    }
+
+    fn start_sign_in(&mut self, provider: &str) -> Result<String, String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_start_sign_in)(s(provider), out, user) })
+    }
+
+    fn sign_in_form(&mut self, ui: &mut Ui) -> bool {
+        self.settle();
+        unsafe { (api().app_sign_in_form)(ui.as_raw()) }
     }
 
     fn transcript(&mut self, ui: &mut Ui, key: &str, version: u64, make: &mut dyn FnMut() -> Chat, tail_sig: u64, tail: &mut dyn FnMut(&mut Ui)) {

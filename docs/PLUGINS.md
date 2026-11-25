@@ -197,6 +197,23 @@ Ids: `egui::Id` values are the same numbers on both sides, so a widget's id from
 can be given to `Memory::request_focus`. A plugin's own per-id state (`ui.data_mut`) is kept in
 the plugin.
 
+### Adding an account from a plugin
+
+With interface version 12, call `app.start_sign_in(provider)` in response to a user action.
+Use `claude`, `codex`, `antigravity`, `freebuff` or `quick`. On success the call returns the
+same browser authorization URL Oak would copy from **Home → + Add account**. The plugin
+chooses how to present it, for example `ui.hyperlink_to("Continue in browser", &url)`.
+Starting a sign-in does not open a browser or change the clipboard.
+
+For Claude, Codex and Antigravity, draw `app.sign_in_form(ui)` each frame in the plugin, or
+let the user complete the same form on Home. Claude uses a pasted authorization code. Codex
+and Antigravity listen for the browser callback and let the user paste the callback URL if
+needed. Freebuff and Quick finish in the background and don't use the form. Oak handles
+credentials and local or vault storage just as it would for a sign-in from Home.
+
+In C the same calls are `api->app_start_sign_in` (the output sink gets the URL on success or
+an error on failure) and `api->app_sign_in_form`.
+
 ## Writing one in C, or anything else
 
 ```sh

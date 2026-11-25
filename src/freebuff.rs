@@ -726,6 +726,11 @@ pub fn login_pending() -> bool {
     STATE.lock().unwrap().pending.is_some()
 }
 
+/// Lets the user start again when the polling worker has timed out.
+pub(crate) fn login_expire() {
+    STATE.lock().unwrap().pending = None;
+}
+
 /// One poll of the login; on success the token is saved and `true` returned.
 pub fn login_poll() -> bool {
     let pending = STATE.lock().unwrap().pending.clone();

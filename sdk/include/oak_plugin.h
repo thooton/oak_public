@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 11
+#define OAK_API_VERSION 12
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -2153,6 +2153,20 @@ struct OakApi {
      * `OAK_INSERT_SPACED`: spaced from the text either side.
      */
     void (*app_insert_input)(OakStr text, uint32_t flags);
+
+    /* Starts the same browser sign-in as Home, without opening or copying
+     * the link. Call on a user action. `provider`: "claude", "codex",
+     * "antigravity", "freebuff" or "quick". True: `out` got the URL;
+     * false: why it couldn't start. Oak keeps the account as on Home.
+     */
+    bool (*app_start_sign_in)(OakStr provider, OakSink out, void *out_user);
+
+    /* Draws Oak's pending Claude, Codex or Antigravity form, including
+     * the field to paste the code or callback URL. True if it was active.
+     * Draw it once per frame in the plugin or leave it on Home. Freebuff
+     * and Quick need no form; they finish in the background.
+     */
+    bool (*app_sign_in_form)(OakUi *ui);
 };
 
 /* Text from a C string, and from a literal. */
