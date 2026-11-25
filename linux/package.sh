@@ -19,10 +19,11 @@ arch="$(uname -m)"
 name="oak-linux-$arch"
 out="$target_dir/dist/$name"
 
-cargo build --release
+cargo build --release --locked -p oak -p oak-aws-quick-signup
 rm -rf "$out"
-mkdir -p "$out"
+mkdir -p "$out/plugins"
 strip -o "$out/oak" "$target_dir/release/oak"
+strip --strip-unneeded -o "$out/plugins/liboak_aws_quick_signup.so" "$target_dir/release/liboak_aws_quick_signup.so"
 cp linux/install.sh linux/oak.desktop "$out/"
 cp assets/oak-icon.png "$out/oak.png"
 chmod +x "$out/oak" "$out/install.sh"
@@ -39,7 +40,8 @@ which every Plasma (or GNOME, ...) desktop has. Settings and conversations
 are kept in ~/.config/oak.
 
 Optional, for the agent's tools: a Chromium browser (chromium, google-chrome,
-brave or microsoft-edge on PATH) for FETCH render and SCREENSHOT.
+brave or microsoft-edge on PATH) for FETCH render, SCREENSHOT, and the
+AWS Quick sign-up plugin on Home.
 EOF
 tar -C "$target_dir/dist" -czf "$target_dir/dist/$name.tar.gz" "$name"
 

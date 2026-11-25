@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 12;
+pub const OAK_API_VERSION: u32 = 13;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -2054,6 +2054,15 @@ c_api! {
     /// Draw it once per frame in the plugin or leave it on Home. Freebuff
     /// and Quick need no form; they finish in the background.
     fn app_sign_in_form(ui: *mut OakUi) -> bool;
+
+    // Version 13: private browser (UI thread, in a Home plugin's page).
+
+    /// Fills the remaining space with Oak's browser at the HTTPS entry URL.
+    /// Draw it once per frame from the plugin's own Home page. The user
+    /// controls it; the plugin receives no page content, inputs, or cookies.
+    /// Its temporary session ends when the page closes or changes URL here.
+    /// True when the view was drawn; false gives the reason to `out`.
+    fn app_private_browser(ui: *mut OakUi, url: OakStr, out: OakSink, out_user: *mut c_void) -> bool;
 }
 
 /// The C header: everything declared above, in C.

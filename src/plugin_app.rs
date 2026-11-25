@@ -34,6 +34,24 @@ impl App {
         }
     }
 
+    /// A browser owned by the current plugin page. Do not expose its state
+    /// to the SDK or connect it to a conversation.
+    pub(crate) fn plugin_private_browser(&mut self, ui: &mut Ui, t: &Theme, url: &str) -> Result<(), String> {
+        if self.page != Page::Plugin {
+            return Err("A private browser must be shown on a Home plugin page.".into());
+        }
+        let url = reqwest::Url::parse(url).ok().filter(|u| {
+            u.scheme() == "https" && u.has_host() && u.username().is_empty() && u.password().is_none()
+        }).ok_or("A private browser needs an HTTPS entry URL without credentials.")?;
+        if self.private_browser.as_ref().is_none_or(|b| b.owner != self.plugin_page || b.url != url.as_str()) {
+            self.private_browser = Some(browser_view::PrivatePage::new(ui.ctx(), self.plugin_page.clone(), url.into()));
+        }
+        if let Some(browser) = &mut self.private_browser {
+            browser.show(ui, t);
+        }
+        Ok(())
+    }
+
     /// Shows Settings; its X comes back to what was shown.
     pub(crate) fn plugin_go_settings(&mut self) {
         if self.page != Page::Settings {

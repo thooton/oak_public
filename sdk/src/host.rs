@@ -593,6 +593,13 @@ pub trait App {
     /// on Home. Freebuff and Quick finish automatically in the background.
     /// True if the form was active, not whether sign-in succeeded.
     fn sign_in_form(&mut self, _ui: &mut Ui) -> bool { false }
+    /// Draws a private browser that the user operates, filling the rest of
+    /// this Home plugin page (interface 13). `url` opens once, as an HTTPS
+    /// entry point. Draw in a non-scrolling container. Navigation and input
+    /// stay in Oak's browser; the session is discarded when leaving the page.
+    fn private_browser(&mut self, _ui: &mut Ui, _url: &str) -> Result<(), String> {
+        Err("This window cannot show a private browser.".into())
+    }
     /// Draws a transcript the plugin has, as a conversation's is drawn,
     /// read-only. `key` is its tab; `version` changes when the transcript
     /// does (`make` is called only then); `tail` draws what follows the
@@ -811,6 +818,11 @@ impl App for Window {
     fn sign_in_form(&mut self, ui: &mut Ui) -> bool {
         self.settle();
         unsafe { (api().app_sign_in_form)(ui.as_raw()) }
+    }
+
+    fn private_browser(&mut self, ui: &mut Ui, url: &str) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_private_browser)(ui.as_raw(), s(url), out, user) }).map(|_| ())
     }
 
     fn transcript(&mut self, ui: &mut Ui, key: &str, version: u64, make: &mut dyn FnMut() -> Chat, tail_sig: u64, tail: &mut dyn FnMut(&mut Ui)) {

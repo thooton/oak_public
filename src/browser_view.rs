@@ -229,6 +229,68 @@ pub(crate) fn preview_layout(view: Rect, col: Rangef, right: f32, top: f32, size
     (Rect::from_min_size(egui::pos2(right - size.x, top), size), over)
 }
 
+/// Owned by the Home plugin page, not by a conversation. The browser's
+/// picture and native input are the same as in the conversation lightbox.
+pub(crate) struct PrivatePage {
+    pub(crate) owner: String,
+    pub(crate) url: String,
+    inst: Arc<Instance>,
+}
+
+impl PrivatePage {
+    pub(crate) fn new(ctx: &egui::Context, owner: String, url: String) -> Self {
+        let inst = browser::open_private(ctx, url.clone());
+        Self { owner, url, inst }
+    }
+
+    pub(crate) fn show(&mut self, ui: &mut Ui, t: &Theme) {
+        let room = ui.available_rect_before_wrap().intersect(ui.clip_rect()).size();
+        let (rect, _) = ui.allocate_exact_size((room - vec2(0.0, 16.0)).max(vec2(1.0, 1.0)), Sense::hover());
+        if rect.height() <= BAR_H || rect.width() <= 1.0 {
+            return;
+        }
+        let bar = Rect::from_min_size(rect.min, vec2(rect.width(), BAR_H));
+        let inst = &self.inst;
+        let (url, loading, back, ready, failed) = {
+            let v = inst.view.lock().unwrap();
+            (v.url.clone(), v.loading, v.back, v.status == Status::Ready, matches!(v.status, Status::Failed(_) | Status::Quit(_)))
+        };
+        let origin = reqwest::Url::parse(&url).ok().filter(|url| url.has_host())
+            .map(|url| url.origin().ascii_serialization()).unwrap_or_default();
+        let painter = ui.painter().with_clip_rect(bar);
+        painter.rect_filled(bar, 0.0, t.panel);
+        painter.text(egui::pos2(bar.left() + 72.0, bar.center().y), Align2::LEFT_CENTER, origin, FontId::proportional(12.5), t.ink2);
+        let button = |index: f32| Rect::from_min_size(bar.min + vec2(4.0 + index * 30.0, 2.0), vec2(30.0, BAR_H - 4.0));
+        if bar_button(ui, t, button(0.0), state_id(&inst.conv).with("back"), Icon::Back, "Back", ready && back) {
+            inst.go(-1);
+        }
+        let (icon, tip) = if loading { (Icon::Cross, "Stop") } else if failed { (Icon::Reload, "Restart browser") } else { (Icon::Reload, "Reload") };
+        if bar_button(ui, t, button(1.0), state_id(&inst.conv).with("reload"), icon, tip, ready || failed) {
+            if failed {
+                browser::close(&inst.conv);
+                self.inst = browser::open_private(ui.ctx(), self.url.clone());
+                return;
+            }
+            if loading { inst.stop_loading(); } else { inst.reload(); }
+        }
+        let room = Rect::from_min_max(bar.left_bottom(), rect.max);
+        inst.resize(room.width().floor() as u32, room.height().floor() as u32, false);
+        let (w, h) = inst.viewport_css();
+        let k = (room.width() / w as f32).min(room.height() / h as f32);
+        let page = Rect::from_center_size(room.center(), vec2(w as f32 * k, h as f32 * k));
+        let ppp = ui.ctx().pixels_per_point();
+        inst.shown(k * ppp, [(page.width() * ppp).ceil() as u32, (page.height() * ppp).ceil() as u32]);
+        upload(ui.ctx(), inst);
+        page_view(ui, t, inst, page, k);
+    }
+}
+
+impl Drop for PrivatePage {
+    fn drop(&mut self) {
+        browser::close(&self.inst.conv);
+    }
+}
+
 impl App {
     /// Windowed protocols also belong to subagents: select the actual
     /// shown conversation, not the parent/browser-only conversation.
@@ -743,7 +805,7 @@ fn page_view(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, rect: Rect, k: f32) {
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new(e).color(t.error));
                     ui.add_space(10.0);
-                    if ui.button(if inst.attached() { "Attach to the tab again" } else { "Restart the browser" }).clicked() {
+                    if !inst.is_private() && ui.button(if inst.attached() { "Attach to the tab again" } else { "Restart the browser" }).clicked() {
                         browser::restart(&inst.conv, ui.ctx());
                     }
                 });

@@ -234,6 +234,10 @@ struct Viewport {
 pub(crate) struct Instance {
     pub(crate) conv: String,
     profile: PathBuf,
+    /// A plugin page's single-use browser. No conversation or agent can read it.
+    private_url: Option<String>,
+    /// Serializes the launch's file/process creation with shutdown.
+    launch: Mutex<()>,
     /// The named profile it runs on; None: the conversation's own.
     profile_name: Option<String>,
     /// Chromium's user agent made a plain Chrome's: what emulate resets to.
@@ -285,6 +289,11 @@ fn profiles_dir() -> PathBuf {
     crate::store::dir().join("browser")
 }
 
+/// Isolated profiles, discarded when their plugin page closes.
+fn private_profiles_dir() -> PathBuf {
+    crate::store::dir().join("browser-private")
+}
+
 /// Conversation `conv`'s profile folder.
 fn profile_dir(conv: &str) -> PathBuf {
     let name: String = conv.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
@@ -293,7 +302,7 @@ fn profile_dir(conv: &str) -> PathBuf {
 
 /// The browser of conversation `conv`, if it is open.
 pub(crate) fn get(conv: &str) -> Option<Arc<Instance>> {
-    OPEN.lock().unwrap().get(conv).cloned()
+    OPEN.lock().unwrap().get(conv).filter(|i| !i.is_private()).cloned()
 }
 
 pub(crate) fn is_open(conv: &str) -> bool {
@@ -332,11 +341,19 @@ pub(crate) fn open(conv: &str, ctx: &egui::Context) -> Arc<Instance> {
 /// Opens conversation `conv`'s browser on `profile` (named `name`, or the
 /// conversation's own), unless another conversation's browser is on it.
 fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<String>, emulation: state::Emulation) -> Result<Arc<Instance>, String> {
-    open_on(conv, ctx, profile, name, emulation, None)
+    open_on(conv, ctx, profile, name, emulation, None, None)
+}
+
+/// A private browser for a plugin page, never addressable as a conversation.
+pub(crate) fn open_private(ctx: &egui::Context, url: String) -> Arc<Instance> {
+    let id = format!("{:032x}", rand::random::<u128>());
+    let key = format!(":private-browser:{id}");
+    open_on(&key, ctx, private_profiles_dir().join(&id), None, Default::default(), None, Some(url))
+        .expect("a new private profile has no other owner")
 }
 
 /// `open_with`, or (`tab`) the user's tab through the extension.
-fn open_on(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<String>, emulation: state::Emulation, tab: Option<i64>) -> Result<Arc<Instance>, String> {
+fn open_on(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<String>, emulation: state::Emulation, tab: Option<i64>, private_url: Option<String>) -> Result<Arc<Instance>, String> {
     let mut open = OPEN.lock().unwrap();
     if let Some(i) = open.get(conv) {
         return Ok(i.clone());
@@ -350,6 +367,8 @@ fn open_on(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<Strin
     let inst = Arc::new(Instance {
         conv: conv.to_string(),
         profile,
+        private_url,
+        launch: Mutex::new(()),
         profile_name: name,
         user_agent: Mutex::new(String::new()),
         emulation: Mutex::new(emulation),
@@ -404,7 +423,7 @@ pub(crate) fn restart(conv: &str, ctx: &egui::Context) {
         // The user's tab: attached again (the user restarted it).
         if let Some(old) = old.as_ref().filter(|o| o.tab.is_some()) {
             old.shutdown();
-            let _ = open_on(&conv, &ctx, old.profile.clone(), None, Default::default(), old.tab);
+            let _ = open_on(&conv, &ctx, old.profile.clone(), None, Default::default(), old.tab, None);
             ctx.request_repaint();
             return;
         }
@@ -427,7 +446,7 @@ pub(crate) fn restart(conv: &str, ctx: &egui::Context) {
 
 /// Closes the browsers of conversations `keep` says no to (their tabs closed).
 pub(crate) fn retain(keep: impl Fn(&str) -> bool) {
-    let gone: Vec<String> = OPEN.lock().unwrap().keys().filter(|c| !keep(c)).cloned().collect();
+    let gone: Vec<String> = OPEN.lock().unwrap().iter().filter(|(c, i)| !i.is_private() && !keep(c)).map(|(c, _)| c.clone()).collect();
     for c in gone {
         close(&c);
     }
@@ -460,6 +479,14 @@ pub(crate) fn shutdown_all() {
     let threads: Vec<_> = all.into_iter().map(|i| std::thread::spawn(move || i.shutdown())).collect();
     for t in threads {
         let _ = t.join();
+    }
+    // A plugin page may already have detached the browser as it closed.
+    let start = Instant::now();
+    let private = private_profiles_dir();
+    while start.elapsed() < Duration::from_secs(10)
+        && CLOSING.lock().unwrap().keys().any(|p| p.starts_with(&private))
+    {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -516,6 +543,10 @@ impl Instance {
 
     fn tab_cdp(&self, id: u64) -> Option<Arc<Cdp>> {
         self.tabs.lock().unwrap().list.iter().find(|tab| tab.id == id).map(|tab| tab.cdp.clone())
+    }
+
+    pub(crate) fn is_private(&self) -> bool {
+        self.private_url.is_some()
     }
 
     fn is_closed(&self) -> bool {
@@ -614,13 +645,24 @@ impl Instance {
             return self.start_attached(tab);
         }
         let exe = find_browser().ok_or(NO_BROWSER)?;
-        std::fs::create_dir_all(&self.profile).map_err(|e| format!("Couldn't make the browser's profile folder: {e}"))?;
         // A browser closed on this profile a moment ago may not have quit yet.
         let t = Instant::now();
         while closing(&self.profile) && t.elapsed() < Duration::from_secs(10) && !self.is_closed() {
             std::thread::sleep(Duration::from_millis(50));
         }
         reap_stale(&self.profile);
+        let launch = self.launch.lock().unwrap();
+        if self.is_closed() {
+            return Err(CLOSED.into());
+        }
+        let mut dir = std::fs::DirBuilder::new();
+        dir.recursive(true);
+        #[cfg(unix)]
+        if self.is_private() {
+            use std::os::unix::fs::DirBuilderExt;
+            dir.mode(0o700);
+        }
+        dir.create(&self.profile).map_err(|e| format!("Couldn't make the browser's profile folder: {e}"))?;
         let vp = *self.viewport.lock().unwrap();
         let mut cmd = Command::new(&exe);
         crate::oom::isolate(&mut cmd);
@@ -629,7 +671,6 @@ impl Instance {
             "--remote-debugging-port=0",
             "--no-first-run",
             "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
             "--disable-features=Translate,MediaRouter,OptimizationHints",
             "--hide-crash-restore-bubble",
         ])
@@ -639,6 +680,11 @@ impl Instance {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+        if self.is_private() {
+            cmd.args(["--incognito", "--disable-background-networking"]);
+        } else {
+            cmd.arg("--disable-blink-features=AutomationControlled");
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -662,6 +708,7 @@ impl Instance {
         }
         let stderr = child.stderr.take().expect("piped");
         *self.child.lock().unwrap() = Some(child);
+        drop(launch);
         let rx = crate::cdp::devtools_address(stderr, "browser-log", "ws://").map_err(|e| e.to_string())?;
         let ws = self.devtools_ws(&rx)?;
         let port = ws.trim_start_matches("ws://").split(['/', ':']).nth(1).and_then(|p| p.parse::<u16>().ok()).ok_or(format!("Unexpected DevTools address {ws}"))?;
@@ -699,8 +746,10 @@ impl Instance {
             self.forward_events(0, &root);
             root.send("Target.setDiscoverTargets", json!({"discover": true}));
         }
-        // Where it was when it was last closed.
-        let last = std::fs::read_to_string(self.profile.join("oak-last-url")).unwrap_or_default();
+        // Private pages always start at the plugin's entry point.
+        let last = self.private_url.clone().unwrap_or_else(|| {
+            std::fs::read_to_string(self.profile.join("oak-last-url")).unwrap_or_default()
+        });
         let last = last.trim();
         if !last.is_empty() && last != "about:blank" {
             cdp.send("Page.navigate", json!({"url": last}));
@@ -807,6 +856,12 @@ impl Instance {
         let tree = call("Page.getFrameTree", json!({}))?;
         let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
         let url = tree["frameTree"]["frame"]["url"].as_str().unwrap_or("").to_string();
+        if self.is_private() {
+            // Use the same native focus/input path without capturing request data.
+            let _ = call("Emulation.setFocusEmulationEnabled", json!({"enabled": true}));
+            let _ = call("Page.setDownloadBehavior", json!({"behavior": "deny"}));
+            return Ok((main_frame, url));
+        }
         // A plain Chrome's user agent, not HeadlessChrome's.
         let need_ua = self.user_agent.lock().unwrap().is_empty();
         if need_ua
@@ -1070,6 +1125,7 @@ impl Instance {
     /// Ends the browser: gently (so it saves its cookies), else killed.
     fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        let _launch = self.launch.lock().unwrap();
         self.probe.lock().unwrap().take();
         self.ev_tx.lock().unwrap().take();
         if let Some(root) = self.root.lock().unwrap().take() {
@@ -1096,6 +1152,15 @@ impl Instance {
             }
         }
         self.texture.lock().unwrap().take();
+        if self.is_private() {
+            // Chromium's children can briefly hold profile files on Windows.
+            for _ in 0..20 {
+                if std::fs::remove_dir_all(&self.profile).is_ok() || !self.profile.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
 }
 
@@ -1361,7 +1426,7 @@ impl Instance {
                     tab.navs += 1;
                 }
             }
-            self.tab.is_none() && active && changed
+            self.tab.is_none() && !self.is_private() && active && changed
         };
         if save {
             let _ = std::fs::write(self.profile.join("oak-last-url"), &url);
@@ -1511,7 +1576,7 @@ impl Instance {
     }
 
     /// The model sets the viewport: `w` x `h` CSS pixels.
-    fn resize(&self, w: u32, h: u32, mobile: bool) {
+    pub(crate) fn resize(&self, w: u32, h: u32, mobile: bool) {
         self.set_viewport(|v| {
             (v.w, v.h, v.mobile) = (w.clamp(MIN_SIDE, MAX_SIDE), h.clamp(MIN_SIDE, MAX_SIDE), mobile);
         });
@@ -2770,7 +2835,7 @@ pub(crate) fn model_attach(conv: &str, ctx: &egui::Context, input: &Value) -> Re
         before = if old.tab.is_some() { "Let go of the user's other tab. ".into() } else { "Closed your own browser. ".into() };
         end(old);
     }
-    let inst = open_on(conv, ctx, profile_dir(conv), None, Default::default(), Some(tab.id))?;
+    let inst = open_on(conv, ctx, profile_dir(conv), None, Default::default(), Some(tab.id), None)?;
     let _busy = Busy::new(&inst);
     inst.ready()?;
     let (w, h) = inst.viewport_size();

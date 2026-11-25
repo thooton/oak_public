@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 12
+#define OAK_API_VERSION 13
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -2167,6 +2167,14 @@ struct OakApi {
      * and Quick need no form; they finish in the background.
      */
     bool (*app_sign_in_form)(OakUi *ui);
+
+    /* Fills the remaining space with Oak's browser at the HTTPS entry URL.
+     * Draw it once per frame from the plugin's own Home page. The user
+     * controls it; the plugin receives no page content, inputs, or cookies.
+     * Its temporary session ends when the page closes or changes URL here.
+     * True when the view was drawn; false gives the reason to `out`.
+     */
+    bool (*app_private_browser)(OakUi *ui, OakStr url, OakSink out, void *out_user);
 };
 
 /* Text from a C string, and from a literal. */

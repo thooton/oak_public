@@ -63,6 +63,17 @@ plugins, and they don't need rebuilding for it.
 A plugin is code with all of Oak's rights: it sees the logins Oak has and can do anything Oak
 can. Install only those you would run as a program.
 
+### AWS Quick sign-up
+
+The Linux release bundle includes the plugin. On Windows, put the release's
+`oak_aws_quick_signup.dll` in the `plugins` folder next to `oak.exe` or in Oak's plugins folder.
+From source, build with `cargo build -p oak-aws-quick-signup` and include `target/debug` in
+`OAK_PLUGINS` or copy the library into a plugins folder.
+
+Open **AWS Quick sign-up** from Home. The official AWS flow runs in Oak's Chromium browser;
+Chrome, Chromium, Brave, or Edge is required. Leaving the page discards its browser session.
+Creating an account here does not connect it to Oak. Use Home's normal AWS Quick sign-in to do that.
+
 ## The interface, and why it stays stable
 
 - A plugin exports `const OakPlugin *oak_plugin(void)`: who it is (id, name, version, what it

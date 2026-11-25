@@ -2494,6 +2494,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oak-aws-quick-signup"
+version = "0.1.0"
+dependencies = [
+ "oak-sdk",
+]
+
+[[package]]
 name = "oak-hello"
 version = "0.1.0"
 dependencies = [
