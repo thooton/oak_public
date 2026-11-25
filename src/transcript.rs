@@ -212,7 +212,18 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
         "NOTE_NEW" => s("text"),
         "NOTE_UPDATE" => format!("note {}: {}", input["id"], s("text")),
         "SET_TITLE" => s("title"),
-        "NOTE_DELETE" => format!("note {}", input["id"]),
+        "NOTE_EDIT" => format!("note {}: {} → {}", input["id"], s("old_string"), s("new_string")),
+        "NOTE_APPEND" => format!("note {}: + {}", input["id"], s("text")),
+        "NOTE_DELETE" => match input["ids"].as_array().filter(|a| !a.is_empty()) {
+            Some(ids) => {
+                let mut ids: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+                if input["id"].is_u64() {
+                    ids.push(input["id"].to_string());
+                }
+                format!("notes {}", ids.join(", "))
+            }
+            None => format!("note {}", input["id"]),
+        },
         "HEARTBEAT_START" => format!(
             "every {}: {}",
             agent::every(input["interval_minutes"].as_u64().unwrap_or(0)),
@@ -372,7 +383,7 @@ pub(crate) fn tool_summary(name: &str, input: &Value) -> String {
             .join(", "),
         // A LOAD that loads a kit (one calling a kit's tool is shown as that
         // tool): the kit it loads.
-        "LOAD" => s("name").trim().to_string(),
+        "LOAD" | "UNLOAD" => s("name").trim().to_string(),
         "AGENT_NEW" => s("name"),
         "AGENT_SEND" => {
             // A subagent's names it `id`; an Oak tab agent's names another `agent`.

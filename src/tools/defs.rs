@@ -5,12 +5,12 @@
 use super::*;
 
 /// The tools the model gets: the tools OAK runs, with each family's as
-/// one tool, every kit's included (LOAD isn't). A sub-orchestrator
+/// one tool, every kit's included (LOAD and UNLOAD aren't). A sub-orchestrator
 /// (`spawner`) sees AGENT as the main session does (its own agents),
 /// without ASK and progress meters.
 pub fn definitions_as(agent: bool, spawner: bool, local: bool, goal: bool) -> Vec<Value> {
     let mut all = run_definitions(agent, spawner, local, goal);
-    all.retain(|d| d["name"] != "LOAD");
+    all.retain(|d| d["name"] != "LOAD" && d["name"] != "UNLOAD");
     families(all, agent && !spawner)
 }
 
@@ -72,7 +72,7 @@ pub fn definitions_with_kits(agent: bool, spawner: bool, local: bool, kits: &[St
     all.retain(|d| {
         let name = d["name"].as_str().unwrap_or("");
         match name {
-            "LOAD" => !loadable.is_empty() || !servers.is_empty(),
+            "LOAD" | "UNLOAD" => !loadable.is_empty() || !servers.is_empty(),
             // A swarm's member talks on the board only: no AGENT.
             _ if agent && has("SWARM") && name.starts_with("AGENT_") => false,
             _ => kit_of(name, agent).is_none_or(has),
@@ -313,7 +313,14 @@ fn definitions_with(agent: bool) -> Value {
             json!({"text": {"type": "string"}}), &["text"]),
         tool("NOTE_UPDATE", "replace note `id`'s text, in full, so it holds the current state of what it tracks",
             json!({"id": {"type": "integer"}, "text": {"type": "string"}}), &["id", "text"]),
-        tool("NOTE_DELETE", "delete note `id`", json!({"id": {"type": "integer"}}), &["id"]),
+        tool("NOTE_EDIT", "replace `old_string` in note `id` with `new_string` (exactly once, unless replace_all)",
+            json!({"id": {"type": "integer"}, "old_string": {"type": "string"}, "new_string": {"type": "string"},
+                   "replace_all": {"type": "boolean"}}), &["id", "old_string", "new_string"]),
+        tool("NOTE_APPEND", "add `text` to the end of note `id`, on a new line",
+            json!({"id": {"type": "integer"}, "text": {"type": "string"}}), &["id", "text"]),
+        tool("NOTE_DELETE", "delete note `id`, or several at once with `ids`",
+            json!({"id": {"type": "integer"}, "ids": {"type": "array", "items": {"type": "integer"}, "description": "For delete: several notes at once"}}), &[]),
+        tool("NOTE_LIST", "your notes as they are now, each with its size in tokens, and their total against the limit", json!({}), &[]),
         tool("HEARTBEAT_START", "have Oak send you `message` every `interval_minutes` minutes, e.g. to check on a long job; returns its ID",
             json!({"message": {"type": "string", "description": "What to tell you each time, e.g. what to check"},
                    "interval_minutes": {"type": "integer", "description": "1 to 10080"}}), &["message", "interval_minutes"]),
@@ -403,6 +410,8 @@ fn definitions_with(agent: bool) -> Value {
         tool("BROWSER_HELP", "this help", json!({}), &[]),
         // Its description and kits are the session's (`load_tool`).
         tool("LOAD", "", json!({"name": {"type": "string"}, "input": {"type": "object"}}), &["name"]),
+        tool("UNLOAD", "Unloads a kit you loaded with LOAD and won't need again soon. Its tool is off from then on (calls to it are refused), and its tool and instructions leave your context at the next summary of earlier context, so they stop costing tokens with every request. LOAD it again if you need it later.",
+            json!({"name": {"type": "string", "description": "The kit, as you loaded it"}}), &["name"]),
         tool("AGENT_STOP", "stop agent `id` while it works: it goes idle without a final reply (a running command becomes one of its tasks) and keeps its conversation, so send can give it more to do",
             json!({"id": {"type": "integer"}}), &["id"]),
         tool("AGENT_DELETE", "delete agent `id` you no longer need: it stops, its tasks are killed and its conversation is removed, with no final reply",

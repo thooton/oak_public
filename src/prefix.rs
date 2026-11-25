@@ -256,7 +256,15 @@ fn loads_kit(b: &Value) -> Option<String> {
         .filter(|k| !k.is_empty())
 }
 
-/// Each kit's first LOAD in `messages` that worked, in order.
+/// The kit an UNLOAD call unloads.
+fn unloads_kit(b: &Value) -> Option<String> {
+    (b["type"] == "tool_call" && b["name"] == "UNLOAD")
+        .then(|| crate::mcp::kit_named(b["input"]["name"].as_str().unwrap_or("")))
+        .filter(|k| !k.is_empty())
+}
+
+/// Each kit's first LOAD in `messages` that worked, in order (an UNLOAD
+/// that worked starts the kit over: the next LOAD is its first again).
 #[cfg(test)]
 pub fn loads(messages: &[Value]) -> Vec<Load> {
     let mut f = Loads::default();
@@ -291,6 +299,8 @@ pub struct Loads {
     out: Vec<Load>,
     /// The LOAD calls without a result yet: id, kit, message.
     open: Vec<(Value, String, usize)>,
+    /// The UNLOAD calls without a result yet: id, kit.
+    unloading: Vec<(Value, String)>,
 }
 
 impl Loads {
@@ -301,6 +311,15 @@ impl Loads {
             for b in m["content"].as_array().into_iter().flatten() {
                 if let Some(kit) = loads_kit(b) {
                     self.open.push((b["id"].clone(), kit, k));
+                } else if let Some(kit) = unloads_kit(b) {
+                    self.unloading.push((b["id"].clone(), kit));
+                } else if b["type"] == "tool_result"
+                    && let Some(i) = self.unloading.iter().position(|(id, _)| *id == b["call_id"])
+                {
+                    let (_, kit) = self.unloading.swap_remove(i);
+                    if b["is_error"] != true {
+                        self.out.retain(|l| l.kit != kit);
+                    }
                 } else if b["type"] == "tool_result"
                     && let Some(i) = self.open.iter().position(|(id, ..)| *id == b["call_id"])
                 {
@@ -357,14 +376,21 @@ impl State {
     }
 
     /// The transcript was cut back to `messages` (a revert): kits whose
-    /// LOAD went are unloaded, and what was told after the cut goes; what
-    /// stays is sent as it was. (A pin holds a kit whose LOAD went only if
-    /// the revert went back past the summary that covered the LOAD: that
-    /// summary goes, and its cut with it, which renews the pin.)
+    /// LOAD went are unloaded, kits whose UNLOAD went are loaded again, and
+    /// what was told after the cut goes; what stays is sent as it was. (A
+    /// pin holds a kit whose LOAD went only if the revert went back past the
+    /// summary that covered the LOAD: that summary goes, and its cut with
+    /// it, which renews the pin.)
     pub fn reverted(&mut self, messages: &crate::store::Messages) {
         let n = messages.len();
         let loads = loads_of(messages);
         self.kits.retain(|k| loads.iter().any(|l| &l.kit == k));
+        // (SWARM isn't: a fork leaves it out on purpose.)
+        for l in loads.iter().filter(|l| l.kit != "SWARM") {
+            if !self.kits.contains(&l.kit) {
+                self.kits.push(l.kit.clone());
+            }
+        }
         self.sys.retain(|m| m.at <= n);
         self.folded = self.folded.min(n);
     }
@@ -529,8 +555,9 @@ impl State {
 
     /// Folds, in `view` (as for `inject`), what the transcript before the
     /// last renewal says twice: a NOTE call's text (the session memory has
-    /// the notes), and the result of a LOAD whose kit the pin holds (only a
-    /// pin an older Oak renewed holds a kit whose LOAD is in view).
+    /// the notes), the result of a LOAD whose kit the pin holds (only a
+    /// pin an older Oak renewed holds a kit whose LOAD is in view), and the
+    /// instructions of a LOAD an UNLOAD before the renewal took back.
     pub fn fold(&self, view: &mut [Value], cut: usize, n: usize) {
         if self.folded <= cut {
             return;
@@ -539,6 +566,32 @@ impl State {
         let end = (offset + self.folded - cut).min(view.len());
         let mut loads: Vec<(Value, String)> = vec![];
         let held = self.pin.as_ref().map(|p| p.kits.as_slice()).unwrap_or_default();
+        // The LOADs a later UNLOAD (before the renewal too, so this is
+        // decided once, at the renewal) took back: their instructions go.
+        let mut gone: Vec<(Value, String)> = vec![];
+        {
+            // LOAD calls whose result worked, UNLOAD and LOAD calls waiting
+            // for theirs: (id, kit).
+            let mut done: Vec<(Value, String)> = vec![];
+            let mut unloading: Vec<(Value, String)> = vec![];
+            let mut pending: Vec<(Value, String)> = vec![];
+            for m in &view[offset..end] {
+                for b in m["content"].as_array().into_iter().flatten() {
+                    if let Some(kit) = loads_kit(b) {
+                        pending.push((b["id"].clone(), kit));
+                    } else if let Some(kit) = unloads_kit(b) {
+                        unloading.push((b["id"].clone(), kit));
+                    } else if b["type"] == "tool_result" && b["is_error"] != true {
+                        if let Some(i) = pending.iter().position(|(id, _)| *id == b["call_id"]) {
+                            done.push(pending.swap_remove(i));
+                        } else if let Some(i) = unloading.iter().position(|(id, _)| *id == b["call_id"]) {
+                            let (_, kit) = unloading.swap_remove(i);
+                            gone.extend(done.extract_if(.., |(_, k)| *k == kit));
+                        }
+                    }
+                }
+            }
+        }
         for m in &mut view[offset..end] {
             let Some(content) = m["content"].as_array_mut() else { continue };
             for b in content {
@@ -549,7 +602,9 @@ impl State {
                         }
                     }
                     Some("tool_result") if b["is_error"] != true => {
-                        if let Some((_, kit)) = loads.iter().find(|(id, _)| *id == b["call_id"]) {
+                        if let Some((_, kit)) = gone.iter().find(|(id, _)| *id == b["call_id"]) {
+                            b["content"] = json!(format!("Loaded {kit} (unloaded later with UNLOAD)."));
+                        } else if let Some((_, kit)) = loads.iter().find(|(id, _)| *id == b["call_id"]) {
                             b["content"] = json!(format!("Loaded {kit}: it is in your tools and system prompt now."));
                         }
                     }

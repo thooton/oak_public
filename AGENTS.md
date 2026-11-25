@@ -402,7 +402,12 @@ can't read.
   until a summary renews it (a Mix's SWITCH result, which the model asked for, is the exception). A loaded kit stays where
   its LOAD put it: its instructions LOAD's result, its tool right after it (where tools can't be
   added, called through LOAD). Only once a summary covers the LOAD do the kit's prompt block and tool
-  join the system prompt and tool list. A revert to before a LOAD unloads the kit. A revert (or an
+  join the system prompt and tool list. UNLOAD takes a kit out: its calls are refused at once, but
+  what was sent stays (its tool, its prompt block or LOAD result) until the next summary renews the
+  prefix without it; that renewal also folds the instructions of a LOAD the UNLOAD took back, and
+  a later LOAD starts the kit over (`prefix::Loads`). UNLOAD closes Oak's browser with BROWSER and
+  refuses SWARM while a swarm runs. A revert to before a LOAD unloads the kit, and one to before an
+  UNLOAD loads it again. A revert (or an
   edit) to before a summary's cut puts back what requests went with before that summary (the
   summary before it, the prefix, the session memory: `Conversation::earlier`, saved with it, the
   last 8 summaries back) and sends exactly what was sent then, so a prompt cache still alive is
@@ -437,10 +442,16 @@ can't read.
 
 **The agent** (`src/agent.rs`, `src/agent/`). One worker thread per conversation. Its tools
 (`src/tools/defs.rs`): READ, WRITE, EDIT, EXECUTE, SEARCH, FETCH, SCREENSHOT, DISPLAY, ASK,
-ACCOUNTS, LOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
+ACCOUNTS, LOAD, UNLOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
 `action` and show as tools of their own (`TASK action=wait` is TASK_WAIT). LOAD loads a kit (AGENT,
 BROWSER, WINDOW, or another protocol by its name): a tool and its instructions, left out of the
-prompt until needed.
+prompt until needed; UNLOAD takes one the model is done with back out (see the prefix above).
+NOTE's actions: new, update (the whole text), edit (an exact `old_string` to `new_string`, as
+EDIT), append (a new line at the end), delete (`id`, or several at once with `ids`; unknown ids
+are skipped and named) and list. Each result gives the note's size and the notes' total against
+the limit, the memory block shows each note's size (`[3] (~40 tokens) text`) and the total, and
+list shows them as they are now (the block is only rebuilt at a summary). Update, edit and append
+all go by the same rule for the limit.
 
 **WINDOW** (Windows; `src/window_tool.rs`, a family as BROWSER is: `WINDOW action=click` is
 WINDOW_CLICK). GUI apps on the hidden desktop `oak-apps` (`src/winctl.rs`), driven without touching
@@ -757,7 +768,7 @@ and opens the coordinator. The workspace is the shared folder (no per-member cop
 conversation that is no project: no folder, role or goal, just a model and effort. Its system
 prompt is `prompts/chat.md` whole (no `tools.md`, no project instructions or memory, no
 scratchpad), and its tools are `tools::CHAT_TOOLS`: SEARCH, FETCH, ASK and NOTE. Every other tool
-(files, EXECUTE, tasks, DISPLAY, SCREENSHOT, CD, heartbeats, progress, goals, LOAD and its kits, so
+(files, EXECUTE, tasks, DISPLAY, SCREENSHOT, CD, heartbeats, progress, goals, LOAD, UNLOAD and the kits, so
 also subagents and the browser) is refused at run time (`tool_calls::chat_refuses`), whatever the
 model was given or calls, so nothing reaches the user's files or runs on the machine. Goal
 commands are dropped and Freebuff (whose agent works on a project) is neither offered nor sent a

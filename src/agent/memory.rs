@@ -67,8 +67,9 @@ pub(crate) fn memory_tool(c: &mut Conversation, name: &str, input: &Value, now: 
             let id = c.next_note_id;
             c.notes.push(Note { id, text, rewrite: None });
             Ok(format!(
-                "Saved note {id}. It stays in your context for the rest of this session; update it with NOTE action=update when what it \
+                "Saved note {id} ({}). It stays in your context for the rest of this session; update it with NOTE action=update when what it \
                  tracks changes, and delete it with NOTE action=delete when it is stale.{}",
+                sizes(c, Some(id)),
                 notes_alert(c)
             ))
         }
@@ -77,32 +78,78 @@ pub(crate) fn memory_tool(c: &mut Conversation, name: &str, input: &Value, now: 
             if text.is_empty() {
                 return Err("The note is empty; delete it with NOTE action=delete instead.".into());
             }
-            let Some(old) = c.notes.iter().find(|n| n.id == id).map(|n| n.text.len()) else { return Err(format!("No note {id}.")) };
-            // Over the limit, a note may still be reworded or cut down: only
-            // an update that makes it longer is refused.
-            let limit = notes_limit();
-            let (before, after) = notes_change(&c.notes, old, text.len());
-            if after > limit && text.len() > old {
-                return Err(format!(
-                    "Not updated: it would make note {id} longer and take your notes to about {after} tokens, past their limit of {} (they \
-                     take about {before} now). Keep the note at most as long as it is, or first shorten or delete other notes.",
-                    with_commas(limit)
-                ));
+            replace_note(c, id, |_| Ok(text), "Not updated", "Updated note")
+        }
+        "NOTE_EDIT" => {
+            let old = input["old_string"].as_str().unwrap_or("");
+            let new = input["new_string"].as_str().unwrap_or("");
+            let all = input["replace_all"].as_bool().unwrap_or(false);
+            if old.is_empty() {
+                return Err("old_string is empty: give the exact text in the note to replace.".into());
             }
-            let n = c.notes.iter_mut().find(|n| n.id == id).expect("found above");
-            n.text = text;
-            n.rewrite = None;
-            Ok(format!("Updated note {id}.{}", notes_alert(c)))
+            replace_note(
+                c,
+                id,
+                |text| {
+                    let found = text.matches(old).count();
+                    if found == 0 {
+                        return Err(format!("old_string isn't in note {id}: it must match the note's text exactly."));
+                    }
+                    if found > 1 && !all {
+                        return Err(format!(
+                            "old_string appears {found} times in note {id}: give more of the text around it, or set replace_all."
+                        ));
+                    }
+                    let text = if all { text.replace(old, new) } else { text.replacen(old, new, 1) }.trim().to_string();
+                    if text.is_empty() {
+                        return Err(format!("That would leave note {id} empty; delete it with NOTE action=delete instead."));
+                    }
+                    Ok(text)
+                },
+                "Not edited",
+                "Edited note",
+            )
+        }
+        "NOTE_APPEND" => {
+            let more = input["text"].as_str().unwrap_or("").trim().to_string();
+            if more.is_empty() {
+                return Err("The text to append is empty.".into());
+            }
+            replace_note(c, id, |text| Ok(format!("{text}\n{more}")), "Not appended", "Appended to note")
         }
         "NOTE_DELETE" => {
-            let before = c.notes.len();
-            c.notes.retain(|n| n.id != id);
-            if c.notes.len() == before {
-                return Err(format!("No note {id}."));
+            // `ids` deletes several at once; `id` (or both) still works.
+            let mut ids: Vec<u64> = input["ids"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+            if input["id"].is_u64() {
+                ids.push(id);
             }
+            let mut seen = std::collections::HashSet::new();
+            ids.retain(|i| seen.insert(*i));
+            if ids.is_empty() {
+                return Err("Give the note to delete as `id`, or several as `ids`.".into());
+            }
+            let (gone, missing): (Vec<u64>, Vec<u64>) = ids.iter().partition(|i| c.notes.iter().any(|n| n.id == **i));
+            let list = |ids: &[u64]| ids.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
+            if gone.is_empty() {
+                let s = if missing.len() > 1 { "s" } else { "" };
+                return Err(format!("No note{s} {}.", list(&missing)));
+            }
+            c.notes.retain(|n| !gone.contains(&n.id));
+            let s = if gone.len() > 1 { "s" } else { "" };
+            let missing = if missing.is_empty() { String::new() } else { format!(" No note {} (skipped).", list(&missing)) };
             // (Still over the limit: what remains to do.)
             let more = if notes_tokens(&c.notes) > notes_limit() { notes_alert(c) } else { String::new() };
-            Ok(format!("Deleted note {id}.{more}"))
+            Ok(format!("Deleted note{s} {} ({}).{missing}{more}", list(&gone), sizes(c, None)))
+        }
+        "NOTE_LIST" => {
+            if c.notes.is_empty() {
+                return Ok(format!("You have no notes (their limit is about {} tokens in all).", with_commas(notes_limit())));
+            }
+            let mut s = format!("{} note{}, {}:\n", c.notes.len(), if c.notes.len() == 1 { "" } else { "s" }, sizes(c, None));
+            for n in &c.notes {
+                s += &note_line(n);
+            }
+            Ok(s.trim_end().to_string() + &notes_alert(c))
         }
         "HEARTBEAT_START" => {
             let message = input["message"].as_str().unwrap_or("").trim().to_string();
@@ -243,6 +290,56 @@ fn notes_change(notes: &[store::Note], old: usize, new: usize) -> (u64, u64) {
     (crate::rolling::estimate(bytes), crate::rolling::estimate(bytes - old + new))
 }
 
+/// About how many tokens one note takes (at least 1), as its size is shown
+/// to the model; the limit goes by `notes_tokens`, of all of them together.
+pub fn note_tokens(n: &store::Note) -> u64 {
+    crate::rolling::estimate(n.text.len()).max(1)
+}
+
+/// A note as the model sees it listed: `[3] (~40 tokens) text`.
+fn note_line(n: &Note) -> String {
+    format!("[{}] (~{} tokens) {}\n", n.id, note_tokens(n), n.text)
+}
+
+/// The notes' size for a NOTE result: "note 3 takes about 40 tokens; your
+/// notes about 450 of 2,000 in all" (without `id`, only the total).
+fn sizes(c: &Conversation, id: Option<u64>) -> String {
+    let total = format!("about {} of {} tokens in all", notes_tokens(&c.notes), with_commas(notes_limit()));
+    match id.and_then(|id| c.notes.iter().find(|n| n.id == id)) {
+        Some(n) => format!("note {} takes about {} tokens; your notes {total}", n.id, note_tokens(n)),
+        None => format!("your notes take {total}"),
+    }
+}
+
+/// NOTE update, edit and append: note `id`'s text becomes what `change`
+/// makes of it. Over the limit, a note may still be reworded or cut down:
+/// only a change that makes it longer and takes the notes past the limit
+/// is refused (`not`: "Not updated"...; `done`: "Updated note"...).
+fn replace_note(
+    c: &mut Conversation,
+    id: u64,
+    change: impl FnOnce(&str) -> Result<String, String>,
+    not: &str,
+    done: &str,
+) -> Result<String, String> {
+    let Some(n) = c.notes.iter().find(|n| n.id == id) else { return Err(format!("No note {id}.")) };
+    let old = n.text.len();
+    let text = change(&n.text)?;
+    let limit = notes_limit();
+    let (before, after) = notes_change(&c.notes, old, text.len());
+    if after > limit && text.len() > old {
+        return Err(format!(
+            "{not}: it would make note {id} longer and take your notes to about {after} tokens, past their limit of {} (they \
+             take about {before} now). Keep the note at most as long as it is, or first shorten or delete other notes.",
+            with_commas(limit)
+        ));
+    }
+    let n = c.notes.iter_mut().find(|n| n.id == id).expect("found above");
+    n.text = text;
+    n.rewrite = None;
+    Ok(format!("{done} {id} ({}).{}", sizes(c, Some(id)), notes_alert(c)))
+}
+
 /// A count with thousands separators: 12345 → "12,345".
 pub fn with_commas(n: u64) -> String {
     let s = n.to_string();
@@ -322,9 +419,13 @@ pub(crate) fn render_memory(c: &Conversation) -> String {
         s += &format!("\nGoal, set by the user (when it is done: GOAL action=justify, then action=finish):\n{}\n", c.goal);
     }
     if !c.notes.is_empty() {
-        s += "\nYour notes (NOTE; action=update keeps one current):\n";
+        s += &format!(
+            "\nYour notes, about {} of {} tokens in all (NOTE; action=update keeps one current, action=list shows them and their sizes as they are now):\n",
+            notes_tokens(&c.notes),
+            with_commas(notes_limit())
+        );
         for n in &c.notes {
-            s += &format!("[{}] {}\n", n.id, n.text);
+            s += &note_line(n);
         }
         let alert = notes_alert(c);
         if !alert.is_empty() {

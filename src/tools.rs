@@ -60,7 +60,7 @@ pub fn allowed(name: &str, agent: bool, spawner: bool) -> bool {
 /// the families (which called TASK_WAIT and so on) carries on as it was.
 const FAMILIES: &[(&str, &[(&str, &str)])] = &[
     ("TASK", &[("new", "TASK_NEW"), ("output", "TASK_GET_NEW_OUTPUT"), ("wait", "TASK_WAIT"), ("list", "TASK_LIST"), ("delete", "TASK_DELETE")]),
-    ("NOTE", &[("new", "NOTE_NEW"), ("update", "NOTE_UPDATE"), ("delete", "NOTE_DELETE")]),
+    ("NOTE", &[("new", "NOTE_NEW"), ("update", "NOTE_UPDATE"), ("edit", "NOTE_EDIT"), ("append", "NOTE_APPEND"), ("delete", "NOTE_DELETE"), ("list", "NOTE_LIST")]),
     ("HEARTBEAT", &[("start", "HEARTBEAT_START"), ("stop", "HEARTBEAT_STOP")]),
     ("PROGRESS", &[("set", "PROGRESS_SET"), ("remove", "PROGRESS_REMOVE")]),
     ("GOAL", &[("justify", "GOAL_JUSTIFICATION"), ("finish", "GOAL_FINISH")]),
@@ -234,7 +234,7 @@ pub const LOCAL_TOOLS: [&str; 13] = [
 /// directly nor through another tool or agent. The model is given only
 /// these (`defs::chat_definitions`) and any other call is refused
 /// (`chat_allows`).
-pub const CHAT_TOOLS: [&str; 6] = ["SEARCH", "FETCH", "ASK", "NOTE_NEW", "NOTE_UPDATE", "NOTE_DELETE"];
+pub const CHAT_TOOLS: [&str; 9] = ["SEARCH", "FETCH", "ASK", "NOTE_NEW", "NOTE_UPDATE", "NOTE_EDIT", "NOTE_APPEND", "NOTE_DELETE", "NOTE_LIST"];
 
 /// Whether a chat may run the tool OAK runs as `name` (`CHAT_TOOLS`).
 pub fn chat_allows(name: &str) -> bool {

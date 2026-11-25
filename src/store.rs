@@ -922,7 +922,7 @@ pub struct Conversation {
     pub ask_request: String,
     #[serde(default, skip_serializing)]
     pub ask_granted: bool,
-    /// The model's session memory (NOTE_NEW / NOTE_UPDATE / NOTE_DELETE).
+    /// The model's session memory (NOTE new, update, edit, append, delete).
     #[serde(default)]
     pub notes: Vec<Note>,
     #[serde(default)]

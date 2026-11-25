@@ -389,6 +389,8 @@ impl Worker {
             (e, true, false)
         } else if name == "LOAD" {
             return self.load(call, input, stop);
+        } else if name == "UNLOAD" {
+            return self.unload(call, input);
         } else if let Some(e) = self.unloaded(name) {
             (e, true, false)
         } else if name.starts_with("mcp__") || crate::mcp::split(name).is_some() {
@@ -570,6 +572,52 @@ impl Worker {
             super::prompt::kit_prompt(&kit, label.as_deref())
         );
         (result_block(call, json!(text.trim()), false), false)
+    }
+
+    /// UNLOAD: takes a kit out of the session. Its tool is refused from then
+    /// on (`unloaded`), and it leaves the system prompt and tool list at the
+    /// next renewal (a summary): until then what was sent stays as it was
+    /// (`crate::prefix`). Oak's browser is closed with it. SWARM stays while
+    /// the swarm runs.
+    fn unload(&self, call: &Value, input: &Value) -> (Value, bool) {
+        let fail = |e: String| (result_block(call, json!(e), true), false);
+        let asked = input["name"].as_str().unwrap_or("").trim();
+        if asked.is_empty() {
+            return fail("Give the kit to unload as `name`.".into());
+        }
+        let kit = crate::mcp::kit_named(asked);
+        let (loaded, in_swarm) = {
+            let c = self.conv.lock().unwrap();
+            let loaded: Vec<String> = c.prefix.kits.clone();
+            (loaded, c.swarm.is_some())
+        };
+        let server = crate::mcp::named(asked);
+        let matches = |k: &String| *k == kit || server.as_ref().is_some_and(|s| crate::mcp::loaded_in(std::slice::from_ref(k), s));
+        if !loaded.iter().any(matches) {
+            let now = if loaded.is_empty() { "none is".to_string() } else { format!("loaded now: {}", loaded.join(", ")) };
+            return fail(format!("{kit} isn't loaded ({now})."));
+        }
+        if kit == "SWARM" && in_swarm {
+            return fail("SWARM stays loaded while your swarm runs.".into());
+        }
+        let mut closed = String::new();
+        if kit == "BROWSER" {
+            let close = json!({"id": call["id"], "name": "BROWSER", "input": {"action": "close"}});
+            let (r, _) = self.browser_call(&close, Some(("BROWSER_CLOSE", &json!({}))));
+            if r["is_error"] != true {
+                closed = " Oak's browser was closed with it.".into();
+            }
+        }
+        {
+            let mut c = self.conv.lock().unwrap();
+            c.prefix.kits.retain(|k| !matches(k));
+            c.save();
+        }
+        let text = format!(
+            "Unloaded {kit}: its tool is off from now on, and it leaves your context (its tool and instructions) at the next \
+             summary.{closed} LOAD it again if you need it."
+        );
+        (result_block(call, json!(text), false), false)
     }
 
     /// LOAD for an MCP server: connects to it (starting it), adds its kit
@@ -986,7 +1034,7 @@ impl Worker {
             }
             "ASK" => return self.ask_user(input),
             "CD" => self.edit(|c| change_folder(c, input, &instructions::home())),
-            "NOTE_NEW" | "NOTE_UPDATE" | "NOTE_DELETE" | "HEARTBEAT_START" | "HEARTBEAT_STOP"
+            "NOTE_NEW" | "NOTE_UPDATE" | "NOTE_EDIT" | "NOTE_APPEND" | "NOTE_DELETE" | "NOTE_LIST" | "HEARTBEAT_START" | "HEARTBEAT_STOP"
             | "GOAL_JUSTIFICATION" | "GOAL_FINISH" => {
                 self.edit(|c| memory_tool(c, name, input, api::now_ms()))
             }
