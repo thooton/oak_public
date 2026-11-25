@@ -779,7 +779,7 @@ fn kits_and_notes_wait_for_a_summary() {
     assert!(
         names(&r6).contains(&"AGENT".to_string()) && r6.system.contains("Subagents (AGENT) suit")
     );
-    assert!(r6.system.contains("[1] the db is postgres") && r6.effort.as_deref() == Some("low"));
+    assert!(r6.system.contains("[1] (~5 tokens) the db is postgres") && r6.effort.as_deref() == Some("low"));
     assert!(r6.messages.iter().all(|m| m["role"] != "system"));
     let flat = serde_json::to_string(&r6.messages).unwrap();
     assert!(
@@ -2016,7 +2016,7 @@ fn memory_changes_only_with_a_summary() {
     assert!(
         m.contains("# Session memory")
             && m.contains("ship v2")
-            && m.contains("[1] the db is postgres"),
+            && m.contains("[1] (~5 tokens) the db is postgres"),
         "{m}"
     );
     memory_tool(&mut c, "NOTE_NEW", &json!({"text": "second note"}), 0).unwrap();
@@ -2474,7 +2474,7 @@ fn a_chat_runs_no_file_command_or_agent_tool() {
             && !r.system.contains("Working folder")
             && !r.system.contains("EXECUTE")
     );
-    assert!(r.system.contains("[1] likes tea"));
+    assert!(r.system.contains("[1] (~2 tokens) likes tea"));
     assert!(r.folder.is_none());
     assert!(s.conv.lock().unwrap().scratch.is_empty());
     // No goal, no Freebuff; effort and other models go through.
@@ -3277,7 +3277,7 @@ fn notes_over_a_lowered_limit_must_shrink_first() {
         "{shrunk}"
     );
     let deleted = tool(&mut c, "NOTE_DELETE", json!({"id": 3})).unwrap();
-    assert_eq!(deleted, "Deleted note 3.");
+    assert_eq!(deleted, "Deleted note 3 (your notes take about 85 of 100 tokens in all).");
     assert_eq!(
         (note_lens(&c), notes_tokens(&c.notes)),
         (vec![200, 100], 85)
@@ -3312,11 +3312,11 @@ fn notes_over_the_limit_with_the_reminder_off_are_not_nagged() {
             json!({"id": 1, "text": "m".repeat(200)})
         )
         .unwrap(),
-        "Updated note 1."
+        "Updated note 1 (note 1 takes about 57 tokens; your notes about 171 of 100 tokens in all)."
     );
     assert_eq!(
         tool(&mut c, "NOTE_DELETE", json!({"id": 3})).unwrap(),
-        "Deleted note 3."
+        "Deleted note 3 (your notes take about 114 of 100 tokens in all)."
     );
     // The hard limit itself still holds.
     assert!(tool(&mut c, "NOTE_NEW", json!({"text": "x"})).is_err());

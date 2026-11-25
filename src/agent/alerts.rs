@@ -32,8 +32,10 @@ mod tests {
 
     #[test]
     fn only_the_credit_is_reported() {
-        let t = accounts_text("local/x");
-        assert!(t.starts_with("You are on x (local)."), "{t}");
+        let model = "local/x";
+        let t = accounts_text(model);
+        assert_eq!(t.lines().next(), Some(format!("You are on {}.", api::model_name(model)).as_str()));
+        assert!(t.lines().skip(1).any(|line| line.contains("OpenRouter")), "{t}");
         assert!(!t.contains("Claude") && !t.contains("Codex") && !t.contains("5-hour") && !t.contains("weekly"), "{t}");
     }
 }
