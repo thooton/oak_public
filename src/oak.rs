@@ -247,6 +247,7 @@ pub struct Request {
     /// of `messages` it hasn't seen (other models wrote it), which it is
     /// sent besides the newest user turn (`agent::unseen_by`).
     pub unseen: Vec<Value>,
+    pub quick_session: Option<crate::quick::recovery::Session>,
 }
 
 impl Request {

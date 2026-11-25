@@ -961,9 +961,9 @@ its client; signing the same account in again renews it in place. Each keeps thi
 for that account. A conversation's Quick thread lives on its login, so a conversation keeps its
 login (`quick::login_for`, a seat in `seats.json` like any provider's) while that one can run, and
 moves only when it can't (its session window or month used up, Quick saying it may not run, or its
-renewal failing); with none that can, it stays and Quick says why. A conversation that moved is
-sent all of itself with the request (`all_unseen`), as a switch from another provider is, since
-the new login's thread has none of it. The turn's login is the thread's (`login::set_using`, which
+renewal failing); with none that can, it stays and Quick says why. A proactive move (from the
+usage reading or a login change) sends the conversation with the request (`all_unseen`). A limit
+reported during a turn gets a handoff instead (below). The turn's login is the thread's (`login::set_using`, which
 its tool threads take with them). Home lists every login, with its month; Quick's provider box
 averages them, and the account box shows the conversation's own.
 
@@ -1060,6 +1060,22 @@ in the middle of a turn (after a dropped stream, a pause, a retry or a usage lim
 results in its newest user turn, and it tells Quick to carry on (`CARRY_ON`) rather than read back
 to an older user turn, which sent the user's first message again
 (`a_request_mid_turn_does_not_send_the_first_message_again`). A summary sends its instruction.
+
+**Recovery.** If `list_outposts` says no devices are accessible to the current turn and the reply
+ends without recovering access, Oak sends a new message asking Quick to check again and continue.
+Quick session errors (including a dropped socket) also retry, keeping the partial reply and tool
+results. Both retries back off to at most 90 seconds between attempts and keep going without an
+attempt limit; pause and interrupt still work. A successful reply or a real question is not retried.
+
+When Quick reports its usage limit in a reply or error frame, Oak keeps the work so far, excludes
+that login and selects another usable Quick account. **Settings → Quick handoff models** sets the
+order of models to ask for a continuation note. With no list set, Oak tries one model per signed-in
+provider that can write the note. Each writer receives a tool-free request with conversation
+context, including the current goal and notes. If no writer replies, Oak carries a bounded transcript
+instead. The transcript shows who generated the handoff (or that it came from the transcript), and
+Oak sends the handoff on a fresh Quick thread on the new login. The Oak conversation, working folder
+and parent-agent relationship do not change. With no usable alternate account, Oak reports why it
+cannot continue.
 
 **A message typed while Quick works goes into its turn**, as Quick's app sends one: a `user_message`
 with `mid_turn: true` and a `message_id` of its own (`steer_message`), on the turn's socket, between

@@ -44,6 +44,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 pub(crate) mod calls;
+pub(crate) mod recovery;
 #[cfg(test)]
 mod live_test;
 pub(crate) mod markup;
@@ -1519,7 +1520,7 @@ fn candidates(now: i64) -> Vec<crate::rotation::Candidate> {
             crate::rotation::Candidate {
                 id: s.id.clone(),
                 left,
-                usable: usable && s.error.is_empty(),
+                usable: usable && s.error.is_empty() && !usage::observed_limit(&s.id, now),
                 resets_at,
                 preferred: s.remote || !any_remote,
             }
@@ -1686,7 +1687,7 @@ fn briefing(r: &Request) -> String {
 /// or Oak restarts: a thread Quick has already run snippets in has had it.
 fn oak_preface(r: &Request, thread: &str) -> Option<String> {
     let mut sent = BRIEFED.lock().unwrap_or_else(|e| e.into_inner());
-    if !sent.insert(thread.to_string()) || quick_worked_here(r) {
+    if !sent.insert(thread.to_string()) || (r.quick_session.is_none() && quick_worked_here(r)) {
         return None;
     }
     Some(briefing(r))
@@ -1900,6 +1901,10 @@ fn clip(s: &str, max: usize) -> String {
 /// The model isn't told of any switch: this is the conversation, which
 /// its thread lacks. None when there is nothing.
 fn so_far(unseen: &[Value]) -> Option<String> {
+    so_far_limit(unseen, SO_FAR_CHARS)
+}
+
+fn so_far_limit(unseen: &[Value], max: usize) -> Option<String> {
     let mut names = std::collections::HashMap::new();
     let mut turns: Vec<String> = vec![];
     for m in unseen {
@@ -1949,16 +1954,15 @@ fn so_far(unseen: &[Value]) -> Option<String> {
         return None;
     }
     // The newest turns, as many as fit.
-    let mut size = 0;
-    let keep = turns.iter().rev().take_while(|t| {
-        size += t.len() + 2;
-        size <= SO_FAR_CHARS
-    });
-    let keep = keep.count().max(1);
-    let left_out = turns.len() - keep;
-    let mut body = turns.split_off(left_out).join("\n\n");
-    if left_out > 0 {
-        body = format!("[{left_out} earlier turns left out.]\n\n{body}");
+    let boundary = |text: &str, mut index: usize| {
+        while !text.is_char_boundary(index) { index -= 1; }
+        index
+    };
+    let mut body = turns.join("\n\n");
+    if body.len() > max {
+        let head = boundary(&body, max / 4);
+        let tail = boundary(&body, body.len() - (max - head));
+        body = format!("{}\n\n[Earlier context clipped here.]\n\n{}", &body[..head], &body[tail..]);
     }
     Some(format!(
         "<conversation_so_far>\nThis conversation so far, which this thread's history doesn't have, oldest first (\"Assistant\" is you). Carry on from it.\n\n{body}\n</conversation_so_far>"
@@ -1997,6 +2001,9 @@ fn hex_uuid() -> String {
 /// What a turn has collected: the blocks by index, and the stop reason.
 #[derive(Default)]
 pub(crate) struct Turn {
+    // Oak keeps using its original conversation id after a Quick account handoff.
+    local: Option<String>,
+    outpost_missing: bool,
     /// The assistant message's blocks, in order, with how the stream has
     /// filled each.
     blocks: Vec<Value>,
@@ -2140,6 +2147,10 @@ impl Turn {
         }
     }
 
+    fn local(&self) -> &str {
+        self.local.as_deref().unwrap_or(&self.thread)
+    }
+
     /// Whether `v` is this turn's. Other threads' frames never are. Joining
     /// a thread makes Quick replay its older messages, so a turn begins only
     /// at a `message_start` — the assistant message Quick opens for it — and
@@ -2163,6 +2174,9 @@ impl Turn {
                 }
                 let k = v["type"].as_str().unwrap_or("");
                 let opens = matches!(k, "message_start");
+                if k == "error" {
+                    return true;
+                }
                 if opens {
                     self.message = message;
                 }
@@ -2340,14 +2354,15 @@ impl Turn {
                 // made of it, so it replaces them.
                 let text = p["text"].as_str().unwrap_or("");
                 let section = kind == "text_complete";
-                if !text.is_empty() && (section || (!self.section_given && self.message_texts <= 1))
-                {
+                if recovery::limit_notice(text) || (!section && recovery::limit_error(p)) {
+                    out.extend(self.show_limit_notice());
+                } else if !text.is_empty() && (section || (!self.section_given && self.message_texts <= 1)) {
                     self.settle_text(text, section, &mut out);
                 }
-                if kind == "message_complete" {
+                if !section {
                     // The turn is over: Quick ran its own loop and Oak ran
                     // its tools as it asked, so nothing is left to do.
-                    out.extend(self.close(stop::COMPLETE));
+                    out.extend(self.close(self.completion()));
                 }
             }
             // Quick's report of a call its agent made: shown as it is made,
@@ -2411,6 +2426,9 @@ impl Turn {
                     .iter()
                     .find_map(|k| p[*k].as_str())
                     .unwrap_or("");
+                if same_tool(p["tool_name"].as_str().unwrap_or(""), "list_outposts") {
+                    self.record_outposts(&quick_result(p));
+                }
                 if let Some(k) = self
                     .quick_calls
                     .iter()
@@ -2736,6 +2754,11 @@ impl Turn {
     /// Call block `i` (`id`) ends with `result`, which goes in the
     /// transcript as the call's.
     fn end_call(&mut self, i: usize, id: &str, result: &Result<String, String>) -> Vec<Event> {
+        if same_tool(self.blocks[i]["name"].as_str().unwrap_or(""), "list_outposts") {
+            self.record_outposts(result);
+        } else if result.is_ok() && self.quick_calls.iter().any(|c| c.block == i && c.device) {
+            self.outpost_missing = false;
+        }
         let (content, is_error) = match result {
             Ok(s) => (s.clone(), false),
             Err(e) => (e.clone(), true),
@@ -2758,6 +2781,41 @@ impl Turn {
             o.remove("_oak_result");
         }
         out
+    }
+
+    fn record_outposts(&mut self, result: &Result<String, String>) {
+        let text = match result { Ok(s) | Err(s) => s };
+        if recovery::outpost_missing(text) {
+            self.outpost_missing = true;
+        } else if result.is_ok() && recovery::outpost_available(text) {
+            self.outpost_missing = false;
+        }
+    }
+
+    fn show_limit_notice(&mut self) -> Vec<Event> {
+        let mut out = vec![];
+        if self.completion() != recovery::LIMIT {
+            if let Some(i) = self.text_at.filter(|_| self.text_open) {
+                self.flush_text(&mut out);
+                out.push(Event::BlockEnd { index: i });
+            }
+            self.text_at = None;
+            self.text_open = false;
+            let i = self.open_text(&mut out);
+            self.show_text(i, "", recovery::LIMIT_NOTICE.into(), &mut out);
+        }
+        out
+    }
+
+    fn completion(&self) -> &'static str {
+        let text = self.blocks.iter().rev().find(|b| oak::is(b, "text"));
+        if text.and_then(|b| b["text"].as_str()).and_then(|t| t.lines().last()).is_some_and(recovery::limit_notice) {
+            recovery::LIMIT
+        } else if self.outpost_missing && self.questions.is_empty() {
+            recovery::DEVICE
+        } else {
+            stop::COMPLETE
+        }
     }
 
     /// The reply Oak is reading ends here (`stop`): the open thought and
@@ -2868,6 +2926,41 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_outpost_retries_only_if_the_reply_ends_without_access() {
+        let start = |id| json!({"type": "tool_start", "payload": {"tool_id": id, "tool_name": "list_outposts"}});
+        let result = |id, devices| json!({"type": "tool_result", "payload": {"tool_id": id,
+            "result": {"outposts": devices, "scope": "current_turn_access"}}});
+        let complete = || json!({"type": "message_complete", "payload": {"text": "I checked for this device."}});
+        for attempt in 0..6 {
+            let mut turn = Turn::for_message("device-retry", "");
+            assert!(!turn.feed(&start("one")).is_empty());
+            let results = turn.feed(&result("one", json!([])));
+            assert!(results.iter().any(|e| matches!(e, Event::Block { block, .. } if block["_oak_result"]["call_id"] == "one")));
+            if attempt == 5 {
+                turn.feed(&start("two"));
+                turn.feed(&result("two", json!([{"id": "back-online"}])));
+            }
+            let expected = if attempt == 5 { stop::COMPLETE } else { recovery::DEVICE };
+            assert!(matches!(turn.feed(&complete()).last(), Some(Event::Stop { reason, .. }) if reason == expected));
+        }
+        // The same error text from another tool must not start a retry.
+        let mut turn = Turn::for_message("device-retry", "");
+        turn.feed(&json!({"type": "tool_start", "payload": {"tool_id": "one", "tool_name": "file_read"}}));
+        turn.feed(&result("one", json!([])));
+        assert!(matches!(turn.feed(&complete()).last(), Some(Event::Stop { reason, .. }) if reason == stop::COMPLETE));
+    }
+
+    #[test]
+    fn preserves_work_before_the_usage_limit_notice() {
+        let mut turn = Turn::for_message("quota", "");
+        turn.feed(&json!({"type": "text_complete", "payload": {"text": "First test passed."}}));
+        let end = turn.feed(&json!({"type": "message_complete", "payload": {"text": recovery::LIMIT_NOTICE}}));
+        assert!(matches!(end.last(), Some(Event::Stop { reason, .. }) if reason == recovery::LIMIT));
+        assert_eq!(turn.blocks()[0]["text"], "First test passed.");
+        assert_eq!(turn.blocks()[1]["text"], recovery::LIMIT_NOTICE);
+    }
 
     #[test]
     fn models_and_effort() {

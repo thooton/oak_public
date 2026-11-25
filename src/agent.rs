@@ -1856,6 +1856,9 @@ impl Worker {
         // A turn that ended with a reply succeeded (an error shown from an
         // earlier turn may still be set); without one, it failed or was cut short.
         let body = match (reply, error) {
+            (Some(t), Some(e)) if crate::quick::recovery::limit_notice(t.lines().last().unwrap_or("")) => {
+                format!("(The agent stopped with an error: {e})")
+            }
             (Some(t), _) if !t.trim().is_empty() => t,
             (Some(_), _) => "(The agent ended its turn without a final message.)".into(),
             (None, Some(e)) => format!("(The agent stopped with an error: {e})"),
@@ -2231,9 +2234,93 @@ impl Worker {
         self.report_to_parent();
     }
 
+    /// A Quick recovery is part of the same turn: neither the user nor a
+    /// parent agent gets a premature final reply. Back off without a cap on
+    /// attempts, but keep pause, interrupt and model changes working.
+    fn retry_quick(&self, attempts: &mut u32, why: &str) -> bool {
+        *attempts = attempts.saturating_add(1);
+        let wait = api::retry_wait(*attempts);
+        self.set(|l| l.status = format!("Retry {} in {wait}s after: {why}", *attempts));
+        self.retry_sleep(Duration::from_secs(wait)) || self.absorb_queued()
+    }
+
+    /// Write a continuation note without changing the conversation's model
+    /// or id. Save the note and fresh Quick thread together before resuming.
+    fn handoff_quick(&self, exhausted: &mut std::collections::HashSet<String>) -> bool {
+        use crate::quick::recovery;
+        let id = self.conv.lock().unwrap().id.clone();
+        if let Some(account) = crate::rotation::seat(api::Provider::Quick, &id) {
+            recovery::note_limit(&account);
+            exhausted.insert(account);
+        }
+        let Some(next) = recovery::next_session(&id, exhausted) else {
+            self.set(|l| l.error = Some("AWS Quick reached its usage limit and no other Quick account is available. Try again when usage resets or sign in to another account.".into()));
+            return false;
+        };
+        if !self.hold_while_paused() { return false; }
+        let (messages, state) = {
+            let mut c = self.conv.lock().unwrap();
+            let cut = c.rolling.base();
+            c.messages.load_from(cut);
+            let messages = c.rolling.view(&c.messages);
+            let notes = c.notes.iter().map(|n| format!("Note {}: {}", n.id, n.text)).collect::<Vec<_>>().join("\n");
+            let state = format!("Working folder: {}\nActive Oak goal: {}\n{}", c.folder.display(), c.goal, notes);
+            (messages, state)
+        };
+        self.set(|l| l.status = "Writing AWS Quick handoff".into());
+        // Don't consume the interrupt flag here: the turn loop still needs
+        // to handle any user message queued with it.
+        let Some((label, note, usd)) = recovery::handoff(&messages, &state, || {
+            self.deleted.load(Ordering::SeqCst) || self.interrupt.load(Ordering::SeqCst) || self.reverting()
+        }) else { return false };
+        self.install_quick_handoff(next, label, note, usd);
+        true
+    }
+
+    fn install_quick_handoff(
+        &self,
+        next: crate::quick::recovery::Session,
+        label: String,
+        note: String,
+        usd: f64,
+    ) {
+        let now = api::now_ms();
+        let text = format!("[Oak] Continue the active task from this handoff. Respect the user's constraints and don't repeat completed work. New user instructions, if any, take precedence.\n\n{note}");
+        let mut c = self.conv.lock().unwrap();
+        c.spent += usd;
+        c.cache.cold();
+        crate::rotation::used(api::Provider::Quick, &c.id, &next.account, 0, now);
+        c.quick_session = Some(next);
+        add_mark(&mut c, MarkKind::QuickHandoff, label, note, now);
+        let mut block = context_block(&text);
+        block["_oak_at"] = json!(now);
+        if let Some(last) = c.messages.last_mut().filter(|m| m["role"] == "user") {
+            last["content"].as_array_mut().unwrap().push(block);
+        } else {
+            c.messages.push(json!({"role": "user", "content": [block]}));
+        }
+        self.save(c);
+    }
+
     fn turn_loop<'scope, 'env>(&'env self, scope: &'scope std::thread::Scope<'scope, 'env>) {
+        self.turn_loop_with(scope, |batch| self.ask(batch), |attempts, why| {
+            self.retry_quick(attempts, why)
+        });
+    }
+
+    fn turn_loop_with<'scope, 'env>(
+        &'env self,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        mut ask: impl FnMut(&mut Batch<'scope, 'env>) -> Reply,
+        mut retry_quick: impl FnMut(&mut u32, &str) -> bool,
+    ) {
+        use crate::quick::recovery;
         self.interrupt.store(false, Ordering::SeqCst);
         let mut failures = 0;
+        let mut quick_failures = 0;
+        let mut missing_device = 0;
+        let mut exhausted = std::collections::HashSet::new();
+        let mut quick_retry = None;
         let mut refusals = 0;
         let mut overflowed = false;
         // The models that failed this turn (`fall_back`), till one replies.
@@ -2258,8 +2345,12 @@ impl Worker {
                 return; // interrupted while paused: what's queued waits for resume
             }
             self.gather_input();
+            if let Some(text) = quick_retry.take() {
+                let quick = self.conv.lock().unwrap().provider() == api::Provider::Quick;
+                if quick { self.push("user", vec![context_block(text)]); }
+            }
             let mut batch = Batch::new(self, scope);
-            let (blocks, stop) = match self.ask(&mut batch) {
+            let (blocks, stop) = match ask(&mut batch) {
                 Reply::Done(b, s, usage) => {
                     tried.clear();
                     self.finish_limit("continued");
@@ -2320,7 +2411,30 @@ impl Worker {
                 continue;
             }
             refusals = 0;
+            let partial = !blocks.is_empty();
             let calls = self.keep_reply(blocks);
+            let (reason, detail) = stop.split_once('\n').unwrap_or((&stop, ""));
+            if matches!(reason, recovery::LIMIT | recovery::DEVICE | recovery::ERROR) {
+                // Only Oak calls that were actually issued are in the batch.
+                // Finish them and store their results before retrying or handing off.
+                if batch.finish(&[], oak::stop::COMPLETE) { return; }
+                if reason == recovery::LIMIT {
+                    if self.handoff_quick(&mut exhausted) { continue; }
+                    if self.interrupt.load(Ordering::SeqCst) { continue; }
+                    return;
+                }
+                let (attempts, why, prompt) = if reason == recovery::DEVICE {
+                    quick_failures = 0;
+                    (&mut missing_device, "AWS Quick could not access this device", Some(recovery::DEVICE_RETRY))
+                } else {
+                    (&mut quick_failures, if detail.is_empty() { "AWS Quick session error" } else { detail }, partial.then_some(recovery::ERROR_RETRY))
+                };
+                if !retry_quick(attempts, why) { return; }
+                quick_retry = prompt;
+                continue;
+            }
+            quick_failures = 0;
+            if reason != oak::stop::STEERED { missing_device = 0; }
             // A turn whose provider already did its work (Quick runs its own
             // agent loop and Oak ran its tools as they were asked for): the
             // calls are in the transcript as what happened, and nothing is

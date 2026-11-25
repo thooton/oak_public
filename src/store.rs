@@ -834,6 +834,9 @@ pub struct Conversation {
     /// (`agent::pick_fallback`): a provider and one of its models each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallbacks: Vec<Fallback>,
+    /// The fresh server thread after a Quick usage-limit handoff. Oak's own id is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_session: Option<crate::quick::recovery::Session>,
     /// The system prompt it was started with: an id in
     /// `agent::prompt::ROLES` (empty, from before roles: the default).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1339,6 +1342,8 @@ pub enum MarkKind {
     /// The user started a swarm with /swarm (`crate::swarm`); `text` is
     /// its task.
     Swarm,
+    /// A Quick account reached its limit; `sent` holds the continuation context.
+    QuickHandoff,
 }
 
 /// A mark's `sent` in parts, each shown in a box of its own under its
@@ -2279,6 +2284,8 @@ pub struct Settings {
     /// The OpenRouter model that names sessions (an id in
     /// `crate::openrouter::TITLE_CHOICES`).
     pub title_model: String,
+    /// Ordered models for Quick handoffs. Empty uses one available model per provider.
+    pub quick_handoff_models: Vec<Fallback>,
     /// How OpenRouter requests pick a provider (an id of
     /// `crate::openrouter::Routing`).
     pub or_routing: String,
@@ -2336,6 +2343,7 @@ impl Default for Settings {
             notes_alert: true,
             notes_limit: crate::agent::DEFAULT_NOTES_LIMIT,
             title_model: crate::openrouter::TITLE_CHOICES[0].0.into(),
+            quick_handoff_models: vec![],
             or_routing: "balanced".into(),
             or_models: vec![],
             paused_on_close: vec![],

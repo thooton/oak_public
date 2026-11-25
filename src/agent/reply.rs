@@ -636,6 +636,7 @@ impl Worker {
             ttl: cache.ttl,
             anchor: cache.anchor,
             unseen,
+            quick_session: c.quick_session.clone().filter(|_| provider == api::Provider::Quick),
             ..Default::default()
         };
         (req, c.messages.len(), c.rolling.base())
@@ -829,6 +830,10 @@ impl Worker {
                 Ok(Sse::Event(ev)) => ev,
                 Ok(Sse::Done) => break,
                 Ok(Sse::Err(_)) if quick_stop.is_some() => break,
+                Ok(Sse::Err(e)) if quick.is_some() && crate::quick::on() => {
+                    s.stop = format!("{}\n{e}", crate::quick::recovery::ERROR);
+                    break;
+                }
                 Ok(Sse::Err(e)) => return Reply::Failed(e),
                 Ok(Sse::Limit(at)) => return Reply::Limited(at),
                 Ok(Sse::Rotated(label)) => {
@@ -842,6 +847,10 @@ impl Worker {
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) if quick_stop.is_some() => break,
+                Err(RecvTimeoutError::Disconnected) if quick.is_some() => {
+                    s.stop = format!("{}\nAWS Quick stream ended unexpectedly", crate::quick::recovery::ERROR);
+                    break;
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     return Reply::Failed("Stream ended unexpectedly".into());
                 }

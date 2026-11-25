@@ -274,7 +274,7 @@ pub(crate) fn drop_parked(thread: &str, pause: bool) {
         .unwrap_or_else(|e| e.into_inner())
         .remove(thread)
     {
-        stop_traffic(&mut p.sock, thread, &p.turn.message, pause);
+        stop_traffic(&mut p.sock, &p.turn, pause);
     }
 }
 
@@ -358,12 +358,13 @@ pub(crate) fn take_ingested(thread: &str) -> Vec<u64> {
 /// and cancels any the user removed or held for editing meanwhile.
 fn send_steers(
     sock: &mut Socket,
+    local: &str,
     thread: &str,
     say: &dyn Fn(&str, &str) -> Value,
 ) -> Result<(), String> {
     let (due, canceled): (Vec<(String, String)>, Vec<String>) = {
         let mut all = STEERS.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(v) = all.get_mut(thread) else {
+        let Some(v) = all.get_mut(local) else {
             return Ok(());
         };
         let mut due = vec![];
@@ -433,11 +434,12 @@ fn took_in(thread: &str, p: &Value) -> bool {
 /// Cancels any un-ingested steers sent on `sock`, sends `stop_generation` to
 /// Quick, and waits briefly for `stream_ended` so Quick's backend has stopped
 /// the turn before the next request opens on `thread`.
-fn stop_traffic(sock: &mut Socket, thread: &str, message: &str, pause: bool) {
+fn stop_traffic(sock: &mut Socket, turn: &Turn, pause: bool) {
+    let (thread, message) = (turn.thread.as_str(), turn.message.as_str());
     let sent_steers: Vec<String> = {
         let mut all = STEERS.lock().unwrap_or_else(|e| e.into_inner());
         let mut ids = vec![];
-        if let Some(v) = all.get_mut(thread) {
+        if let Some(v) = all.get_mut(turn.local()) {
             for s in v.iter_mut() {
                 if s.sent && !s.taken {
                     ids.push(s.message.clone());
@@ -593,20 +595,22 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
-    // The thread is the conversation's, so Quick keeps its history there.
-    let thread = body
+    // Control, steering and Oak tools keep using the conversation's id.
+    let local = body
         .conv
         .clone()
         .filter(|c| !c.is_empty())
         .unwrap_or_else(hex_uuid);
-    let (ctl, _ctl_guard) = CtlGuard::register(&thread);
-    let parked = take_parked(&thread);
+    let (ctl, _ctl_guard) = CtlGuard::register(&local);
+    let parked = take_parked(&local);
     // The login the conversation goes through (`login_for`): a parked turn
     // reads on on its own. A conversation that moved to another login
     // sends what that login's thread lacks: all of it.
     let conv = body.seat_conv();
+    let session = body.quick_session.take().filter(|q| login::all().iter().any(|a| a.id == q.account));
     let acct = match &parked {
         Some(_) => crate::rotation::seat(crate::api::Provider::Quick, &conv),
+        None if session.is_some() => session.as_ref().map(|q| q.account.clone()),
         None => match crate::quick::login_for(&conv) {
             Some((a, moved)) => {
                 if moved && body.instruction.is_none() {
@@ -617,13 +621,15 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
             None => None,
         },
     };
+    let thread = session.as_ref().map_or_else(|| local.clone(), |q| q.thread.clone());
+    body.quick_session = session;
     crate::quick::login::set_using(acct);
     // Quick took in a message typed meanwhile and carries on: this request
     // reads on where the last one stopped, on the same socket. Anything said
     // since that Quick hasn't had goes to it mid-turn too.
     if let Some(p) = parked {
         if let Some(text) = new_user_text(&body) {
-            steer(&thread, 0, &text);
+            steer(&local, 0, &text);
         }
         let Parked {
             sock,
@@ -644,7 +650,6 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
                 live,
                 folder,
                 outpost,
-                thread,
                 m,
                 body,
                 ctl,
@@ -816,9 +821,11 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
         user["payload"]["text"] = json!(format!("{said}\n\n{}", attached.join("\n")));
     }
     if let Err(e) = sock.send(&user) {
+        BRIEFED.lock().unwrap_or_else(|e| e.into_inner()).remove(&thread);
         return drop(tx.send(Sse::Err(e)));
     }
     let mut turn = Turn::for_message(&thread, "");
+    turn.local = Some(local);
     turn.ignore_messages = seen_messages(&thread);
     drive(
         Drive {
@@ -829,7 +836,6 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
             live,
             folder,
             outpost,
-            thread,
             m,
             body,
             ctl,
@@ -848,7 +854,6 @@ struct Drive {
     live: Live,
     folder: std::path::PathBuf,
     outpost: Option<String>,
-    thread: String,
     m: &'static Model,
     body: Request,
     ctl: Arc<TurnCtl>,
@@ -865,11 +870,12 @@ fn drive(d: Drive, tx: Sender<Sse>) {
         live,
         folder,
         outpost,
-        thread,
         m,
         body,
         ctl,
     } = d;
+    let thread = turn.thread.clone();
+    let local = turn.local().to_string();
     let say = |text: &str, id: &str| steer_message(&body, text, id, &thread, m, outpost.as_deref());
     turn.oak_tools = oak_tools(&body);
     loop {
@@ -889,16 +895,11 @@ fn drive(d: Drive, tx: Sender<Sse>) {
             // and the next request reads on.
             Ok(Pumped::Steered) => {
                 if let Some(kind) = ctl.aborted() {
-                    stop_traffic(
-                        &mut sock,
-                        &turn.thread,
-                        &turn.message,
-                        kind == StopKind::Pause,
-                    );
+                    stop_traffic(&mut sock, &turn, kind == StopKind::Pause);
                     return drop(tx.send(Sse::Done));
                 }
                 if ctl.pause_requested() {
-                    stop_traffic(&mut sock, &turn.thread, &turn.message, true);
+                    stop_traffic(&mut sock, &turn, true);
                     return drop(tx.send(Sse::Done));
                 }
                 turn.resume();
@@ -915,7 +916,7 @@ fn drive(d: Drive, tx: Sender<Sse>) {
                 PARKED
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(thread.clone(), p);
+                    .insert(local.clone(), p);
                 return drop(tx.send(Sse::Done));
             }
             // Quick's relay recorded its own error for a call Oak had
@@ -937,12 +938,19 @@ fn drive(d: Drive, tx: Sender<Sse>) {
                     json!({"role": "user", "content": [{"type": "text", "text": resend_text(&lost)}]}),
                 ];
                 again.instruction = None;
+                again.unseen.clear();
                 let user = user_message(&again, &thread, m, outpost.as_deref());
                 if let Err(e) = sock.send(&user) {
-                    return drop(tx.send(Sse::Err(e)));
+                    finish_error(&mut turn, &tx, &e);
+                    return drop(tx.send(Sse::Done));
                 }
             }
-            Err(e) => return drop(tx.send(Sse::Err(e))),
+            Err(e) => {
+                if ctl.aborted().is_none() && !ctl.pause_requested() {
+                    finish_error(&mut turn, &tx, &e);
+                }
+                return drop(tx.send(Sse::Done));
+            }
         }
     }
 }
@@ -969,13 +977,28 @@ fn finish_stop(
     reason: &str,
     pause: bool,
 ) -> Result<Pumped, String> {
-    stop_traffic(sock, &turn.thread, &turn.message, pause);
+    stop_traffic(sock, turn, pause);
     if !turn.blocks().is_empty() {
         for ev in turn.close(reason) {
             let _ = tx.send(Sse::Event(ev));
         }
     }
     Ok(Pumped::Done)
+}
+
+/// Close the partial reply without rerunning any Quick or Oak tools in it.
+fn finish_error(turn: &mut Turn, tx: &Sender<Sse>, error: &str) {
+    let detected = turn.completion();
+    let reason = if detected == stop::COMPLETE { recovery::ERROR } else { detected };
+    let mut events = turn.close(reason);
+    if reason == recovery::ERROR
+        && let Some(Event::Stop { detail, .. }) = events.last_mut()
+    {
+        *detail = Some(error.to_string());
+    }
+    for ev in events {
+        if tx.send(Sse::Event(ev)).is_err() { break; }
+    }
 }
 
 /// Reads Quick's frames until the message ends, running the tools it asks
@@ -1011,24 +1034,19 @@ fn pump(
             return finish_stop(sock, turn, tx, stop::TOOL_CALLS, true);
         }
         if turn.started {
-            send_steers(sock, &turn.thread, say)?;
+            send_steers(sock, turn.local(), &turn.thread, say)?;
         }
         let frame = match sock.poll_next(Duration::from_millis(100)) {
             PollFrame::Frame(f) => f,
             PollFrame::Idle => continue,
             PollFrame::Closed => {
-                // The socket closed: a reply that ended is done; one that
-                // didn't is an error.
-                if !turn.started && ctl.aborted().is_none() && !ctl.pause_requested() {
-                    return Err("Quick closed the connection before the reply began.".into());
-                }
-                return Ok(Pumped::Done);
+                return Err("Quick closed the connection before completing the reply.".into());
             }
         };
         // Messages typed meanwhile go between Quick's frames: Quick takes
         // them in at its agent's next step, so that is soon enough.
         if turn.started && ctl.aborted().is_none() && !ctl.pause_requested() {
-            send_steers(sock, &turn.thread, say)?;
+            send_steers(sock, turn.local(), &turn.thread, say)?;
         }
         let kind = frame["type"].as_str().unwrap_or("").to_string();
         // Another thread's frames, and older messages' of this one, are not
@@ -1060,7 +1078,11 @@ fn pump(
         if kind == "tool_result" {
             calls.saw_server_result(&frame["payload"]);
         }
-        if kind == "message_complete" && may_resend && !calls.lost.is_empty() {
+        if kind == "message_complete" && may_resend && !calls.lost.is_empty()
+            && turn.completion() != recovery::LIMIT
+            && !frame["payload"]["text"].as_str().is_some_and(recovery::limit_notice)
+            && !recovery::limit_error(&frame["payload"])
+        {
             let lost = std::mem::take(&mut calls.lost);
             calls.resent.extend(lost.iter().map(|l| l.call.clone()));
             return Ok(Pumped::Lost(lost));
@@ -1100,7 +1122,7 @@ fn pump(
         if !repeat && !foreign {
             for ev in turn.feed(&frame) {
                 if tx.send(Sse::Event(ev)).is_err() {
-                    stop_traffic(sock, &turn.thread, &turn.message, false);
+                    stop_traffic(sock, turn, false);
                     return Ok(Pumped::Done);
                 }
             }
@@ -1172,7 +1194,7 @@ fn pump(
                 let _ = sock.send(&reply);
                 for ev in finished {
                     if tx.send(Sse::Event(ev)).is_err() {
-                        stop_traffic(sock, &turn.thread, &turn.message, false);
+                        stop_traffic(sock, turn, false);
                         return Ok(Pumped::Done);
                     }
                 }
@@ -1186,7 +1208,7 @@ fn pump(
                 if ctl.pause_requested() {
                     return finish_stop(sock, turn, tx, stop::TOOL_CALLS, true);
                 }
-                send_steers(sock, &turn.thread, say)?;
+                send_steers(sock, turn.local(), &turn.thread, say)?;
                 // Quick carries the turn on in a new message once it has the
                 // result; that message is this turn's too.
                 if !foreign {
@@ -1201,7 +1223,7 @@ fn pump(
                         p["message_ids"], p["fallback"]
                     );
                 }
-                if took_in(&turn.thread, p) {
+                if took_in(turn.local(), p) {
                     for ev in turn.close(stop::STEERED) {
                         if tx.send(Sse::Event(ev)).is_err() {
                             return Ok(Pumped::Done);
@@ -1216,6 +1238,14 @@ fn pump(
                 return Ok(Pumped::Done);
             }
             "error" => {
+                if recovery::limit_error(&frame["payload"]) {
+                    let mut events = turn.show_limit_notice();
+                    events.extend(turn.close(recovery::LIMIT));
+                    for ev in events {
+                        if tx.send(Sse::Event(ev)).is_err() { break; }
+                    }
+                    return Ok(Pumped::Done);
+                }
                 let why = frame["payload"]["message"]
                     .as_str()
                     .or(frame["payload"]["error"].as_str())
@@ -1258,7 +1288,7 @@ fn run_call(
     folder: &std::path::Path,
     foreign: bool,
 ) -> Result<(ToolResult, Option<ToolResult>), String> {
-    if is_snippet(name) && !foreign && has_runner(&turn.thread) {
+    if is_snippet(name) && !foreign && has_runner(turn.local()) {
         let oak = match crate::quick::calls::snippet(snippet_code(args), &turn.oak_tools) {
             Ok(oak) => oak,
             Err(e) => return Ok((Err(e), None)),
@@ -1318,6 +1348,7 @@ fn run_oak_alive(
         }
     }
     let mut got: std::collections::HashMap<String, Value> = Default::default();
+    let mut connected = true;
     let mut aborted_at: Option<std::time::Instant> = None;
     let mut why = "the turn ended";
     while got.len() < ids.len() {
@@ -1342,14 +1373,13 @@ fn run_oak_alive(
                     continue;
                 }
                 // The agent stopped reading the turn: nothing more will run.
-                if !has_runner(&turn.thread) {
+                if !has_runner(turn.local()) {
                     why = "Oak's agent stopped reading the turn";
                     break;
                 }
-                if !sock.keep_alive(Duration::from_millis(100)) {
-                    forget();
-                    return Err("Quick closed the socket while Oak's calls ran.".into());
-                }
+                // Keep already-issued work and its results even if the
+                // socket died. The next read will trigger the retry.
+                connected = connected && sock.keep_alive(Duration::from_millis(100));
             }
         }
     }
@@ -1569,6 +1599,7 @@ fn run_tool_alive(
             let _ = tx.send(res);
         })
         .map_err(|e| format!("Couldn't start {name}: {e}"))?;
+    let mut connected = true;
     let mut aborted_at: Option<std::time::Instant> = None;
     loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
@@ -1589,9 +1620,8 @@ fn run_tool_alive(
                     let _ = sock.keep_alive(Duration::from_millis(20));
                     continue;
                 }
-                if !sock.keep_alive(Duration::from_millis(100)) {
-                    return Err(format!("Quick closed the socket while {name} ran."));
-                }
+                // Let the tool finish and record its result before retrying.
+                connected = connected && sock.keep_alive(Duration::from_millis(100));
             }
         }
     }

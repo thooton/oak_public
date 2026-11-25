@@ -138,6 +138,11 @@ fn best(seats: &HashMap<String, Seat>, conv: &str, cands: &[Candidate], now: i64
         .map(|c| c.id.clone())
 }
 
+/// Weighs accounts without reserving a seat, e.g. while a handoff is being written.
+pub(crate) fn preview(kind: Kind, conv: &str, cands: &[Candidate], now: i64) -> Option<String> {
+    with(|s| best(s.by.entry(kind.id().to_string()).or_default(), conv, cands, now))
+}
+
 /// A request of `conv` went through `account`: its cache there lives
 /// `ttl_ms` from now.
 pub fn used(kind: Kind, conv: &str, account: &str, ttl_ms: i64, now: i64) {

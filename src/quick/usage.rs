@@ -56,6 +56,7 @@ struct Kept {
     usage: Option<Usage>,
     error: Option<String>,
     at: i64,
+    observed_limit_until: i64,
 }
 
 /// Each login's (by its id).
@@ -67,6 +68,23 @@ static KEPT: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Kept>>>
 pub fn last_of(id: &str) -> (Option<Usage>, Option<String>, i64) {
     let k = KEPT.lock().unwrap();
     k.get(id).map_or((None, None, 0), |k| (k.usage.clone(), k.error.clone(), k.at))
+}
+
+/// A chat refusal is newer evidence than a usage meter that still has room.
+/// Keep it out of account selection until the known reset, or briefly when
+/// Quick gave no time. In the latter case another refusal renews the block.
+pub(super) fn note_limit(id: &str, now: i64) {
+    let mut all = KEPT.lock().unwrap();
+    let k = all.entry(id.to_string()).or_default();
+    let until = k.usage.as_ref().and_then(|u| {
+        u.session_resumes_at.filter(|&at| at > now)
+            .or_else(|| (u.month_percent >= 100.0).then_some(u.month_resets_at).flatten().filter(|&at| at > now))
+    });
+    k.observed_limit_until = until.unwrap_or(now + 5 * 60_000);
+}
+
+pub(super) fn observed_limit(id: &str, now: i64) -> bool {
+    KEPT.lock().unwrap().get(id).is_some_and(|k| k.observed_limit_until > now)
 }
 
 /// Login `id` was signed out: its reading goes.

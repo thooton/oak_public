@@ -189,6 +189,8 @@ impl App {
             store::save_settings(&self.settings);
         }
 
+        self.quick_handoff_row(ui, t);
+
         if option_row(
             ui,
             t,
@@ -492,6 +494,66 @@ impl App {
             self.wallpaper_picker = false;
             self.wallpaper_hover = None;
         }
+    }
+
+    /// Ordered, tool-free model attempts for handing off Quick's transcript.
+    fn quick_handoff_row(&mut self, ui: &mut Ui, t: &Theme) {
+        caption(ui, "Quick handoff models", t.ink3);
+        let mut change = None;
+        let mut add = None;
+        let list = &self.settings.quick_handoff_models;
+        ui.vertical(|ui| {
+            let about = "When Quick runs out of usage, Oak sends conversation context to these models in order to write a handoff for the next Quick account.";
+            ui.add(egui::Label::new(RichText::new(about).small().color(t.ink2)).wrap());
+            if list.is_empty() {
+                caption(ui, "Automatic: one available model per provider", t.ink3);
+            }
+            for (i, writer) in list.iter().enumerate() {
+                ui.push_id(("quick-handoff", i), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}. {} ({})", i + 1, self.model_name(&writer.model), writer.provider.name()));
+                        if ui.add_enabled(i > 0, egui::Button::new("↑")).on_hover_text("Try earlier").clicked() {
+                            change = Some((i, Some(i - 1)));
+                        }
+                        if ui.add_enabled(i + 1 < list.len(), egui::Button::new("↓")).on_hover_text("Try later").clicked() {
+                            change = Some((i, Some(i + 1)));
+                        }
+                        if ui.button("Remove").clicked() { change = Some((i, None)); }
+                    });
+                });
+            }
+            let button = ui.button("Add model…");
+            egui::Popup::menu(&button).width(180.0).show(|ui| {
+                let models = api::known_models();
+                let mut any = false;
+                for provider in api::Provider::ALL.into_iter().filter(|p| crate::quick::recovery::can_write(*p)) {
+                    let group: Vec<_> = models.iter().filter(|m| m.provider == provider
+                        && !list.iter().any(|f| f.provider == provider && f.model == m.id)).collect();
+                    if group.is_empty() { continue; }
+                    any = true;
+                    ui.menu_button(provider.name(), |ui| {
+                        for m in group {
+                            if ui.button(&m.name).clicked() {
+                                add = Some(store::Fallback { provider, model: m.id.clone() });
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                if !any { caption(ui, "No other models available", t.ink3); }
+            });
+        });
+        if change.is_some() || add.is_some() {
+            let list = &mut self.settings.quick_handoff_models;
+            match change {
+                Some((i, Some(j))) => list.swap(i, j),
+                Some((i, None)) => { list.remove(i); }
+                None => {}
+            }
+            list.extend(add);
+            store::save_settings(&self.settings);
+        }
+        ui.end_row();
     }
 
     /// The OpenRouter models row: how many are built in (named on hover),

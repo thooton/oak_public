@@ -1303,6 +1303,7 @@ pub(crate) fn mark_row(ui: &mut Ui, t: &Theme, m: &Mark) {
             format!("swarm started on {}", crate::tools::one_line(&m.text)),
             Some(AGENT_ICON),
         ),
+        MarkKind::QuickHandoff => (m.text.clone(), Some(ROTATED_ICON)),
         MarkKind::FilesChanged => (
             format!("changed on disk, not by Oak: {}", m.text),
             Some(FILES_CHANGED_ICON),
