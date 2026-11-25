@@ -3464,6 +3464,53 @@ fn group_pause_picks_by_model() {
     }
 }
 
+#[test]
+fn agent_list_is_a_markdown_table() {
+    use crate::store::AgentRef;
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    let (parent, session) = idle_worker("agent-list", Conversation::default());
+    assert_eq!(parent.agent_list(), "No agents yet: AGENT action=new starts one.");
+    let now = api::now_ms();
+    let (child, agent) = idle_worker("agent-list-child", Conversation {
+        model: "smart".into(),
+        effort: "high".into(),
+        last_message_at: now - 60_000,
+        progress_at: now - 30_000,
+        progress: "EXECUTE returned".into(),
+        ..Default::default()
+    });
+    child.set(|l| {
+        l.busy = true;
+        l.status = "Running execute".into();
+    });
+    session.conv.lock().unwrap().agents = vec![
+        AgentRef { id: 1, conv: agent.conv.lock().unwrap().id.clone(), name: "A\\B | C\r\nD\tE".into() },
+        AgentRef { id: 2, conv: "missing-agent-list-session".into(), name: "Offline".into() },
+    ];
+
+    let output = parent.agent_list();
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    for event in Parser::new_ext(&output, Options::ENABLE_TABLES) {
+        match event {
+            Event::Start(Tag::TableCell) => cell.clear(),
+            Event::Text(text) => cell.push_str(&text),
+            Event::End(TagEnd::TableCell) => cells.push(std::mem::take(&mut cell)),
+            _ => {}
+        }
+    }
+    assert_eq!(cells.len(), 18, "{output}");
+    assert_eq!(&cells[..6], ["id", "state", "last progress", "last change", "model", "name"]);
+    assert_eq!(cells[6], "1");
+    assert!(cells[7].starts_with("working (running execute) for "), "{output}");
+    assert!(cells[8].ends_with(" ago: EXECUTE returned"), "{output}");
+    assert!(cells[9].ends_with(" ago"), "{output}");
+    assert_eq!(cells[10], "smart (high)");
+    assert_eq!(cells[11], "agent 1 (A\\B | C D E)");
+    assert_eq!(&cells[12..], ["2", "not running", "-", "-", "-", "agent 2 (Offline)"]);
+}
+
 /// A session's pulse: its last progress (a reply, a tool's result by its
 /// tool's name), kept with the conversation; a wait its status line names
 /// is what blocks it, and so is the error its last turn ended on.

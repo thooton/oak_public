@@ -244,7 +244,7 @@ impl Worker {
         if contacts.is_empty() {
             return "No agents yet: AGENT action=new starts one.".into();
         }
-        let mut out = String::from("id\tstate\tlast progress\tlast change\tmodel\tname\n");
+        let mut out = String::from("| id | state | last progress | last change | model | name |\n| --- | --- | --- | --- | --- | --- |\n");
         let now = api::now_ms();
         for (id, label, conv) in contacts {
             let (state, at, model, progress) = match find_session(&conv) {
@@ -271,7 +271,23 @@ impl Worker {
                 None => ("not running".into(), 0, "-".into(), "-".into()),
             };
             let ago = if at > 0 { format!("{} ago", fmt_duration(Duration::from_millis((api::now_ms() - at).max(0) as u64))) } else { "-".into() };
-            out += &format!("{id}\t{state}\t{progress}\t{ago}\t{model}\t{label}\n");
+            out.push('|');
+            for cell in [&id.to_string(), &state, &progress, &ago, &model, &label] {
+                // Keep cell data literal without splitting the row.
+                out.push(' ');
+                for ch in cell.replace("\r\n", " ").chars() {
+                    match ch {
+                        '\r' | '\n' | '\t' => out.push(' '),
+                        '\\' | '|' | '*' | '_' | '`' | '~' | '[' | ']' | '<' | '>' | '&' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push_str(" |");
+            }
+            out.push('\n');
         }
         out
     }

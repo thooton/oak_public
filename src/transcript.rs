@@ -2199,7 +2199,7 @@ fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
     row_details(ui, NAME_X, |ui| {
         tool_input_view(ui, t, name, input);
         match result {
-            Some(r) => tool_output_view(ui, t, name, input, r),
+            Some(r) => tool_output_view(ui, t, name, input, r, ui.scope_id().with(id)),
             None if streaming.is_some() => {
                 ui.label(RichText::new("writing…").color(t.ink3));
             }
@@ -2353,7 +2353,7 @@ fn tool_input_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value) {
 /// An open tool row's result `r`: SEARCH's hits, READ's lines, a command's
 /// output colored when it is code, or the text; then how much was left out
 /// and the images.
-fn tool_output_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value, r: &ToolOut) {
+fn tool_output_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value, r: &ToolOut, id: Id) {
     // Cleared from the model's context: what it sees in its place, then
     // the output itself.
     if r.cleared {
@@ -2407,6 +2407,9 @@ fn tool_output_view(ui: &mut Ui, t: &Theme, name: &str, input: &Value, r: &ToolO
         && read_view(ui, t, input["path"].as_str().unwrap_or(""), &out)
     {
         // Shown with its line numbers, colored as code when it is.
+    } else if !r.error && name == "AGENT_LIST" && out.starts_with('|') {
+        // Older AGENT_LIST results are tab-separated and stay verbatim.
+        markdown::show(ui, t, &out, id.with("agent-list"));
     } else if !r.error
         && is_command(name)
         && let Some(syntax) = output_syntax(input["command"].as_str().unwrap_or(""), &out)

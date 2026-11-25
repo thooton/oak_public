@@ -817,8 +817,9 @@ answer or its agents, summarizing; idle, paused) and since when, its last progre
 reply or a tool's result going into the transcript, by tool name, never a command; kept with the
 conversation as `progress_at`/`progress`, never sent) and what holds it up, only as known (the wait
 its status line names, or the error its last turn ended on). A subagent's box shows it under its
-state, its row on the super agent's list on hover, and AGENT_LIST in its state and last progress
-columns, so "working" doesn't pass for progress. A collapsed "Local controls"
+state and on its row on the super agent's list on hover. AGENT_LIST returns a Markdown table with
+ID, state, last progress, last change, model (with effort), and name, so "working" doesn't pass
+for progress. Its expanded tool result shows the rendered table. A collapsed "Local controls"
 section keeps provider/model/effort switching, goals, progress meters, heartbeats, folder actions
 and parent navigation available without crowding the shared layout. It still
 runs here: its subagents are conversations of their own. Oak's own choices win over a plugin's `NewKind` of the same id,
