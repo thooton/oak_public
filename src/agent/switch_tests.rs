@@ -696,3 +696,139 @@ fn quick_modes_offer_their_own_efforts() {
     assert_eq!(efforts("balanced"), ["low", "medium", "high"]);
     assert_eq!(effort_for("fast", "max"), "high");
 }
+
+/// One live Quick turn on what `w` would send now (`request_body`), its
+/// reply kept in the conversation as Oak keeps one: blocks marked Quick's,
+/// and a result for each call that ended with one. Its text, or the error.
+fn live_quick_turn(w: &Worker, s: &Session) -> Result<String, String> {
+    use crate::api::Sse;
+    let (req, ..) = w.request_body();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let h = std::thread::spawn(move || crate::quick::turn::stream(req, tx));
+    let mut blocks: std::collections::BTreeMap<usize, Value> = Default::default();
+    let mut err = None;
+    let mut stop = String::new();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(400) {
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Sse::Event(oak::Event::Block { index, block })) => {
+                blocks.insert(index, block);
+            }
+            Ok(Sse::Event(oak::Event::Text { index, text })) => {
+                let b = blocks.entry(index).or_insert_with(|| oak::text(""));
+                let t = format!("{}{text}", b["text"].as_str().unwrap_or(""));
+                b["text"] = json!(t);
+            }
+            Ok(Sse::Event(oak::Event::Stop { reason, detail })) => stop = format!("{reason} {detail:?}"),
+            Ok(Sse::Done) => break,
+            Ok(Sse::Err(e)) => {
+                err = Some(e);
+                break;
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => break,
+        }
+    }
+    h.join().ok();
+    if let Some(e) = err {
+        return Err(e);
+    }
+    let mut kept: Vec<Value> = blocks.into_values().filter(|b| b["type"] == "text" || b["type"] == "tool_call").collect();
+    let results: Vec<Value> = kept
+        .iter()
+        .filter(|b| b["type"] == "tool_call")
+        .map(|b| {
+            let said = b["_oak_result"]["content"].clone();
+            json!({"type": "tool_result", "call_id": b["id"], "content": if said.is_null() { json!("done") } else { said }})
+        })
+        .collect();
+    mark_by(&mut kept, Some(api::Provider::Quick));
+    for b in kept.iter().filter(|b| b["type"] == "tool_call") {
+        let input: String = b["input"].to_string().chars().take(160).collect();
+        println!("  call {} {input} catch-up={}", b["name"], crate::quick::is_boot(b));
+    }
+    let text: String = kept.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
+    println!("  stop: {stop}\n  text: {text}");
+    let mut c = s.conv.lock().unwrap();
+    c.messages.push(json!({"role": "assistant", "content": kept}));
+    if !results.is_empty() {
+        c.messages.push(json!({"role": "user", "content": results}));
+    }
+    Ok(text)
+}
+
+/// Live: a conversation goes from one Quick account to another and back,
+/// as Oak moves it at a usage or rate limit (`move_quick_thread`), and on to
+/// Claude. Each fresh thread is sent the whole conversation with Oak's
+/// briefing (in files, through that thread's own login, when too long for
+/// one message), carries on knowing what was said on the others, and none
+/// of Quick's catching up goes to Claude. Uses the two Quick logins whose
+/// tokens last longest (a test has no vault to refresh them):
+///   OAK_DIR=<scratch profile> cargo test --lib quick_live_rotation -- --ignored --nocapture
+#[test]
+#[ignore]
+fn quick_live_rotation_carries_the_conversation() {
+    use crate::quick::recovery;
+    let _ = std::env::var("OAK_DIR").expect("set OAK_DIR to a scratch profile with quick.json");
+    api::load_auth();
+    assert!(crate::quick::on(), "Quick isn't signed in");
+    let now = api::now_ms();
+    let mut logins = crate::quick::login::all();
+    logins.retain(|l| l.expires_at > now + 5 * 60_000);
+    logins.sort_by_key(|l| -l.expires_at);
+    assert!(logins.len() >= 2, "two Quick logins with fresh tokens");
+    let (a, b) = (logins[0].id.clone(), logins[1].id.clone());
+    println!("accounts: {a} -> {b} -> {a}");
+    let on = |acct: &str, n: u32| recovery::Session { account: acct.into(), thread: format!("oak-rot-{now}-{n}"), from: None };
+    let (w, s) = super::tests::idle_worker("live-rotation", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        effort: "low".into(),
+        folder: std::env::current_dir().unwrap(),
+        messages: vec![user("Remember the code word ORCHID-7731 for later. Don't run any tools: reply with just OK.")].into(),
+        quick_session: Some(on(&a, 1)),
+        ..Default::default()
+    });
+    let id = s.conv.lock().unwrap().id.clone();
+    crate::rotation::used(api::Provider::Quick, &id, &a, 0, now);
+
+    println!("== turn 1, {a}");
+    let t1 = live_quick_turn(&w, &s).expect("turn 1");
+    assert!(!t1.trim().is_empty());
+
+    // Claude works in between, with a long result, so the next thread's
+    // message is too long to send and goes in files.
+    {
+        let mut c = s.conv.lock().unwrap();
+        let long = (0..3000).map(|i| format!("row {i}: padding padding padding padding\n")).collect::<String>() + "LAST-ROW-ZEBRA\n";
+        c.messages.push(user("Read the log."));
+        c.messages.push(reply(api::Provider::Claude, vec![
+            oak::text("Reading the log."),
+            json!({"type": "tool_call", "id": "toolu_log", "name": "READ", "input": {"path": "build.log"}}),
+        ]));
+        c.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "toolu_log", "content": long}]}));
+        c.messages.push(reply(api::Provider::Claude, vec![oak::text("The log is read.")]));
+    }
+    let ask = |t: &str| {
+        s.conv.lock().unwrap().messages.last_mut().unwrap()["content"].as_array_mut().unwrap().push(oak::text(t));
+    };
+    println!("== turn 2, moved to {b}");
+    w.move_quick_thread(on(&b, 2), "rotated".into(), recovery::LIMIT_FRESH);
+    ask("Without running any of Oak's tools: what is the code word, and what is the last line of the log?");
+    let t2 = live_quick_turn(&w, &s).expect("turn 2");
+    assert!(t2.contains("ORCHID-7731"), "the code word, from the first account's thread: {t2}");
+    assert!(t2.contains("LAST-ROW-ZEBRA"), "the log's last line, from Claude's turn: {t2}");
+
+    println!("== turn 3, moved back to {a} (a fresh thread)");
+    w.move_quick_thread(on(&a, 3), "rotated".into(), recovery::RATE_FRESH);
+    ask("Without running any tools: say the code word again.");
+    let t3 = live_quick_turn(&w, &s).expect("turn 3");
+    assert!(t3.contains("ORCHID-7731"), "{t3}");
+
+    // On to Claude: none of Quick's catching up goes.
+    let c = s.conv.lock().unwrap();
+    let sent = all_text(&for_provider(&c.messages, api::Provider::Claude));
+    assert!(!sent.contains("quick-conversation-"), "no catch-up reads go to Claude: {}", sent.len());
+    assert!(sent.contains("LAST-ROW-ZEBRA") && sent.contains("ORCHID-7731"));
+}
