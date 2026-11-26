@@ -2127,6 +2127,14 @@ impl Worker {
         }
     }
 
+    /// Whether a queued model change goes to another provider than the
+    /// conversation's: what waits on this one (a retry, Quick's recovery)
+    /// gives way to it.
+    fn switching_away(&self) -> bool {
+        let now = self.conv.lock().unwrap().provider();
+        self.queued_model().is_some_and(|(p, _)| p != now)
+    }
+
     /// The model the last queued model change picks, if one is queued.
     fn queued_model(&self) -> Option<(api::Provider, String)> {
         self.live
@@ -2228,7 +2236,8 @@ impl Worker {
                 return false;
             }
             let left = end.saturating_duration_since(Instant::now());
-            if left.is_zero() || self.paused.load(Ordering::SeqCst) {
+            // (A model switched to meanwhile takes the retry at once.)
+            if left.is_zero() || self.paused.load(Ordering::SeqCst) || self.switching_away() {
                 return true;
             }
             if !self.nap(left.min(Duration::from_millis(200))) {
@@ -2333,7 +2342,11 @@ impl Worker {
         let mut exhausted = std::collections::HashSet::new();
         let mut quick_retry = None;
         let mut refusals = 0;
-        let mut overflowed = false;
+        // The summary cut a refusal as too long was summarized on, so a
+        // refusal after the summary (a conversation another model left past
+        // this one's window takes more than one) summarizes again, and one
+        // that made no headway doesn't.
+        let mut overflowed: Option<usize> = None;
         // The models that failed this turn (`fall_back`), till one replies.
         let mut tried: Vec<(api::Provider, String)> = vec![];
         loop {
@@ -2357,8 +2370,18 @@ impl Worker {
             }
             self.gather_input();
             if let Some(text) = quick_retry.take() {
-                let quick = self.conv.lock().unwrap().provider() == api::Provider::Quick;
-                if quick { self.push("user", vec![context_block(text)]); }
+                // Quick is asked to go on; a model switched to meanwhile
+                // reads a plain carry-on after the reply Quick cut short
+                // (its request may not end with that reply).
+                let (quick, open) = {
+                    let c = self.conv.lock().unwrap();
+                    (c.provider() == api::Provider::Quick, last_is(&c, "assistant"))
+                };
+                if quick {
+                    self.push("user", vec![context_block(text)]);
+                } else if open {
+                    self.push("user", vec![context_block(CARRY_ON)]);
+                }
             }
             let mut batch = Batch::new(self, scope);
             let (blocks, stop) = match ask(&mut batch) {
@@ -2384,10 +2407,13 @@ impl Worker {
                     }
                     continue;
                 }
-                Reply::Failed(e) if e.contains("prompt is too long") && !overflowed => {
+                Reply::Failed(e)
+                    if e.contains("prompt is too long")
+                        && overflowed != Some(self.conv.lock().unwrap().rolling.base()) =>
+                {
                     // Outgrew the model's context before a summary landed:
                     // summarize now (blocking) and send again.
-                    overflowed = true;
+                    overflowed = Some(self.conv.lock().unwrap().rolling.base());
                     match self.summarize_now(&e) {
                         Ok(()) => continue,
                         Err(why) => {
@@ -2429,6 +2455,13 @@ impl Worker {
                 // Only Oak calls that were actually issued are in the batch.
                 // Finish them and store their results before retrying or handing off.
                 if batch.finish(&[], oak::stop::COMPLETE) { return; }
+                // The user switched to another provider's model meanwhile:
+                // the turn goes on there, not in Quick's thread (no retry,
+                // no handoff to another Quick account).
+                if self.switching_away() {
+                    quick_retry = Some(recovery::ERROR_RETRY);
+                    continue;
+                }
                 if reason == recovery::LIMIT {
                     if self.handoff_quick(&mut exhausted) { continue; }
                     if self.interrupt.load(Ordering::SeqCst) { continue; }
@@ -2441,6 +2474,10 @@ impl Worker {
                     (&mut quick_failures, if detail.is_empty() { "AWS Quick session error" } else { detail }, partial.then_some(recovery::ERROR_RETRY))
                 };
                 if !retry_quick(attempts, why) { return; }
+                if self.switching_away() {
+                    quick_retry = Some(recovery::ERROR_RETRY);
+                    continue;
+                }
                 // A thread that still can't reach this device once asked
                 // again goes on in a fresh one on the same account (a cold
                 // start's first thread often never gets it): misses alternate
@@ -3089,8 +3126,9 @@ fn apply_command(
         // (`effort_for`).
         Command::Model(p, m) => {
             if m != c.model || Some(p) != c.provider {
+                let left = (c.provider(), std::mem::take(&mut c.model));
                 c.model = m.clone();
-                c.cache.cold();
+                switch_cache(c, left, p);
                 // Another model may be served elsewhere on OpenRouter.
                 c.served_by.clear();
             }
@@ -3107,6 +3145,47 @@ fn apply_command(
             let text = swarm::start(c, &task);
             (Some(goal_block(&text)), Some((MarkKind::Swarm, task)))
         }
+    }
+}
+
+/// What Claude's prompt cache held for a conversation (by id) when it moved
+/// off the Claude model that wrote it (`switch_cache`): the model, the
+/// effort (part of the cache's key where it can't change per message), and
+/// the cache's state then.
+static CLAUDE_CACHES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, (String, String, crate::cache_ttl::State)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The prompt cache across a switch from `left` (provider, model) to
+/// `c.model` on `to`. The new model has none of the conversation cached:
+/// cold. But what a Claude model cached lives on at Anthropic, for its
+/// lifetime, while the conversation is elsewhere (Quick, another model):
+/// back on that model, the state as it left it comes back, so its entries
+/// still alive are read (an hour's kept warm by its anchor) rather than
+/// written again (`cache_choice`). Entries since past their lifetime, or
+/// in another summary's view, count as dead there as always.
+fn switch_cache(c: &mut Conversation, left: (api::Provider, String), to: api::Provider) {
+    // (A conversation without an id, a test's, keeps nothing.)
+    if c.id.is_empty() {
+        return c.cache.cold();
+    }
+    let mut kept = CLAUDE_CACHES.lock().unwrap();
+    // (An effort set meanwhile is another cache, unless it goes per message.)
+    let same_key = |model: &str, effort: &str| {
+        model == c.model && (effort == c.effort || crate::prefix::supports_effort(model))
+    };
+    let back = match kept.get(&c.id) {
+        Some((model, effort, _)) if to == api::Provider::Claude && same_key(model, effort) => {
+            kept.remove(&c.id).map(|(.., state)| state)
+        }
+        _ => None,
+    };
+    if left.0 == api::Provider::Claude && !left.1.is_empty() {
+        kept.insert(c.id.clone(), (left.1, c.effort.clone(), c.cache.clone()));
+    }
+    drop(kept);
+    match back {
+        Some(state) => c.cache = state,
+        None => c.cache.cold(),
     }
 }
 
@@ -3167,6 +3246,65 @@ fn opens_quick_thread(m: &Value) -> bool {
     m["content"]
         .as_array()
         .is_some_and(|c| c.iter().any(|b| b.get(crate::quick::recovery::FRESH_KEY).is_some()))
+}
+
+/// Where the newest fresh Quick thread opened in `messages`: the message
+/// and the block marked `recovery::FRESH_KEY`.
+fn fresh_thread_at(messages: &[Value]) -> Option<(usize, usize)> {
+    messages.iter().enumerate().rev().find_map(|(k, m)| {
+        let blocks = m["content"].as_array()?;
+        let i = blocks.iter().rposition(|b| b.get(crate::quick::recovery::FRESH_KEY).is_some())?;
+        Some((k, i))
+    })
+}
+
+/// What another provider's model reads where Oak told Quick to get its
+/// thread going again (`is_quick_recovery`): the turn before was cut short.
+pub(crate) const CARRY_ON: &str = "[Oak] The previous reply was cut short. Continue the existing task from where it left off, respecting its constraints. Check the results and current state before repeating any work.";
+
+/// Whether user-turn block `b` is one of Oak's messages to Quick about its
+/// own thread (`quick::recovery`): asking it to look for this device again,
+/// to go on after a service error, or opening a fresh thread. Only Quick
+/// has the tools and threads they speak of.
+fn is_quick_recovery(b: &Value) -> bool {
+    use crate::quick::recovery;
+    b["_oak_context"] == true
+        && (b.get(recovery::FRESH_KEY).is_some()
+            || b["text"].as_str().is_some_and(|t| {
+                [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::DEVICE_FRESH].contains(&t)
+            }))
+}
+
+/// What a reply Quick wrote on another conversation's thread is marked as
+/// written by (`BY_KEY`) in a fork of it: not this conversation's Quick,
+/// whose thread is a new one (`quick_replies_elsewhere`).
+const QUICK_ELSEWHERE: &str = "quick-other-thread";
+
+/// For a fork (`crate::fork`), which goes on in a Quick thread of its own,
+/// a new one: the replies Quick wrote are on the source's thread, so they
+/// count as another model's (`unseen_by` sends them, with the rest of the
+/// conversation, to the fork's thread) and Quick hears it all, Oak's
+/// briefing too, from its first request (`quick::moved_out`).
+pub(crate) fn quick_replies_elsewhere(c: &mut Conversation) {
+    let quick = api::Provider::Quick.id();
+    c.messages.load_all();
+    let mut any = false;
+    for k in 0..c.messages.len() {
+        let by_quick = c.messages[k]["role"] == "assistant"
+            && c.messages[k]["content"].as_array().is_some_and(|b| b.iter().any(|b| b[BY_KEY] == quick));
+        if !by_quick {
+            continue;
+        }
+        any = true;
+        if let Some(blocks) = c.messages[k]["content"].as_array_mut() {
+            for b in blocks.iter_mut().filter(|b| b[BY_KEY] == quick) {
+                b[BY_KEY] = json!(QUICK_ELSEWHERE);
+            }
+        }
+    }
+    if any {
+        crate::quick::moved_out(&c.id);
+    }
 }
 
 /// Marks each of a reply's blocks as written by `by`'s model.
@@ -3250,7 +3388,14 @@ fn unseen_by(
         .collect();
     for m in &mut out {
         if let Some(c) = m["content"].as_array_mut() {
-            c.retain(|b| !oak::is_result(b) || b["call_id"].as_str().is_some_and(|id| calls.contains(id)));
+            // (A decision card's answers are the user's: Quick's thread
+            // has the card, not what was answered, `quick::ASK_CALL`.)
+            c.retain(|b| {
+                !oak::is_result(b)
+                    || b["call_id"]
+                        .as_str()
+                        .is_some_and(|id| calls.contains(id) || id.starts_with(crate::quick::ASK_CALL))
+            });
         }
     }
     out.retain(|m| m["content"].as_array().is_none_or(|c| !c.is_empty()));
@@ -3283,15 +3428,25 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
     // Quick has the messages its agent took in mid-turn already. The mark
     // saying so (`quick::STEERED_KEY`) is one of Oak's own keys, which the
     // request drops, so the message would look new and go to Quick again.
-    let steered = |b: &Value| quick && b.get(crate::quick::STEERED_KEY).is_some();
-    let touched = |b: &Value| foreign(b) || quiet(b) || wrapped(b);
-    let has = |m: &Value| {
-        let any = |f: &dyn Fn(&Value) -> bool| {
-            m["content"].as_array().is_some_and(|c| c.iter().any(f))
-        };
-        (m["role"] == "assistant" && any(&touched)) || (m["role"] == "user" && any(&steered))
+    // Only the thread they were steered into has them: a fresh one opened
+    // since (`recovery::FRESH_KEY`, after them) gets them with the rest of
+    // the conversation (`unseen_by`).
+    let fresh = if quick { fresh_thread_at(messages) } else { None };
+    let steered = |k: usize, i: usize, b: &Value| {
+        quick && b.get(crate::quick::STEERED_KEY).is_some() && fresh.is_none_or(|f| (k, i) > f)
     };
-    if !messages.iter().any(has) {
+    // What Oak tells Quick to get its own thread going again (ask for the
+    // device, a fresh thread) means nothing to another provider's model,
+    // which has no such tools or threads: it reads a plain carry-on.
+    let recovery = |b: &Value| !quick && is_quick_recovery(b);
+    let touched = |b: &Value| foreign(b) || quiet(b) || wrapped(b);
+    let has = |(k, m): (usize, &Value)| {
+        let blocks = m["content"].as_array().map_or(&[][..], Vec::as_slice);
+        (m["role"] == "assistant" && blocks.iter().any(touched))
+            || (m["role"] == "user"
+                && blocks.iter().enumerate().any(|(i, b)| steered(k, i, b) || recovery(b)))
+    };
+    if !messages.iter().enumerate().any(has) {
         return std::borrow::Cow::Borrowed(messages);
     }
     // The snippets' calls, whose results go with them.
@@ -3305,7 +3460,7 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
     let snippet_result =
         |b: &Value| oak::is_result(b) && b["call_id"].as_str().is_some_and(|id| snippets.contains(id));
     let mut out = messages.to_vec();
-    for m in out.iter_mut() {
+    for (k, m) in out.iter_mut().enumerate() {
         let assistant = m["role"] == "assistant";
         let Some(content) = m["content"].as_array_mut() else {
             continue;
@@ -3319,7 +3474,22 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
                 }
             }
         } else {
-            content.retain(|b| !steered(b) && (snippets.is_empty() || !snippet_result(b)));
+            let mut i = 0;
+            let mut told = false;
+            content.retain_mut(|b| {
+                let at = i;
+                i += 1;
+                if recovery(b) {
+                    // One carry-on for the turn, where the first was.
+                    if told {
+                        return false;
+                    }
+                    told = true;
+                    *b = oak::text(CARRY_ON);
+                    return true;
+                }
+                !steered(k, at, b) && (snippets.is_empty() || !snippet_result(b))
+            });
         }
         if content.is_empty() && before > 0 {
             // A user turn of only a steered message stays empty for Quick,
@@ -3631,10 +3801,32 @@ fn summary_request_for(
 /// What to summarize of the first `n` messages of a request built on the
 /// summary cut `base`, whose prompt came to `total` tokens.
 fn plan_summary(c: &mut Conversation, n: usize, base: usize, total: u64) -> Option<Plan> {
+    let cap = rolling::summary_cap(&c.model);
+    plan_summary_within(c, n, base, total, cap)
+}
+
+/// Why no summary can make room on `model` though one could be made, but
+/// none that one summary request on it holds (`rolling::summary_cap`): the
+/// oldest part left is bigger than that (a conversation another model with
+/// a bigger window, or Quick, took past this one's), and what to do.
+fn too_big_to_summarize(model: &str) -> String {
+    let window = api::context_window(model).map_or(String::new(), |w| format!(" ({}k-token context window)", w / 1000));
+    format!(
+        "the oldest part of the conversation left is too big for one summary request on {}{window}. \
+         Switch back to a model with a larger context window to go on, or fork or revert the conversation to before its biggest messages",
+        api::Provider::model_name(model)
+    )
+}
+
+/// `plan_summary` with the part before the cut at most `cap` tokens.
+fn plan_summary_within(c: &mut Conversation, n: usize, base: usize, total: u64, cap: u64) -> Option<Plan> {
     c.messages.load_from(base);
     let cleared = c.rolling.cleared_to();
     let keep = rolling::config_for(&c.model).keep;
-    rolling::plan(
+    // (What one summary request on this model can hold: after a switch
+    // from a model with a bigger window, or from Quick, the conversation
+    // may be past it.)
+    rolling::plan_within(
         &c.messages[..n.min(c.messages.len())],
         base,
         cleared,
@@ -3643,6 +3835,7 @@ fn plan_summary(c: &mut Conversation, n: usize, base: usize, total: u64) -> Opti
         keep,
         rolling::least_for(&c.model),
         true,
+        cap,
     )
 }
 
@@ -3762,6 +3955,9 @@ fn mark_speed(blocks: &mut [Value], tps: f64) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod switch_tests;
 
 #[cfg(test)]
 mod live;

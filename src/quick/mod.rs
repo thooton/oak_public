@@ -47,6 +47,8 @@ pub(crate) mod calls;
 pub(crate) mod recovery;
 #[cfg(test)]
 mod live_test;
+#[cfg(test)]
+mod switch_test;
 pub(crate) mod markup;
 #[cfg(test)]
 mod models_test;
@@ -161,25 +163,30 @@ fn effort(r: &Request, m: &Model) -> &'static str {
     if r.purpose == oak::Purpose::Title {
         return "off";
     }
+    // The levels in order, so an effort the mode lacks goes to its nearest
+    // below (a conversation keeps its effort across a switch: Claude's
+    // `xhigh`, or `off`, or Smart's `max` taken to Fast).
+    const RANK: [&str; 6] = ["off", "low", "medium", "high", "xhigh", "max"];
     let asked = r.effort.as_deref().unwrap_or("medium");
     let pick = match asked {
         "off" | "none" => "off",
         "low" | "min" | "minimal" => "low",
         "medium" | "med" => "medium",
         "high" => "high",
-        "xhigh" | "max" | "ultra" => "max",
-        other => other,
+        "xhigh" => "xhigh",
+        "max" | "ultra" => "max",
+        _ => "medium",
     };
-    if m.efforts.contains(&pick) {
-        return m
-            .efforts
-            .iter()
-            .find(|e| **e == pick)
-            .copied()
-            .unwrap_or("low");
-    }
-    // Past its levels: its highest that isn't above what was asked.
-    m.efforts.last().copied().unwrap_or("low")
+    let rank = |e: &str| RANK.iter().position(|x| *x == e);
+    let want = rank(pick).unwrap_or(2);
+    // Its highest that isn't above what was asked, else its lowest.
+    m.efforts
+        .iter()
+        .copied()
+        .filter(|e| rank(e).is_some_and(|k| k <= want))
+        .max_by_key(|e| rank(e))
+        .or_else(|| m.efforts.first().copied())
+        .unwrap_or("low")
 }
 
 // ---------------------------------------------------------------- the login
@@ -1687,21 +1694,60 @@ fn briefing(r: &Request) -> String {
 /// or Oak restarts: a thread Quick has already run snippets in has had it.
 fn oak_preface(r: &Request, thread: &str) -> Option<String> {
     let mut sent = BRIEFED.lock().unwrap_or_else(|e| e.into_inner());
-    if !sent.insert(thread.to_string()) || (r.quick_session.is_none() && quick_worked_here(r)) {
+    let first = sent.insert(thread.to_string());
+    // A login the conversation moved to has none of its thread: not the
+    // briefing either, whatever the conversation's own Quick work says.
+    if r.quick_session.is_none() && moving(&r.seat_conv()) {
+        return Some(briefing(r));
+    }
+    if !first || (r.quick_session.is_none() && quick_worked_here(r)) {
         return None;
     }
     Some(briefing(r))
 }
 
-/// Whether Quick has run snippets in this conversation already (so its
-/// thread holds the briefing they were called by).
+/// Conversations whose Quick thread moved to another login (`login_for`)
+/// and no message has reached there yet. That login's thread has none of
+/// the conversation, so each request sends it all (`all_unseen`) with Oak's
+/// briefing until one gets there (`moved_in`): the move is seen only once,
+/// and a first request that failed to send would otherwise leave the next
+/// one sending its newest turn alone to a thread that has nothing.
+static MOVED: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(Default::default);
+
+/// Conversation `conv`'s thread moved to another login just now.
+pub(crate) fn moved_out(conv: &str) {
+    if !conv.is_empty() {
+        MOVED.lock().unwrap_or_else(|e| e.into_inner()).insert(conv.to_string());
+    }
+}
+
+/// A message with the whole of `conv` reached the login it moved to.
+pub(crate) fn moved_in(conv: &str) {
+    MOVED.lock().unwrap_or_else(|e| e.into_inner()).remove(conv);
+}
+
+/// Whether `conv` moved to a login no message has reached yet.
+pub(crate) fn moving(conv: &str) -> bool {
+    !conv.is_empty() && MOVED.lock().unwrap_or_else(|e| e.into_inner()).contains(conv)
+}
+
+/// Whether Quick has run snippets in this conversation's thread already (so
+/// it holds the briefing they were called by). Not those in what the thread
+/// lacks (`unseen`): a fork's, or a moved login's, are another thread's,
+/// which Oak can't otherwise tell after a restart (`MOVED` is in memory).
 fn quick_worked_here(r: &Request) -> bool {
-    r.messages
-        .iter()
-        .filter(|m| m["role"] == "assistant")
-        .filter_map(|m| m["content"].as_array())
-        .flatten()
-        .any(|b| b["type"] == "tool_call" && b["name"].as_str().is_some_and(is_snippet))
+    let calls = |ms: &[Value]| -> Vec<String> {
+        ms.iter()
+            .filter(|m| m["role"] == "assistant")
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .filter(|b| b["type"] == "tool_call" && b["name"].as_str().is_some_and(is_snippet))
+            .map(|b| b["id"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+    let elsewhere: std::collections::HashSet<String> = calls(&r.unseen).into_iter().collect();
+    calls(&r.messages).iter().any(|id| !elsewhere.contains(id))
 }
 
 /// The `user_message` frame for Oak request `r` on thread `thread`: the
@@ -1950,7 +1996,10 @@ fn so_far_body(unseen: &[Value], part: usize, max: usize) -> Option<(String, boo
     };
     let mut names = std::collections::HashMap::new();
     let mut turns: Vec<String> = vec![];
-    for m in unseen {
+    // The newest user turns' files go with the message itself
+    // (`turn::attached_images`), as their text and pictures do.
+    let newest = unseen.iter().rposition(|m| m["role"] == "assistant").map_or(0, |i| i + 1);
+    for (k, m) in unseen.iter().enumerate() {
         let assistant = m["role"] == "assistant";
         let mut lines = vec![];
         for b in m["content"].as_array().into_iter().flatten() {
@@ -1965,6 +2014,17 @@ fn so_far_body(unseen: &[Value], part: usize, max: usize) -> Option<(String, boo
                     let name = b["name"].as_str().unwrap_or("tool");
                     names.insert(b["id"].as_str().unwrap_or("").to_string(), name.to_string());
                     lines.push(format!("Assistant called {name}: {}", cut_to(&b["input"].to_string())));
+                }
+                // The user's answers to Quick's own decision card (its ASK),
+                // when another model went on after them: what the user said.
+                // (The newest turns' answers go as the message, `new_user_text`.)
+                "tool_result" if b["call_id"].as_str().is_some_and(|c| c.starts_with(ASK_CALL)) => {
+                    if k >= newest {
+                        continue;
+                    }
+                    if let Ok(said) = calls::result_text(b) {
+                        lines.push(format!("User: {}", markup::decision_response(&said).trim()));
+                    }
                 }
                 "tool_result" => {
                     let name = names.get(b["call_id"].as_str().unwrap_or("")).map_or("the call", String::as_str);
@@ -1985,7 +2045,16 @@ fn so_far_body(unseen: &[Value], part: usize, max: usize) -> Option<(String, boo
                     lines.push(format!("Result of {name}{error}: {}", cut_to(content.trim())));
                 }
                 "image" => lines.push("[a picture]".into()),
-                "document" => lines.push(format!("[a document: {}]", b["title"].as_str().unwrap_or("untitled"))),
+                // A text file's words are the conversation's too; a PDF
+                // can't go as text.
+                "document" if k >= newest => {}
+                "document" => {
+                    let title = b["title"].as_str().unwrap_or("untitled");
+                    lines.push(match document_text(b) {
+                        Some(t) => format!("[a document: {title}]\n{}", cut_to(t.trim())),
+                        None => format!("[a document: {title}]"),
+                    });
+                }
                 _ => {}
             }
         }
@@ -2009,6 +2078,20 @@ fn so_far_body(unseen: &[Value], part: usize, max: usize) -> Option<(String, boo
         cut = true;
     }
     Some((body, cut))
+}
+
+/// A text document's words (an attached text file, `transcript::file_block`):
+/// its `data` as it is, or its blob's bytes. None for a PDF or anything else.
+pub(crate) fn document_text(b: &Value) -> Option<String> {
+    if b["type"] != "document" || !b["media_type"].as_str().is_some_and(|m| m.starts_with("text/")) {
+        return None;
+    }
+    if let Some(t) = b["data"].as_str() {
+        return Some(t.to_string());
+    }
+    let data = crate::blobs::data_of(b)?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// What Quick is sent when Oak asks again in the middle of a turn with

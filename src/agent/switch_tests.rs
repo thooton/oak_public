@@ -1,0 +1,516 @@
+//! Switching a conversation between providers mid-conversation, above all
+//! AWS Quick and Claude, back and forth: what each request carries, what
+//! state survives the switch and what gives way to it.
+
+use super::tests::idle_worker;
+use super::*;
+
+const CLAUDE: &str = "claude-opus-5-5";
+const QUICK: &str = "smart";
+
+fn user(t: &str) -> Value {
+    json!({"role": "user", "content": [oak::text(t)]})
+}
+
+/// A reply as `by`'s model wrote it.
+fn reply(by: api::Provider, blocks: Vec<Value>) -> Value {
+    let mut blocks = blocks;
+    mark_by(&mut blocks, Some(by));
+    json!({"role": "assistant", "content": blocks})
+}
+
+fn all_text(v: &[Value]) -> String {
+    serde_json::to_string(v).unwrap()
+}
+
+fn switch(s: &Session, p: api::Provider, m: &str) {
+    let mut c = s.conv.lock().unwrap();
+    apply_command(&mut c, Command::Model(p, m.into()));
+}
+
+/// Claude -> Quick -> Claude -> Quick -> Claude: each request goes to the
+/// model picked, with what that provider takes. Quick hears what Claude did
+/// since its own last reply (and nothing twice), on the same thread every
+/// time; Claude never gets Quick's own snippet calls or its recovery
+/// prompts; the effort and Quick's thread outlive every switch.
+#[test]
+fn alternating_quick_and_claude_keeps_every_request_whole() {
+    use crate::quick::{QUIET_KEY, recovery};
+    let thread = recovery::Session { account: "switch-account".into(), thread: "switch-thread".into() };
+    let (w, s) = idle_worker("switch-alternate", Conversation {
+        provider: Some(api::Provider::Claude),
+        model: CLAUDE.into(),
+        effort: "high".into(),
+        messages: vec![user("Build the parser")].into(),
+        ..Default::default()
+    });
+    let claude_turn = |s: &Session, n: usize| {
+        let mut c = s.conv.lock().unwrap();
+        let id = format!("toolu_c{n}");
+        c.messages.push(reply(api::Provider::Claude, vec![
+            oak::text(&format!("Claude step {n}")),
+            json!({"type": "tool_call", "id": id, "name": "READ", "input": {"path": "a.rs"}}),
+        ]));
+        c.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": id, "content": format!("claude result {n}")}]}));
+        c.messages.push(reply(api::Provider::Claude, vec![oak::text(&format!("Claude done {n}"))]));
+    };
+    let quick_turn = |s: &Session, n: usize| {
+        let mut c = s.conv.lock().unwrap();
+        let (snip, inner) = (format!("snip{n}"), format!("q{n}"));
+        c.messages.push(reply(api::Provider::Quick, vec![
+            oak::text(&format!("Quick step {n}")),
+            json!({"type": "tool_call", "id": snip, "name": "run_python_on_device", QUIET_KEY: true, "input": {"code": "READ(path=\"b.rs\")"}}),
+            json!({"type": "tool_call", "id": inner, "name": "READ", "input": {"path": "b.rs"}}),
+        ]));
+        c.messages.push(json!({"role": "user", "content": [
+            {"type": "tool_result", "call_id": snip, "content": "snippet ran"},
+            {"type": "tool_result", "call_id": inner, "content": format!("quick result {n}")},
+        ]}));
+        c.quick_session = Some(thread.clone());
+    };
+    let ask = |s: &Session, t: &str| s.conv.lock().unwrap().messages.push(user(t));
+
+    claude_turn(&s, 1);
+    for round in 1..=3 {
+        // To Quick: it hears Claude's turn since its own last reply.
+        ask(&s, &format!("quick round {round}"));
+        switch(&s, api::Provider::Quick, QUICK);
+        let (req, ..) = w.request_body();
+        assert_eq!((req.provider, req.model.as_str()), (api::Provider::Quick, QUICK));
+        assert_eq!(crate::quick::new_user_text(&req).as_deref(), Some(format!("quick round {round}").as_str()));
+        let unseen = all_text(&req.unseen);
+        assert!(unseen.contains(&format!("Claude done {round}")) && unseen.contains(&format!("claude result {round}")), "round {round}: {unseen}");
+        if round > 1 {
+            assert!(!unseen.contains(&format!("Quick step {}", round - 1)), "Quick's own reply isn't sent back to it: {unseen}");
+            assert!(!unseen.contains(&format!("Claude done {}", round - 1)), "nor what it heard before: {unseen}");
+            assert_eq!(req.quick_session.as_ref(), Some(&thread), "the same thread every time");
+        }
+        quick_turn(&s, round);
+
+        // Back to Claude: the whole conversation, Quick's snippets out.
+        ask(&s, &format!("claude round {round}"));
+        switch(&s, api::Provider::Claude, CLAUDE);
+        let (req, ..) = w.request_body();
+        assert_eq!((req.provider, req.model.as_str()), (api::Provider::Claude, CLAUDE));
+        assert!(req.quick_session.is_none() && req.unseen.is_empty());
+        assert_eq!(req.effort.as_deref(), Some("high"), "the effort outlives the switches");
+        let sent = all_text(&req.messages);
+        assert!(!sent.contains("run_python_on_device") && !sent.contains("snippet ran"), "round {round}: {sent}");
+        for n in 1..=round {
+            assert!(sent.contains(&format!("quick result {n}")) && sent.contains(&format!("Quick step {n}")), "Quick's work reaches Claude: {sent}");
+        }
+        // Every call has its result, right after it.
+        for (k, m) in req.messages.iter().enumerate().filter(|(_, m)| m["role"] == "assistant") {
+            for call in m["content"].as_array().unwrap().iter().filter(|b| oak::is_call(b)) {
+                let next = &req.messages[k + 1];
+                assert!(next["content"].as_array().unwrap().iter().any(|b| b["call_id"] == call["id"]), "{call} unanswered");
+            }
+        }
+        assert_eq!(req.messages.last().unwrap()["role"], "user");
+        claude_turn(&s, round + 1);
+    }
+    assert_eq!(s.conv.lock().unwrap().quick_session, Some(thread));
+}
+
+/// What Oak told Quick to get its own thread going again (look for the
+/// device, go on after an error, a fresh thread) reaches another provider
+/// as one plain carry-on line; Quick still reads its own.
+#[test]
+fn quick_recovery_prompts_read_as_a_carry_on_elsewhere() {
+    use crate::quick::recovery;
+    let mut fresh = context_block(recovery::LIMIT_FRESH);
+    fresh[recovery::FRESH_KEY] = json!("t2");
+    let messages = vec![
+        user("Fix it"),
+        reply(api::Provider::Quick, vec![oak::text("Partial")]),
+        json!({"role": "user", "content": [context_block(recovery::DEVICE_RETRY)]}),
+        reply(api::Provider::Quick, vec![oak::text("Partial again")]),
+        json!({"role": "user", "content": [context_block(recovery::ERROR_RETRY), fresh.clone(), oak::text("and also this")]}),
+    ];
+    let claude = for_provider(&messages, api::Provider::Claude).into_owned();
+    let sent = all_text(&claude);
+    for t in [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH] {
+        assert!(!sent.contains(t), "{t} reached Claude");
+    }
+    assert!(!sent.contains("list_outposts"), "{sent}");
+    assert_eq!(claude[2]["content"], json!([oak::text(CARRY_ON)]));
+    assert_eq!(claude[4]["content"], json!([oak::text(CARRY_ON), oak::text("and also this")]), "one line per turn, the user's text kept");
+    assert_eq!(claude.len(), messages.len(), "every turn stays");
+    // Quick reads them as they were.
+    assert!(matches!(for_provider(&messages, api::Provider::Quick), std::borrow::Cow::Borrowed(_)));
+    // A conversation with none goes as it is.
+    let plain = vec![user("a"), reply(api::Provider::Claude, vec![oak::text("b")])];
+    assert!(matches!(for_provider(&plain, api::Provider::Claude), std::borrow::Cow::Borrowed(_)));
+}
+
+/// A message steered into a Quick turn is left out for Quick (its thread
+/// has it), unless a fresh thread opened since: that one never saw it.
+#[test]
+fn a_fresh_quick_thread_gets_messages_steered_into_the_old_one() {
+    use crate::quick::{STEERED_KEY, recovery};
+    let steered = |t: &str| {
+        let mut b = oak::text(t);
+        b[STEERED_KEY] = json!(true);
+        b
+    };
+    let mut fresh = context_block(recovery::LIMIT_FRESH);
+    fresh[recovery::FRESH_KEY] = json!("t2");
+    let messages = vec![
+        user("Start"),
+        reply(api::Provider::Quick, vec![oak::text("on it")]),
+        json!({"role": "user", "content": [steered("old thread steer"), fresh]}),
+        reply(api::Provider::Quick, vec![oak::text("fresh reply")]),
+        json!({"role": "user", "content": [steered("new thread steer")]}),
+    ];
+    let quick = for_provider(&messages, api::Provider::Quick).into_owned();
+    let sent = all_text(&quick);
+    assert!(sent.contains("old thread steer"), "the fresh thread never saw it: {sent}");
+    assert!(!sent.contains("new thread steer"), "the fresh thread has it: {sent}");
+    // With no fresh thread, every steered message stays out.
+    let one = vec![user("Start"), reply(api::Provider::Quick, vec![oak::text("on it")]), json!({"role": "user", "content": [steered("s"), oak::text("t")]})];
+    assert_eq!(for_provider(&one, api::Provider::Quick)[2]["content"], json!([oak::text("t")]));
+    // Other providers read them all, as typed.
+    let claude = all_text(&for_provider(&messages, api::Provider::Claude));
+    assert!(claude.contains("old thread steer") && claude.contains("new thread steer"));
+}
+
+/// The user switches to Claude while a Quick turn fails (a service error,
+/// the device out of reach, the account at its limit): no retry on Quick,
+/// no move to another Quick account; the turn goes on on Claude at once,
+/// whose request ends with a user turn (a plain carry-on after the reply
+/// Quick cut short), and never with Quick's recovery prompts.
+#[test]
+fn a_switch_during_quick_recovery_goes_on_on_the_new_model() {
+    use crate::quick::recovery;
+    for reason in [recovery::ERROR, recovery::DEVICE, recovery::LIMIT] {
+        let (w, s) = idle_worker(&format!("switch-recovery-{reason}"), Conversation {
+            provider: Some(api::Provider::Quick),
+            model: QUICK.into(),
+            messages: vec![user("Fix the build")].into(),
+            ..Default::default()
+        });
+        let mut request = 0;
+        let mut retries = 0;
+        std::thread::scope(|scope| w.turn_loop_with(scope, |_| {
+            let (req, ..) = w.request_body();
+            request += 1;
+            match request {
+                1 => {
+                    assert_eq!(req.provider, api::Provider::Quick);
+                    // Picked while Quick's turn runs.
+                    s.command(Command::Model(api::Provider::Claude, CLAUDE.into()));
+                    let partial = json!({"type": "text", "text": "Half done", BY_KEY: api::Provider::Quick.id()});
+                    Reply::Done(vec![partial], format!("{reason}\nboom"), Usage::default())
+                }
+                2 => {
+                    assert_eq!((req.provider, req.model.as_str()), (api::Provider::Claude, CLAUDE), "{reason}");
+                    let last = req.messages.last().unwrap();
+                    assert_eq!(last["role"], "user", "{reason}: the request ends with a user turn");
+                    assert_eq!(last["content"], json!([oak::text(CARRY_ON)]), "{reason}");
+                    let sent = all_text(&req.messages);
+                    assert!(sent.contains("Half done"), "{reason}: {sent}");
+                    for t in [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::DEVICE_FRESH] {
+                        assert!(!sent.contains(t), "{reason}: {sent}");
+                    }
+                    Reply::Done(vec![oak::text("Fixed")], oak::stop::END.into(), Usage::default())
+                }
+                _ => panic!("{reason}: one request on each model"),
+            }
+        }, |attempts, _| {
+            *attempts += 1;
+            retries += 1;
+            true
+        }));
+        assert_eq!((request, retries), (2, 0), "{reason}");
+        let c = s.conv.lock().unwrap();
+        assert!(c.quick_session.is_none(), "{reason}: no fresh Quick thread");
+        assert!(!c.marks.iter().any(|m| m.kind == MarkKind::QuickHandoff), "{reason}");
+        assert_eq!(reply_text(&c).as_deref(), Some("Fixed"));
+    }
+}
+
+/// Quick tiers are one provider: a switch between them mid-recovery
+/// doesn't stop Quick getting its thread going again.
+#[test]
+fn a_quick_tier_switch_keeps_quick_recovering() {
+    use crate::quick::recovery;
+    let (w, s) = idle_worker("switch-quick-tier", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        messages: vec![user("Go")].into(),
+        ..Default::default()
+    });
+    let mut request = 0;
+    std::thread::scope(|scope| w.turn_loop_with(scope, |_| {
+        let (req, ..) = w.request_body();
+        request += 1;
+        if request == 1 {
+            s.command(Command::Model(api::Provider::Quick, "fast".into()));
+            return Reply::Done(vec![oak::text("Partial")], recovery::ERROR.into(), Usage::default());
+        }
+        assert_eq!((req.provider, req.model.as_str()), (api::Provider::Quick, "fast"));
+        assert_eq!(crate::quick::new_user_text(&req).as_deref(), Some(recovery::ERROR_RETRY));
+        Reply::Done(vec![oak::text("Done")], oak::stop::COMPLETE.into(), Usage::default())
+    }, |attempts, _| {
+        *attempts += 1;
+        true
+    }));
+    assert_eq!(request, 2);
+}
+
+/// Quick's token count is of its own thread: it sizes the context, but a
+/// summary made after a switch to Claude doesn't place its cut by it. And a
+/// reply from another provider ends keeping the Claude request warm.
+#[test]
+fn quick_usage_is_not_a_measure_of_what_claude_is_sent() {
+    let (w, s) = idle_worker("switch-measures", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        messages: vec![user("a"), reply(api::Provider::Quick, vec![oak::text("b")]), user("c")].into(),
+        ..Default::default()
+    });
+    let usage = |prompt| Usage { prompt, output: 100, ..Default::default() };
+    let (body, n, base) = w.request_body();
+    *w.warm.lock().unwrap() = Some((body.clone(), false));
+    *w.last_request.lock().unwrap() = Some((body, n, base, api::now_ms()));
+    w.after_reply(usage(90_000));
+    {
+        let c = s.conv.lock().unwrap();
+        assert!(c.rolling.measured.is_empty(), "{:?}", c.rolling.measured);
+        assert_eq!(c.rolling.context, 90_100);
+    }
+    assert!(w.warm.lock().unwrap().is_none(), "nothing of Claude's to keep warm after Quick's reply");
+    // On Claude, the count is the request's own.
+    switch(&s, api::Provider::Claude, CLAUDE);
+    let (body, n, base) = w.request_body();
+    *w.last_request.lock().unwrap() = Some((body, n, base, api::now_ms()));
+    w.after_reply(usage(5_000));
+    let c = s.conv.lock().unwrap();
+    assert_eq!(c.rolling.measured.len(), 1);
+    assert_eq!((c.rolling.measured[0].n, c.rolling.measured[0].prompt), (n, 5_000));
+}
+
+/// A conversation past what one summary request on the new model can hold
+/// (Quick has no summaries; another model's window may be bigger) is
+/// summarized in parts: each cut at the latest boundary that fits, the
+/// next summary taking on from it, till the kept part is what the
+/// settings keep.
+#[test]
+fn a_conversation_past_the_new_window_is_summarized_in_parts() {
+    // 40 turns of about 10k tokens each.
+    let big = "x".repeat(40_000);
+    let mut m = vec![];
+    for i in 0..40 {
+        m.push(user(&format!("turn {i} {big}")));
+        m.push(json!({"role": "assistant", "content": [oak::text(&format!("reply {i}"))]}));
+    }
+    m.push(user("now"));
+    let total = rolling::estimate(m.iter().map(rolling::chars).sum());
+    let keep = 40_000;
+    let whole = rolling::plan_within(&m, 0, 0, total, &[], keep, 10_000, false, u64::MAX).unwrap();
+    assert!(whole.before > 300_000, "{}", whole.before);
+    let cap = 150_000;
+    let first = rolling::plan_within(&m, 0, 0, total, &[], keep, 10_000, false, cap).unwrap();
+    assert!(first.before <= cap && first.before > cap - 20_000, "as much as fits: {}", first.before);
+    assert!(first.cut < whole.cut && (m[first.cut]["role"] == "user" || m[first.cut]["role"] == "assistant"));
+    // Within the cap the plan is the same as without one.
+    assert_eq!(rolling::plan_within(&m, 0, 0, total, &[], keep, 10_000, false, whole.before), Some(whole));
+    // Nothing that fits: no plan.
+    assert_eq!(rolling::plan_within(&m, 0, 0, total, &[], keep, 10_000, false, 1_000), None);
+    // The cap is the model's window's three quarters.
+    let w = api::context_window(CLAUDE).unwrap();
+    assert_eq!(rolling::summary_cap(CLAUDE), w * 3 / 4);
+}
+
+/// A fork of a conversation Quick worked on goes on in a Quick thread of its
+/// own, a new one, which has none of it: its first Quick request sends the
+/// whole conversation, Quick's own replies on the source's thread too, with
+/// Oak's briefing. Claude reads the fork as it read the source.
+#[test]
+fn a_fork_sends_its_new_quick_thread_the_whole_conversation() {
+    let source = Conversation {
+        id: "switch-fork-source".into(),
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        messages: vec![
+            user("Start the port"),
+            reply(api::Provider::Quick, vec![oak::text("Ported the lexer")]),
+            user("Now the parser"),
+            reply(api::Provider::Claude, vec![oak::text("Parser ported")]),
+            user("And the tests"),
+            reply(api::Provider::Quick, vec![oak::text("Tests ported")]),
+        ]
+        .into(),
+        quick_session: Some(crate::quick::recovery::Session { account: "a".into(), thread: "source-thread".into() }),
+        ..Default::default()
+    };
+    let mut c = crate::fork::fork(&source, "switch-fork-copy".into(), 1, None).unwrap();
+    assert!(c.quick_session.is_none(), "not the source's thread");
+    assert!(crate::quick::moving(&c.id), "Quick gets the briefing and all of it");
+    c.messages.push(user("Carry on"));
+    let (w, _s) = idle_worker("switch-fork", c);
+    let (req, ..) = w.request_body();
+    let unseen = all_text(&req.unseen);
+    for t in ["Start the port", "Ported the lexer", "Parser ported", "Tests ported"] {
+        assert!(unseen.contains(t), "{t} missing: {unseen}");
+    }
+    // The source's own thread still has it all: nothing changes there.
+    let mut src = source.clone();
+    src.messages.push(user("Carry on"));
+    let (w, _s) = idle_worker("switch-fork-src", src);
+    assert!(w.request_body().0.unseen.is_empty());
+    // On Claude, the fork reads as the source does.
+    let (w, s) = idle_worker("switch-fork-claude", crate::fork::fork(&source, "switch-fork-claude-copy".into(), 1, None).unwrap());
+    switch(&s, api::Provider::Claude, CLAUDE);
+    s.conv.lock().unwrap().messages.push(user("Carry on"));
+    let text = |m: &[Value]| m.iter().map(|m| m["content"].clone()).collect::<Vec<_>>();
+    let forked = text(&w.request_body().0.messages);
+    let (w, s) = idle_worker("switch-fork-claude-src", source.clone());
+    switch(&s, api::Provider::Claude, CLAUDE);
+    s.conv.lock().unwrap().messages.push(user("Carry on"));
+    assert_eq!(forked, text(&w.request_body().0.messages));
+}
+
+/// Claude -> Quick -> Claude: what Claude cached lives on at Anthropic, so
+/// back on the same model the cache state comes back as it was (its hour's
+/// entry anchored and read, not written again). Another Claude model, or
+/// Quick itself, starts cold; Quick's requests leave Claude's state alone.
+#[test]
+fn claudes_cache_outlives_a_detour_to_quick() {
+    use crate::cache_ttl::Choice;
+    let mut c = Conversation {
+        id: "switch-cache".into(),
+        provider: Some(api::Provider::Claude),
+        model: CLAUDE.into(),
+        ..Default::default()
+    };
+    let now = api::now_ms();
+    c.cache.record(now, Choice { ttl: oak::Ttl::OneHour, anchor: None }, 50_000, 10, 0);
+    let claude = c.cache.clone();
+    assert!(claude.hour.is_some());
+    apply_command(&mut c, Command::Model(api::Provider::Quick, QUICK.into()));
+    assert!(c.cache.hour.is_none() && c.cache.last.is_none(), "Quick has none of it");
+    // A Quick reply is recorded in Quick's state.
+    c.cache.record(now + 1_000, Choice { ttl: oak::Ttl::FiveMinutes, anchor: None }, 80_000, 12, 0);
+    apply_command(&mut c, Command::Model(api::Provider::Quick, "fast".into()));
+    apply_command(&mut c, Command::Model(api::Provider::Claude, CLAUDE.into()));
+    assert_eq!(c.cache, claude, "back on the model that cached it");
+    let choice = c.cache.choose(now + 120_000, 55_000, 0, 120_000);
+    assert!(choice.ttl == oak::Ttl::OneHour || choice.anchor == Some(9), "the hour's entry is used: {choice:?}");
+    // To another Claude model and back: cold there, its own state back here.
+    apply_command(&mut c, Command::Model(api::Provider::Claude, "claude-sonnet-5-5".into()));
+    assert!(c.cache.hour.is_none());
+    apply_command(&mut c, Command::Model(api::Provider::Claude, CLAUDE.into()));
+    assert_eq!(c.cache, claude);
+    // An effort set while away is another cache for a model whose effort
+    // can't change per message (claude-sonnet-5 here), and the same one
+    // where it can.
+    let old = "claude-sonnet-5";
+    assert!(!crate::prefix::supports_effort(old));
+    apply_command(&mut c, Command::Model(api::Provider::Claude, old.into()));
+    c.cache = claude.clone();
+    apply_command(&mut c, Command::Model(api::Provider::Quick, QUICK.into()));
+    apply_command(&mut c, Command::Effort("low".into()));
+    apply_command(&mut c, Command::Model(api::Provider::Claude, old.into()));
+    assert!(c.cache.hour.is_none() && c.cache.cold, "another effort, another cache");
+    apply_command(&mut c, Command::Model(api::Provider::Claude, CLAUDE.into()));
+    c.cache = claude.clone();
+    apply_command(&mut c, Command::Model(api::Provider::Quick, QUICK.into()));
+    apply_command(&mut c, Command::Effort("max".into()));
+    apply_command(&mut c, Command::Model(api::Provider::Claude, CLAUDE.into()));
+    assert_eq!(c.cache, claude, "per-message effort: the same cache");
+    // Quick, then another Claude model: cold; the first model's state stays for later.
+    apply_command(&mut c, Command::Model(api::Provider::Quick, QUICK.into()));
+    apply_command(&mut c, Command::Model(api::Provider::Claude, "claude-sonnet-5-5".into()));
+    assert!(c.cache.hour.is_none() && c.cache.cold);
+}
+
+/// A side chat of a conversation Quick worked on is a new Quick thread too:
+/// its first Quick request sends the whole conversation, with the side
+/// chat's instruction as the message; on Claude it sends what the source
+/// sent, then that instruction.
+#[test]
+fn a_side_chat_sends_its_new_quick_thread_the_whole_conversation() {
+    let source = Conversation {
+        id: "switch-side-source".into(),
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        messages: vec![
+            user("Port it"),
+            reply(api::Provider::Quick, vec![oak::text("Ported the lexer")]),
+            user("More"),
+            reply(api::Provider::Quick, vec![oak::text("Ported the parser")]),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let c = crate::side_chat::fork(&source, "switch-side-copy".into(), 1);
+    let (w, _s) = idle_worker("switch-side", c);
+    let (req, ..) = w.request_body();
+    let unseen = all_text(&req.unseen);
+    for t in ["Port it", "Ported the lexer", "Ported the parser"] {
+        assert!(unseen.contains(t), "{t} missing: {unseen}");
+    }
+    assert_eq!(crate::quick::new_user_text(&req).as_deref(), Some(crate::side_chat::FORK_MESSAGE));
+    // On Claude, the source's messages as they were, then the instruction.
+    let mut side = crate::side_chat::fork(&source, "switch-side-claude".into(), 1);
+    apply_command(&mut side, Command::Model(api::Provider::Claude, CLAUDE.into()));
+    let mut src = source.clone();
+    apply_command(&mut src, Command::Model(api::Provider::Claude, CLAUDE.into()));
+    let content = |m: &[Value]| m.iter().map(|m| m["content"].clone()).collect::<Vec<_>>();
+    let (sent, from) = (request_messages(&side, &side.messages), request_messages(&src, &src.messages));
+    assert_eq!(content(&sent[..from.len()]), content(&from));
+}
+
+/// Where no summary request on the model can hold the oldest part left (a
+/// message bigger than it, from a model with a bigger window), the turn
+/// says so and what to do, rather than that nothing is old enough.
+#[test]
+fn a_part_too_big_for_one_summary_says_why() {
+    let cap = rolling::summary_cap(CLAUDE);
+    let huge = "y".repeat((cap as usize + 20_000) * 4);
+    // (What follows it is more than the part kept: the cut comes after it.)
+    let tail = "z".repeat(120_000);
+    let mut c = Conversation {
+        provider: Some(api::Provider::Claude),
+        model: CLAUDE.into(),
+        messages: vec![
+            user(&huge),
+            reply(api::Provider::Quick, vec![oak::text("read it")]),
+            user(&tail),
+            reply(api::Provider::Quick, vec![oak::text("on")]),
+            user(&tail),
+            reply(api::Provider::Quick, vec![oak::text("on again")]),
+            user("and now"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let total = rolling::estimate(c.messages.iter().map(rolling::chars).sum());
+    // (The sizes as given: other tests change the settings' meanwhile.)
+    c.messages.load_all();
+    let plan = |cap| rolling::plan_within(&c.messages, 0, 0, total, &[], 40_000, 10_000, true, cap);
+    assert!(plan(cap).is_none(), "nothing fits one request");
+    assert!(plan(u64::MAX).is_some(), "though a summary could be made");
+    let why = too_big_to_summarize(CLAUDE);
+    assert!(why.contains(&api::Provider::model_name(CLAUDE)) && why.contains("larger context window"), "{why}");
+}
+
+/// A failed retry wait (a refusal's, Quick's backoff) ends at once when the
+/// user switches to another provider's model, which takes the retry.
+#[test]
+fn a_switch_ends_a_retry_wait() {
+    let (w, s) = idle_worker("switch-retry-wait", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        ..Default::default()
+    });
+    assert!(!w.switching_away());
+    s.command(Command::Model(api::Provider::Quick, "fast".into()));
+    assert!(!w.switching_away(), "another Quick tier is the same provider");
+    s.command(Command::Model(api::Provider::Claude, CLAUDE.into()));
+    assert!(w.switching_away());
+    let t = Instant::now();
+    assert!(w.retry_sleep(Duration::from_secs(30)));
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+}

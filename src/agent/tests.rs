@@ -2943,7 +2943,48 @@ fn assert_grows(prev: &Sent, next: &Sent, what: &str) {
 /// instruction files changing, old tool output, smart context turned off
 /// and on, a save and reload, a fork), every later request sends what an
 /// earlier one sent, unchanged, at its start. Only a summary changes it.
+///
+/// AGENT's definition lists the models of the providers signed in, which
+/// are this machine's own logins and vault: tests running alongside sync or
+/// forget them. Then Oak rightly tells the model "The AGENT tool changed",
+/// which no step here did, so a run during which the list moved is run
+/// again (a few times at most), and a failure without such a move fails.
 fn prefix_only_grows(
+    name: &str,
+    conv: Conversation,
+    other_model: &str,
+    sent: fn(&oak::Request) -> Sent,
+) {
+    let models = || api::known_models().into_iter().map(|m| m.id).collect::<Vec<_>>();
+    for attempt in 0.. {
+        let (done, moved) = (std::sync::atomic::AtomicBool::new(false), std::sync::atomic::AtomicBool::new(false));
+        let first = models();
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::SeqCst) {
+                    if models() != first {
+                        moved.store(true, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            });
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                prefix_only_grows_once(&format!("{name}-{attempt}"), conv.clone(), other_model, sent)
+            }));
+            done.store(true, Ordering::SeqCst);
+            r
+        });
+        match result {
+            Ok(()) => return,
+            Err(_) if moved.load(Ordering::SeqCst) && attempt < 5 => {
+                eprintln!("{name}: the signed-in models changed during the run; again");
+            }
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    }
+}
+
+fn prefix_only_grows_once(
     name: &str,
     conv: Conversation,
     other_model: &str,
@@ -3179,7 +3220,7 @@ fn prefix_only_grows(
     );
     assert_eq!(
         back.2.len(),
-        sent_then.2.len() + usize::from(name == "prefix-claude"),
+        sent_then.2.len() + usize::from(name.starts_with("prefix-claude")),
         "only the effort is added"
     );
     assert_starts_with(&sent_then, &req(&w4), "reverted to before the summaries");

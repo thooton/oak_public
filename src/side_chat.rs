@@ -50,6 +50,10 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation 
         ..Default::default()
     };
     agent::answer_lost_calls(&mut c);
+    // Its Quick thread is its own, a new one, as a fork's is (`crate::fork`):
+    // Quick is sent the whole conversation there. (Only the transcript's
+    // marks change: what other providers are sent is the source's.)
+    agent::quick_replies_elsewhere(&mut c);
     let message = if c.chat {
         CHAT_FORK_MESSAGE
     } else {

@@ -608,6 +608,9 @@ impl Worker {
         let unseen = if provider == api::Provider::Quick {
             unseen_by(&c.messages, &messages, provider, cut)
         } else {
+            // A Quick turn parked after a steer would go on generating on
+            // Quick's server (its calls running) while another model works.
+            crate::quick::turn::drop_parked(&c.id, false);
             vec![]
         };
         if let Some(mode) = mode {
@@ -1026,14 +1029,20 @@ impl Worker {
             return; // no usage reported
         }
         let mut c = self.conv.lock().unwrap();
-        c.rolling.record(
-            Measure {
-                base,
-                n,
-                prompt: usage.prompt,
-            },
-            usage.output,
-        );
+        let m = Measure {
+            base,
+            n,
+            prompt: usage.prompt,
+        };
+        if rolling::applies(body.provider) {
+            c.rolling.record(m, usage.output);
+        } else {
+            // Quick's count is of its own thread (its prompt, its agent's
+            // steps), not of the messages Oak would send: a summary made
+            // after a switch to another model mustn't place its cut by it
+            // (`rolling::plan`). The size stays, as a guide.
+            c.rolling.context = m.prompt + usage.output;
+        }
         // How long the cache lives, for its cold moments (`request_body`):
         // as Claude's request chose; the user's own server keeps its slot
         // until another conversation takes it (an hour stands for that);
@@ -1059,6 +1068,10 @@ impl Worker {
                 && body.ttl == oak::Ttl::FiveMinutes
                 && body.purpose == oak::Purpose::Main;
             *self.warm.lock().unwrap() = warm.then(|| (body.clone(), false));
+        } else {
+            // On another provider now: the Claude request before is no
+            // longer the one to keep warm.
+            *self.warm.lock().unwrap() = None;
         }
         let cfg = rolling::config_for(&c.model);
         if !rolling::applies(body.provider) || c.rolling.off || c.rolling.base() != base || c.rolling.context < cfg.trigger {
@@ -1137,7 +1150,14 @@ impl Worker {
                     context,
                 )
             });
-        let plan = plan_summary(&mut c, n, base, total).ok_or("nothing old enough to summarize")?;
+        let plan = match plan_summary(&mut c, n, base, total) {
+            Some(plan) => plan,
+            // One could be made, but not in one request on this model.
+            None if plan_summary_within(&mut c, n, base, total, u64::MAX).is_some() => {
+                return Err(too_big_to_summarize(&c.model));
+            }
+            None => return Err("nothing old enough to summarize".into()),
+        };
         let request = summary_request_for(&c, &body, n, plan.cut);
         drop(c);
         self.set(|l| {

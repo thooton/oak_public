@@ -503,12 +503,39 @@ struct Parked {
 }
 
 /// The turn parked on `thread`, if it is fresh.
+/// Parked turns past `PARK_LIMIT` (their conversation went on with another
+/// model, or stopped) are closed on the way, with Quick told to stop: only
+/// dropping the socket left Quick's agent going on them.
 fn take_parked(thread: &str) -> Option<Parked> {
-    let p = PARKED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(thread)?;
-    (p.at.elapsed() < PARK_LIMIT).then_some(p)
+    let (mine, stale) = {
+        let mut all = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+        let mine = all.remove(thread);
+        let old: Vec<String> = all
+            .iter()
+            .filter(|(_, p)| p.at.elapsed() >= PARK_LIMIT)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let stale: Vec<Parked> = old.iter().filter_map(|k| all.remove(k)).collect();
+        (mine, stale)
+    };
+    for mut p in stale {
+        stop_traffic(&mut p.sock, &p.turn, false);
+    }
+    match mine {
+        Some(p) if p.at.elapsed() < PARK_LIMIT => Some(p),
+        Some(mut p) => {
+            stop_traffic(&mut p.sock, &p.turn, false);
+            None
+        }
+        None => None,
+    }
+}
+
+/// Whether request `body` may read on in a turn parked on its thread: not
+/// once other models worked on the conversation since Quick last replied
+/// (what its thread lacks, `unseen`), as after a switch away and back.
+pub(super) fn reads_on_parked(body: &Request) -> bool {
+    body.unseen.is_empty()
 }
 
 /// A turn reading its thread, for as long as it lives.
@@ -602,7 +629,16 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
         .filter(|c| !c.is_empty())
         .unwrap_or_else(hex_uuid);
     let (ctl, _ctl_guard) = CtlGuard::register(&local);
-    let parked = take_parked(&local);
+    let mut parked = take_parked(&local);
+    // Other models worked on the conversation since Quick's turn was parked
+    // (a switch away and back within the minute): Quick's message is stale
+    // and its thread lacks what they did, so Quick is told to stop it and
+    // this request goes as a new message, with what the thread missed.
+    if !reads_on_parked(&body)
+        && let Some(mut p) = parked.take()
+    {
+        stop_traffic(&mut p.sock, &p.turn, false);
+    }
     // The login the conversation goes through (`login_for`): a parked turn
     // reads on on its own. A conversation that moved to another login
     // sends what that login's thread lacks: all of it.
@@ -613,7 +649,11 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
         None if session.is_some() => session.as_ref().map(|q| q.account.clone()),
         None => match crate::quick::login_for(&conv) {
             Some((a, moved)) => {
-                if moved && body.instruction.is_none() {
+                // (Until a message gets there: `quick::MOVED`.)
+                if moved {
+                    crate::quick::moved_out(&conv);
+                }
+                if crate::quick::moving(&conv) && body.instruction.is_none() {
                     body.unseen = crate::quick::all_unseen(&body.messages);
                 }
                 Some(a)
@@ -823,6 +863,10 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
     if let Err(e) = sock.send(&user) {
         BRIEFED.lock().unwrap_or_else(|e| e.into_inner()).remove(&thread);
         return drop(tx.send(Sse::Err(e)));
+    }
+    // The login the conversation moved to has it all now.
+    if body.instruction.is_none() {
+        crate::quick::moved_in(&conv);
     }
     let mut turn = Turn::for_message(&thread, "");
     turn.local = Some(local);
@@ -1468,12 +1512,13 @@ fn images_delivered(r: &Value, thread: &str) -> Value {
     out
 }
 
-/// The images the user attached since Quick last replied (the user turns
-/// after the newest assistant message, as `new_user_text` reads them), each
-/// put in thread `thread`'s workspace: a line for each, saying where, for the
-/// message that goes to Quick. None for a request with an instruction of its
-/// own (a summary).
-fn attached_images(r: &Request, thread: &str) -> Vec<String> {
+/// The images and files the user attached since Quick last replied (the
+/// user turns after the newest assistant message, as `new_user_text` reads
+/// them), each put in thread `thread`'s workspace: a line for each, saying
+/// where, for the message that goes to Quick (Quick's message takes text
+/// only, so a file attached as the conversation moved to Quick went nowhere
+/// before). None for a request with an instruction of its own (a summary).
+pub(super) fn attached_images(r: &Request, thread: &str) -> Vec<String> {
     if r.instruction.as_deref().is_some_and(|i| !i.trim().is_empty()) {
         return vec![];
     }
@@ -1485,18 +1530,23 @@ fn attached_images(r: &Request, thread: &str) -> Vec<String> {
         if m["role"] != "user" {
             continue;
         }
-        let images: Vec<Value> = m["content"]
+        // (A text file or a PDF is a document, `transcript::file_block`.)
+        let files: Vec<Value> = m["content"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|b| b["type"] == "image")
+            .filter(|b| b["type"] == "image" || b["type"] == "document")
             .cloned()
             .collect();
-        turns.push(images);
+        turns.push(files);
     }
     turns.reverse();
     let mut lines = vec![];
     for (k, b) in turns.into_iter().flatten().enumerate() {
+        if b["type"] == "document" {
+            lines.push(attached_document(&b, thread));
+            continue;
+        }
         let Some((bytes, media)) = image_bytes(&b) else {
             continue;
         };
@@ -1510,6 +1560,47 @@ fn attached_images(r: &Request, thread: &str) -> Vec<String> {
         });
     }
     lines
+}
+
+/// The most of an attached text file the message carries when it can't go
+/// to Quick's workspace (characters).
+const ATTACHED_TEXT: usize = 20_000;
+
+/// A document the user attached (a text file or a PDF,
+/// `transcript::file_block`), put in thread `thread`'s workspace: the line
+/// saying where, for the message. A text file that can't go there goes in
+/// the line itself.
+fn attached_document(b: &Value, thread: &str) -> String {
+    let name = b["_oak_file"]
+        .as_str()
+        .or(b["title"].as_str())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or("attached-file")
+        .to_string();
+    let media = b["media_type"].as_str().unwrap_or("application/octet-stream").to_string();
+    let text = crate::quick::document_text(b);
+    let bytes = match &text {
+        Some(t) => Some(t.as_bytes().to_vec()),
+        None => crate::blobs::data_of(b).and_then(|d| {
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, d.as_bytes()).ok()
+        }),
+    };
+    let tool = if media == "application/pdf" { "file_read_pdf" } else { "file_read" };
+    let put = match bytes {
+        Some(bytes) => crate::quick::outpost::upload(&bytes, &name, &media, thread),
+        None => Err("Oak couldn't read it".into()),
+    };
+    match (put, text) {
+        (Ok(v), _) => format!(
+            "[The user attached a file ({name}). Oak put it in your workspace at {}: open that path with {tool} to read it.]",
+            workspace_place(&v)
+        ),
+        (Err(e), Some(t)) => format!(
+            "[The user attached a file ({name}); Oak couldn't put it in your workspace ({e}), so here it is:]\n{}",
+            crate::quick::clip(&t, ATTACHED_TEXT)
+        ),
+        (Err(e), None) => format!("[The user attached a file ({name}), but Oak couldn't put it in your workspace: {e}]"),
+    }
 }
 
 /// A snippet's Oak calls run here, for a turn no conversation's agent reads

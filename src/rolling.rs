@@ -782,8 +782,27 @@ pub struct Plan {
 /// `base..cleared` had their old tool output cleared by the summary at `base`.
 /// With `clear`, the new one clears tool output older than the newest
 /// `recent()` tokens.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn plan(messages: &[Value], base: usize, cleared: usize, total: u64, measured: &[Measure], keep: u64, least: u64, clear: bool) -> Option<Plan> {
+    plan_within(messages, base, cleared, total, measured, keep, least, clear, u64::MAX)
+}
+
+/// The most a summary request on `model` holds before its cut (system,
+/// tools, the summary in use and the messages it replaces): three quarters
+/// of its window, the rest left for the instruction and the summary it
+/// writes. Unknown windows aren't capped.
+pub fn summary_cap(model: &str) -> u64 {
+    crate::api::context_window(model).map_or(u64::MAX, |w| w * 3 / 4)
+}
+
+/// `plan`, with the part before the cut at most `cap` tokens
+/// (`summary_cap`): a conversation bigger than the model's window (one
+/// another model with a bigger window, or Quick, which has no summaries,
+/// worked on) is summarized as much as one request can take, at the latest
+/// boundary that fits, and the next summary takes on from there.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_within(messages: &[Value], base: usize, cleared: usize, total: u64, measured: &[Measure], keep: u64, least: u64, clear: bool, cap: u64) -> Option<Plan> {
     let n = messages.len();
     if n < base + 3 {
         return None;
@@ -819,6 +838,15 @@ pub fn plan(messages: &[Value], base: usize, cleared: usize, total: u64, measure
         .collect();
     // The start of a turn reads best, if one keeps no more than half again as much.
     let cut = candidates.iter().copied().find(|&k| messages[k]["role"] == "user" && full[k] <= keep * 3 / 2).or(candidates.first().copied())?;
+    // Too much before it for one summary request: the latest boundary
+    // before it that fits.
+    let cut = if total - tails[cut] > cap {
+        (base + 1..cut)
+            .rev()
+            .find(|&k| total - tails[k] <= cap && (messages[k]["role"] == "assistant" || !has_tool_result(&messages[k])))?
+    } else {
+        cut
+    };
     let before = total - tails[cut];
     // Tool output in the newest `recent()` tokens stays.
     let clear = if clear { (cut..n).rev().find(|&k| full[k] >= recent()).unwrap_or(cut) } else { cut };
@@ -1373,19 +1401,19 @@ mod tests {
     fn summary_request_appends_to_the_last_turn() {
         let req = Request {
             model: "m".into(),
-            messages: vec![user("a"), json!({"role": "user", "content": [{"type": "tool_result", "call_id": "t1", "content": "ok"}]})],
+            messages: vec![user("a"), json!({"role": "assistant", "content": [{"type": "tool_call", "id": "t1", "name": "READ", "input": {}}]}), json!({"role": "user", "content": [{"type": "tool_result", "call_id": "t1", "content": "ok"}]})],
             ..Default::default()
         };
         let r = summary_request(req.clone(), "SUMMARIZE");
         let body = crate::api::claude_body(&r);
         let msgs = body["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 2, "the prefix stays as sent");
-        assert_eq!(msgs[1]["content"][0]["content"], "ok");
-        assert_eq!(msgs[1]["content"][1]["text"], "SUMMARIZE");
+        assert_eq!(msgs.len(), 3, "the prefix stays as sent");
+        assert_eq!(msgs[2]["content"][0]["content"], "ok");
+        assert_eq!(msgs[2]["content"][1]["text"], "SUMMARIZE");
         // The breakpoint stays on the copied request's last block, none on
         // the instruction.
-        assert!(msgs[1]["content"][0].get("cache_control").is_some());
-        assert_eq!(msgs[1]["content"][1].get("cache_control"), None);
+        assert!(msgs[2]["content"][0].get("cache_control").is_some());
+        assert_eq!(msgs[2]["content"][1].get("cache_control"), None);
         // A view truncated after an answer gets its own user turn.
         let r = summary_request(Request { messages: vec![user("a"), reply("b")], ..Default::default() }, "S");
         assert_eq!(crate::api::claude_body(&r)["messages"][2]["role"], "user");

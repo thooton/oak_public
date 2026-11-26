@@ -66,6 +66,9 @@ pub(crate) fn fork(
     // A source stopped mid-turn leaves calls without results, which the API
     // refuses.
     agent::answer_lost_calls(&mut c);
+    // Its Quick thread is its own, a new one (no `quick_session`): Quick is
+    // sent the whole conversation there, not only what it didn't write.
+    agent::quick_replies_elsewhere(&mut c);
     Some(c)
 }
 

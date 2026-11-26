@@ -975,7 +975,8 @@ pub fn claude_body(req: &crate::oak::Request) -> Value {
     body["system"] = system;
     // The client ships this with adaptive thinking: it never clears earlier
     // thinking out of the context.
-    if req.thinking {
+    // (As the body has it: off for a turn another provider began.)
+    if body["thinking"]["type"] != "disabled" {
         body["context_management"] = json!({"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]});
     }
     if tail.is_null() {
@@ -2113,7 +2114,7 @@ mod tests {
             system: "You are Oak.".into(),
             messages: vec![
                 json!({"role": "user", "content": [{"type": "text", "text": "hi"}]}),
-                json!({"role": "assistant", "content": [{"type": "text", "text": "hello"}]}),
+                json!({"role": "assistant", "content": [{"type": "reasoning", "text": "hm", "sig": "S", "by": "claude"}, {"type": "text", "text": "hello"}, {"type": "tool_call", "id": "t1", "name": "READ", "input": {}}]}),
                 json!({"role": "user", "content": [{"type": "tool_result", "call_id": "t1", "content": "ok"}]}),
             ],
             tools: vec![
