@@ -1814,12 +1814,16 @@ fn repo_snapshot(root: Option<&str>) -> Option<String> {
     }
     let root = std::path::Path::new(root);
     let git = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .output()
-            .ok()?;
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(root).args(args);
+        // Eight of these run as a session starts: without this, each one
+        // flashes a console window up on Windows.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = cmd.output().ok()?;
         out.status
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -2255,6 +2259,12 @@ struct Blocks {
     /// Until the briefing's file is read, only reads of it run.
     gate: Option<Gate>,
     count: crate::nodeclub::ThinkCount,
+    /// The latest `usage` the stream gave: OpenRouter-style streams send it
+    /// in a chunk of its own after the one with the `finish_reason`.
+    usage: Option<Value>,
+    /// The stop reason, from the `finish_reason`; sent, with the usage, as
+    /// the stream ends (`end`).
+    stop: Option<&'static str>,
 }
 
 impl Blocks {
@@ -2265,11 +2275,14 @@ impl Blocks {
     }
 
     /// One chunk of the reply as the Oak events it brings: blocks that
-    /// open and close, and at its `finish_reason` the usage and stop reason.
+    /// open and close (the usage and stop reason come from `end`).
     fn feed(&mut self, ev: &Value) -> Vec<Event> {
         let mut out: Vec<Event> = Vec::new();
         if let Some(id) = ev["id"].as_str().filter(|i| !i.is_empty()) {
             self.message_id = Some(id.to_string());
+        }
+        if ev["usage"].is_object() {
+            self.usage = Some(ev["usage"].clone());
         }
         for choice in ev["choices"].as_array().into_iter().flatten() {
             let d = &choice["delta"];
@@ -2350,36 +2363,46 @@ impl Blocks {
                 let calls = !self.tools.is_empty() || choice["finish_reason"] == "tool_calls";
                 self.tool_calls = calls;
                 close_all(self, &mut out);
-                let stop = match choice["finish_reason"].as_str().unwrap_or("stop") {
+                self.stop = Some(match choice["finish_reason"].as_str().unwrap_or("stop") {
                     "length" => oak::stop::MAX_TOKENS,
                     "content_filter" => oak::stop::REFUSAL,
                     _ if calls => oak::stop::TOOL_CALLS,
                     _ => oak::stop::END,
-                };
-                let u = &ev["usage"];
-                let input = u["prompt_tokens"].as_u64().unwrap_or(0);
-                let cached = u["prompt_tokens_details"]["cached_tokens"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .min(input);
-                let output = u["completion_tokens"].as_u64().unwrap_or(0);
-                let thought = self
-                    .count
-                    .tokens(crate::nodeclub::reported_thinking(u), output);
-                out.push(Event::Usage(oak::Usage {
-                    input: input - cached,
-                    cache_read: cached,
-                    output,
-                    reasoning: (thought > 0).then_some(thought),
-                    ..Default::default()
-                }));
-                out.push(Event::Stop {
-                    reason: stop.into(),
-                    detail: None,
                 });
             }
         }
         out
+    }
+
+    /// The stream ended: the usage (the last one it gave) and the stop
+    /// reason, when the reply finished.
+    fn end(&mut self) -> Vec<Event> {
+        let Some(stop) = self.stop.take() else {
+            return vec![];
+        };
+        let u = self.usage.take().unwrap_or(Value::Null);
+        let input = u["prompt_tokens"].as_u64().unwrap_or(0);
+        let cached = u["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(input);
+        let output = u["completion_tokens"].as_u64().unwrap_or(0);
+        let thought = self
+            .count
+            .tokens(crate::nodeclub::reported_thinking(&u), output);
+        vec![
+            Event::Usage(oak::Usage {
+                input: input - cached,
+                cache_read: cached,
+                output,
+                reasoning: (thought > 0).then_some(thought),
+                ..Default::default()
+            }),
+            Event::Stop {
+                reason: stop.into(),
+                detail: None,
+            },
+        ]
     }
 }
 
@@ -2506,6 +2529,11 @@ fn stream_once(body: Request, tx: Sender<Sse>, attempt: u8) {
     };
     for line in std::io::BufReader::new(resp).lines() {
         let Ok(line) = line else {
+            // After the finish_reason, a dropped connection only loses the
+            // trailing usage chunk or [DONE]: the reply ends as it is.
+            if b.finished {
+                break;
+            }
             return drop(tx.send(Sse::Err("Stream broke.".into())));
         };
         let Some(data) = line.strip_prefix("data:") else {
@@ -2554,12 +2582,14 @@ fn stream_once(body: Request, tx: Sender<Sse>, attempt: u8) {
     if !b.started {
         return drop(tx.send(Sse::Err("Stream ended before the reply began".into())));
     }
-    if !b.finished {
-        let mut out = vec![];
+    let mut out = vec![];
+    if b.finished {
+        out = b.end();
+    } else {
         close_all(&mut b, &mut out);
-        for v in out {
-            let _ = tx.send(Sse::Event(v));
-        }
+    }
+    for v in out {
+        let _ = tx.send(Sse::Event(v));
     }
     if b.finished {
         // One step per model reply, with the response's own id, as the CLI
@@ -2886,6 +2916,31 @@ mod tests {
         read_part(&mut b, 2, 4, lines);
         assert!(Gate::of(&b).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thinking_tokens_come_from_the_usage_after_the_finish() {
+        let mut b = Blocks::default();
+        for t in ["Let", " me", " think", " this", " through"] {
+            b.feed(&json!({"choices": [{"delta": {"reasoning": t}}]}));
+        }
+        b.feed(&json!({"choices": [{"delta": {"content": "Done."}}]}));
+        let at_finish = b.feed(&json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}));
+        assert!(!at_finish.iter().any(|e| matches!(e, Event::Usage(_))), "{at_finish:?}");
+        // OpenRouter-style: the usage in a chunk of its own, after the finish.
+        b.feed(&json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 900, "completion_tokens_details": {"reasoning_tokens": 812}}}));
+        let out = b.end();
+        let Event::Usage(u) = &out[0] else { panic!("{out:?}") };
+        assert_eq!((u.output, u.reasoning), (900, Some(812)));
+        assert!(matches!(&out[1], Event::Stop { reason, .. } if reason == oak::stop::END));
+        // No reasoning_tokens: the output shared out by characters, not the
+        // number of streamed chunks (5).
+        let mut b = Blocks::default();
+        b.feed(&json!({"choices": [{"delta": {"reasoning": "a".repeat(300)}}]}));
+        b.feed(&json!({"choices": [{"delta": {"content": "b".repeat(100)}, "finish_reason": "stop"}]}));
+        b.feed(&json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 80}}));
+        let Event::Usage(u) = &b.end()[0] else { panic!() };
+        assert_eq!(u.reasoning, Some(60));
     }
 
     #[test]
