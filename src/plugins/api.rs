@@ -802,6 +802,17 @@ impl HostApi for Oak {
         give_result(result.unwrap_or_else(|| Err("Oak's window isn't available for a private browser.".into())).map(|()| String::new()), out, out_user)
     }
 
+    unsafe extern "C" fn app_open_background_browser(url: OakStr, out: OakSink, user: *mut c_void) -> bool {
+        let result = super::context().and_then(|ctx| app(|a| a.plugin_open_background_browser(&ctx, str_of(url))));
+        give_result(result.unwrap_or_else(|| Err(NO_WINDOW.into())), out, user)
+    }
+
+    unsafe extern "C" fn background_browser_command(handle: OakStr, request: OakStr, out: OakSink, user: *mut c_void) -> bool {
+        let result = serde_json::from_str(str_of(request)).map_err(|_| "Invalid browser command.".to_string())
+            .and_then(|command| crate::browser::automation::command(str_of(handle), command));
+        give_result(result, out, user)
+    }
+
     unsafe extern "C" fn app_local_form(ui: *mut OakUi) {
         let (ui, t) = (ui_of(ui), theme());
         app(|a| a.local_rows(ui, &t));

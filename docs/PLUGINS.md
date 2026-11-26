@@ -185,6 +185,11 @@ What a plugin works with:
   again. A conversation started from `NewConversation` may name a folder, model, provider, effort
   and chat of its own, so a plugin can carry work on where another conversation was, on the model
   it ran.
+- **`App::open_background_browser`** (interface version 14) opens a temporary headless Chromium
+  session for a Home plugin with its own form. On a worker, read accessibility labels and send
+  native input through `oak_sdk::browser::Browser`. Check the observed origin before sending
+  credentials. Browser input uses the same Chromium commands as the `BROWSER` tool. Oak closes
+  the session when the user leaves the page.
 - **`App::private_browser`** (interface version 13) draws Oak's browser inside a Home plugin
   page. The user controls it directly. The plugin supplies an HTTPS entry URL, but gets no
   page content, input, or cookies. The browser uses a temporary profile and closes when the

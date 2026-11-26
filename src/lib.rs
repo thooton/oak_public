@@ -416,6 +416,7 @@ struct App {
     plugin_page: String,
     /// The private browser, kept only while its plugin page is shown.
     private_browser: Option<browser_view::PrivatePage>,
+    background_browser: Option<browser::automation::Lease>,
     /// What Home's conversation search narrows the list to (not kept).
     chat_filter: String,
     /// Home's menu (the box with the conversations and the accounts) is
@@ -873,6 +874,9 @@ impl App {
         }
         if self.private_browser.as_ref().is_some_and(|b| self.page != Page::Plugin || b.owner != self.plugin_page) {
             self.private_browser = None;
+        }
+        if self.background_browser.as_ref().is_some_and(|b| self.page != Page::Plugin || b.owner != self.plugin_page) {
+            self.background_browser = None;
         }
     }
     /// The chats page: the side chat's pane right of the chat and its

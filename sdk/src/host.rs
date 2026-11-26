@@ -220,6 +220,8 @@ pub struct Conversation {
 pub struct Activity {
     /// "home", "chats", "settings", "usage" or "plugin" (a plugin's page).
     pub page: String,
+    /// The active Home plugin page, by id, if there is one.
+    pub plugin_page: Option<String>,
     /// Home's menu is open.
     pub menu: bool,
     /// Where Home's menu is, when it is open: x0, y0, x1, y1.
@@ -331,7 +333,7 @@ pub fn has_host() -> bool {
 }
 
 /// What a call that can fail answered: its text, or why it failed.
-fn checked(call: impl FnOnce(OakSink, *mut c_void) -> bool) -> Result<String, String> {
+pub(crate) fn checked(call: impl FnOnce(OakSink, *mut c_void) -> bool) -> Result<String, String> {
     let (ok, text) = text_from(call);
     if ok { Ok(text) } else { Err(text) }
 }
@@ -600,6 +602,12 @@ pub trait App {
     fn private_browser(&mut self, _ui: &mut Ui, _url: &str) -> Result<(), String> {
         Err("This window cannot show a private browser.".into())
     }
+    /// Starts an isolated background Chromium session from a Home plugin
+    /// page (interface 14). Start on a user action and do browser operations
+    /// on a worker. The host discards the session when the page closes.
+    fn open_background_browser(&mut self, _url: &str) -> Result<crate::browser::Browser, String> {
+        Err("This window cannot open a background browser.".into())
+    }
     /// Draws a transcript the plugin has, as a conversation's is drawn,
     /// read-only. `key` is its tab; `version` changes when the transcript
     /// does (`make` is called only then); `tail` draws what follows the
@@ -823,6 +831,11 @@ impl App for Window {
     fn private_browser(&mut self, ui: &mut Ui, url: &str) -> Result<(), String> {
         self.settle();
         checked(|out, user| unsafe { (api().app_private_browser)(ui.as_raw(), s(url), out, user) }).map(|_| ())
+    }
+
+    fn open_background_browser(&mut self, url: &str) -> Result<crate::browser::Browser, String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_open_background_browser)(s(url), out, user) }).map(crate::browser::Browser::new)
     }
 
     fn transcript(&mut self, ui: &mut Ui, key: &str, version: u64, make: &mut dyn FnMut() -> Chat, tail_sig: u64, tail: &mut dyn FnMut(&mut Ui)) {

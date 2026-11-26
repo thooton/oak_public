@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 13
+#define OAK_API_VERSION 14
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -2175,6 +2175,20 @@ struct OakApi {
      * True when the view was drawn; false gives the reason to `out`.
      */
     bool (*app_private_browser)(OakUi *ui, OakStr url, OakSink out, void *out_user);
+
+    /* Starts a private background Chromium session at an HTTPS URL.
+     * Call from a Home plugin page on the UI thread. True: `out` got
+     * the session handle; false: a reason. The page owns the session.
+     */
+    bool (*app_open_background_browser)(OakStr url, OakSink out, void *user);
+
+    /* Runs one session command (observe, fill, click, close), as JSON.
+     * Use a worker except for close. Observations contain accessibility
+     * labels and node ids, not field values. Input uses native Chromium
+     * events on a node from that document. True: `out` got the result;
+     * false: a reason.
+     */
+    bool (*background_browser_command)(OakStr handle, OakStr request, OakSink out, void *user);
 };
 
 /* Text from a C string, and from a literal. */

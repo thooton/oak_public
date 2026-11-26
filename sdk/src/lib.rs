@@ -36,6 +36,7 @@
 pub use serde_json;
 
 pub mod abi;
+pub mod browser;
 pub mod chat;
 pub mod cloud;
 pub mod egui;

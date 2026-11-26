@@ -19,7 +19,9 @@
 //! conversations (one browser at a time on each), and manage its cookies,
 //! site data, emulation and what it records (`state.rs`).
 
+pub(crate) mod automation;
 pub(crate) mod bridge;
+mod native_input;
 mod state;
 
 pub(crate) use state::model_profiles;
@@ -346,8 +348,12 @@ fn open_with(conv: &str, ctx: &egui::Context, profile: PathBuf, name: Option<Str
 
 /// A private browser for a plugin page, never addressable as a conversation.
 pub(crate) fn open_private(ctx: &egui::Context, url: String) -> Arc<Instance> {
+    open_isolated(ctx, url, ":private-browser:")
+}
+
+fn open_isolated(ctx: &egui::Context, url: String, prefix: &str) -> Arc<Instance> {
     let id = format!("{:032x}", rand::random::<u128>());
-    let key = format!(":private-browser:{id}");
+    let key = format!("{prefix}{id}");
     open_on(&key, ctx, private_profiles_dir().join(&id), None, Default::default(), None, Some(url))
         .expect("a new private profile has no other owner")
 }
@@ -2128,31 +2134,24 @@ const AT_POINT_JS: &str = r#"(() => {
   return brief(k || el);
 })()"#;
 
-/// Focuses element __N__ for typing, its content selected so typing
-/// replaces it; a `<select>` instead picks the option reading __TEXT__.
-const FOCUS_JS: &str = r#"(() => {
+/// Resolve a BROWSER ref without changing focus or the DOM.
+const INPUT_REF_JS: &str = r#"(() => { __HELPERS__ return refEl(__N__); })()"#;
+
+/// Pick a native select option by label or value (not a text field).
+const PICK_JS: &str = r#"(() => {
   __HELPERS__
   try {
     const el = refEl(__N__);
     const want = __TEXT__;
-    if (el.localName === 'select') {
-      const opts = Array.from(el.options);
-      const w = clean(want).toLowerCase();
-      const o = opts.find((o) => clean(o.text).toLowerCase() === w) || opts.find((o) => o.value === want) || opts.find((o) => clean(o.text).toLowerCase().includes(w));
-      if (!o) return { error: 'Element __N__ is a select without an option reading ' + JSON.stringify(want) + ' (it has: ' + opts.map((o) => clean(o.text)).slice(0, 30).join(' | ') + ').' };
-      el.focus();
-      el.value = o.value;
-      o.selected = true;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return { picked: true, desc: brief(el) };
-    }
-    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const opts = Array.from(el.options || []);
+    const w = clean(want).toLowerCase();
+    const o = opts.find((o) => clean(o.text).toLowerCase() === w) || opts.find((o) => o.value === want) || opts.find((o) => clean(o.text).toLowerCase().includes(w));
+    if (!o) return { error: 'Element __N__ is a select without an option reading ' + JSON.stringify(want) + ' (it has: ' + opts.map((o) => clean(o.text)).slice(0, 30).join(' | ') + ').' };
     el.focus();
-    if (typeof el.select === 'function' && (el.localName === 'input' || el.localName === 'textarea')) el.select();
-    else if (el.isContentEditable) { const d = el.ownerDocument, r = d.createRange(); r.selectNodeContents(el); const s = d.defaultView.getSelection(); s.removeAllRanges(); s.addRange(r); }
-    const a = deepActive();
-    if (a !== el && !(el.contains && el.contains(a))) return { error: 'Element __N__ (' + brief(el) + ') didn\'t take the focus, so it can\'t be typed into; click it first, or pick another.' };
+    el.value = o.value;
+    o.selected = true;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
     return { desc: brief(el) };
   } catch (e) { return { error: e.message }; }
 })()"#;
@@ -2367,16 +2366,9 @@ impl Instance {
         self.agent_move(page, x, y, 0, GLIDE)?;
         // The ring shows as the pointer arrives.
         self.update_view(|v| v.agent_at = Some((egui::pos2(x as f32, y as f32), Instant::now() + GLIDE / 2)));
-        let bit = match button {
-            "right" => 2,
-            "middle" => 4,
-            _ => 1,
-        };
-        for n in 1..=clicks {
-            page.send("Input.dispatchMouseEvent", json!({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": bit, "clickCount": n}));
-            page.send("Input.dispatchMouseEvent", json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": 0, "clickCount": n}));
-        }
-        Ok(())
+        native_input::click_buttons(&|method, params| {
+            page.call_until(method, params, CALL_TIMEOUT, &|| self.dialog_open()).map_err(|e| e.to_string())
+        }, x, y, button, clicks)
     }
 
     /// A point the model names: element `ref_key` (from read; scrolled into
@@ -2683,19 +2675,29 @@ impl Instance {
     fn type_text(&self, page: &Cdp, input: &Value, navs: u64) -> Result<String, String> {
         let text = input["text"].as_str().ok_or("Missing `text`.")?;
         let mut target = String::new();
+        let call = |method: &str, params| page.call_until(method, params, CALL_TIMEOUT, &|| self.dialog_open()).map_err(|e| e.to_string());
         if let Some(n) = ref_of(input) {
-            let js = script(FOCUS_JS).replace("__N__", &n.to_string()).replace("__TEXT__", &serde_json::to_string(text).unwrap_or_default());
-            let r = self.eval(page, &js, CALL_TIMEOUT)?;
-            if let Some(e) = r["error"].as_str() {
-                return Err(e.to_string());
-            }
-            if r["picked"] == true {
+            let js = script(INPUT_REF_JS).replace("__N__", &n.to_string());
+            let r = call("Runtime.evaluate", json!({"expression": js, "objectGroup": "oak-type"}))?;
+            let object = r["result"]["objectId"].as_str().ok_or_else(|| format!("Element {n} is no longer available. Read the page again."))?;
+            let node = call("DOM.describeNode", json!({"objectId": object}));
+            page.send("Runtime.releaseObjectGroup", json!({"objectGroup": "oak-type"}));
+            let node = node?;
+            if node["node"]["localName"] == "select" {
+                let js = script(PICK_JS).replace("__N__", &n.to_string()).replace("__TEXT__", &serde_json::to_string(text).unwrap_or_default());
+                let r = self.eval(page, &js, CALL_TIMEOUT)?;
+                if let Some(e) = r["error"].as_str() {
+                    return Err(e.to_string());
+                }
                 self.settle(navs);
                 return Ok(self.report(&format!("Picked {text:?} in [{n} {}].", r["desc"].as_str().unwrap_or(""))));
             }
+            let id = node["node"]["backendNodeId"].as_u64().ok_or("The element is unavailable.")?;
+            native_input::focus(&call, id)?;
+            native_input::select_all(&call)?;
             target = format!(" into [{n}]");
         }
-        page.call("Input.insertText", json!({"text": text})).map_err(|e| e.to_string())?;
+        native_input::insert(&call, text)?;
         std::thread::sleep(Duration::from_millis(100));
         let now = self.eval(page, &script(FOCUSED_JS), CALL_TIMEOUT).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
         self.settle(navs);

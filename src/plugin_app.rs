@@ -52,6 +52,20 @@ impl App {
         Ok(())
     }
 
+    pub(crate) fn plugin_open_background_browser(&mut self, ctx: &egui::Context, url: &str) -> Result<String, String> {
+        if self.page != Page::Plugin {
+            return Err("Open the browser from a Home plugin page.".into());
+        }
+        let url = reqwest::Url::parse(url).ok().filter(|u| {
+            u.scheme() == "https" && u.has_host() && u.username().is_empty() && u.password().is_none()
+        }).ok_or("A background browser needs an HTTPS entry URL without credentials.")?;
+        self.background_browser = None;
+        let browser = browser::automation::Lease::new(ctx, self.plugin_page.clone(), url.to_string());
+        let handle = browser.handle().to_string();
+        self.background_browser = Some(browser);
+        Ok(handle)
+    }
+
     /// Shows Settings; its X comes back to what was shown.
     pub(crate) fn plugin_go_settings(&mut self) {
         if self.page != Page::Settings {
@@ -162,6 +176,7 @@ impl App {
                 Page::Plugin => "plugin",
             }
             .into(),
+            plugin_page: (self.page == Page::Plugin).then(|| self.plugin_page.clone()),
             menu: home && self.home_menu,
             menu_rect: if home && self.home_menu { rect(self.home_menu_rect) } else { None },
             buttons_rect: if home { rect(self.home_buttons_rect) } else { None },

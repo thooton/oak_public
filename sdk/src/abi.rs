@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 13;
+pub const OAK_API_VERSION: u32 = 14;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -2063,6 +2063,20 @@ c_api! {
     /// Its temporary session ends when the page closes or changes URL here.
     /// True when the view was drawn; false gives the reason to `out`.
     fn app_private_browser(ui: *mut OakUi, url: OakStr, out: OakSink, out_user: *mut c_void) -> bool;
+
+    // Version 14: background Chromium.
+
+    /// Starts a private background Chromium session at an HTTPS URL.
+    /// Call from a Home plugin page on the UI thread. True: `out` got
+    /// the session handle; false: a reason. The page owns the session.
+    fn app_open_background_browser(url: OakStr, out: OakSink, user: *mut c_void) -> bool;
+
+    /// Runs one session command (observe, fill, click, close), as JSON.
+    /// Use a worker except for close. Observations contain accessibility
+    /// labels and node ids, not field values. Input uses native Chromium
+    /// events on a node from that document. True: `out` got the result;
+    /// false: a reason.
+    fn background_browser_command(handle: OakStr, request: OakStr, out: OakSink, user: *mut c_void) -> bool;
 }
 
 /// The C header: everything declared above, in C.
