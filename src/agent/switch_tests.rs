@@ -609,6 +609,42 @@ fn reverting_another_providers_work_keeps_quicks_thread() {
     assert_eq!(written_by(&c.messages[1]), Some(api::Provider::Quick.id()));
 }
 
+/// A long conversation is reverted (and forked) at once: marking Quick's
+/// replies as another thread's changes them in one pass, not one message at
+/// a time (each of which re-read everything after it, under the
+/// conversation's lock, which froze the window).
+#[test]
+fn reverting_a_long_quick_conversation_is_quick() {
+    let mut messages = vec![];
+    for i in 0..3000 {
+        let mut ask = user(&format!("ask {i}"));
+        if i % 7 == 0 {
+            ask["content"][0][crate::quick::STEERED_KEY] = json!(true);
+        }
+        messages.push(ask);
+        let blocks = (0..12).map(|j| oak::text(&format!("step {i}.{j}"))).collect();
+        messages.push(reply(if i % 2 == 0 { api::Provider::Quick } else { api::Provider::Claude }, blocks));
+    }
+    let (w, s) = idle_worker("switch-revert-long", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        messages: messages.into(),
+        ..Default::default()
+    });
+    let id = s.conv.lock().unwrap().id.clone();
+    crate::rotation::used(api::Provider::Quick, &id, "revert-long-account", 0, api::now_ms());
+    let was = s.conv.lock().unwrap().messages[5000]["content"][0].clone();
+    let t = Instant::now();
+    w.apply_revert(&RevertTo::Block(5000, 0, was));
+    let took = t.elapsed();
+    let c = s.conv.lock().unwrap();
+    assert_eq!(c.messages.len(), 5000);
+    assert!(c.quick_session.is_some());
+    assert_eq!(written_by(&c.messages[1]), Some(QUICK_ELSEWHERE));
+    assert!(c.messages[0]["content"][0].get(crate::quick::STEERED_KEY).is_none());
+    assert!(took < Duration::from_secs(2), "the revert took {took:?}");
+}
+
 /// Quick's modes offer their own effort levels wherever a model is picked.
 #[test]
 fn quick_modes_offer_their_own_efforts() {

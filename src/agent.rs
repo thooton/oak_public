@@ -3377,31 +3377,39 @@ const QUICK_ELSEWHERE: &str = "quick-other-thread";
 pub(crate) fn quick_replies_elsewhere(c: &mut Conversation) {
     let quick = api::Provider::Quick.id();
     c.messages.load_all();
-    let mut any = false;
     // The messages Quick took in mid-turn (`quick::STEERED_KEY`) are in the
     // old thread only: the new one is sent them with the rest.
+    let steered = |m: &Value| {
+        m["role"] == "user"
+            && m["content"].as_array().is_some_and(|b| b.iter().any(|b| b.get(crate::quick::STEERED_KEY).is_some()))
+    };
+    let by_quick = |m: &Value| {
+        m["role"] == "assistant" && m["content"].as_array().is_some_and(|b| b.iter().any(|b| b[BY_KEY] == quick))
+    };
+    // Read first, then change them all in one pass, and only when there is
+    // something to change: each `messages[k]` taken to change re-reads every
+    // message after the last one changed (`Messages::changed`), which made a
+    // revert or fork of a long conversation quadratic, and it ran under the
+    // conversation's lock, so the window froze.
+    let (mut any_steered, mut any) = (false, false);
     for k in 0..c.messages.len() {
-        if c.messages[k]["role"] != "user" {
-            continue;
-        }
-        if let Some(blocks) = c.messages[k]["content"].as_array_mut() {
-            for b in blocks.iter_mut() {
-                if let Some(o) = b.as_object_mut() {
+        let m = &c.messages[k];
+        any_steered |= steered(m);
+        any |= by_quick(m);
+    }
+    if any_steered || any {
+        for m in c.messages.iter_mut() {
+            let (s, q) = (steered(m), by_quick(m));
+            if !(s || q) {
+                continue;
+            }
+            for b in m["content"].as_array_mut().into_iter().flatten() {
+                if s && let Some(o) = b.as_object_mut() {
                     o.remove(crate::quick::STEERED_KEY);
                 }
-            }
-        }
-    }
-    for k in 0..c.messages.len() {
-        let by_quick = c.messages[k]["role"] == "assistant"
-            && c.messages[k]["content"].as_array().is_some_and(|b| b.iter().any(|b| b[BY_KEY] == quick));
-        if !by_quick {
-            continue;
-        }
-        any = true;
-        if let Some(blocks) = c.messages[k]["content"].as_array_mut() {
-            for b in blocks.iter_mut().filter(|b| b[BY_KEY] == quick) {
-                b[BY_KEY] = json!(QUICK_ELSEWHERE);
+                if q && b[BY_KEY] == quick {
+                    b[BY_KEY] = json!(QUICK_ELSEWHERE);
+                }
             }
         }
     }
@@ -3419,7 +3427,8 @@ fn quick_holds(c: &mut Conversation, from: usize) -> bool {
         return true;
     }
     let quick = api::Provider::Quick.id();
-    c.messages.load_all();
+    // (Only what the revert takes out is read.)
+    c.messages.load_from(from.min(c.messages.len()));
     (from..c.messages.len()).any(|k| written_by(&c.messages[k]) == Some(quick))
 }
 
