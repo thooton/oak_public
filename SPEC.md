@@ -776,7 +776,11 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   message or one of the model's items also offers Fork from here, which copies the conversation up
   to just before it, as Revert to before this goes back to, and leaves the source as it is. Files
   in the working folder are shared, as a side chat's; nothing links a fork to its source, so
-  deleting either leaves the other.
+  deleting either leaves the other. A fork is made off the window thread (`fork::make`): the source
+  is locked only while it is copied, the rest (going back to the point, mending lost calls, Quick's
+  replies marked as another thread's) is done on the copy, it is saved, and the window opens it at
+  its next frame (`App::open_made`), so a long conversation's fork never stops the window
+  (`forking_a_long_saved_quick_conversation_is_quick`).
 - Rewrites (`src/rewrites.rs`): a plugin's rewriter (`Rewriter`; Unslop, a private plugin)
   has replies, and optionally thinking and notes, rewritten for the user; the model's context
   keeps its own text. Oak keeps the rewrites in their blocks (under the rewriter's key, which
@@ -938,7 +942,9 @@ transcript and message box. The usual attachment, pause and ultrapause buttons s
 The first opening snapshots the saved conversation (including smart context, notes, the prefix as
 sent and the scratchpad it names) and adds:
 'The session was forked to be placed in a "side chat". This is only a chat for asking questions or requesting small changes, so do not continue work as you were before it was forked. Only make changes to the project if the user explicitly requests so.'
-It waits for a question; the original keeps working independently. A side chat shares the working
+It waits for a question; the original keeps working independently. The snapshot is made off the
+window thread, as a fork is (`fork::make`), and the pane shows the side chat once it is made; clicks
+meanwhile make no second one. A side chat shares the working
 folder, so any explicitly requested file changes are real, but it inherits no running tasks,
 subagents, goal or heartbeats. Closing its pane retains it and its draft; Ctrl+W does the same
 while the side chat has focus. The bubble reopens it, even after restarting Oak (drafts last only
@@ -1218,10 +1224,15 @@ row, "the conversation so far (AWS Quick catching up)", which opens to the read.
 from the revert point on, or anything while the conversation is on Quick) moves the conversation to
 a fresh Quick thread on the same login (`agent::quick_thread_reverted`): Quick's service has no way
 to take messages out of a thread (its app's `edit_message` frame replaces one user message by the
-id the app gave it, which Oak doesn't keep), and its agent would go on from what was reverted. Quick's
-earlier replies count as another thread's (`quick_replies_elsewhere`, which also clears the
-messages it took in mid-turn), so the fresh thread is sent the conversation as it is after the
-revert, with Oak's briefing (`a_revert_moves_quick_to_a_fresh_thread`). Reverting only what other
+id the app gave it, which Oak doesn't keep), and its agent would go on from what was reverted. The
+fresh thread says where it starts (`recovery::Session::from`: the number of messages left), and
+everything before that counts as another thread's: Quick's replies there (`agent::unseen_since`) and
+the messages it took in mid-turn there (`agent::for_provider_since`), so the fresh thread is sent the
+conversation as it is after the revert, with Oak's briefing (`a_revert_moves_quick_to_a_fresh_thread`).
+No message is changed for it, so a revert of a long conversation reads and saves only what it takes
+out (`reverting_a_long_saved_quick_conversation_is_quick`); a later revert to before that point
+brings it back with what is left. A fork or side chat marks Quick's replies as another thread's
+(`quick_replies_elsewhere`, on its copy, off the window thread). Reverting only what other
 providers wrote since Quick's last reply keeps its thread.
 
 **A message typed while Quick works goes into its turn**, as Quick's app sends one: a `user_message`

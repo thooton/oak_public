@@ -159,7 +159,7 @@ fn a_login_move_is_briefed_until_a_message_gets_there() {
     assert!(oak_preface(&r, conv).is_some(), "again, while no message got there");
     // A fresh thread of its own (`recovery`) is briefed once, as before.
     let mut fresh = r.clone();
-    fresh.quick_session = Some(recovery::Session { account: "a".into(), thread: "switch-moved-fresh".into() });
+    fresh.quick_session = Some(recovery::Session { account: "a".into(), thread: "switch-moved-fresh".into(), ..Default::default() });
     assert!(oak_preface(&fresh, "switch-moved-fresh").is_some());
     assert!(oak_preface(&fresh, "switch-moved-fresh").is_none());
     moved_in(conv);

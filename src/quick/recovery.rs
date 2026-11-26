@@ -30,10 +30,17 @@ pub(crate) const DEVICE_FRESH: &str = "[Oak] The previous AWS Quick thread could
 /// whole conversation until Quick replies on this one (`agent::unseen_by`).
 pub(crate) const FRESH_KEY: &str = "_oak_quick_fresh";
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Session {
     pub(crate) account: String,
     pub(crate) thread: String,
+    /// A thread a revert opened (`agent::quick_thread_reverted`) holds none
+    /// of the conversation's first `from` messages: Quick's replies among them
+    /// are another thread's, and so are the messages it took in mid-turn. (A
+    /// thread opened by a message says so on it instead, `FRESH_KEY`.) Kept
+    /// as a number, so a revert changes no message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) from: Option<usize>,
 }
 
 pub(crate) fn note_limit(account: &str) {
@@ -56,6 +63,7 @@ pub(crate) fn next_session(
     Some(Session {
         account,
         thread: hex_uuid(),
+        from: None,
     })
 }
 
@@ -67,6 +75,7 @@ pub(crate) fn fresh_session(conv: &str) -> Option<Session> {
     Some(Session {
         account,
         thread: hex_uuid(),
+        from: None,
     })
 }
 

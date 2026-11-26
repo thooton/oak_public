@@ -1668,6 +1668,12 @@ impl Worker {
         };
         if done && quick_had {
             quick_thread_reverted(&mut c);
+        } else if done {
+            // A thread a revert opened starts no later than what is left.
+            let n = c.messages.len();
+            if let Some(f) = c.quick_session.as_mut().and_then(|q| q.from.as_mut()) {
+                *f = (*f).min(n);
+            }
         }
         // Questions asked during a goal go too (with `Live::ask`).
         let asked = !std::mem::take(&mut c.pending_ask).is_null();
@@ -3437,14 +3443,23 @@ fn quick_holds(c: &mut Conversation, from: usize) -> bool {
 /// what Quick's agent reads, so it would go on from what was reverted: the
 /// conversation goes on in a fresh thread on the same account instead, sent
 /// the whole conversation as it is now, with Oak's briefing, until Quick
-/// replies there (`quick_replies_elsewhere`, `unseen_by`). Nothing is done for
-/// a conversation that never had a Quick thread (no seat).
+/// replies there (`unseen_by`, `for_provider`). The thread says where it
+/// starts (`Session::from`, the messages there are now) rather than marking
+/// Quick's earlier replies, so a revert changes no message and costs the same
+/// however long the conversation (`reverting_a_long_saved_quick_conversation_is_quick`).
+/// Nothing is done for a conversation that never had a Quick thread (no seat).
 pub(crate) fn quick_thread_reverted(c: &mut Conversation) {
-    let Some(next) = crate::quick::recovery::fresh_session(&c.id) else {
+    let Some(mut next) = crate::quick::recovery::fresh_session(&c.id) else {
         return;
     };
-    quick_replies_elsewhere(c);
+    next.from = Some(c.messages.len());
     c.quick_session = Some(next);
+}
+
+/// Where conversation `c`'s Quick thread starts, when a revert opened it
+/// (`recovery::Session::from`): none of the messages before it are in it.
+fn quick_opened(c: &Conversation) -> Option<usize> {
+    c.quick_session.as_ref().and_then(|q| q.from)
 }
 
 /// Marks each of a reply's blocks as written by `by`'s model.
@@ -3482,16 +3497,29 @@ fn written_by(m: &Value) -> Option<&str> {
 /// them), and the results of its own calls (it has those). Empty when it has
 /// seen everything, or nothing says otherwise (replies from before Oak
 /// marked them, with no reasoning to tell).
-fn unseen_by(
+#[cfg(test)]
+fn unseen_by(transcript: &[Value], messages: &[Value], provider: api::Provider, cut: usize) -> Vec<Value> {
+    unseen_since(transcript, messages, provider, cut, None)
+}
+
+/// `unseen_by`, for a thread a revert opened before transcript message
+/// `opened` (`quick_opened`): Quick's replies before it are another thread's.
+fn unseen_since(
     transcript: &[Value],
     messages: &[Value],
     provider: api::Provider,
     cut: usize,
+    opened: Option<usize>,
 ) -> Vec<Value> {
     let n = transcript.len();
     let me = provider.id();
     let assistant = |k: &usize| transcript[*k]["role"] == "assistant";
-    let fresh = (cut..n).rev().find(|&k| opens_quick_thread(&transcript[k]));
+    let marked = (cut..n).rev().find(|&k| opens_quick_thread(&transcript[k]));
+    // The newer of the two: the message that opened it, or where a revert did.
+    let fresh = match (marked, opened.map(|b| b.min(n)).filter(|&b| b >= cut)) {
+        (Some(f), Some(b)) => Some(f.max(b)),
+        (f, b) => f.or(b),
+    };
     let mine = (fresh.unwrap_or(cut)..n)
         .rev()
         .filter(assistant)
@@ -3558,7 +3586,15 @@ fn unseen_by(
 ///
 /// A message left with nothing says so in a line, so the turn still has
 /// content. Borrowed as it is when nothing is left out.
+#[cfg(test)]
 fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow<'_, [Value]> {
+    for_provider_since(messages, provider, None)
+}
+
+/// `for_provider`, for a Quick thread a revert opened before transcript
+/// message `opened` (`quick_opened`): it has none of the messages Quick took
+/// in mid-turn before that, so they go to it as any others.
+fn for_provider_since(messages: &[Value], provider: api::Provider, opened: Option<usize>) -> std::borrow::Cow<'_, [Value]> {
     let quick = provider == api::Provider::Quick;
     let freebuff = provider == api::Provider::Freebuff;
     let foreign =
@@ -3575,7 +3611,10 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
     // the conversation (`unseen_by`).
     let fresh = if quick { fresh_thread_at(messages) } else { None };
     let steered = |k: usize, i: usize, b: &Value| {
-        quick && b.get(crate::quick::STEERED_KEY).is_some() && fresh.is_none_or(|f| (k, i) > f)
+        quick
+            && b.get(crate::quick::STEERED_KEY).is_some()
+            && fresh.is_none_or(|f| (k, i) > f)
+            && opened.is_none_or(|o| k >= o)
     };
     // What Oak tells Quick to get its own thread going again (ask for the
     // device, a fresh thread) means nothing to another provider's model,
@@ -3881,7 +3920,7 @@ fn memory_context(c: &Conversation) -> &str {
 /// the rolling view, fit for the model, with the context block.
 fn request_messages(c: &Conversation, messages: &[Value]) -> Vec<Value> {
     with_context(
-        c.rolling.view(&for_provider(messages, c.provider())),
+        c.rolling.view(&for_provider_since(messages, c.provider(), quick_opened(c))),
         memory_context(c),
     )
 }

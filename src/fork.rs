@@ -18,13 +18,19 @@ use super::*;
 
 /// A copy of `source` as conversation `id`, forking from just before `at`
 /// (`None`: at its end). `None` when `at` is no longer there: the source
-/// changed since the user asked.
+/// changed since the user asked. (The app makes one in two steps, `make`.)
+#[cfg(test)]
 pub(crate) fn fork(
     source: &Conversation,
     id: String,
     now: i64,
     at: Option<agent::RevertTo>,
 ) -> Option<Conversation> {
+    finish(copy(source, id, now), at)
+}
+
+/// What a fork takes of `source`: the part made while the source is locked.
+fn copy(source: &Conversation, id: String, now: i64) -> Conversation {
     let mut c = Conversation {
         id,
         title: fork_title(source),
@@ -54,6 +60,11 @@ pub(crate) fn fork(
     c.prefix.pin = None;
     // A swarm stays with its coordinator: the fork isn't in it.
     c.prefix.kits.retain(|k| k != "SWARM");
+    c
+}
+
+/// The rest of a fork, on the copy alone (the source's lock let go).
+fn finish(mut c: Conversation, at: Option<agent::RevertTo>) -> Option<Conversation> {
     if let Some(to) = at {
         let cut = match &to {
             agent::RevertTo::Block(msg, block, was) => agent::revert_to(&mut c, *msg, *block, was),
@@ -83,10 +94,70 @@ fn fork_title(source: &Conversation) -> String {
     }
 }
 
+/// A fork or side chat made off the window thread, for it to open.
+pub(crate) enum Made {
+    Fork(Conversation),
+    Side(Conversation),
+}
+
+static MADE: std::sync::Mutex<Vec<Made>> = std::sync::Mutex::new(vec![]);
+
+/// The sources whose side chat is being made, so a second click makes none.
+static MAKING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Runs `f` off the window thread: copying, mending and saving a long
+/// conversation takes a while, and the window must keep drawing meanwhile.
+/// (Tests run it at once, so what they open is there when the call returns.)
+fn off_thread(f: impl FnOnce() + Send + 'static) {
+    if cfg!(test) {
+        f();
+    } else {
+        std::thread::spawn(f);
+    }
+}
+
+/// Copies conversation `source` (holding its lock only for the copy), then,
+/// with no lock held, finishes the copy (`finish`), copies the source's REPL
+/// for Code Mode, saves it, and hands it to the window (`App::open_made`).
+pub(crate) fn make(
+    conv: std::sync::Arc<store::Shared>,
+    source: String,
+    ctx: &egui::Context,
+    copy: impl FnOnce(&Conversation) -> Conversation + Send + 'static,
+    finish: impl FnOnce(Conversation) -> Option<Made> + Send + 'static,
+) {
+    let ctx = ctx.clone();
+    off_thread(move || {
+        let copied = copy(&conv.lock().unwrap());
+        let made = finish(copied);
+        if let Some(Made::Fork(c) | Made::Side(c)) = &made {
+            if c.code_mode {
+                // Its REPL starts with the source's variables.
+                crate::code_mode::copy_snapshot(&source, &c.id);
+            }
+            c.save();
+        }
+        match made {
+            Some(m) => MADE.lock().unwrap_or_else(|e| e.into_inner()).push(m),
+            // (The source changed since the user asked: nothing is made.)
+            None => drop(MAKING.lock().unwrap_or_else(|e| e.into_inner()).remove(&source)),
+        }
+        ctx.request_repaint();
+    });
+}
+
+/// Whether `source`'s side chat is being made (`App::open_side_chat`); else
+/// it is marked as being made, and false.
+pub(crate) fn making_side_chat(source: &str) -> bool {
+    !MAKING.lock().unwrap_or_else(|e| e.into_inner()).insert(source.to_string())
+}
+
 impl App {
-    /// Forks conversation `source` and shows the fork: from just before
-    /// `at`, or at its end. What the source is doing carries on there alone.
-    /// Gives the fork's id, or None when the source changed since.
+    /// Forks conversation `source` and shows the fork, once it is made (off
+    /// the window thread, `make`): from just before `at`, or at its end. What
+    /// the source is doing carries on there alone. Gives the fork's id; none
+    /// is made when the source changed since.
     pub(crate) fn fork_conversation(
         &mut self,
         source: &str,
@@ -95,21 +166,31 @@ impl App {
     ) -> Option<String> {
         let now = api::now_ms();
         let id = format!("fork-{now}-{:016x}", rand::random::<u64>());
-        let c = fork(
-            &self.sessions.get(source)?.conv.lock().unwrap(),
-            id.clone(),
-            now,
-            at,
-        )?;
-        if c.code_mode {
-            // Its REPL starts with the source's variables.
-            crate::code_mode::copy_snapshot(source, &id);
-        }
-        c.save();
-        self.sessions
-            .insert(id.clone(), Session::start(c, ctx.clone()));
-        self.open(id.clone());
+        let conv = self.sessions.get(source)?.conv.clone();
+        let fork_id = id.clone();
+        make(conv, source.to_string(), ctx, move |s| copy(s, fork_id, now), move |c| finish(c, at).map(Made::Fork));
+        self.open_made(ctx);
         Some(id)
+    }
+
+    /// Opens the forks and side chats made since the last frame (`make`).
+    pub(crate) fn open_made(&mut self, ctx: &egui::Context) {
+        let made = std::mem::take(&mut *MADE.lock().unwrap_or_else(|e| e.into_inner()));
+        for m in made {
+            match m {
+                Made::Fork(c) => {
+                    let id = c.id.clone();
+                    self.sessions.insert(id.clone(), Session::start(c, ctx.clone()));
+                    self.open(id);
+                }
+                Made::Side(c) => {
+                    let (id, source) = (c.id.clone(), c.side_chat_of.clone().unwrap_or_default());
+                    MAKING.lock().unwrap_or_else(|e| e.into_inner()).remove(&source);
+                    self.sessions.insert(id.clone(), Session::start(c, ctx.clone()));
+                    self.show_side_chat(id);
+                }
+            }
+        }
     }
 }
 

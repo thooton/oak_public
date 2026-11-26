@@ -811,6 +811,8 @@ impl eframe::App for App {
         for (id, s) in agent::take_spawned() {
             self.sessions.insert(id, s);
         }
+        // Forks and side chats made off this thread since the last frame.
+        self.open_made(ui.ctx());
         self.refresh_account(ui.ctx());
         self.switch_draft();
         self.rename_dialog(ui.ctx(), &t);

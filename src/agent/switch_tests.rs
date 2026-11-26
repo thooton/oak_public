@@ -36,7 +36,7 @@ fn switch(s: &Session, p: api::Provider, m: &str) {
 #[test]
 fn alternating_quick_and_claude_keeps_every_request_whole() {
     use crate::quick::{QUIET_KEY, recovery};
-    let thread = recovery::Session { account: "switch-account".into(), thread: "switch-thread".into() };
+    let thread = recovery::Session { account: "switch-account".into(), thread: "switch-thread".into(), ..Default::default() };
     let (w, s) = idle_worker("switch-alternate", Conversation {
         provider: Some(api::Provider::Claude),
         model: CLAUDE.into(),
@@ -341,7 +341,7 @@ fn a_fork_sends_its_new_quick_thread_the_whole_conversation() {
             reply(api::Provider::Quick, vec![oak::text("Tests ported")]),
         ]
         .into(),
-        quick_session: Some(crate::quick::recovery::Session { account: "a".into(), thread: "source-thread".into() }),
+        quick_session: Some(crate::quick::recovery::Session { account: "a".into(), thread: "source-thread".into(), ..Default::default() }),
         ..Default::default()
     };
     let mut c = crate::fork::fork(&source, "switch-fork-copy".into(), 1, None).unwrap();
@@ -609,12 +609,9 @@ fn reverting_another_providers_work_keeps_quicks_thread() {
     assert_eq!(written_by(&c.messages[1]), Some(api::Provider::Quick.id()));
 }
 
-/// A long conversation is reverted (and forked) at once: marking Quick's
-/// replies as another thread's changes them in one pass, not one message at
-/// a time (each of which re-read everything after it, under the
-/// conversation's lock, which froze the window).
-#[test]
-fn reverting_a_long_quick_conversation_is_quick() {
+/// A long Quick conversation, as a file on disk: 3000 turns, every 7th ask
+/// one Quick took in mid-turn.
+fn long_saved_quick_conversation(name: &str) -> (std::path::PathBuf, Conversation) {
     let mut messages = vec![];
     for i in 0..3000 {
         let mut ask = user(&format!("ask {i}"));
@@ -625,24 +622,66 @@ fn reverting_a_long_quick_conversation_is_quick() {
         let blocks = (0..12).map(|j| oak::text(&format!("step {i}.{j}"))).collect();
         messages.push(reply(if i % 2 == 0 { api::Provider::Quick } else { api::Provider::Claude }, blocks));
     }
-    let (w, s) = idle_worker("switch-revert-long", Conversation {
+    let mem = Conversation {
         provider: Some(api::Provider::Quick),
         model: QUICK.into(),
         messages: messages.into(),
         ..Default::default()
-    });
+    };
+    let file = crate::store::conversations_dir().join(format!("unit-test-{name}-{}.json", api::now_ms()));
+    std::fs::write(&file, serde_json::to_vec(&mem).unwrap()).unwrap();
+    let read = crate::store::read_conversation(&file, &|_, _| {}).unwrap();
+    assert!(!read.messages.loaded(), "read from the file as it goes");
+    (file, read)
+}
+
+/// A long saved Quick conversation is reverted at once: no message changes
+/// (the fresh thread says where it starts, `recovery::Session::from`), only
+/// what the revert takes out is read, and the next request sends the fresh
+/// thread all that is left, the messages Quick took in mid-turn on the old
+/// thread too. It holds the conversation's lock, which the window waits on.
+#[test]
+fn reverting_a_long_saved_quick_conversation_is_quick() {
+    let (file, read) = long_saved_quick_conversation("revert-long");
+    let (w, s) = idle_worker("switch-revert-long", read);
     let id = s.conv.lock().unwrap().id.clone();
     crate::rotation::used(api::Provider::Quick, &id, "revert-long-account", 0, api::now_ms());
-    let was = s.conv.lock().unwrap().messages[5000]["content"][0].clone();
+    let was = s.conv.lock().unwrap().messages.read_range(5000, 5001)[0]["content"][0].clone();
     let t = Instant::now();
     w.apply_revert(&RevertTo::Block(5000, 0, was));
     let took = t.elapsed();
-    let c = s.conv.lock().unwrap();
-    assert_eq!(c.messages.len(), 5000);
-    assert!(c.quick_session.is_some());
+    {
+        let mut c = s.conv.lock().unwrap();
+        assert_eq!(c.messages.len(), 5000);
+        assert_eq!(c.quick_session.as_ref().and_then(|q| q.from), Some(5000));
+        assert!(c.messages.base() > 0, "the kept part wasn't read");
+        c.messages.push(user("Another ask"));
+    }
+    println!("revert of a saved 6000-message Quick conversation: {took:?}");
+    assert!(took < Duration::from_millis(500), "the revert took {took:?}");
+    let (req, ..) = w.request_body();
+    let unseen = all_text(&req.unseen);
+    assert!(unseen.contains("step 0.0") && unseen.contains("step 2498.11"), "the fresh thread gets it all");
+    assert!(unseen.contains("\"ask 0\""), "and what the old thread took in mid-turn");
+    assert_eq!(crate::quick::new_user_text(&req).as_deref(), Some("Another ask"));
+    let _ = std::fs::remove_file(&file);
+}
+
+/// A fork of a long saved Quick conversation: the copy (all the source's
+/// lock is held for) and the rest of it, timed; the app does both off the
+/// window thread (`fork::make`).
+#[test]
+fn forking_a_long_saved_quick_conversation_is_quick() {
+    let (file, read) = long_saved_quick_conversation("fork-long");
+    let t = Instant::now();
+    let c = crate::fork::fork(&read, "fork-long-test".into(), api::now_ms(), None).unwrap();
+    let took = t.elapsed();
+    println!("fork of a saved 6000-message Quick conversation: {took:?}");
+    assert_eq!(c.messages.len(), 6000);
     assert_eq!(written_by(&c.messages[1]), Some(QUICK_ELSEWHERE));
     assert!(c.messages[0]["content"][0].get(crate::quick::STEERED_KEY).is_none());
-    assert!(took < Duration::from_secs(2), "the revert took {took:?}");
+    assert!(took < Duration::from_secs(3), "the fork took {took:?}");
+    let _ = std::fs::remove_file(&file);
 }
 
 /// Quick's modes offer their own effort levels wherever a model is picked.

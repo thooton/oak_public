@@ -21,8 +21,14 @@ pub(crate) const CHAT_FORK_MESSAGE: &str = "The conversation was forked to be pl
 /// What the source sent (`crate::prefix`: its system prompt, which names its
 /// scratchpad, its session memory and context block, its tools and messages)
 /// the fork sends as it was, the fork instruction after it.
+#[cfg(test)]
 pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation {
-    let mut c = Conversation {
+    finish(copy(source, id, now))
+}
+
+/// What a side chat takes of `source`: the part made while it is locked.
+fn copy(source: &Conversation, id: String, now: i64) -> Conversation {
+    Conversation {
         id,
         title: format!("Side chat: {}", source.title),
         titled: true,
@@ -48,7 +54,11 @@ pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation 
         last_message_at: now,
         side_chat_of: Some(source.id.clone()),
         ..Default::default()
-    };
+    }
+}
+
+/// The rest of a side chat, on the copy alone (the source's lock let go).
+fn finish(mut c: Conversation) -> Conversation {
     agent::answer_lost_calls(&mut c);
     // Its Quick thread is its own, a new one, as a fork's is (`crate::fork`):
     // Quick is sent the whole conversation there. (Only the transcript's
@@ -71,20 +81,24 @@ impl App {
         })
     }
 
+    /// Shows `source`'s side chat, made first (off the window thread,
+    /// `fork::make`) when it has none: it shows once it is made.
     fn open_side_chat(&mut self, source: &str, ctx: &egui::Context) {
-        let id = self.side_chat_for(source).unwrap_or_else(|| {
-            let now = api::now_ms();
-            let id = format!("side-{now}-{:016x}", rand::random::<u64>());
-            let c = fork(&self.sessions[source].conv.lock().unwrap(), id.clone(), now);
-            if c.code_mode {
-                // Its REPL starts with the source's variables.
-                crate::code_mode::copy_snapshot(source, &id);
-            }
-            c.save();
-            self.sessions
-                .insert(id.clone(), Session::start(c, ctx.clone()));
-            id
-        });
+        if let Some(id) = self.side_chat_for(source) {
+            return self.show_side_chat(id);
+        }
+        let Some(conv) = self.sessions.get(source).map(|s| s.conv.clone()) else { return };
+        if crate::fork::making_side_chat(source) {
+            return;
+        }
+        let now = api::now_ms();
+        let id = format!("side-{now}-{:016x}", rand::random::<u64>());
+        crate::fork::make(conv, source.to_string(), ctx, move |s| copy(s, id, now), |c| Some(crate::fork::Made::Side(finish(c))));
+        self.open_made(ctx);
+    }
+
+    /// Shows side chat `id` in the pane.
+    pub(crate) fn show_side_chat(&mut self, id: String) {
         if self.side_chat.as_deref() != Some(&id) {
             self.side_hint = None;
             self.side_editing = None;

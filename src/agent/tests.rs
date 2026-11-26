@@ -589,7 +589,7 @@ fn a_quick_handoff_keeps_the_chat_and_seeds_a_fresh_thread() {
         ..Default::default()
     });
     let (id, parent) = { let c = s.conv.lock().unwrap(); (c.id.clone(), c.parent.clone()) };
-    let thread = crate::quick::recovery::Session { account: "test-next-account".into(), thread: "test-new-quick-thread".into() };
+    let thread = crate::quick::recovery::Session { account: "test-next-account".into(), thread: "test-new-quick-thread".into(), ..Default::default() };
     w.move_quick_thread(thread.clone(), QUICK_LIMIT_MARK.into(), crate::quick::recovery::LIMIT_FRESH);
     {
         let c = s.conv.lock().unwrap();

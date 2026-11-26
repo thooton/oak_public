@@ -606,7 +606,7 @@ impl Worker {
         // since it last replied goes with the request, so a switch to it
         // carries the conversation over.
         let unseen = if provider == api::Provider::Quick {
-            unseen_by(&c.messages, &messages, provider, cut)
+            unseen_since(&c.messages, &messages, provider, cut, super::quick_opened(&c))
         } else {
             // A Quick turn parked after a steer would go on generating on
             // Quick's server (its calls running) while another model works.
