@@ -1728,7 +1728,12 @@ fn oak_preface(r: &Request, thread: &str) -> Option<String> {
     if r.quick_session.is_none() && moving(&r.seat_conv()) {
         return Some(briefing(r));
     }
-    if !first || (r.quick_session.is_none() && quick_worked_here(r)) {
+    // (A fresh thread a handoff, revert or summary opened too: until Quick
+    // replies there, all of the conversation is what it lacks (`unseen`), so
+    // Quick's snippets don't count; after, it has been briefed there. Oak
+    // forgets which threads it briefed when it restarts, and a restart
+    // re-briefed such a thread on its next message.)
+    if !first || quick_worked_here(r) {
         return None;
     }
     Some(briefing(r))

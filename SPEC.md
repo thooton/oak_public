@@ -1143,7 +1143,9 @@ own system prompt as the request has it, notes included, in `<instructions_loade
 definitions in `<tools_loaded>`, so Quick's agent takes them as what it was loaded with rather
 than as the user's words, then the call syntax; later ones (mid-turn ones too) are the user's text alone. Quick keeps the
 thread's history, so the briefing never goes again: not when the prompt or tools change (notes,
-kits, the folder), not after Oak restarts (a thread Quick ran snippets in has had it), and the
+kits, the folder), not after Oak restarts (a thread Quick ran snippets in has had it, a fresh one
+a handoff, revert or summary opened too, once Quick replied there; before, all of the conversation
+is what it lacks, so its snippets don't count), and the
 `<system-reminder>` blocks a Generic-mode request adds of such changes are left out too
 (`user_message_tells_quick_how_to_call_oaks_tools`); a summary's request goes on a thread of
 its own, with the part it replaces and its instruction, unbriefed (smart context, above).
