@@ -475,7 +475,9 @@ can't read.
   A file that couldn't be uploaded is named on this device instead. Until Quick reads one, the
   first Oak call it makes is answered with a reminder to read them, once (`handoff::remind`).
   Reading them is Quick catching up (`quick::is_boot`, by their name
-  `quick-conversation-<thread>-<n>-<k>.md`): no model is sent those reads or their results, nor
+  `quick-conversation-<thread>-<n>-<k>.md` as the path of a read, Quick's file_read or READ, never
+  a READ of Oak's own copies in `quick-handoff` nor any other call that only names one: an edit,
+  a command): no model is sent those reads or their results, nor
   what Quick said just before them, and the transcript shows each as one closed row
   (`a_catch_up_read_is_left_out`). What Quick wrote first (text, thinking, in the same message)
   and its reads, through the last, are one closed line, "Rereading context files…", then

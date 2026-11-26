@@ -2105,7 +2105,26 @@ pub(crate) fn reads_handoff(b: &Value) -> bool {
     if b[CATCH_UP_KEY] == true {
         return true;
     }
-    names_handoff(&b["input"].to_string()) || b["_oak_partial"].as_str().is_some_and(names_handoff)
+    // Only a read of the file it was sent, by its path: not a call that
+    // merely names one (an edit of code whose tests name one, a command that
+    // looks at Oak's copies), which is work of its own and no catching up.
+    let name = b["name"].as_str().unwrap_or("");
+    let quicks = same_tool(name, "file_read");
+    if !quicks && name != "READ" {
+        return false;
+    }
+    let path = match b["input"]["path"].as_str() {
+        Some(p) => p.to_string(),
+        // Streaming in: its input so far.
+        None => match b["_oak_partial"].as_str() {
+            Some(raw) => raw.to_string(),
+            None => return false,
+        },
+    };
+    let file = path.rsplit(['/', '\\']).next().unwrap_or("");
+    // (Oak's own copies are read with Quick's file_read when the upload
+    // failed; a READ of them is looking at them.)
+    names_handoff(file) && file.starts_with(SO_FAR_FILE) && (quicks || !path.contains("quick-handoff"))
 }
 
 /// Whether `input` names a file of `handoff::deliver`.
@@ -3593,7 +3612,7 @@ mod tests {
         for f in &files {
             let name = f.file_name().unwrap().to_string_lossy().into_owned();
             assert!(text.contains(&name), "each file is named: {text}");
-            assert!(is_boot(&json!({"type": "tool_call", "_oak_by": "quick", "input": {"path": format!("workspace/attached_files/{name}")}})), "reading it is catching up");
+            assert!(is_boot(&json!({"type": "tool_call", "name": "file_read", "_oak_by": "quick", "input": {"path": format!("workspace/attached_files/{name}")}})), "reading it is catching up");
         }
         let mut files = files;
         let number = |f: &std::path::PathBuf| -> u32 {

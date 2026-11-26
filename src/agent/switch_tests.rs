@@ -604,6 +604,17 @@ fn a_catch_up_read_is_left_out() {
     assert!(crate::quick::is_boot(&messages[1]["content"][3]), "a call answered with the reminder to read them");
     assert!(!crate::quick::is_boot(&messages[1]["content"][5]));
     assert!(!crate::quick::is_boot(&messages[3]["content"][0]), "Claude's own read is Claude's");
+    // Only reads of it, by their path: not an edit whose text names one, a
+    // command, or a look at Oak's own copies.
+    let quick_call = |name: &str, input: Value| {
+        let mut b = json!({"type": "tool_call", "id": "x", "name": name, "input": input});
+        b[BY_KEY] = json!(api::Provider::Quick.id());
+        b
+    };
+    assert!(!crate::quick::is_boot(&quick_call("EDIT", json!({"path": "src/quick/handoff.rs", "old_string": "quick-conversation-th1-5-1.md", "new_string": "x"}))));
+    assert!(!crate::quick::is_boot(&quick_call("EXECUTE", json!({"command": "head quick-handoff/quick-conversation-c32ceb47-1063-1.md"}))));
+    assert!(!crate::quick::is_boot(&quick_call("READ", json!({"path": "C:/Users/me/AppData/Roaming/oak/quick-handoff/quick-conversation-c32ceb47-1063-1.md"}))));
+    assert!(crate::quick::is_boot(&quick_call("file_read", json!({"path": "/outposts/dsk/C:/Users/me/AppData/Roaming/oak/quick-handoff/quick-conversation-c32ceb47-1063-1.md", "max_chars": 116000}))), "a part on this device, read with Quick's tool");
     for p in [api::Provider::Claude, api::Provider::Quick, api::Provider::Codex] {
         let sent = all_text(&for_provider(&messages, p));
         assert!(!sent.contains("THE WHOLE CONVERSATION") && !sent.contains("ITS SECOND PART") && !sent.contains("boot"), "{p:?}: {sent}");
