@@ -3673,8 +3673,19 @@ fn overhead(req: &oak::Request) -> u64 {
         .map_or(0, str::len);
     let p = api::preamble(&req.model, &req.system, &Value::Array(req.tools.clone()));
     let identity = p.identity.map_or(0, |[b, i]| b.len() + i.len());
+    // Freebuff's first message opens with Oak's prompt and tools.
+    let briefing = if api::Provider::of(&req.model) == api::Provider::Freebuff {
+        crate::freebuff_tools::briefing(&req.system, &req.tools).len()
+    } else {
+        0
+    };
     rolling::estimate(
-        identity + p.system.len() + Value::Array(p.tools).to_string().len() + context + 300,
+        identity
+            + p.system.len()
+            + Value::Array(p.tools).to_string().len()
+            + context
+            + briefing
+            + 300,
     )
 }
 

@@ -42,11 +42,13 @@ pub fn to_oak(id: &str, name: &str, args: &str) -> Vec<(String, String, Value)> 
         _ => v,
     };
     let (parts, local) = parts(id, name, &v);
+    // A command of Oak calls (`snippet`) runs as them, shown as Oak's own.
+    let oak = local.is_none() && name == "run_terminal_command" && snippet(&v).is_some();
     let n = parts.len();
     parts
         .into_iter()
         .enumerate()
-        .map(|(k, (oak, mut input))| {
+        .map(|(k, (oak_name, mut input))| {
             let pid = if k == 0 { id.to_string() } else { format!("{id}_{k}") };
             input[KEY] = if k == 0 {
                 let mut c = json!({"name": name, "args": v, "parts": n});
@@ -57,9 +59,97 @@ pub fn to_oak(id: &str, name: &str, args: &str) -> Vec<(String, String, Value)> 
             } else {
                 json!({"of": id, "k": k})
             };
-            (pid, oak, input)
+            if oak {
+                input[KEY]["oak"] = json!(true);
+            }
+            (pid, oak_name, input)
         })
         .collect()
+}
+
+/// Whether OAK's tool block for a call shows the Freebuff tool it came
+/// from: not for Oak calls run through run_terminal_command, which show as
+/// themselves.
+pub fn shows_origin(input: &Value) -> bool {
+    input[KEY]["oak"] != true
+}
+
+/// What a command of Oak calls that isn't right is told, after what was
+/// wrong (and what Freebuff's model is told about them: `briefing`).
+const HOW: &str = "run_terminal_command runs Oak's tools when its command is Oak tool calls only: one or more lines like READ(path=\"src/main.rs\") or TASK(action=\"list\"), written as Python calls with literal arguments (strings, numbers, True/False/None, lists and dicts), all run at the same time. Any other command runs in the shell.";
+
+/// Oak's tool definitions, for a command's calls (their canonical names and
+/// the order of their positional arguments).
+fn oak_definitions() -> Vec<Value> {
+    crate::tools::definitions_with_kits(false, false, false, &[])
+}
+
+/// A command that is Oak tool calls (its first line opens with one of Oak's
+/// tools, in capitals, and `(`, which no shell command does): the command.
+fn snippet(v: &Value) -> Option<&str> {
+    let command = v["command"].as_str()?;
+    let line = command.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#'))?;
+    let end = line.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(line.len());
+    let (name, rest) = line.split_at(end);
+    (rest.trim_start().starts_with('(') && oak_tool(name)).then_some(command)
+}
+
+/// Whether `name` is one of Oak's tools as Oak writes them (a kit's and a
+/// protocol's too).
+fn oak_tool(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && (crate::tools::tool_names().iter().any(|n| n == name)
+            || ["LOAD", "UNLOAD"].contains(&name)
+            || crate::tools::kits_for(false).contains(&name)
+            || crate::mcp::is_family(name)
+            || crate::mcp::split(name).is_some())
+}
+
+/// A command of Oak calls: the calls, or (when it isn't right) nothing run
+/// and the error as the answer.
+fn snippet_parts(command: &str) -> (Vec<(String, Value)>, Option<Value>) {
+    match crate::quick::calls::calls_in(command, &oak_definitions(), HOW, |_| true) {
+        Ok(calls) => (calls.into_iter().map(|c| (c.name, c.input)).collect(), None),
+        Err(e) => (vec![shown_only(std::slice::from_ref(&e), "Run Oak's tools")], Some(json!({"command": command, "errorMessage": e}))),
+    }
+}
+
+/// An Oak call as a line of a command (`snippet`): NAME(key=value, ...),
+/// the values as Python literals.
+fn call_line(name: &str, input: &Value) -> String {
+    fn literal(v: &Value) -> String {
+        match v {
+            Value::Null => "None".into(),
+            Value::Bool(b) => if *b { "True" } else { "False" }.into(),
+            Value::Array(a) => format!("[{}]", a.iter().map(literal).collect::<Vec<_>>().join(", ")),
+            Value::Object(o) => format!("{{{}}}", o.iter().map(|(k, v)| format!("{}: {}", Value::String(k.clone()), literal(v))).collect::<Vec<_>>().join(", ")),
+            // JSON's strings and numbers read the same in Python.
+            other => other.to_string(),
+        }
+    }
+    let args: Vec<String> = input.as_object().into_iter().flatten().filter(|(k, _)| !k.starts_with("_oak")).map(|(k, v)| format!("{k}={}", literal(v))).collect();
+    format!("{name}({})", args.join(", "))
+}
+
+/// What Freebuff's model is told of Oak, in the conversation's first
+/// message: Oak's own system prompt (`system`, as every other model gets it)
+/// and tools, and that its run_terminal_command runs them. The service
+/// checks its own prompt and tools, so these can't go there.
+pub fn briefing(system: &str, tools: &[Value]) -> String {
+    let mut defs = String::new();
+    for t in tools {
+        defs.push_str(&format!(
+            "\n### {}\n{}\nInput: {}\n",
+            t["name"].as_str().unwrap_or(""),
+            t["description"].as_str().unwrap_or("").trim(),
+            t["input_schema"]
+        ));
+    }
+    format!(
+        "<instructions_loaded>\n{}\n</instructions_loaded>\n\n<tools_loaded>{defs}</tools_loaded>\n\n[Oak, on this machine]\nAbove are the instructions and tools of Oak, the coding agent app this conversation runs in: its own system prompt, as it gives it to every model it runs, and its tool definitions. Follow them as your instructions for this work. Your own tools run as Oak's, in the conversation's working folder (read_files as READ, str_replace as EDIT, write_file as WRITE, run_terminal_command as EXECUTE, ask_user as ASK, web_search as SEARCH, read_url as FETCH), so keep using them where the instructions name those. Oak's other tools (TASK, NOTE, HEARTBEAT, DISPLAY, SCREENSHOT, CD, LOAD and the rest of <tools_loaded>, and a kit's tool once LOAD has loaded it) you call through run_terminal_command: a command made only of Oak tool calls runs those calls instead of a shell, one per line, written as Python calls with literal arguments only, for example:\n\nTASK(action=\"new\", command=\"npm run dev\", summary=\"Start the dev server\")\nNOTE(action=\"new\", text=\"Decided: keep the old API\")\n\nAll the calls of one command run at the same time (calls on a file one of them writes keep their order), and its result gives each call's result, in order. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). Any other command runs in the shell as usual.\n[End of Oak's notes. The conversation follows.]",
+        system.trim()
+    )
 }
 
 /// Single-quoted for bash.
@@ -105,7 +195,10 @@ fn parts(id: &str, name: &str, v: &Value) -> (Vec<(String, Value)>, Option<Value
         "read_files" => read_files_parts(v),
         "str_replace" => str_replace_parts(v),
         "write_file" => one(("WRITE".into(), json!({"path": s("path"), "content": s("content")}))),
-        "run_terminal_command" => one(terminal_part(id, v, cwd)),
+        "run_terminal_command" => match snippet(v) {
+            Some(command) => snippet_parts(command),
+            None => one(terminal_part(id, v, cwd)),
+        },
         "code_search" => code_search_parts(v, cwd),
         "glob" => {
             let pattern = s("pattern");
@@ -625,6 +718,8 @@ pub struct Call {
     local: Option<Value>,
     /// Made by OAK's own tools rather than streamed from Freebuff.
     native: bool,
+    /// A run_terminal_command of Oak calls (`snippet`), its parts theirs.
+    oak: bool,
 }
 
 pub fn origin(b: &Value) -> Origin {
@@ -635,7 +730,7 @@ pub fn origin(b: &Value) -> Origin {
         return Origin::Part;
     }
     if let Some(name) = c["name"].as_str() {
-        return Origin::Call(Call { id, name: name.into(), args: c["args"].clone(), parts: c["parts"].as_u64().unwrap_or(1) as usize, local: c.get("local").cloned(), native: false });
+        return Origin::Call(Call { id, name: name.into(), args: c["args"].clone(), parts: c["parts"].as_u64().unwrap_or(1) as usize, local: c.get("local").cloned(), native: false, oak: c["oak"] == true });
     }
     // OAK's own tools, from before the conversation moved to Freebuff.
     let mut clean = input.clone();
@@ -658,9 +753,15 @@ pub fn origin(b: &Value) -> Origin {
         "EXECUTE" => ("run_terminal_command", json!({"command": s("command")})),
         "SEARCH" => ("web_search", json!({"query": input["queries"][0].as_str().or(input["objective"].as_str()).unwrap_or("")})),
         "FETCH" => ("read_url", json!({"url": s("url")})),
-        other => return Origin::Call(Call { id, name: other.into(), args: clean, parts: 1, local: None, native: true }),
+        // Oak's other tools as the model calls them itself: a command of
+        // Oak calls (a protocol's `mcp__…` tools by their own name).
+        other if oak_tool(other) => {
+            let args = json!({"command": call_line(other, &clean)});
+            return Origin::Call(Call { id, name: "run_terminal_command".into(), args, parts: 1, local: None, native: true, oak: true });
+        }
+        other => return Origin::Call(Call { id, name: other.into(), args: clean, parts: 1, local: None, native: true, oak: false }),
     };
-    Origin::Call(Call { id, name: name.into(), args, parts: 1, local: None, native: true })
+    Origin::Call(Call { id, name: name.into(), args, parts: 1, local: None, native: true, oak: false })
 }
 
 /// One OAK call's result: its text, whether it failed, and its images.
@@ -742,6 +843,7 @@ pub fn answer(call: &Call, parts: Vec<Option<Part>>) -> (String, Vec<Value>) {
                 false => json!({"file": s("path"), "message": "Wrote file successfully."}),
                 true => json!({"file": s("path"), "errorMessage": "Failed to write to file: file path caused an error or file could not be written"}),
             },
+            "run_terminal_command" if call.oak => snippet_result(call, &parts, &mut attached),
             "run_terminal_command" => terminal_result(call, &parts[0]),
             "code_search" => search_result(v, &parts[0]),
             "glob" => glob_result(v, &parts[0]),
@@ -806,16 +908,8 @@ fn read_files_result(v: &Value, parts: &[Part], attached: &mut Vec<Value>) -> Va
             if images.iter().any(|(f, _)| *f == shown) {
                 continue;
             }
-            let content = if attached.len() < MAX_IMAGES_PER_READ {
-                let mt = img["media_type"].as_str().unwrap_or("image/png");
-                let data = img["data"].as_str().unwrap_or("");
-                let bytes = data.len() / 4 * 3 - data.bytes().rev().take_while(|b| *b == b'=').count();
-                let kb = ((bytes as f64 / 1024.0).round() as u64).max(1);
-                attached.push(json!({"type": "image_url", "image_url": {"url": format!("data:{mt};base64,{data}")}}));
-                format!("[IMAGE] {mt}, {kb} KB. The image is attached after this result.")
-            } else {
-                format!("{READ_ERROR} [Not read: read_files attaches at most {MAX_IMAGES_PER_READ} images per call. Read this image in a later call.]")
-            };
+            let content = attach(img, attached)
+                .unwrap_or_else(|| format!("{READ_ERROR} [Not read: read_files attaches at most {MAX_IMAGES_PER_READ} images per call. Read this image in a later call.]"));
             images.push((shown, content));
             continue;
         }
@@ -831,6 +925,47 @@ fn read_files_result(v: &Value, parts: &[Part], attached: &mut Vec<Value>) -> Va
         }
     }
     Value::Array(files.into_iter().chain(images).map(|(path, content)| json!({"path": path, "content": content})).collect())
+}
+
+/// Attaches an OAK image block the way read_files does: what the answer
+/// says in its place, or None once the call has attached its most.
+fn attach(img: &Value, attached: &mut Vec<Value>) -> Option<String> {
+    if attached.len() >= MAX_IMAGES_PER_READ {
+        return None;
+    }
+    let mt = img["media_type"].as_str().unwrap_or("image/png");
+    let data = img["data"].as_str().unwrap_or("");
+    let bytes = (data.len() / 4 * 3).saturating_sub(data.bytes().rev().take_while(|b| *b == b'=').count());
+    let kb = ((bytes as f64 / 1024.0).round() as u64).max(1);
+    attached.push(json!({"type": "image_url", "image_url": {"url": format!("data:{mt};base64,{data}")}}));
+    Some(format!("[IMAGE] {mt}, {kb} KB. The image is attached after this result."))
+}
+
+/// A command of Oak calls' answer: each call's result under its line, as
+/// Quick gets a snippet's (`quick::calls::answer`), a lone one's as it is;
+/// their images attached as read_files attaches them.
+fn snippet_result(call: &Call, parts: &[Part], attached: &mut Vec<Value>) -> Value {
+    use crate::quick::calls::{self, OakCall};
+    let command = call.args["command"].as_str().unwrap_or("");
+    let mut written = calls::calls_in(command, &oak_definitions(), HOW, |_| true).unwrap_or_default();
+    if written.len() != parts.len() {
+        written = (1..=parts.len()).map(|k| OakCall { name: String::new(), input: Value::Null, source: format!("Call {k}") }).collect();
+    }
+    let results: Vec<Result<String, String>> = parts
+        .iter()
+        .map(|p| {
+            let mut text = p.text.clone();
+            for img in &p.images {
+                let said = attach(img, attached).unwrap_or_else(|| format!("[IMAGE] Not attached: a command attaches at most {MAX_IMAGES_PER_READ} images."));
+                text = if text.is_empty() { said } else { format!("{text}\n{said}") };
+            }
+            if p.error { Err(text) } else { Ok(text) }
+        })
+        .collect();
+    match calls::answer(&written, &results) {
+        Ok(out) => json!({"command": command, "stdout": out}),
+        Err(e) => json!({"command": command, "errorMessage": e}),
+    }
 }
 
 /// str_replace's answer; Err for one the CLI gives as it is (the file
@@ -1153,7 +1288,7 @@ mod tests {
     }
 
     fn call(name: &str, args: Value) -> Call {
-        Call { id: "c".into(), name: name.into(), args, parts: 1, local: None, native: false }
+        Call { id: "c".into(), name: name.into(), args, parts: 1, local: None, native: false, oak: false }
     }
 
     /// Every read_files entry is read (with its window), and answered the
@@ -1280,6 +1415,39 @@ mod tests {
             "Found 3 matches\n./src/a.rs:\n  Line 1: fn main() {\n  Line 5: fn main(x)\n\n./b.rs:\n  Line 2: context\n  Line 3: fn main(z)\n\n[Results limited to 2 per file. Truncated files:\n./src/a.rs: limited to 2 results per file]"
         );
         assert_eq!(v["message"], "Exit code: 0");
+    }
+
+    /// A run_terminal_command of Oak calls runs as them, shown as Oak's own,
+    /// and is answered with each one's result; any other command still runs
+    /// in the shell. Oak calls another model made go back as such commands.
+    #[test]
+    fn oak_calls_through_run_terminal_command() {
+        let cmd = "NOTE(action=\"new\", text=\"x\")\nTASK(action=\"list\")";
+        let calls = to_oak("c", "run_terminal_command", &json!({"command": cmd}).to_string());
+        let names: Vec<&str> = calls.iter().map(|c| c.1.as_str()).collect();
+        assert_eq!(names, ["NOTE", "TASK"]);
+        assert_eq!(calls[0].2["text"], "x");
+        assert!(!shows_origin(&calls[0].2) && !shows_origin(&calls[1].2));
+        let Origin::Call(c) = origin(&json!({"name": "NOTE", "input": calls[0].2})) else { panic!() };
+        let v: Value = serde_json::from_str(&result(&c, vec![part("Saved note 1", false), part("No tasks", true)])).unwrap();
+        assert_eq!(v["stdout"], "[1/2] NOTE(action=\"new\", text=\"x\")\nSaved note 1\n\n[2/2] TASK(action=\"list\")\nError: No tasks");
+        // A call that isn't right is answered, and nothing runs.
+        let bad = to_oak("c", "run_terminal_command", &json!({"command": "TASK(action=)"}).to_string());
+        assert!(bad[0].2[KEY]["local"]["errorMessage"].as_str().unwrap().ends_with(HOW), "{}", bad[0].2);
+        for sh in ["echo hi", "MAIN() { echo hi; }; MAIN", "ls (x)", "# READ(path=\"a\")\nls"] {
+            let t = to_oak("c", "run_terminal_command", &json!({"command": sh}).to_string());
+            assert_eq!(t[0].1, "EXECUTE", "{sh}");
+            assert!(shows_origin(&t[0].2), "{sh}");
+        }
+        let b = json!({"id": "t", "name": "TASK", "input": {"action": "new", "command": "srv \"a\"", "summary": "S", "n": [1, true, null]}});
+        let Origin::Call(c) = origin(&b) else { panic!() };
+        assert_eq!(c.name, "run_terminal_command");
+        assert_eq!(c.args["command"], r#"TASK(action="new", command="srv \"a\"", n=[1, True, None], summary="S")"#);
+        let again = to_oak("t", "run_terminal_command", &json!({"command": c.args["command"]}).to_string());
+        assert_eq!(again[0].2["command"], "srv \"a\"");
+        assert_eq!(again[0].2["n"], json!([1, true, null]));
+        let v: Value = serde_json::from_str(&result(&c, vec![part("Started task 0.", false)])).unwrap();
+        assert_eq!(v["stdout"], "Started task 0.");
     }
 
     /// The other tools: what each runs as, and the CLI's answer.

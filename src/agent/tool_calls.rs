@@ -565,6 +565,12 @@ impl Worker {
                 crate::prefix::THROUGH_LOAD,
                 tools::kit_help(&kit, agent)
             ),
+            // Freebuff, whose tools are its CLI's: Oak's go through its
+            // run_terminal_command (`freebuff_tools::briefing`).
+            None => format!(
+                "Its tool isn't in your tool list: call it as Oak's other tools, in a run_terminal_command of Oak calls, as {kit}(action=\"...\").\n{}",
+                tools::kit_help(&kit, agent)
+            ),
             _ => format!("The {kit} tool is in your tool list now."),
         };
         let text = format!(

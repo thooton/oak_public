@@ -421,6 +421,21 @@ can't read.
   tools with the current date, so its prompt's date is always today's (`freebuff::system_prompt`,
   tested by `the_prompt_has_todays_date_and_the_row_name`) and a new day renews its cache; its
   messages still only grow. No other provider or event gets this.
+- Freebuff still works with Oak's tools, without changing what the service checks. Its CLI's tools
+  run as Oak's (`freebuff_tools::to_oak`: read_files as READs, str_replace as EDITs,
+  run_terminal_command as EXECUTE or TASK, and so on), answered as the CLI answers them. Oak's own
+  prompt and tools open the first user message on the wire (`freebuff_tools::briefing`, as Quick's
+  briefing: `<instructions_loaded>`, `<tools_loaded>`, then how to call them), pinned per
+  conversation as first sent until that message changes, so notes, kits and the day don't change
+  it (`freebuff::oak_briefing`, tested by `oaks_prompt_and_tools_open_the_first_message`). Oak's
+  other tools go through run_terminal_command: a command whose first line opens with one of Oak's
+  tools in capitals and `(` (no shell command does) is Oak calls, read as Quick's snippets are
+  (`quick::calls::calls_in`, ASK allowed), and each runs as its own Oak call, shown as itself; the
+  answer is the CLI's JSON with each call's result under its line in `stdout`, and their images
+  attached as read_files attaches them. A command that doesn't read as calls runs nothing and is
+  answered with what was wrong; any other command runs in the shell as before. Oak calls another
+  model made (TASK, NOTE, …) go to Freebuff as such commands (`call_line`), so it never sees a tool
+  it wasn't given. LOAD tells Freebuff to call a kit's tool the same way.
 - Quick keeps a conversation itself (its thread on Quick's server), so a request sends only its
   newest user turn. A conversation that other providers' models worked on since Quick's own last
   reply sends what it missed too, as `<conversation_so_far>` in that message (`agent::unseen_by`,

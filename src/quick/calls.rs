@@ -36,11 +36,18 @@ pub(crate) fn offered(name: &str) -> bool {
 /// the tool's required fields in order. Fails, with what was wrong and how a
 /// snippet looks, before anything runs.
 pub(crate) fn snippet(code: &str, tools: &[Value]) -> Result<Vec<OakCall>, String> {
-    let raw = parse(code).map_err(|e| format!("{e}\n\n{HOW}"))?;
+    calls_in(code, tools, HOW, offered)
+}
+
+/// `snippet` for another agent's way in (Freebuff's run_terminal_command:
+/// `freebuff_tools`): what a mistake is followed by (`how`), and which
+/// tools may be called (`allowed`).
+pub(crate) fn calls_in(code: &str, tools: &[Value], how: &str, allowed: fn(&str) -> bool) -> Result<Vec<OakCall>, String> {
+    let raw = parse(code).map_err(|e| format!("{e}\n\n{how}"))?;
     if raw.is_empty() {
-        return Err(format!("The snippet makes no calls.\n\n{HOW}"));
+        return Err(format!("The snippet makes no calls.\n\n{how}"));
     }
-    raw.into_iter().map(|c| resolve(c, tools)).collect()
+    raw.into_iter().map(|c| resolve(c, tools, how, allowed)).collect()
 }
 
 /// A call as written: its name, positional and keyword arguments, and text.
@@ -52,7 +59,7 @@ struct Written {
     source: String,
 }
 
-fn resolve(c: Written, tools: &[Value]) -> Result<OakCall, String> {
+fn resolve(c: Written, tools: &[Value], how: &str, allowed: fn(&str) -> bool) -> Result<OakCall, String> {
     let def = tools.iter().find(|d| d["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(&c.name)));
     let name = match def {
         Some(d) => d["name"].as_str().unwrap_or(&c.name).to_string(),
@@ -62,12 +69,12 @@ fn resolve(c: Written, tools: &[Value]) -> Result<OakCall, String> {
             // capitals, MCP's tools `mcp__…`): Oak's agent says if it isn't.
             None if c.name.starts_with("mcp__") || c.name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') => c.name.clone(),
             None => {
-                let names: Vec<&str> = tools.iter().filter_map(|d| d["name"].as_str()).filter(|n| offered(n)).collect();
-                return Err(format!("`{}` isn't one of Oak's tools. They are: {}.\n\n{HOW}", c.name, names.join(", ")));
+                let names: Vec<&str> = tools.iter().filter_map(|d| d["name"].as_str()).filter(|n| allowed(n)).collect();
+                return Err(format!("`{}` isn't one of Oak's tools. They are: {}.\n\n{how}", c.name, names.join(", ")));
             }
         },
     };
-    if !offered(&name) {
+    if !allowed(&name) {
         return Err(format!("{name} isn't available through this tool: ask the user in your reply instead, with a decision card (Oak asks its questions with ASK)."));
     }
     let mut input = Map::new();

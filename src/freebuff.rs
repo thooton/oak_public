@@ -1991,6 +1991,14 @@ fn build_request(
         json!({"role": "system", "content": fill_prompt(include_str!("../assets/freebuff-system.txt"), label)}),
     ];
     msgs.extend(chat_messages(&body.messages_with_instruction()));
+    // Oak's prompt and tools open the conversation's first message (the
+    // service checks the system prompt and tools as the CLI sends them).
+    if let Some(b) = oak_briefing(body)
+        && let Some(first) = msgs.iter_mut().find(|m| m["role"] == "user")
+        && let Some(text) = first["content"].as_str()
+    {
+        first["content"] = json!(format!("{b}\n\n{text}"));
+    }
     let mut meta = json!({
         "freebuff_instance_id": instance(),
         "freebuff_multi_session": "1",
@@ -2023,6 +2031,36 @@ fn build_request(
         req["tools"] = Value::Array(tools);
     }
     req
+}
+
+/// The briefings sent, by conversation: the hash of the conversation's first
+/// message they went with, and the briefing.
+static BRIEFINGS: LazyLock<Mutex<std::collections::HashMap<String, (String, String)>>> =
+    LazyLock::new(Mutex::default);
+
+/// What a request's first message opens with (`freebuff_tools::briefing`):
+/// as first sent until that message changes (a summary replaced what it
+/// began), so the notes, kits and day the prompt holds don't change what
+/// was sent, as on other providers. None for a request without Oak's prompt
+/// and tools (a title).
+fn oak_briefing(body: &Request) -> Option<String> {
+    if body.system.trim().is_empty() || body.tools.is_empty() || body.purpose == oak::Purpose::Title {
+        return None;
+    }
+    let first = hash_hex(&body.messages.first()?.to_string());
+    let key = body.conv.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| chat_key(body));
+    let mut sent = BRIEFINGS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((h, b)) = sent.get(&key)
+        && *h == first
+    {
+        return Some(b.clone());
+    }
+    if sent.len() >= 256 {
+        sent.clear();
+    }
+    let b = crate::freebuff_tools::briefing(&body.system, &body.tools);
+    sent.insert(key, (first, b.clone()));
+    Some(b)
 }
 
 /// Says a retry is coming (the client's own event), and how long it waits.
@@ -2205,7 +2243,7 @@ impl Blocks {
                         };
                         let early = crate::freebuff_tools::early_name(name);
                         if let Some(oak) = early {
-                            out.push(tool_start(block, &id, oak, name));
+                            out.push(tool_start(block, &id, oak, Some(name)));
                         }
                         self.tools.push(Tool {
                             n,
@@ -2260,10 +2298,16 @@ impl Blocks {
     }
 }
 
-fn tool_start(index: i64, id: &str, oak: &str, shown: &str) -> Event {
+/// A tool block opening: OAK's tool `oak`, shown as the Freebuff tool it
+/// came from (`shown`) or, without one, as itself.
+fn tool_start(index: i64, id: &str, oak: &str, shown: Option<&str>) -> Event {
+    let mut block = json!({"type": "tool_call", "id": id, "name": oak, "input": {}});
+    if let Some(s) = shown {
+        block["_oak_shown"] = json!(s);
+    }
     Event::Block {
         index: index as usize,
-        block: json!({"type": "tool_call", "id": id, "name": oak, "_oak_shown": shown, "input": {}}),
+        block,
     }
 }
 
@@ -2287,7 +2331,8 @@ fn close_all(b: &mut Blocks, out: &mut Vec<Event>) {
         {
             let index = if k == 0 { t.block } else { b.index() };
             if k > 0 || !t.opened {
-                out.push(tool_start(index, &id, &oak, &t.name));
+                let shown = crate::freebuff_tools::shows_origin(&input).then_some(t.name.as_str());
+                out.push(tool_start(index, &id, &oak, shown));
             }
             out.push(Event::Input {
                 index: index as usize,
@@ -2676,6 +2721,31 @@ mod tests {
         assert!(!meta.contains_key("agent_id"));
         assert!(!meta.contains_key("model"));
         assert!(!meta.keys().any(|k| k.starts_with("compaction_")));
+    }
+
+    /// Oak's prompt and tools open the first message (the system prompt and
+    /// tools stay the CLI's), as first sent until that message changes.
+    #[test]
+    fn oaks_prompt_and_tools_open_the_first_message() {
+        let mut b = body();
+        b.conv = Some("briefing-test".into());
+        b.system = "You are Oak.".into();
+        b.tools = vec![json!({"name": "TASK", "description": "Background commands.", "input_schema": {"type": "object"}})];
+        let req = |b: &Request| build_request(b, "m", "m", None, &turn());
+        let first = |b: &Request| req(b)["messages"][1]["content"].as_str().unwrap().to_string();
+        let sent = first(&b);
+        assert!(sent.starts_with("<instructions_loaded>\nYou are Oak.\n</instructions_loaded>\n\n<tools_loaded>\n### TASK\nBackground commands.\n"), "{sent}");
+        assert!(sent.ends_with("[End of Oak's notes. The conversation follows.]\n\n<environment>context</environment>fix it"), "{sent}");
+        let r = req(&b);
+        assert!(r["messages"][0]["content"].as_str().unwrap().starts_with("You are Buffy"));
+        assert_eq!(r["tools"], json!(cli_tools()));
+        assert_eq!(r["messages"][2]["content"], "ok");
+        b.system = "You are Oak, with a note.".into();
+        assert_eq!(first(&b), sent, "a changed prompt doesn't change what was sent");
+        b.messages[0]["content"][1]["text"] = json!("a summary");
+        assert!(first(&b).contains("with a note"), "a new first message renews it");
+        b.system.clear();
+        assert!(first(&b).starts_with("<environment>"), "no prompt, no briefing");
     }
 
     #[test]
