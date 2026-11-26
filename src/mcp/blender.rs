@@ -440,7 +440,7 @@ fn window_screenshot(max_size: u32) -> Value {
 // ------------------------------------------------------------ Poly Haven
 
 fn http() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder().user_agent(USER_AGENT).timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())
+    crate::api::client_builder().user_agent(USER_AGENT).timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())
 }
 
 fn get_json(url: &str) -> Result<Value, String> {

@@ -32,7 +32,7 @@ fn quick_outpost_status() {
     if items_empty(&v) {
         println!(
             "\nRAW (first 900 chars):\n{}",
-            &text.chars().take(900).collect::<String>()
+            text.chars().take(900).collect::<String>()
         );
     }
     let items = v["eventResponse"]["listOutpostsResponse"]["items"]
@@ -139,10 +139,10 @@ fn quick_outpost_stay_online() {
     }
     while std::time::Instant::now() < end {
         let path = format!(
-            "/streaming/quickwork-chat-bidirectional-stream?surfaceType={}&token={}&outpostId={outpost}&workingSessionId={}&channel=prod",
+            "/streaming/quickwork-chat-bidirectional-stream?surfaceType={}&token={}&outpostId={outpost}&workingSessionId=oak-keep-{}&channel=prod",
             crate::quick::SURFACE,
             enc(&token),
-            format!("oak-keep-{}", crate::api::now_ms()),
+            crate::api::now_ms(),
         );
         let mut sock = match crate::quick::socket::Socket::connect(&host, &path) {
             Ok(s) => s,
@@ -244,10 +244,10 @@ fn measure_online(token: &str, host: &str, probe: &str) -> String {
         return "ONLINE before the socket: the probe is no good".into();
     }
     let path = format!(
-        "/streaming/quickwork-chat-bidirectional-stream?surfaceType={}&token={}&outpostId={probe}&workingSessionId={}&channel=prod",
+        "/streaming/quickwork-chat-bidirectional-stream?surfaceType={}&token={}&outpostId={probe}&workingSessionId=oak-live-{}&channel=prod",
         crate::quick::SURFACE,
         enc(token),
-        format!("oak-live-{}", crate::api::now_ms()),
+        crate::api::now_ms(),
     );
     println!("\nconnecting with the outpost named in the URL");
     let mut sock = match crate::quick::socket::Socket::connect(host, &path) {

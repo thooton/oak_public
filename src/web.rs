@@ -29,7 +29,7 @@ pub fn fetch(input: &Value) -> Result<String, String> {
         // One client for every FETCH: one soon after another from the same
         // site reuses its connection instead of a new TLS handshake.
         static CLIENT: std::sync::LazyLock<Result<reqwest::blocking::Client, String>> =
-            std::sync::LazyLock::new(|| reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).user_agent(AGENT).build().map_err(|e| e.to_string()));
+            std::sync::LazyLock::new(|| crate::api::client_builder().timeout(Duration::from_secs(30)).user_agent(AGENT).build().map_err(|e| e.to_string()));
         let client = CLIENT.clone()?;
         let resp = client.get(url).send().map_err(|e| format!("Couldn't fetch {url}: {e}"))?;
         let status = resp.status();

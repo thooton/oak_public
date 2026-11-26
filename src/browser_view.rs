@@ -195,6 +195,7 @@ fn lightbox_area(ctx: &egui::Context) -> Rect {
 /// Where the lightbox puts a `size` viewport (CSS pixels) in `area`: the
 /// frame (the toolbar and the page), the page, and its scale (points per
 /// CSS pixel). Scaled to fit, never above 1:1, with the caption under it.
+#[cfg(test)]
 fn lightbox_layout(area: Rect, size: (u32, u32)) -> (Rect, Rect, f32) {
     lightbox_layout_with(area, size, BAR_H)
 }

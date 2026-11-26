@@ -404,6 +404,7 @@ fn current_id() -> Result<u64, String> {
 
 /// The accounts as rotation weighs them (`crate::rotation`): logins on
 /// this machine are only a fallback once a vault has accounts.
+#[cfg(test)]
 fn candidates(list: &[Stored], now: i64) -> Vec<crate::rotation::Candidate> {
     candidates_for(list, "", now)
 }
@@ -552,6 +553,27 @@ pub(crate) fn uuid_text(b: &[u8]) -> String {
     format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
+/// Installs rustls' ring provider as the process's, once. reqwest is built
+/// without a provider of its own (`rustls-no-provider` in Cargo.toml: its
+/// default, aws-lc, is a second large C library to build), so this comes
+/// before any client is made (`client_builder`) and before Quick's socket
+/// (`quick::socket`).
+pub(crate) fn tls_provider() {
+    static RING: std::sync::Once = std::sync::Once::new();
+    RING.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// `reqwest::blocking::Client::builder()`, with the TLS provider installed
+/// first (`tls_provider`); every client is made with it (clippy.toml
+/// disallows the plain one).
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn client_builder() -> reqwest::blocking::ClientBuilder {
+    tls_provider();
+    reqwest::blocking::Client::builder()
+}
+
 pub(crate) fn http() -> reqwest::blocking::Client {
     // One client for everything: a clone shares its connection pool, so
     // requests reuse a kept-alive connection instead of paying a new
@@ -565,7 +587,7 @@ pub(crate) fn http() -> reqwest::blocking::Client {
 }
 
 fn new_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+    client_builder()
         .timeout(None)
         .connect_timeout(Duration::from_secs(30))
         // Idle connections are dropped before the server or a NAT is likely

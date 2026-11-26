@@ -281,10 +281,8 @@ pub(crate) fn take_message(buf: &mut Vec<u8>) -> Option<(u8, Vec<u8>)> {
 fn tls_config() -> Arc<rustls::ClientConfig> {
     use rustls::RootCertStore;
     static CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
-        // reqwest's own TLS brings in a second provider (aws-lc-rs), so
-        // rustls can't pick one on its own: this is Oak's socket, so it
-        // says which.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // The provider reqwest's clients use too (ring).
+        crate::api::tls_provider();
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let config = rustls::ClientConfig::builder()

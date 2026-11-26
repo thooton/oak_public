@@ -1245,7 +1245,7 @@ impl Instance {
 
 /// A DevTools HTTP endpoint's JSON answer.
 fn http_json(port: u16, method: &str, path: &str) -> Result<Value, String> {
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).no_proxy().build().map_err(|e| e.to_string())?;
+    let client = crate::api::client_builder().timeout(Duration::from_secs(10)).no_proxy().build().map_err(|e| e.to_string())?;
     let url = format!("http://127.0.0.1:{port}{path}");
     let req = if method == "PUT" { client.put(&url) } else { client.get(&url) };
     req.send().and_then(|r| r.json()).map_err(|e| format!("The browser didn't answer {path}: {e}"))

@@ -720,9 +720,7 @@ fn calendar(
         let weekend = col == 0 || col == 6;
         let color = if today {
             Color32::WHITE
-        } else if day < now.day() {
-            t.ink3
-        } else if weekend {
+        } else if day < now.day() || weekend {
             t.ink3
         } else {
             t.ink2

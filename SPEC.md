@@ -55,6 +55,13 @@ picked up when the build script runs again (with each commit). Offline, it bundl
 kept; `OAK_RIPGREP=<path to rg>` bundles that executable instead. With neither, a release build
 (`OAK_RELEASE=1`) fails and any other is built without ripgrep, with a warning.
 
+Builds are set up for quick rebuilds (`Cargo.toml`): debug builds keep line tables only and their
+dependencies no debug info (on Windows, writing the full PDB cost about a second a rebuild and
+~400 MB), release builds are incremental (a change rebuilds in 10-20 s instead of ~80 s, with
+frames as fast; CI sets `CARGO_INCREMENTAL=0`, so published builds are full ones), and reqwest
+uses rustls' ring provider instead of building aws-lc (`api::tls_provider`). The rest of a
+rebuild is compiling the one `oak` crate.
+
 `oak --version` prints the version, `oak --plugins` the plugins found and whether each runs,
 `oak --no-plugins` starts without any, `oak --mcp blender` serves Oak's Blender MCP server over
 stdio (for Claude Code, Codex or any MCP client) and exits when stdin closes.
@@ -1101,8 +1108,9 @@ mid-turn again, under a new id (`a_message_quick_took_in_is_left_out_of_its_requ
 `{"eventType":"rawInputEvent","payload":{"payload":"<base64 JSON>"}}`, and answers are AWS
 event-stream records whose body is the JSON the app reads (base64 again inside its `payload`).
 The socket is Oak's own (`quick/socket.rs`, rustls, the frame code in `cdp.rs`); it sends no
-permessage-deflate, and installs rustls' ring provider itself because reqwest's TLS brings a
-second one.
+permessage-deflate, and uses rustls' ring provider, as reqwest's clients do (`api::tls_provider`;
+reqwest is built without a provider of its own, so every client is made with
+`api::client_builder`, and clippy.toml disallows the plain `Client::builder`).
 
 **Usage** is read as Quick's desktop app reads it (`quick/usage.rs`): a POST of `{}` to the
 workspace's `/integration/quick-work/user-info`, whose `usageSummary` has the month's units

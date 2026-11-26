@@ -58,6 +58,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Published builds are full ones (Cargo.toml makes local release builds
+  # incremental, for speed).
+  CARGO_INCREMENTAL: "0"
   # Release builds are marked as such (no "-dev" in their version).
   OAK_RELEASE: "1"
   # Tests never look for updates.

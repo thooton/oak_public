@@ -3319,7 +3319,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             login::wait_for_login(listeners, port, "n1", "s1", "c1", epoch)
         });
-        let mut ask = |line: &str| -> String {
+        let ask = |line: &str| -> String {
             let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
             s.write_all(line.as_bytes()).unwrap();
             let mut out = String::new();
@@ -3499,7 +3499,7 @@ mod tests {
         let other = json!({"type": "text_delta", "payload": {"delta": "not mine"},
             "thread_id": "thread-b", "message_id": "msg-b1"});
         assert!(t.feed(&other).is_empty());
-        assert!(t.accepts(&other) == false);
+        assert!(!t.accepts(&other));
         // An older message of this thread, replayed as the thread is joined,
         // is not (its text, thinking or calls).
         let replayed = json!({"type": "thinking_delta", "payload": {"delta": "old thoughts"},

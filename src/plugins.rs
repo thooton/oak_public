@@ -965,7 +965,7 @@ fn http_client(redirects: bool, direct: bool) -> reqwest::blocking::Client {
     }
     CLIENTS[redirects as usize * 2 + direct as usize]
         .get_or_init(|| {
-            let mut b = reqwest::blocking::Client::builder()
+            let mut b = crate::api::client_builder()
                 .timeout(None)
                 .connect_timeout(Duration::from_secs(30))
                 .pool_idle_timeout(Duration::from_secs(60))
@@ -1007,7 +1007,7 @@ mod tests {
     /// compiler (`OAK_TEST_CC`, else `CC`, else `gcc` on Windows and `cc`
     /// elsewhere) into a scratch folder; the folder. On Windows CI sets
     /// none: a `CC` of gcc there would also build the crates' own C
-    /// (aws-lc, zstd) with MinGW, which MSVC's linker can't link.
+    /// (ring, zstd) with MinGW, which MSVC's linker can't link.
     fn built_c_example() -> PathBuf {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let out = std::env::temp_dir().join(format!("oak-hello-c-{}", std::process::id()));

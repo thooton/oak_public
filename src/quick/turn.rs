@@ -1759,7 +1759,7 @@ impl Calls {
             self.answered
                 .iter()
                 .rposition(|a| !a.settled && same_name(a))
-                .or_else(|| self.answered.iter().rposition(|a| same_name(a)))
+                .or_else(|| self.answered.iter().rposition(same_name))
         } else if !name.is_empty() {
             self.answered
                 .iter()
@@ -1897,7 +1897,7 @@ pub(crate) fn unix_ls(command: &str, folder: &std::path::Path) -> Option<Result<
             })
             .filter(|(name, _)| all || !name.starts_with('.'))
             .collect();
-        entries.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        entries.sort_by_key(|a| a.0.to_lowercase());
         for (name, m) in &entries {
             out.push_str(&line(name, m));
         }

@@ -501,6 +501,7 @@ pub fn register_folder(token: &str, host: &str, folder: &str) -> Result<(), Stri
 /// which one the server kept. The validator names only fields it requires
 /// (`hasUsedDesktop`), never the one that carries the state, so the shape is
 /// found by trying them.
+#[cfg(test)]
 pub fn put_device_state_report(token: &str, host: &str) -> Vec<(String, bool, String)> {
     let outpost = id();
     let mut out = vec![];
@@ -566,6 +567,7 @@ pub fn put_device_state_report(token: &str, host: &str) -> Vec<(String, bool, St
 }
 
 /// Whether Quick lists this machine's outpost as ONLINE.
+#[cfg(test)]
 pub fn is_online(token: &str, host: &str) -> Result<bool, String> {
     is_online_of(token, host, &id())
 }

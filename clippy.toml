@@ -1,0 +1,8 @@
+# reqwest is built without a TLS provider of its own (Cargo.toml): clients
+# are made with `api::client_builder`, which installs ring first.
+disallowed-methods = [
+    { path = "reqwest::blocking::Client::builder", reason = "use crate::api::client_builder(), which installs the TLS provider" },
+    { path = "reqwest::blocking::Client::new", reason = "use crate::api::client_builder(), which installs the TLS provider" },
+    { path = "reqwest::Client::builder", reason = "install the TLS provider first (crate::api::tls_provider)" },
+    { path = "reqwest::Client::new", reason = "install the TLS provider first (crate::api::tls_provider)" },
+]

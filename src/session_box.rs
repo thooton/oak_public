@@ -674,7 +674,7 @@ fn fallback_row(
             vec2(button, button),
         )
     };
-    let id = ui.id().with(("fallback", i));
+    let id = ui.scope_id().with(("fallback", i));
     let mut op = None;
     if i > 0
         && crate::widgets::icon_button(ui, t, rect(0.0), id.with("up"), "Move up", |p, r, c| {

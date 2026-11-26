@@ -138,7 +138,7 @@ pub fn pretty_name(alias: &str) -> String {
 
 /// "64k", "32.5k", "812": a context size as `-c` usually gives it.
 pub fn context_text(n: u64) -> String {
-    if n >= 1024 && n % 1024 == 0 { format!("{}k", n / 1024) } else { tokens_text(n) }
+    if n >= 1024 && n.is_multiple_of(1024) { format!("{}k", n / 1024) } else { tokens_text(n) }
 }
 
 /// A context size the user typed ("64k", "65536", "128K"); 0 for nothing.

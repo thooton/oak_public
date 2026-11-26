@@ -428,7 +428,7 @@ fn hit(url: &str, title: Option<&str>, text: &str, published: Option<&str>) -> O
 /// connection and TLS handshake (about 300 ms of each).
 pub(super) fn client() -> reqwest::blocking::Client {
     static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
-        std::sync::LazyLock::new(|| reqwest::blocking::Client::builder().timeout(TIMEOUT).user_agent("oak/0.1").build().unwrap_or_default());
+        std::sync::LazyLock::new(|| crate::api::client_builder().timeout(TIMEOUT).user_agent("oak/0.1").build().unwrap_or_default());
     CLIENT.clone()
 }
 

@@ -1138,7 +1138,7 @@ struct Http {
 
 impl Http {
     fn new(url: &str, headers: &BTreeMap<String, String>) -> Result<Http, String> {
-        let client = reqwest::blocking::Client::builder().timeout(None).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+        let client = crate::api::client_builder().timeout(None).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
         Ok(Http { url: url.into(), headers: headers.clone(), client, session: Mutex::new(None), protocol: Mutex::new(None), next: AtomicU64::new(1) })
     }
 
