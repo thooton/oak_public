@@ -189,7 +189,11 @@ What a plugin works with:
   session for a Home plugin with its own form. On a worker, read accessibility labels and send
   native input through `oak_sdk::browser::Browser`. Check the observed origin before sending
   credentials. Browser input uses the same Chromium commands as the `BROWSER` tool. Oak closes
-  the session when the user leaves the page.
+  the session when the user leaves the page. The session presents itself as a plain Chrome, not
+  a headless one: its user agent and client hints (`sec-ch-ua`) carry no "Headless", so a site
+  that refuses headless browsers (AWS's signup, which answers `ERR-837` at its name step) still
+  works. Do not send an `accept-language` override of your own with a quality value;
+  Chromium adds it.
 - **`App::private_browser`** (interface version 13) draws Oak's browser inside a Home plugin
   page. The user controls it directly. The plugin supplies an HTTPS entry URL, but gets no
   page content, input, or cookies. The browser uses a temporary profile and closes when the

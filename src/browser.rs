@@ -509,6 +509,48 @@ fn find_browser() -> Option<PathBuf> {
 
 const NO_BROWSER: &str = "No Chrome or Chromium found (looked for Chrome, Chromium, Brave, Edge and Playwright's Chromium). Install one, or set OAK_BROWSER to its path.";
 
+/// A plain Chrome's identity from the browser's own user agent (`raw`): that
+/// agent without "Headless", and the client hints (`sec-ch-ua` brands, the
+/// full version, the platform) that go with it. Chromium's headless build
+/// advertises "HeadlessChrome" in both, and sites that check (AWS's signup
+/// among them) refuse the request; the version stays the browser's own, so
+/// the agent and the hints agree with what it really is. None when `raw`
+/// names no version.
+fn chrome_identity(raw: &str) -> Option<(String, Value)> {
+    let ua = raw.replace("HeadlessChrome", "Chrome");
+    if ua.is_empty() {
+        return None;
+    }
+    // "... Chrome/158.0.8127.92 Safari/537.36" → "158.0.8127.92".
+    let full = raw
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("HeadlessChrome/").or_else(|| w.strip_prefix("Chrome/")))?
+        .to_string();
+    let major = full.split('.').next().filter(|m| !m.is_empty())?;
+    // Chrome's own hint set, in its order and with its "Not A Brand" greasing.
+    let meta = json!({
+        "brands": [
+            {"brand": "Chromium", "version": major},
+            {"brand": "Not.A/Brand", "version": "24"},
+            {"brand": "Google Chrome", "version": major},
+        ],
+        "fullVersionList": [
+            {"brand": "Chromium", "version": full},
+            {"brand": "Not.A/Brand", "version": "24.0.0.0"},
+            {"brand": "Google Chrome", "version": full},
+        ],
+        "fullVersion": full,
+        "platform": "Windows",
+        "platformVersion": "10.0.0",
+        "architecture": "x86",
+        "model": "",
+        "mobile": false,
+        "bitness": "64",
+        "wow64": false,
+    });
+    Some((ua, meta))
+}
+
 /// A browser left running on the profile (Oak killed, say) holds its lock,
 /// and a new one would quit at once: it is ended, by the PID Oak kept, once
 /// its command line shows it is on this profile.
@@ -687,7 +729,11 @@ impl Instance {
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
         if self.is_private() {
+            // A plugin's hidden page is a person's own browser to the site it
+            // reaches, as a conversation's browser is: no incognito hint that
+            // it is not, and the automation flag cleared as for BROWSER.
             cmd.args(["--incognito", "--disable-background-networking"]);
+            cmd.arg("--disable-blink-features=AutomationControlled");
         } else {
             cmd.arg("--disable-blink-features=AutomationControlled");
         }
@@ -853,6 +899,29 @@ impl Instance {
         Ok((id, cdp))
     }
 
+    /// A private page's browser, as a website sees a plain Chrome: the user
+    /// agent without "Headless", and the client hints that go with it
+    /// (`sec-ch-ua` brands, platform, version). Chromium's headless build
+    /// advertises "HeadlessChrome" in both, and sites that check (AWS's
+    /// signup among them) refuse the request. The version is the browser's
+    /// own, so the UA and hints stay consistent with what it really is.
+    fn present_as_chrome(&self, cdp: &Arc<Cdp>) {
+        let Ok(v) = cdp.call("Browser.getVersion", json!({})) else { return };
+        let raw = v["userAgent"].as_str().unwrap_or("");
+        let Some((ua, meta)) = chrome_identity(raw) else { return };
+        let _ = cdp.call(
+            "Emulation.setUserAgentOverride",
+            json!({
+                "userAgent": ua,
+                // Chromium adds the quality itself: this sends
+                // "en-US,en;q=0.9", as a Chrome does, not a doubled ;q.
+                "acceptLanguage": "en-US,en",
+                "platform": "Win32",
+                "userAgentMetadata": meta,
+            }),
+        );
+    }
+
     /// Readies a page tab: its events and main frame, a plain Chrome's user
     /// agent (or the model's overrides), file choosers, downloads, and the
     /// network log.
@@ -863,6 +932,10 @@ impl Instance {
         let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or("").to_string();
         let url = tree["frameTree"]["frame"]["url"].as_str().unwrap_or("").to_string();
         if self.is_private() {
+            // A plugin's hidden page must pass for a plain Chrome, not a
+            // headless one: AWS's signup refuses the headless user agent and
+            // its client hints (ERR-837 at the name step). See present_as_chrome.
+            self.present_as_chrome(cdp);
             // Use the same native focus/input path without capturing request data.
             let _ = call("Emulation.setFocusEmulationEnabled", json!({"enabled": true}));
             let _ = call("Page.setDownloadBehavior", json!({"behavior": "deny"}));
@@ -2894,6 +2967,31 @@ impl Drop for Busy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_private_page_presents_as_plain_chrome() {
+        // What a site sees: no "Headless" in the user agent, and the client
+        // hints a real Chrome sends. Built from the browser's own version.
+        let (ua, meta) = chrome_identity("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.8127.92 Safari/537.36").unwrap();
+        assert_eq!(ua, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.8127.92 Safari/537.36");
+        assert!(!ua.contains("Headless"));
+        assert_eq!(meta["fullVersion"], "158.0.8127.92");
+        let brands = meta["brands"].as_array().unwrap();
+        assert_eq!(brands[0]["brand"], "Chromium");
+        assert_eq!(brands[0]["version"], "158");
+        // Chrome's greased slot, not a "Brave" or a "HeadlessChrome" one.
+        assert_eq!(brands[1]["brand"], "Not.A/Brand");
+        assert_eq!(brands[2]["brand"], "Google Chrome");
+        assert_eq!(brands[2]["version"], "158");
+        assert_eq!(meta["platform"], "Windows");
+        assert_eq!(meta["mobile"], false);
+        assert_eq!(meta["bitness"], "64");
+        // A browser that already says Chrome is left as it is, version and all.
+        let (ua2, meta2) = chrome_identity("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.1.2 Safari/537.36").unwrap();
+        assert_eq!(ua2, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.1.2 Safari/537.36");
+        assert_eq!(meta2["fullVersion"], "140.0.1.2");
+        assert_eq!(meta2["brands"][2]["version"], "140");
+    }
 
     #[test]
     fn addresses() {
