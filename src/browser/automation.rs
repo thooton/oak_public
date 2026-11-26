@@ -88,7 +88,22 @@ pub(crate) fn command(handle: &str, command: Command) -> Result<String, String> 
         Command::Click { screen, node } => {
             click(&inst, &page, &screen, node).map(|()| String::new())
         }
+        Command::Navigate { url } => navigate(&inst, &page, &url).map(|()| String::new()),
         Command::Close => unreachable!(),
+    }
+}
+
+/// Loads `url` in the session's page, as the address bar would: HTTPS
+/// without credentials only, like the URL a session is opened on.
+fn navigate(inst: &Instance, page: &Cdp, url: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(url)
+        .ok()
+        .filter(|u| u.scheme() == "https" && u.has_host() && u.username().is_empty() && u.password().is_none())
+        .ok_or("A background browser only goes to HTTPS URLs without credentials.")?;
+    let r = call(inst, page, "Page.navigate", json!({"url": url.as_str()}))?;
+    match r["errorText"].as_str().filter(|e| !e.is_empty()) {
+        Some(e) => Err(format!("Chromium couldn't load the page ({e}).")),
+        None => Ok(()),
     }
 }
 

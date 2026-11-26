@@ -54,6 +54,14 @@ impl Browser {
         .map(|_| ())
     }
 
+    /// Loads an HTTPS URL (without credentials) in this session, keeping its
+    /// cookies: a flow can carry on from where an earlier one left it signed
+    /// in. Returns once the navigation has started; observe to see it land.
+    /// An Oak without it answers "Invalid browser command.".
+    pub fn navigate(&self, url: &str) -> Result<(), String> {
+        self.command(Command::Navigate { url: url.to_owned() }).map(|_| ())
+    }
+
     /// Closes the browser and discards its private profile.
     pub fn close(&self) {
         let _ = self.command(Command::Close);
@@ -73,6 +81,9 @@ pub enum Command {
     Click {
         screen: Address,
         node: u64,
+    },
+    Navigate {
+        url: String,
     },
     Close,
 }

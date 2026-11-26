@@ -193,7 +193,9 @@ What a plugin works with:
   a headless one: its user agent and client hints (`sec-ch-ua`) carry no "Headless", so a site
   that refuses headless browsers (AWS's signup, which answers `ERR-837` at its name step) still
   works. Do not send an `accept-language` override of your own with a quality value;
-  Chromium adds it.
+  Chromium adds it. `Browser::navigate` loads another HTTPS URL in the same session, its
+  cookies kept, so a flow can go on from where an earlier one left it signed in (an Oak without
+  it answers "Invalid browser command.", so fall back to opening a session there).
 - **`App::background_browser_view`** (interface version 15) draws the live picture of a
   background session the same page opened, read-only: its origin in a bar over the page, as wide
   as the space left and at most `max_h` tall (0: no limit), scaled to the session's viewport.

@@ -2071,11 +2071,13 @@ c_api! {
     /// the session handle; false: a reason. The page owns the session.
     fn app_open_background_browser(url: OakStr, out: OakSink, user: *mut c_void) -> bool;
 
-    /// Runs one session command (observe, fill, click, close), as JSON.
-    /// Use a worker except for close. Observations contain accessibility
+    /// Runs one session command (observe, fill, click, navigate, close), as
+    /// JSON. Use a worker except for close. Observations contain accessibility
     /// labels and node ids, not field values. Input uses native Chromium
-    /// events on a node from that document. True: `out` got the result;
-    /// false: a reason.
+    /// events on a node from that document; navigate loads an HTTPS URL in
+    /// the same session (its cookies kept; an Oak without it answers
+    /// "Invalid browser command."). True: `out` got the result; false: a
+    /// reason.
     fn background_browser_command(handle: OakStr, request: OakStr, out: OakSink, user: *mut c_void) -> bool;
 
     // Version 15: watching a background Chromium session.

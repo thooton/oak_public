@@ -2182,11 +2182,13 @@ struct OakApi {
      */
     bool (*app_open_background_browser)(OakStr url, OakSink out, void *user);
 
-    /* Runs one session command (observe, fill, click, close), as JSON.
-     * Use a worker except for close. Observations contain accessibility
+    /* Runs one session command (observe, fill, click, navigate, close), as
+     * JSON. Use a worker except for close. Observations contain accessibility
      * labels and node ids, not field values. Input uses native Chromium
-     * events on a node from that document. True: `out` got the result;
-     * false: a reason.
+     * events on a node from that document; navigate loads an HTTPS URL in
+     * the same session (its cookies kept; an Oak without it answers
+     * "Invalid browser command."). True: `out` got the result; false: a
+     * reason.
      */
     bool (*background_browser_command)(OakStr handle, OakStr request, OakSink out, void *user);
 
