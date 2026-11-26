@@ -44,11 +44,15 @@ use std::time::{Duration, Instant};
 
 /// This build's version: "0.1.276" for a release, "0.1.276-dev" for any
 /// other build of commit 276 (see build.rs).
-pub(crate) const VERSION: &str = env!("OAK_VERSION");
+///
+/// These three are statics, not consts: a const's value is copied into
+/// every function that uses it, so a new commit (a new version) would
+/// make an incremental release build redo most of the crate's codegen.
+pub(crate) static VERSION: &str = env!("OAK_VERSION");
 /// The commit it was built from (short hash).
-pub(crate) const COMMIT: &str = env!("OAK_COMMIT");
+pub(crate) static COMMIT: &str = env!("OAK_COMMIT");
 /// The GitHub repository the releases come from (empty: none).
-const REPO: &str = env!("OAK_UPDATE_REPO");
+static REPO: &str = env!("OAK_UPDATE_REPO");
 /// GitHub's API.
 const GITHUB_API: &str = "https://api.github.com";
 
