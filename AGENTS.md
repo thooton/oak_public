@@ -112,11 +112,11 @@ Drive it with `xdotool` and look with `import -window root shot.png`, inside xvf
 
 ## Releases and updates
 
-- `.github/workflows/client.yml` builds the app and the AWS Quick sign-up plugin on Windows and
-  on Linux (Ubuntu 22.04, so glibc 2.35 is enough) for every push that touches it. It does not
-  run the test suite. A successful push to master (the default branch) is released as `v<version>`
-  with `oak-windows-x86_64.exe`, the optional `oak_aws_quick_signup.dll`, `oak-linux-x86_64`, and
-  `oak-linux-x86_64.tar.gz` (each with a `.sha256`); the 20 newest releases are kept.
+- `.github/workflows/client.yml` builds the app on Windows and Linux (Ubuntu 22.04, so glibc 2.35
+  is enough) for every push that touches it. It does not run the test suite. A successful push to
+  master (the default branch) is released as `v<version>` with `oak-windows-x86_64.exe`,
+  `oak-linux-x86_64`, and `oak-linux-x86_64.tar.gz` (each with a `.sha256`); the 20 newest releases
+  are kept.
   Its "Time startup" step starts the release build on both systems with a fresh profile and with
   300 conversations (~200 MB), on Windows with Defender's real-time scanning on and off, and puts each
   `startup.log` in the run's summary (informational: it never fails the build).
@@ -948,13 +948,6 @@ talks to as a pipe. Quick runs its own system prompt, agent loop and model (Clau
 Bedrock; `turn_usage.resolved_model_id` says which), so Oak sends neither its prompt nor its
 tools, and the picker's models are Quick's three modes (`smart`, `fast`, `balanced`, sent as
 `agent_mode`), not model ids.
-
-**Signing up.** When the AWS Quick sign-up plugin is installed, Home shows an AWS Quick sign-up
-button and a link in its menu. Both open the official standalone signup in Oak's browser. AWS
-shows the email, name, email verification, password, and onboarding screens; the user interacts
-with them directly via Oak's native Chromium input. Signup doesn't sign the user in to Oak. The
-private browser has no conversation or tool access, and its temporary profile is removed when the
-page closes. A link opens the signup in the default browser instead.
 
 **Signing in** is Quick's own OIDC flow against AWS IAM Identity Center: Oak registers a public
 client for itself (`/client/register`), copies a link to the authorization endpoint with PKCE

@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 
 [workspace]
-members = ["sdk", "plugins/hello", "plugins/aws-quick-signup"]
+members = ["sdk", "plugins/hello"]
 
 [dependencies]
 anyhow = "1"

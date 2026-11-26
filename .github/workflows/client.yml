@@ -9,7 +9,6 @@
 #
 # Release assets (src/update.rs looks for these names):
 #   oak-windows-x86_64.exe          the Windows app
-#   oak_aws_quick_signup.dll        the optional Home plugin on Windows
 #   oak-linux-x86_64                the Linux binary, what the updater installs
 #   oak-linux-x86_64.tar.gz         the Linux bundle (linux/package.sh)
 # each with a .sha256 beside it.
@@ -122,7 +121,7 @@ jobs:
       # Keep a runnable binary for startup diagnostics.
       - name: Build (release)
         id: build
-        run: cargo build --release --locked -p oak -p oak-aws-quick-signup
+        run: cargo build --release --locked
 
       - name: Check the version
         env:
@@ -196,7 +195,6 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/oak.exe dist/oak-windows-x86_64.exe
-          cp target/release/oak_aws_quick_signup.dll dist/
 
       - name: Checksums
         run: |
