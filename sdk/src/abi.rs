@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 15;
+pub const OAK_API_VERSION: u32 = 16;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -2089,6 +2089,21 @@ c_api! {
     /// the page but can't send it input; the plugin gets no pixels. True
     /// when it was drawn; false gives the reason to `out`.
     fn app_background_browser_view(ui: *mut OakUi, handle: OakStr, max_h: f32, out: OakSink, out_user: *mut c_void) -> bool;
+
+    // Version 16: background Chromium a plugin owns, from any thread.
+
+    /// Starts a private background Chromium session at an HTTPS URL that
+    /// the plugin owns rather than a page: it keeps running whatever Oak
+    /// shows, until `background_browser_command` closes it or Oak exits.
+    /// Any thread. Plugins must close their own sessions, including on
+    /// plugin exit. True: `out` got the session handle; false: a reason.
+    fn background_browser_open(url: OakStr, out: OakSink, user: *mut c_void) -> bool;
+
+    /// Starts a browser sign-in that finishes on its own (`quick`) from any
+    /// thread, without the window: Oak waits for it in the background and
+    /// keeps the account as Home's Add account does. A new one replaces one
+    /// still waiting. True: `out` got the URL to load; false: a reason.
+    fn background_sign_in(provider: OakStr, out: OakSink, user: *mut c_void) -> bool;
 }
 
 /// The C header: everything declared above, in C.

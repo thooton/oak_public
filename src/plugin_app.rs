@@ -66,18 +66,17 @@ impl App {
         Ok(handle)
     }
 
-    /// Draws this page's own background session, read-only, so the user can
-    /// watch what the plugin does in it.
+    /// Draws a background session (this page's, or one the plugin owns),
+    /// read-only, so the user can watch what the plugin does in it. Any
+    /// plugin part may draw it: a Home tab, a page.
     pub(crate) fn plugin_background_browser_view(&mut self, ui: &mut Ui, t: &Theme, handle: &str, max_h: f32) -> Result<(), String> {
-        if self.page != Page::Plugin {
-            return Err("A background browser can only be shown on a Home plugin page.".into());
+        if !browser::automation::is_detached(handle)
+            && (self.page != Page::Plugin
+                || !self.background_browser.as_ref().is_some_and(|b| b.owner == self.plugin_page && b.handle() == handle))
+        {
+            return Err("That background browser isn't open on this page.".into());
         }
-        let inst = self
-            .background_browser
-            .as_ref()
-            .filter(|b| b.owner == self.plugin_page && b.handle() == handle)
-            .and_then(|b| b.instance())
-            .ok_or("That background browser isn't open on this page.")?;
+        let inst = browser::automation::instance(handle).ok_or("That background browser isn't open.")?;
         browser_view::watch(ui, t, &inst, max_h);
         Ok(())
     }

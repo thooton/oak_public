@@ -8,6 +8,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct Browser(String);
 
+/// Opens a private background Chromium session at an HTTPS URL that the
+/// plugin owns (interface 16): from any thread, and it keeps running
+/// whatever Oak shows, until `Browser::close` or Oak exits. Close what
+/// you open, including on plugin exit. Draw one with `App::background_browser_view`.
+pub fn open(url: &str) -> Result<Browser, String> {
+    checked(|out, user| unsafe { (api().background_browser_open)(s(url), out, user) }).map(Browser)
+}
+
 impl Browser {
     pub(crate) fn new(handle: String) -> Self {
         Self(handle)

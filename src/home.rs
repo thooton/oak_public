@@ -753,20 +753,7 @@ impl App {
                 self.antigravity_login = Some(login);
                 url
             }
-            Provider::Quick => {
-                let url = crate::quick::login::start()?;
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    for _ in 0..300 {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        if !matches!(crate::quick::login::state(), Some(crate::quick::login::State::Waiting { .. })) {
-                            ctx.request_repaint();
-                            return;
-                        }
-                    }
-                });
-                url
-            }
+            Provider::Quick => start_quick_sign_in(ctx)?,
             Provider::Freebuff => {
                 if freebuff::login_pending() {
                     return Err("A Freebuff sign-in is already waiting for browser approval.".into());
@@ -793,6 +780,24 @@ impl App {
         self.sign_in_copied = false;
         Ok(url)
     }
+}
+
+/// Starts a Quick sign-in, which finishes in the background (its listener
+/// keeps the account), and repaints once it has: Home's Add account, and a
+/// plugin's from any thread (`background_sign_in`).
+pub(crate) fn start_quick_sign_in(ctx: &egui::Context) -> Result<String, String> {
+    let url = crate::quick::login::start()?;
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        for _ in 0..300 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if !matches!(crate::quick::login::state(), Some(crate::quick::login::State::Waiting { .. })) {
+                ctx.request_repaint();
+                return;
+            }
+        }
+    });
+    Ok(url)
 }
 
 /// What "+ Add account" can add.

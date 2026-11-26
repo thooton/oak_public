@@ -8,6 +8,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 const PREFIX: &str = ":background-browser:";
+/// Sessions a plugin owns rather than a page (`open_detached`).
+const DETACHED: &str = ":background-session:";
 const CLOSED: &str = "The background browser is closed.";
 const CHANGED: &str = "The browser page changed before input could be sent.";
 const ACTION_FAILED: &str = "Chromium couldn't complete the requested browser action.";
@@ -26,11 +28,34 @@ impl Lease {
     pub(crate) fn handle(&self) -> &str {
         &self.handle
     }
+}
 
-    /// The running browser, for the page that owns it to watch.
-    pub(crate) fn instance(&self) -> Option<std::sync::Arc<Instance>> {
-        OPEN.lock().unwrap().get(&self.handle).filter(|inst| inst.is_private()).cloned()
+pub(crate) fn is_detached(handle: &str) -> bool {
+    handle.starts_with(DETACHED)
+}
+
+fn is_background(handle: &str) -> bool {
+    handle.starts_with(PREFIX) || is_detached(handle)
+}
+
+/// Opens a session a plugin owns rather than a page: it keeps running
+/// whatever Oak shows, until it is closed (`Command::Close`) or Oak exits
+/// (`shutdown_all`), and its private profile goes with it.
+pub(crate) fn open_detached(ctx: &egui::Context, url: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(url)
+        .ok()
+        .filter(|u| u.scheme() == "https" && u.has_host() && u.username().is_empty() && u.password().is_none())
+        .ok_or("A background browser needs an HTTPS entry URL without credentials.")?;
+    Ok(open_isolated(ctx, url.to_string(), DETACHED).conv.clone())
+}
+
+/// A background session by its handle (which only its owner has), for
+/// drawing it.
+pub(crate) fn instance(handle: &str) -> Option<std::sync::Arc<Instance>> {
+    if !is_background(handle) {
+        return None;
     }
+    OPEN.lock().unwrap().get(handle).filter(|inst| inst.is_private()).cloned()
 }
 
 impl Drop for Lease {
@@ -40,7 +65,7 @@ impl Drop for Lease {
 }
 
 pub(crate) fn command(handle: &str, command: Command) -> Result<String, String> {
-    if !handle.starts_with(PREFIX) {
+    if !is_background(handle) {
         return Err(CLOSED.into());
     }
     if matches!(&command, Command::Close) {

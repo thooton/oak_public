@@ -201,7 +201,14 @@ What a plugin works with:
   as the space left and at most `max_h` tall (0: no limit), scaled to the session's viewport.
   Draw it every frame it should show; frames stream only while it is drawn and on screen. The
   user can watch the automation but not click or type into it, and the plugin receives no
-  pixels. It fails for a session that isn't this page's or is no longer open.
+  pixels. In interface 16, any plugin view can also draw a session it opened with
+  `oak_sdk::browser::open`.
+- **`oak_sdk::browser::open`** (interface version 16) opens a private background Chromium
+  session from a worker, independent of the page or tab Oak draws. Each such session has its
+  own temporary profile, and the plugin must close it on completion, failure or plugin exit.
+  **`Host::start_background_sign_in`** starts Quick's OAuth flow from a worker and returns
+  its URL without opening a browser. Oak's Quick listener handles one flow at a time; a new
+  start replaces one still waiting, so jobs should take turns at this step.
 - **`App::private_browser`** (interface version 13) draws Oak's browser inside a Home plugin
   page. The user controls it directly. The plugin supplies an HTTPS entry URL, but gets no
   page content, input, or cookies. The browser uses a temporary profile and closes when the

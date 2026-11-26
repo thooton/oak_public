@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 15
+#define OAK_API_VERSION 16
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -2200,6 +2200,21 @@ struct OakApi {
      * when it was drawn; false gives the reason to `out`.
      */
     bool (*app_background_browser_view)(OakUi *ui, OakStr handle, float max_h, OakSink out, void *out_user);
+
+    /* Starts a private background Chromium session at an HTTPS URL that
+     * the plugin owns rather than a page: it keeps running whatever Oak
+     * shows, until `background_browser_command` closes it or Oak exits.
+     * Any thread. Plugins must close their own sessions, including on
+     * plugin exit. True: `out` got the session handle; false: a reason.
+     */
+    bool (*background_browser_open)(OakStr url, OakSink out, void *user);
+
+    /* Starts a browser sign-in that finishes on its own (`quick`) from any
+     * thread, without the window: Oak waits for it in the background and
+     * keeps the account as Home's Add account does. A new one replaces one
+     * still waiting. True: `out` got the URL to load; false: a reason.
+     */
+    bool (*background_sign_in)(OakStr provider, OakSink out, void *user);
 };
 
 /* Text from a C string, and from a literal. */

@@ -819,6 +819,24 @@ impl HostApi for Oak {
         give_result(result.unwrap_or_else(|| Err(NO_WINDOW.into())).map(|()| String::new()), out, out_user)
     }
 
+    unsafe extern "C" fn background_browser_open(url: OakStr, out: OakSink, user: *mut c_void) -> bool {
+        let url = str_of(url).to_string();
+        let result = match super::context() {
+            Some(ctx) => crate::browser::automation::open_detached(&ctx, &url),
+            None => Err(NO_WINDOW.into()),
+        };
+        give_result(result, out, user)
+    }
+
+    unsafe extern "C" fn background_sign_in(provider: OakStr, out: OakSink, user: *mut c_void) -> bool {
+        let result = match (str_of(provider), super::context()) {
+            ("quick", Some(ctx)) => crate::home::start_quick_sign_in(&ctx),
+            ("quick", None) => Err(NO_WINDOW.into()),
+            _ => Err("Only Quick's sign-in can be started in the background.".into()),
+        };
+        give_result(result, out, user)
+    }
+
     unsafe extern "C" fn app_local_form(ui: *mut OakUi) {
         let (ui, t) = (ui_of(ui), theme());
         app(|a| a.local_rows(ui, &t));

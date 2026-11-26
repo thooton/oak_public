@@ -1150,4 +1150,6 @@ ends, then `OAK_WRITE_HEADER=1 OAK_WRITE_ABI=1 cargo test -p oak-sdk` (docs/PLUG
 Plugins can start the same browser sign-ins as Home's **+ Add account**. Oak returns the
 link without opening it or copying it, and keeps the sign-in state and account credentials.
 The pending Claude, Codex, or Antigravity form can be shown by the plugin or on Home;
-Quick and Freebuff complete in the background.
+Quick and Freebuff complete in the background. From interface version 16, workers can start
+Quick's sign-in without a window callback and open independent private background Chromium
+sessions. Plugins close those sessions when done or on exit; drawing them is optional.

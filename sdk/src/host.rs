@@ -419,6 +419,15 @@ impl Host {
         unsafe { (api().signed_in)() }
     }
 
+    /// Starts a browser sign-in that finishes on its own (`quick`) from any
+    /// thread, without the window (interface 16): Oak waits for it in the
+    /// background and keeps the account as Home's Add account does. A new
+    /// one replaces one still waiting. Ok: the URL to load (in a
+    /// `browser::Browser`, say).
+    pub fn start_background_sign_in(&self, provider: &str) -> Result<String, String> {
+        checked(|out, user| unsafe { (api().background_sign_in)(s(provider), out, user) })
+    }
+
     /// The vault (`plugin::Vault`) connected or disconnected, or its
     /// logins changed: Oak brings its accounts in step, off this thread.
     pub fn vault_changed(&self) {
@@ -609,7 +618,8 @@ pub trait App {
         Err("This window cannot open a background browser.".into())
     }
     /// Draws the live picture of `browser`, a session this Home plugin page
-    /// opened, read-only (interface 15): as wide as the space left and at
+    /// opened (interface 15) or one opened with `browser::open` (interface
+    /// 16). Read-only, as wide as the space left and at
     /// most `max_h` tall (0: no limit), its origin over it. Draw it each
     /// frame it should show; the picture streams only while it is drawn.
     /// The user can watch but not send input, and the plugin gets no pixels.
