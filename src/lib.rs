@@ -986,6 +986,12 @@ impl App {
         if let (Some(to), Some(s)) = (rewind, self.sessions.get(id)) {
             s.rewind(to);
         }
+        // A swarm member's row under its coordinator's transcript.
+        if let Some(conv) = ctx.data_mut(|d| d.remove_temp::<String>(Id::unique(transcript::OPEN_REQUEST)))
+            && self.sessions.contains_key(&conv)
+        {
+            self.open(conv);
+        }
     }
 
     /// What the chats page shows: the new screen or the open conversation,

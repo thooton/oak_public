@@ -850,7 +850,9 @@ something moves, at 30 fps while a member works, else once a second. Under its t
 works) has a row each, like a card: the member's Oak bot (`src/bot.rs`, its shape, eyeless, in its color on
 the board), its name (its role), its brief's first sentence, faint, and on the right its state
 (working with a spinner, a dot while the coordinator's own status spins; waiting; done, with a
-check, once its last post holds [done]; paused; stopped); hovering shows what it is doing,
+check, once its last post holds [done]; paused; stopped), everything in it painted so each row
+takes exactly its height (`member_rows_are_evenly_spaced_and_open_their_member`); hovering shows
+what it is doing, a click opens its conversation (`transcript::OPEN_REQUEST`, as the Graph's does),
 and its session box has a swarm row (title, how many work); a member's says its name and swarm
 and opens the coordinator. The workspace is the shared folder (no per-member copies).
 

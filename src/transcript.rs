@@ -3802,6 +3802,8 @@ fn file_link(ui: &mut Ui, t: &Theme, name: &str, path: &str, note: &str) {
 pub(crate) struct MemberRow {
     /// Its name on the board: its role ("parser", "verifier").
     pub(crate) name: String,
+    /// Its conversation, which a click on its row opens (`OPEN_REQUEST`).
+    pub(crate) conv: String,
     /// Its brief's first sentence.
     pub(crate) task: String,
     /// What OAK is doing in it, while it works.
@@ -3817,7 +3819,7 @@ impl MemberRow {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for r in rows {
-            (&r.name, &r.task, &r.status, r.state.describe(), r.done).hash(&mut h);
+            (&r.name, &r.conv, &r.task, &r.status, r.state.describe(), r.done).hash(&mut h);
         }
         h.finish()
     }
@@ -3840,7 +3842,7 @@ pub(crate) fn transcript_status(
     if !members.is_empty() {
         ui.add_space(4.0);
         ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.spacing_mut().item_spacing.y = MEMBER_ROW_GAP;
             for m in members {
                 member_row(ui, t, m, live.busy);
             }
@@ -3848,23 +3850,42 @@ pub(crate) fn transcript_status(
     }
 }
 
+/// A click on a member's row in the list under a coordinator's transcript
+/// leaves its conversation's id here; `App::chat_actions` opens it, as the
+/// Graph tab's click does.
+pub(crate) const OPEN_REQUEST: &str = "oak-open-member-request";
+
+/// The members' list's rows: their height, the gap between them and their
+/// bots' size.
+const MEMBER_ROW_H: f32 = 34.0;
+const MEMBER_ROW_GAP: f32 = 6.0;
+const MEMBER_BOT: f32 = 20.0;
+
 /// A row of the members' list: the member's bot (eyeless, in its color on
 /// the board), its name, its task (faint, cut to fit) and, on the right,
-/// its state. Hovering shows what it is doing. A working member's spinner
-/// is a dot while OAK's own status line spins (`busy`).
+/// its state. Hovering shows what it is doing; a click opens its
+/// conversation (`OPEN_REQUEST`). A working member's spinner is a dot
+/// while OAK's own status line spins (`busy`). Everything in it is painted
+/// (no widget is added), so each row takes exactly its height.
 fn member_row(ui: &mut Ui, t: &Theme, m: &MemberRow, busy: bool) {
     use crate::agent::swarm::MemberState;
-    const PAD: f32 = 10.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+    const PAD: f32 = 12.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), MEMBER_ROW_H), Sense::click());
+    // (Whole pixels, so its border is crisp and the rows are evenly spaced.)
+    let ppp = ui.ctx().pixels_per_point();
+    let snap = |v: egui::Pos2| egui::pos2((v.x * ppp).round() / ppp, (v.y * ppp).round() / ppp);
+    let rect = Rect::from_min_max(snap(rect.min), snap(rect.max));
     let p = ui.painter().clone();
     let r = crate::gravity::radius(t, 8.0);
-    p.rect_filled(rect, r, t.panel);
-    p.rect_stroke(rect, r, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+    let hovered = resp.hovered();
+    p.rect_filled(rect, r, if hovered { t.tool_hover } else { t.panel });
+    p.rect_stroke(rect, r, Stroke::new(1.0, if hovered { t.ink4 } else { t.line }), egui::StrokeKind::Inside);
     let cy = rect.center().y;
-    crate::bot::paint(&p, egui::pos2(rect.left() + PAD + 7.0, cy), 14.0, crate::swarm_view::name_color(t, &m.name), &m.name);
+    let bot_x = rect.left() + PAD + MEMBER_BOT / 2.0;
+    crate::bot::paint(&p, egui::pos2(bot_x, cy), MEMBER_BOT, crate::swarm_view::name_color(t, &m.name), &m.name);
     let galley = |ui: &Ui, text: RichText, wrap: egui::TextWrapMode, width: f32| egui::WidgetText::from(text).into_galley(ui, Some(wrap), width, egui::TextStyle::Body);
     let name = galley(ui, RichText::new(&m.name).strong().color(t.ink), egui::TextWrapMode::Extend, f32::INFINITY);
-    let name_x = rect.left() + PAD + 14.0 + 10.0;
+    let name_x = rect.left() + PAD + MEMBER_BOT + 10.0;
     let name_w = name.size().x;
     p.galley(egui::pos2(name_x, cy - name.size().y / 2.0), name, t.ink);
     // The state, right-aligned, after its sign.
@@ -3881,9 +3902,8 @@ fn member_row(ui: &mut Ui, t: &Theme, m: &MemberRow, busy: bool) {
     p.galley(egui::pos2(state_x, cy - state.size().y / 2.0), state, color);
     let sign = Rect::from_center_size(egui::pos2(state_x - 6.0 - 6.0, cy), vec2(12.0, 12.0));
     match &m.state {
-        MemberState::Working if !busy => {
-            ui.put(sign, egui::Spinner::new().size(12.0).color(t.ink3));
-        }
+        // (Painted, not added: a widget here would move the next row up.)
+        MemberState::Working if !busy => egui::Spinner::new().size(12.0).color(t.ink3).paint_at(ui, sign),
         MemberState::Working => crate::widgets::state_dot(&p, t, sign.center(), false),
         MemberState::Waiting if m.done => {
             p.text(sign.center(), egui::Align2::CENTER_CENTER, CHECK_ICON, crate::look::icon_font(13.0), color);
@@ -3903,8 +3923,13 @@ fn member_row(ui: &mut Ui, t: &Theme, m: &MemberRow, busy: bool) {
         let task = galley(ui, RichText::new(&m.task).small().color(t.ink3), egui::TextWrapMode::Truncate, room);
         p.galley(egui::pos2(task_x, cy - task.size().y / 2.0), task, t.ink3);
     }
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(Id::unique(OPEN_REQUEST), m.conv.clone()));
+    }
     resp.on_hover_ui(|ui| {
         ui.label(RichText::new(format!("@{}: {}", m.name, m.state.describe())).color(t.ink));
+        ui.label(RichText::new("Click to open its conversation").small().color(t.ink3));
         if !m.status.is_empty() && m.state == MemberState::Working {
             ui.label(RichText::new(&m.status).color(t.ink2));
         }
@@ -4175,7 +4200,41 @@ pub(crate) fn queue_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_hover_test::{run_frame, test_ctx};
+    use crate::app_hover_test::{click, painted, rect_of, run_frame, test_ctx};
+
+    /// The members' list under a coordinator's transcript: each row its
+    /// height apart, working ones (with their spinners) too, its bot whole
+    /// inside its card, and a click on a row asks for its conversation.
+    #[test]
+    fn member_rows_are_evenly_spaced_and_open_their_member() {
+        use crate::agent::swarm::MemberState;
+        let (ctx, t) = test_ctx(true, true);
+        let row = |name: &str, state: MemberState| MemberRow { name: name.into(), conv: format!("conv-{name}"), task: "Its task.".into(), status: String::new(), state, done: false };
+        let rows = [row("parser", MemberState::Waiting), row("quick", MemberState::Working), row("theme", MemberState::Working), row("verifier", MemberState::Waiting)];
+        let (conv, live) = (Conversation::default(), Live::default());
+        let mut time = 0.0;
+        let mut frame = |events| run_frame(&ctx, vec2(800.0, 600.0), &mut time, 0.1, events, |ui| transcript_status(ui, &t, &conv, &live, false, &rows));
+        let out = frame(vec![]);
+        let shown = painted(&out);
+        // (By their tasks' tops: the same text, so the same glyphs.)
+        let tops: Vec<f32> = shown.iter().filter(|(s, _)| s == "Its task.").map(|(_, r)| r.top()).collect();
+        assert_eq!(tops.len(), rows.len());
+        let step = MEMBER_ROW_H + MEMBER_ROW_GAP;
+        for w in tops.windows(2) {
+            assert!((w[1] - w[0] - step).abs() < 0.6, "rows {tops:?} aren't {step} apart");
+        }
+        // The bots: images, each inside its card (not cut at its left).
+        let bots: Vec<Rect> = out.shapes.iter().filter_map(|s| if let egui::Shape::Mesh(m) = &s.shape { (m.texture_id != egui::TextureId::default()).then(|| m.calc_bounds()) } else { None }).collect();
+        assert_eq!(bots.len(), rows.len(), "one bot a row");
+        for b in &bots {
+            assert!(b.left() >= 8.0 && (b.width() - MEMBER_BOT).abs() < 1.0, "bot {b:?}");
+        }
+        // A click on quick's row asks for its conversation.
+        let at = rect_of(&shown, "quick").center();
+        frame(click(at, egui::PointerButton::Primary));
+        let asked = ctx.data_mut(|d| d.remove_temp::<String>(Id::unique(OPEN_REQUEST)));
+        assert_eq!(asked.as_deref(), Some("conv-quick"));
+    }
 
     /// A Python call shows its code: its row says what the agent says the
     /// code does, else the code's first line.

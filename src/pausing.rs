@@ -89,7 +89,7 @@ impl App {
             .map(|(m, task, done)| {
                 let state = state_of(&m).0;
                 let status = if state == MemberState::Working { self.sessions.get(&m.conv).map(|a| a.live.lock().unwrap().status.clone()).unwrap_or_default() } else { String::new() };
-                crate::transcript::MemberRow { name: m.name, task, status, state, done }
+                crate::transcript::MemberRow { name: m.name, conv: m.conv, task, status, state, done }
             })
             .collect();
         if done && !rows.iter().any(|r| r.state == MemberState::Working) {
