@@ -2826,6 +2826,26 @@ pub(crate) fn install_summary(
         c.earlier.remove(0);
     }
     c.rolling.apply(summary, saved, cost);
+    // Quick's thread holds what the summary replaced, and Quick's agent
+    // reads its thread: the conversation goes on in a fresh one, which the
+    // next request to Quick sends the summary and all after it
+    // (`open_compacted_thread`), whichever model the summary was made for.
+    if let Some(next) = crate::quick::recovery::compacted_session(&c.id, c.quick_session.as_ref()) {
+        c.quick_session = Some(next);
+    }
+}
+
+/// A Quick thread a summary opened (`recovery::Session::compacted`) starts
+/// where the conversation is now: its first request sends it all (the
+/// summary and after it), as a revert's fresh thread is sent. Done when the
+/// request is made, not when the summary lands, so a turn that ran on the
+/// old thread meanwhile isn't taken as the new one's.
+pub(crate) fn open_compacted_thread(c: &mut Conversation) {
+    let n = c.messages.len();
+    if let Some(q) = c.quick_session.as_mut().filter(|q| q.compacted) {
+        q.compacted = false;
+        q.from = Some(n);
+    }
 }
 
 /// Keeps the first `n` messages, `changed` being the first one that is no
@@ -3990,14 +4010,32 @@ fn summary_request_for(
 ) -> oak::Request {
     let mut request = body.clone();
     request.messages = summary_messages(c, body.provider, n, cut);
-    // (A provider that keeps the conversation itself reads the summary's
-    // instruction alone: what its thread lacks isn't what is summarized.)
     request.unseen.clear();
+    // Quick writes the summary on a throwaway thread of its own (the
+    // conversation's has all of it, the part kept too), sent exactly the
+    // part the summary replaces, under its own id so that nothing of the
+    // conversation's turn (its controls, a parked turn) is its.
+    if body.provider == api::Provider::Quick {
+        request.unseen = request.messages.clone();
+        request.quick_session = crate::quick::recovery::summary_session(&c.id, c.quick_session.as_ref());
+        request.conv = Some(format!("{}-summary", c.id));
+    }
     if request.ttl == oak::Ttl::OneHour {
         request.ttl = oak::Ttl::FiveMinutes;
     }
     request.anchor = request.anchor.filter(|&i| i < request.messages.len());
     rolling::summary_request(request, &rolling::prompt_for(&body.model))
+}
+
+/// What the first `n` messages come to from the summary cut `base`, as
+/// Oak's copy of the conversation holds them (tokens, estimated): Quick's
+/// own count is of its thread, its agent's steps and Quick's own prompt
+/// included, so a summary's cut is placed by this instead.
+pub(crate) fn quick_view_size(c: &mut Conversation, n: usize, base: usize) -> u64 {
+    c.messages.load_from(base);
+    let n = n.min(c.messages.len());
+    let summary = c.rolling.summary.as_ref().map_or(0, |s| s.text.len());
+    rolling::estimate(summary + c.messages[base.min(n)..n].iter().map(rolling::chars).sum::<usize>())
 }
 
 /// What to summarize of the first `n` messages of a request built on the

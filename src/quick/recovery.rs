@@ -41,6 +41,36 @@ pub(crate) struct Session {
     /// as a number, so a revert changes no message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) from: Option<usize>,
+    /// A summary opened this thread (`compacted_session`): none of the
+    /// conversation is in it, and its `from` is set by the first request
+    /// that goes to it (`agent::open_compacted_thread`), so it is sent the
+    /// summary and all after it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) compacted: bool,
+}
+
+/// The thread conversation `conv` goes on in once a summary replaces the
+/// older part of it: a fresh one on the same account (`current`'s, else the
+/// seat's), which Quick is sent the summary and the part kept (as a revert's
+/// is). None when Quick never had a thread there.
+pub(crate) fn compacted_session(conv: &str, current: Option<&Session>) -> Option<Session> {
+    let account = current
+        .map(|q| q.account.clone())
+        .filter(|a| !a.is_empty())
+        .or_else(|| crate::rotation::seat(api::Provider::Quick, conv))?;
+    Some(Session { account, thread: hex_uuid(), from: None, compacted: true })
+}
+
+/// The thread a summary of conversation `conv` is written on: a throwaway
+/// one on the account its thread is on, so the summary is Quick's own and
+/// the conversation's thread is left as it is. None with no account.
+pub(crate) fn summary_session(conv: &str, current: Option<&Session>) -> Option<Session> {
+    let account = current
+        .map(|q| q.account.clone())
+        .filter(|a| !a.is_empty())
+        .or_else(|| crate::rotation::seat(api::Provider::Quick, conv))
+        .or_else(|| login::all().first().map(|l| l.id.clone()))?;
+    Some(Session { account, thread: hex_uuid(), from: None, compacted: false })
 }
 
 pub(crate) fn note_limit(account: &str) {
@@ -64,6 +94,7 @@ pub(crate) fn next_session(
         account,
         thread: hex_uuid(),
         from: None,
+        compacted: false,
     })
 }
 
@@ -76,6 +107,7 @@ pub(crate) fn fresh_session(conv: &str) -> Option<Session> {
         account,
         thread: hex_uuid(),
         from: None,
+        compacted: false,
     })
 }
 

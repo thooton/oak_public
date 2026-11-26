@@ -601,6 +601,9 @@ impl Worker {
             let at = if start { 0 } else { c.messages.len() };
             start_marks(&mut c, marks_before, &p, &context, at);
         }
+        if provider == api::Provider::Quick {
+            super::open_compacted_thread(&mut c);
+        }
         let mut messages = request_messages(&c, &c.messages);
         // Quick keeps the conversation itself: what other models wrote
         // since it last replied goes with the request, so a switch to it
@@ -1037,7 +1040,7 @@ impl Worker {
             n,
             prompt: usage.prompt,
         };
-        if rolling::applies(body.provider) {
+        if body.provider != api::Provider::Quick {
             c.rolling.record(m, usage.output);
         } else {
             // Quick's count is of its own thread (its prompt, its agent's
@@ -1089,7 +1092,10 @@ impl Worker {
                 return;
             }
         }
-        let Some(plan) = plan_summary(&mut c, n, base, usage.prompt) else {
+        // Quick's count is of its own thread: where the cut goes is placed
+        // by what Oak's copy of the conversation holds (`quick_view_size`).
+        let total = if body.provider == api::Provider::Quick { super::quick_view_size(&mut c, n, base) } else { usage.prompt };
+        let Some(plan) = plan_summary(&mut c, n, base, total) else {
             return;
         };
         // The request that just finished, with only the part the summary

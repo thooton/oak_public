@@ -465,11 +465,19 @@ can't read.
   reply sends what it missed too, as `<conversation_so_far>` in that message (`agent::unseen_by`,
   `quick::so_far`): the user turns, calls, results and replies since, without what the request
   sends anyway. With nothing new from the user it is told to carry on from there (`CARRY_ON_SO_FAR`).
-  It is the conversation itself, never a summary: each call's input and result is cut to 6,000
-  characters there, and a conversation past 400,000 to its start and newest turns, and when
-  anything is cut the whole of it, uncut, is written to the session's scratchpad
-  (`quick-conversation-<thread>.md`, `quick::so_far_file`) and the message names the file for
-  Quick to READ (`a_cut_conversation_so_far_is_written_whole_to_the_scratchpad`).
+  It is the conversation itself, uncut: what another model would be sent of it. Quick's service
+  turns away a message past about 49,500 bytes (with an error that says nothing), so one past
+  `handoff::MESSAGE_MAX` (45,000) goes whole, word for word, into files in the thread's
+  workspace (`quick::handoff`: uploaded through the thread's own login before the message, each
+  sized for one of Quick's reads, about 116k characters once serialized; copies in
+  `%APPDATA%\oak\quick-handoff`, kept three days), and the message names them and asks for all
+  of them read at once before anything else (`a_message_too_long_to_send_goes_whole_in_files`).
+  A file that couldn't be uploaded is named on this device instead. Until Quick reads one, the
+  first Oak call it makes is answered with a reminder to read them, once (`handoff::remind`).
+  Reading them is Quick catching up (`quick::is_boot`, by their name
+  `quick-conversation-<thread>-<n>-<k>.md`): no model is sent those reads or their results, nor
+  what Quick said just before them, and the transcript shows each as one closed row
+  (`a_catch_up_read_is_left_out`).
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
   the prompt, and is never offered to subagents (it serves one request at a time). Its model's name
   and context come from the server (`/v1/models`, `/props`), read at start, on adding it and after
@@ -711,9 +719,18 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   ~20k tokens stays (the smart context box's "Tool output kept", in thousands of tokens, 0 to 1000;
   a change applies to summaries made after it). A suggested trigger is never below keep × 4/3, the
   least that allows the keep, so it is always for the keep in the box. Turning smart context
-  off for a conversation stops new summaries; the one in use stays. It doesn't apply to Quick
-  (`rolling::applies`): Quick keeps the conversation on its own thread, so its conversations get
-  no summaries and the composer row shows only the account box.
+  off for a conversation stops new summaries; the one in use stays. On Quick it works the same,
+  with the same settings and box: the trigger is Quick's own count of its thread (its prompt and
+  its agent's steps too), and the cut is placed by what Oak's copy holds (`agent::quick_view_size`).
+  Quick writes the summary on a throwaway thread of its own, without this device's tools, sent
+  exactly the part it replaces, then the instruction (`agent::summary_request_for`); only the
+  text after its last call is the summary (`oak::text_after_calls`). Once a summary is in, made
+  on whichever model, the conversation's Quick thread is replaced by a fresh one on the same
+  account (`recovery::Session::compacted`), which the next request to Quick opens and sends the
+  summary and the part kept, with Oak's briefing (`agent::open_compacted_thread`,
+  `a_summary_moves_quick_to_a_fresh_thread_with_the_summary_and_the_part_kept`,
+  `a_summary_made_on_claude_gives_quick_a_fresh_thread_too`). Its sizes aren't suggested
+  (a subscription pays for Quick).
   The trigger is at most 90% of the model's window, and never past it: a window too short for the
   least trigger (20k; a plugin's model, Duck.ai's 19k) gets 90% of it (`rolling::max_trigger`). A
   summary takes out at least 10k tokens, or for a basic model (local or a plugin's) a quarter of
@@ -1114,7 +1131,8 @@ than as the user's words, then the call syntax; later ones (mid-turn ones too) a
 thread's history, so the briefing never goes again: not when the prompt or tools change (notes,
 kits, the folder), not after Oak restarts (a thread Quick ran snippets in has had it), and the
 `<system-reminder>` blocks a Generic-mode request adds of such changes are left out too
-(`user_message_tells_quick_how_to_call_oaks_tools`); a summary's instruction goes alone.
+(`user_message_tells_quick_how_to_call_oaks_tools`); a summary's request goes on a thread of
+its own, with the part it replaces and its instruction, unbriefed (smart context, above).
 That is why a Quick conversation works on the real project rather than on a copy of it.
 Quick hands this machine's tool calls to every socket Oak has open to it, whatever thread asked
 (a call names its thread only in its arguments, `_quickwork.offload_session_id`), so each turn

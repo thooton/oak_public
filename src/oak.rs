@@ -407,6 +407,39 @@ pub fn collect(events: &[Event]) -> Collected {
     c
 }
 
+/// The text a reply wrote after its last tool call (a provider that runs its
+/// own calls within one reply, Quick, says what it is about to do before
+/// them): None when it made none.
+pub fn text_after_calls(events: &[Event]) -> Option<String> {
+    let mut texts: Vec<Option<String>> = vec![];
+    let mut last_call = None;
+    for ev in events {
+        match ev {
+            Event::Block { index, block } => {
+                if texts.len() <= *index {
+                    texts.resize(index + 1, None);
+                }
+                texts[*index] = is(block, "text").then(|| block["text"].as_str().unwrap_or("").to_string());
+                if is_call(block) {
+                    last_call = Some(last_call.map_or(*index, |l: usize| l.max(*index)));
+                }
+            }
+            Event::Text { index, text } => {
+                if let Some(t) = texts.get_mut(*index).and_then(Option::as_mut) {
+                    t.push_str(text);
+                }
+            }
+            Event::Retry { .. } | Event::ThreadRestart(_) => {
+                texts.clear();
+                last_call = None;
+            }
+            _ => {}
+        }
+    }
+    let last = last_call?;
+    Some(texts.into_iter().skip(last + 1).flatten().collect::<Vec<_>>().join("").trim().to_string())
+}
+
 // ---------------------------------------------------------------- from the old format
 
 /// A block of the Anthropic Messages format, as conversations were kept
@@ -536,6 +569,23 @@ mod tests {
         assert_eq!(c.text, "Hello");
         assert_eq!(c.stop, "end");
         assert_eq!(c.usage.output, 4);
+    }
+
+    /// What a reply wrote after its own calls (Quick reading a summary's
+    /// files, then writing it), and None for a reply without calls.
+    #[test]
+    fn the_text_after_a_replys_calls() {
+        let ev = vec![
+            Event::Block { index: 0, block: text("") },
+            Event::Text { index: 0, text: "Reading the files.".into() },
+            Event::Block { index: 1, block: json!({"type": "tool_call", "id": "c1", "name": "file_read", "input": {}}) },
+            Event::Block { index: 2, block: json!({"type": "tool_call", "id": "c2", "name": "file_read", "input": {}}) },
+            Event::Block { index: 3, block: text("") },
+            Event::Text { index: 3, text: " ## Active Goal ".into() },
+        ];
+        assert_eq!(text_after_calls(&ev).as_deref(), Some("## Active Goal"));
+        assert_eq!(collect(&ev).text, "Reading the files. ## Active Goal");
+        assert_eq!(text_after_calls(&ev[..1]), None);
     }
 
     /// Call ids from every provider's models are made to fit the strictest

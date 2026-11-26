@@ -85,11 +85,14 @@ pub fn capped(c: Config, max: u64) -> Config {
     Config { trigger, keep: c.keep.min(trigger * 3 / 4) }
 }
 
-/// Whether smart context applies to conversations `provider` serves. Not
-/// Quick's: it keeps the conversation on its own thread and runs its own
-/// agent, so a summary of Oak's copy changes nothing it reads.
+/// Whether smart context applies to conversations `provider` serves: all
+/// of them. Quick keeps the conversation on its own thread, so a summary
+/// moves it to a fresh one that holds the summary and the part kept
+/// (`agent::install_summary`); its trigger is Quick's own count of its
+/// thread (`agent::quick_view_size` places the cut).
 pub fn applies(provider: crate::api::Provider) -> bool {
-    provider != crate::api::Provider::Quick
+    let _ = provider;
+    true
 }
 
 /// The sizes as they apply to a conversation on `model`: the settings,
@@ -1016,7 +1019,15 @@ fn summarize_with(mut req: Request) -> Result<(String, Cost), String> {
             }
             Err(e) => return Err(e),
         };
-        let reply = crate::oak::collect(&events);
+        let mut reply = crate::oak::collect(&events);
+        // Quick runs its own calls within the reply (reading a summary
+        // request too long for one message, `quick::handoff`): what it said
+        // before them isn't the summary.
+        if req.provider == crate::api::Provider::Quick
+            && let Some(after) = crate::oak::text_after_calls(&events)
+        {
+            reply.text = after;
+        }
         cost.add(&reply);
         let stop = reply.stop.as_str();
         // A tool call instead of the summary: asked again with a reminder
@@ -1033,6 +1044,12 @@ fn summarize_with(mut req: Request) -> Result<(String, Cost), String> {
             refusals += 1;
             std::thread::sleep(std::time::Duration::from_secs(api::retry_wait(refusals)));
             continue;
+        }
+        // Quick stopped for its own reasons (a usage or rate limit, a service
+        // error, the device): what it wrote, its notice too, isn't a summary.
+        if stop.starts_with("quick_") {
+            let why = reply.detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default();
+            return Err(format!("AWS Quick couldn't write the summary ({stop}{why})."));
         }
         if reply.text.is_empty() || stop == crate::oak::stop::REFUSAL {
             let why = reply.detail.as_deref().map(|d| format!("; {d}")).unwrap_or_default();

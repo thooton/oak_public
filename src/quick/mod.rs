@@ -1769,7 +1769,7 @@ pub(crate) fn quick_worked_here(r: &Request) -> bool {
 
 /// The `user_message` frame for Oak request `r` on thread `thread`: the
 /// newest user turn, since Quick keeps the thread's history.
-fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> Value {
+pub(crate) fn user_message(r: &Request, thread: &str, m: &Model, outpost: Option<&str>) -> Value {
     user_message_as(r, thread, m, outpost, true)
 }
 
@@ -1784,7 +1784,16 @@ fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, 
     };
     // What the thread hasn't seen of the conversation goes first (a
     // summary's own request carries its instruction alone).
-    let newest = match r.instruction.is_none().then(|| so_far(r)).flatten() {
+    // A summary's request carries the part it replaces (on a thread of its
+    // own, `agent::summary_request_for`), then its instruction.
+    let source = if r.instruction.is_none() {
+        so_far(r)
+    } else if r.purpose == oak::Purpose::Summary {
+        to_summarize(r)
+    } else {
+        None
+    };
+    let newest = match source {
         Some(s) => format!("{s}\n\n{newest}"),
         None => newest,
     };
@@ -1972,6 +1981,20 @@ fn so_far(r: &Request) -> Option<String> {
     ))
 }
 
+/// The part of the conversation a summary replaces (a summary request's
+/// `unseen`), as text for its message: the instruction after it asks for the
+/// summary. None when there is nothing.
+fn to_summarize(r: &Request) -> Option<String> {
+    let (body, _) = so_far_body(&r.unseen, usize::MAX, usize::MAX)?;
+    Some(format!(
+        "<conversation_so_far>\nThe conversation so far, oldest first (\"Assistant\" is you, the same assistant). Don't carry on with it, run anything, or use any tools: the request after it is what to do.\n\n{body}\n</conversation_so_far>"
+    ))
+}
+
+/// Marks a call of Quick's that Oak answered with a reminder to read the
+/// files of its message instead of running it (`Turn::mark_catch_up`).
+pub(crate) const CATCH_UP_KEY: &str = "_oak_catch_up";
+
 /// What the files of a message too long to send (`handoff::deliver`) are
 /// named with, before the thread's id, their own numbers and `.md`.
 const SO_FAR_FILE: &str = "quick-conversation-";
@@ -1985,6 +2008,9 @@ const SO_FAR_FILE: &str = "quick-conversation-";
 pub(crate) fn is_boot(b: &Value) -> bool {
     if b["type"] != "tool_call" || !b[crate::agent::BY_KEY].as_str().is_some_and(|by| by.starts_with("quick")) {
         return false;
+    }
+    if b[CATCH_UP_KEY] == true {
+        return true;
     }
     let input = b["input"].to_string();
     input.match_indices(SO_FAR_FILE).any(|(i, _)| {
@@ -2929,6 +2955,15 @@ impl Turn {
             }
         }
         self.end_call(i, id, result)
+    }
+
+    /// Call `id` was answered with a reminder to read the files of the
+    /// message (`handoff::remind`), not run: it is part of Quick catching up
+    /// (`is_boot`), which no model is sent again.
+    pub(crate) fn mark_catch_up(&mut self, id: &str) {
+        if let Some(b) = self.blocks.iter_mut().rev().find(|b| b["type"] == "tool_call" && b["id"] == id) {
+            b[CATCH_UP_KEY] = json!(true);
+        }
     }
 
     /// Call block `i` (`id`) ends with `result`, which goes in the

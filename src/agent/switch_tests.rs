@@ -532,20 +532,23 @@ fn a_catch_up_read_is_left_out() {
             oak::text("Catching up"),
             read("boot1", file),
             read("boot2", "workspace/attached_files/quick-conversation-0f3a9c-11-482913-2.md"),
+            json!({"type": "tool_call", "id": "remind1", "name": "run_python_on_device", crate::quick::QUIET_KEY: true, crate::quick::CATCH_UP_KEY: true, "input": {"code": "EXECUTE(command=\"ls\")"}}),
             oak::text("Back to the build"),
             read("own1", "src/quick-conversation-notes.rs"),
         ]),
-        json!({"role": "user", "content": [result_of("boot1", "THE WHOLE CONVERSATION"), result_of("boot2", "ITS SECOND PART"), result_of("own1", "own notes")]}),
+        json!({"role": "user", "content": [result_of("boot1", "THE WHOLE CONVERSATION"), result_of("boot2", "ITS SECOND PART"), result_of("remind1", "READ THE FILES FIRST"), result_of("own1", "own notes")]}),
         reply(api::Provider::Claude, vec![read("claude1", file)]),
         json!({"role": "user", "content": [result_of("claude1", "Claude read it")]}),
     ];
     assert!(crate::quick::is_boot(&messages[1]["content"][1]));
     assert!(crate::quick::is_boot(&messages[1]["content"][2]), "a part in Quick's workspace");
-    assert!(!crate::quick::is_boot(&messages[1]["content"][4]));
+    assert!(crate::quick::is_boot(&messages[1]["content"][3]), "a call answered with the reminder to read them");
+    assert!(!crate::quick::is_boot(&messages[1]["content"][5]));
     assert!(!crate::quick::is_boot(&messages[3]["content"][0]), "Claude's own read is Claude's");
     for p in [api::Provider::Claude, api::Provider::Quick, api::Provider::Codex] {
         let sent = all_text(&for_provider(&messages, p));
         assert!(!sent.contains("THE WHOLE CONVERSATION") && !sent.contains("ITS SECOND PART") && !sent.contains("boot"), "{p:?}: {sent}");
+        assert!(!sent.contains("READ THE FILES FIRST") && !sent.contains("remind1"), "{p:?}: {sent}");
         assert!(!sent.contains("Catching up"), "what Quick said of the read goes with it: {p:?}: {sent}");
         assert!(sent.contains("own notes") && sent.contains("Claude read it") && sent.contains("Back to the build"), "{p:?}: {sent}");
     }
@@ -780,7 +783,7 @@ fn quick_live_rotation_carries_the_conversation() {
     assert!(logins.len() >= 2, "two Quick logins with fresh tokens");
     let (a, b) = (logins[0].id.clone(), logins[1].id.clone());
     println!("accounts: {a} -> {b} -> {a}");
-    let on = |acct: &str, n: u32| recovery::Session { account: acct.into(), thread: format!("oak-rot-{now}-{n}"), from: None };
+    let on = |acct: &str, n: u32| recovery::Session { account: acct.into(), thread: format!("oak-rot-{now}-{n}"), ..Default::default() };
     let (w, s) = super::tests::idle_worker("live-rotation", Conversation {
         provider: Some(api::Provider::Quick),
         model: QUICK.into(),
@@ -831,4 +834,185 @@ fn quick_live_rotation_carries_the_conversation() {
     let sent = all_text(&for_provider(&c.messages, api::Provider::Claude));
     assert!(!sent.contains("quick-conversation-"), "no catch-up reads go to Claude: {}", sent.len());
     assert!(sent.contains("LAST-ROW-ZEBRA") && sent.contains("ORCHID-7731"));
+}
+
+
+/// Smart context on Quick: the summary is written on a throwaway thread
+/// of its own, sent exactly the part it replaces with the instruction after
+/// it, and none of this device's tools; once it is in, the conversation goes
+/// on in a fresh thread on the same account, whose first request sends the
+/// summary and the part kept (not what the summary replaced), with Oak's
+/// briefing.
+#[test]
+fn a_summary_moves_quick_to_a_fresh_thread_with_the_summary_and_the_part_kept() {
+    let old = crate::quick::recovery::Session { account: "compact-account".into(), thread: "compact-old-thread".into(), ..Default::default() };
+    let (w, s) = idle_worker("switch-quick-compact", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        messages: vec![
+            user("OLD-ASK set up the build"),
+            reply(api::Provider::Quick, vec![oak::text("OLD-REPLY the build is set up")]),
+            user("KEPT-ASK now the tests"),
+            reply(api::Provider::Quick, vec![oak::text("KEPT-REPLY tests written")]),
+            user("NEWEST-ASK run them"),
+        ]
+        .into(),
+        quick_session: Some(old.clone()),
+        ..Default::default()
+    });
+    let (body, n, ..) = w.request_body();
+    // The summary's request.
+    let req = {
+        let c = s.conv.lock().unwrap();
+        summary_request_for(&c, &body, n, 2)
+    };
+    let q = req.quick_session.clone().expect("a thread for the summary");
+    assert_eq!(q.account, "compact-account");
+    assert_ne!(q.thread, "compact-old-thread", "not the conversation's thread");
+    assert!(req.conv.as_deref().is_some_and(|c| c.ends_with("-summary")), "{:?}", req.conv);
+    assert_eq!(req.purpose, oak::Purpose::Summary);
+    let m = crate::quick::model(QUICK).unwrap();
+    let text = crate::quick::user_message(&req, &q.thread, m, None)["payload"]["text"].as_str().unwrap().to_string();
+    assert!(text.contains("OLD-ASK") && text.contains("OLD-REPLY"), "the part it replaces: {text}");
+    assert!(!text.contains("KEPT-ASK") && !text.contains("NEWEST-ASK"), "nothing kept: {text}");
+    assert!(rolling::is_housekeeping(text.rsplit("</conversation_so_far>").next().unwrap().trim()), "then the instruction: {text}");
+    assert!(!text.contains("<tools_loaded>"), "no briefing: {text}");
+    // The summary lands: a fresh thread, opened by the next request.
+    {
+        let mut c = s.conv.lock().unwrap();
+        install_summary(&mut c, rolling::Summary { cut: 2, text: "SUMMARY-TEXT the build was set up".into(), made_at: 1, clear: 2 }, 0, Default::default());
+        let q = c.quick_session.clone().unwrap();
+        assert!(q.compacted && q.account == "compact-account" && q.thread != "compact-old-thread", "{q:?}");
+    }
+    let (req, ..) = w.request_body();
+    let q = req.quick_session.clone().unwrap();
+    assert!(!q.compacted && q.from == Some(5), "{q:?}");
+    let text = crate::quick::user_message(&req, &q.thread, m, None)["payload"]["text"].as_str().unwrap().to_string();
+    assert!(text.contains("SUMMARY-TEXT") && text.contains("KEPT-ASK") && text.contains("KEPT-REPLY"), "{text}");
+    assert!(!text.contains("OLD-ASK") && !text.contains("OLD-REPLY"), "what the summary replaced stays out: {text}");
+    assert!(text.trim_end().ends_with("NEWEST-ASK run them"), "{text}");
+    assert!(text.contains("<tools_loaded>"), "a fresh thread is briefed: {text}");
+    // Quick replies there: the next request sends only what is new.
+    {
+        let mut c = s.conv.lock().unwrap();
+        c.messages.push(reply(api::Provider::Quick, vec![oak::text("ran them")]));
+        c.messages.push(user("thanks"));
+    }
+    let (req, ..) = w.request_body();
+    assert!(req.unseen.is_empty(), "{:?}", req.unseen);
+}
+
+/// A summary made on Claude moves Quick to a fresh thread too, so a switch
+/// back to Quick reads the summary and the part kept, as Claude does, not a
+/// thread that holds what the summary replaced as well.
+#[test]
+fn a_summary_made_on_claude_gives_quick_a_fresh_thread_too() {
+    let (w, s) = idle_worker("switch-claude-compact", Conversation {
+        provider: Some(api::Provider::Claude),
+        model: CLAUDE.into(),
+        messages: vec![
+            user("OLD-ASK one"),
+            reply(api::Provider::Quick, vec![oak::text("OLD-REPLY from Quick")]),
+            user("KEPT-ASK two"),
+            reply(api::Provider::Claude, vec![oak::text("KEPT-REPLY from Claude")]),
+        ]
+        .into(),
+        quick_session: Some(crate::quick::recovery::Session { account: "acct".into(), thread: "quick-old".into(), ..Default::default() }),
+        ..Default::default()
+    });
+    {
+        let mut c = s.conv.lock().unwrap();
+        install_summary(&mut c, rolling::Summary { cut: 2, text: "SUMMARY-TEXT one was done".into(), made_at: 1, clear: 2 }, 0, Default::default());
+    }
+    // Claude's request doesn't open it; Quick's does.
+    let _ = w.request_body();
+    assert!(s.conv.lock().unwrap().quick_session.as_ref().unwrap().compacted);
+    switch(&s, api::Provider::Quick, QUICK);
+    s.conv.lock().unwrap().messages.push(user("NEWEST-ASK three"));
+    let (req, ..) = w.request_body();
+    let q = req.quick_session.clone().unwrap();
+    assert_ne!(q.thread, "quick-old");
+    let m = crate::quick::model(QUICK).unwrap();
+    let text = crate::quick::user_message(&req, &q.thread, m, None)["payload"]["text"].as_str().unwrap().to_string();
+    assert!(text.contains("SUMMARY-TEXT") && text.contains("KEPT-REPLY") && !text.contains("OLD-REPLY"), "{text}");
+}
+
+
+/// Live: smart context on Quick, end to end. Past the trigger (set low
+/// here), the summary is written by Quick on a thread of its own, the
+/// conversation moves to a fresh thread, and Quick there still knows what
+/// only the part summarized said.
+///   OAK_DIR=<scratch profile> cargo test --lib quick_live_compaction -- --ignored --nocapture
+#[test]
+#[ignore]
+fn quick_live_compaction_carries_on_from_the_summary() {
+    use crate::quick::recovery;
+    let _ = std::env::var("OAK_DIR").expect("set OAK_DIR to a scratch profile with quick.json");
+    api::load_auth();
+    assert!(crate::quick::on(), "Quick isn't signed in");
+    let now = api::now_ms();
+    let mut logins = crate::quick::login::all();
+    logins.retain(|l| l.expires_at > now + 5 * 60_000);
+    logins.sort_by_key(|l| -l.expires_at);
+    let a = logins.first().expect("a Quick login with a fresh token").id.clone();
+    let was = rolling::config();
+    rolling::set_config(rolling::Config { trigger: 1_000, keep: 750 });
+    let (w, s) = super::tests::idle_worker("live-compaction", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        effort: "low".into(),
+        folder: std::env::current_dir().unwrap(),
+        messages: vec![user("Remember the code word ORCHID-7731: I'll ask for it later. Don't run any tools: reply with just OK.")].into(),
+        quick_session: Some(recovery::Session { account: a.clone(), thread: format!("oak-compact-{now}"), ..Default::default() }),
+        ..Default::default()
+    });
+    let id = s.conv.lock().unwrap().id.clone();
+    crate::rotation::used(api::Provider::Quick, &id, &a, 0, now);
+    println!("== turn 1 on {a}");
+    live_quick_turn(&w, &s).expect("turn 1");
+    {
+        let mut c = s.conv.lock().unwrap();
+        let long = (0..2500).map(|i| format!("row {i}: padding padding padding padding\n")).collect::<String>();
+        c.messages.push(user("Read the log."));
+        c.messages.push(reply(api::Provider::Claude, vec![
+            oak::text("Reading the log."),
+            json!({"type": "tool_call", "id": "toolu_log", "name": "READ", "input": {"path": "build.log"}}),
+        ]));
+        c.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "toolu_log", "content": long}]}));
+        c.messages.push(reply(api::Provider::Claude, vec![oak::text("The log is read: nothing in it matters.")]));
+        // What is kept past the summary (smart context keeps 5k tokens at
+        // least): the log and the code word are in the part summarized.
+        c.messages.push(user("Go on."));
+        let notes = (0..600).map(|i| format!("Note {i}: the parser handles case {i}.\n")).collect::<String>();
+        c.messages.push(reply(api::Provider::Claude, vec![oak::text(&notes)]));
+        c.messages.push(user("Don't run any tools: reply with just OK again."));
+    }
+    let (body, n, base) = w.request_body();
+    println!("== turn 2");
+    live_quick_turn(&w, &s).expect("turn 2");
+    // The turn's usage passes the trigger: the summary starts.
+    *w.last_request.lock().unwrap() = Some((body, n, base, api::now_ms()));
+    w.after_reply(Usage { prompt: 50_000, output: 100, ..Default::default() });
+    assert!(w.live.lock().unwrap().compacting, "a summary started");
+    let t = Instant::now();
+    while w.live.lock().unwrap().compacting {
+        assert!(t.elapsed() < Duration::from_secs(400), "the summary took too long");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    rolling::set_config(was);
+    let (summary, q) = {
+        let c = s.conv.lock().unwrap();
+        assert!(c.rolling.last_error.is_none(), "{:?}", c.rolling.last_error);
+        (c.rolling.summary.clone().expect("a summary"), c.quick_session.clone().unwrap())
+    };
+    println!("== summary (cut {}):\n{}\n== thread {q:?}", summary.cut, summary.text);
+    assert!(q.compacted && q.account == a && !q.thread.starts_with("oak-compact-"), "{q:?}");
+    s.conv.lock().unwrap().messages.push(user("Without running any tools: what is the code word?"));
+    println!("== turn 3, on the fresh thread");
+    let t3 = live_quick_turn(&w, &s).expect("turn 3");
+    assert!(t3.contains("ORCHID-7731"), "known from the summary: {t3}");
+    // Opened by turn 3's request, where the conversation then was.
+    let c = s.conv.lock().unwrap();
+    let q = c.quick_session.as_ref().unwrap();
+    assert!(!q.compacted && q.from.is_some_and(|f| f > summary.cut), "{q:?}");
 }

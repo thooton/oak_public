@@ -1545,7 +1545,9 @@ fn rolling_rows(ui: &mut Ui, t: &Theme, session: Option<&Session>, settings: &mu
     };
     // None for a local model or a plugin's: they weigh API prices, and
     // those are free.
-    let local = session.map_or(crate::local::basic(&settings.model), |s| crate::local::basic(&s.conv.lock().unwrap().model));
+    // (Nor for Quick's, which a subscription pays for.)
+    let priced = |m: &str| crate::local::basic(m) || crate::quick::serves(m);
+    let local = session.map_or(priced(&settings.model), |s| priced(&s.conv.lock().unwrap().model));
     let suggest = suggest.map(|s| rolling::capped(s, max)).filter(|s| *s != cfg && !local);
     let saved_text = if saved == 0 { "0".into() } else { format!("~{}", rolling::fmt_tokens(saved)) };
     let f = rolling::fmt_tokens;

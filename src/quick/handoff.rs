@@ -180,7 +180,7 @@ pub(crate) fn deliver(text: &str, thread: &str) -> String {
     let n = parts.len();
     let files = if n == 1 { "1 file".to_string() } else { format!("{n} files") };
     let message = format!(
-        "[Oak] What Oak has for you this time is longer than one Quick message can carry, so Oak put all of it, word for word, in {files} {where_} ({} characters in all). Before anything else, read every one of them in full with file_read, all at once in one step: one call per file, each with max_chars=116000 and max_lines=100000, and if a read gives a next_offset, read on from there. Read them yourself rather than scanning them with code: they hold your instructions and the context you are working in, and you need all of it. Then go on as if their text were this message (it starts with the instructions and tools Oak has loaded for you, then the conversation so far, then the newest message), carrying on from where the conversation leaves off, without starting over or mentioning the files.\n\nThe files, in order:\n{list}",
+        "[Oak] What Oak has for you this time is longer than one Quick message can carry, so Oak put all of it, word for word, in {files} {where_} ({} characters in all). Before anything else, read every one of them in full with file_read, all at once in one step: one call per file, each with max_chars=116000 and max_lines=100000, and if a read gives a next_offset, read on from there. Read them yourself rather than scanning them with code: you need all of what they hold. Then go on as if their text were this message, doing what it says, without mentioning the files.\n\nThe files, in order:\n{list}",
         text.chars().count()
     );
     let reminder = format!(

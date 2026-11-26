@@ -714,7 +714,9 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
     // does: in the socket's own query, not only in the frames (Quick marks an
     // outpost ONLINE for the socket that names it, which is what makes it
     // eligible to run tools).
-    let outpost = outpost();
+    // A summary is written on a thread of its own, which has no business
+    // with this machine: it is given none of its tools.
+    let outpost = if body.purpose == crate::oak::Purpose::Summary { None } else { outpost() };
     let mut path = format!(
         "/streaming/quickwork-chat-bidirectional-stream?surfaceType={SURFACE}&token={}&workingSessionId={thread}&channel=prod",
         urlencode(&token)
@@ -1210,10 +1212,14 @@ fn pump(
                         let reminder = (!foreign && is_snippet(&name))
                             .then(|| crate::quick::handoff::remind(&turn.thread))
                             .flatten();
+                        let reminded = reminder.is_some();
                         let (result, shown) = match reminder {
                             Some(r) => (Ok(r), None),
                             None => run_call(sock, ctl, tx, turn, &call, &name, &args, folder, foreign)?,
                         };
+                        if reminded {
+                            turn.mark_catch_up(&call);
+                        }
                         if std::env::var("OAK_QUICK_DEBUG").is_ok() {
                             eprintln!(
                                 "TOOL {name} {args} -> {}",
