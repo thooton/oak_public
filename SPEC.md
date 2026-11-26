@@ -254,18 +254,12 @@ and a faint shadow (black at 23%) in the pixel under the bottom edge;
 its body stays flat, a box 40 points tall or more has corners half again as round (up to 22 points),
 and a focus ring stays as it is.
 Its left sidebar (`src/gravity_side.rs`) replaces the horizontal tab strip: New
-conversation, Home, Conversations (Home, its search focused; Home stays the lit row) and Usage, a scrollable list of open tabs
-with the same shortcuts and menus, and Settings at the foot. Home (`src/gravity_home.rs`) is a desktop
-over the chosen wallpaper with the conversations on it: their tile has New, the search field (Ctrl+F,
-Enter opens the first match) and the sort, chips for all of them, those at work and those paused, and
-the list, those at work and then those paused pinned first, each under its heading, and the rest under
-Today, Yesterday, This week and Earlier; a row lights under the pointer and fades in its quick actions
-(Rename, Fork, Delete; its right-click menu also clears the scratchpad), and a title cut short shows in
-full in its tooltip. Beside it, a local clock (the ring shows seconds), a calendar marking the dates
-of conversations' latest activity (a click on one lists that day's, a chip clearing it), counts (a click
-on one filters the list) and a usage preview. The tiles reflow and scroll in smaller windows. The dock
-replaces Home's corner buttons: the conversations' search, the menu on Cloud, Protocols and Plugins (with
-the providers, plugin tabs and links), a new conversation or Settings. It stays visible when
+conversation, Home, Conversations and Usage, a scrollable list of open tabs with the same shortcuts
+and menus, and Settings at the foot. Home (`src/gravity_home.rs`) starts as a desktop over the chosen
+wallpaper, with a local clock (the ring shows seconds), a calendar marking the dates of conversations'
+latest activity, counts, recent conversations, running and paused work, and a usage preview. The tiles
+reflow and scroll in smaller windows. The dock replaces Home's corner buttons, opening the same lists
+and providers menu (with plugin tabs and links), a new conversation or Settings. It stays visible when
 the menu opens. Theme switches leave the open tabs, conversations and wallpaper alone.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
 plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row

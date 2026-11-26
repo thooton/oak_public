@@ -365,17 +365,6 @@ fn rounder(cr: CornerRadius, h: f32) -> CornerRadius {
     CornerRadius { nw: r(cr.nw), ne: r(cr.ne), sw: r(cr.sw), se: r(cr.se) }
 }
 
-/// Edges a box Oak paints itself with its own fill (a Home tile, the
-/// dock): the hairline and the top line, `k` times as strong as a card's.
-pub(crate) fn edge_light(p: &Painter, rect: Rect, radius: f32, k: f32) {
-    let cr = CornerRadius::same(radius.round().clamp(0.0, 255.0) as u8);
-    let g = Grid {
-        ppp: p.ctx().pixels_per_point(),
-        tf: p.ctx().memory(|m| m.to_global.get(&p.layer_id()).copied()),
-    };
-    p.add(edges(rect, cr, g, k, true));
-}
-
 /// The outline of `rect` with corners `cr`, `inset` inside it, clockwise
 /// from the top left corner's arc.
 fn outline(rect: Rect, cr: CornerRadius, inset: f32) -> Vec<Pos2> {
