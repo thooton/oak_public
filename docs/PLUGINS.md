@@ -209,6 +209,13 @@ What a plugin works with:
   **`Host::start_background_sign_in`** starts Quick's OAuth flow from a worker and returns
   its URL without opening a browser. Oak's Quick listener handles one flow at a time; a new
   start replaces one still waiting, so jobs should take turns at this step.
+- **`App::background_browser_live_view`** (interface version 17) draws a background session a
+  plugin opened with `oak_sdk::browser::open` for the user to work: the pointer, wheel and keys
+  reach that same page, cookies and all, as in a conversation's browser. Use it to hand a flow
+  over at a step only a person can pass (a CAPTCHA, a page the plugin doesn't recognise) instead
+  of failing: the job waits, the user finishes the page, and the job reads it again and carries
+  on. Reading the session (`observe`) while it is drawn is fine; sending it input (fill, click,
+  navigate) is not, as two hands on one page fight.
 - **`App::private_browser`** (interface version 13) draws Oak's browser inside a Home plugin
   page. The user controls it directly. The plugin supplies an HTTPS entry URL, but gets no
   page content, input, or cookies. The browser uses a temporary profile and closes when the

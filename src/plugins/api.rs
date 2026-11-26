@@ -819,6 +819,12 @@ impl HostApi for Oak {
         give_result(result.unwrap_or_else(|| Err(NO_WINDOW.into())).map(|()| String::new()), out, out_user)
     }
 
+    unsafe extern "C" fn app_background_browser_live_view(ui: *mut OakUi, handle: OakStr, max_h: f32, out: OakSink, out_user: *mut c_void) -> bool {
+        let (ui, t) = (ui_of(ui), theme());
+        let result = app(|a| a.plugin_background_browser_live_view(ui, &t, str_of(handle), max_h));
+        give_result(result.unwrap_or_else(|| Err(NO_WINDOW.into())).map(|()| String::new()), out, out_user)
+    }
+
     unsafe extern "C" fn background_browser_open(url: OakStr, out: OakSink, user: *mut c_void) -> bool {
         let url = str_of(url).to_string();
         let result = match super::context() {

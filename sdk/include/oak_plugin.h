@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 16
+#define OAK_API_VERSION 17
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -2215,6 +2215,19 @@ struct OakApi {
      * still waiting. True: `out` got the URL to load; false: a reason.
      */
     bool (*background_sign_in)(OakStr provider, OakSink out, void *user);
+
+    /* Draws a session the plugin opened with `background_browser_open` so
+     * that the user works it, as a conversation's browser is worked:
+     * pointer, wheel and keys go to that same page, so the cookies and
+     * anything typed before stay. As wide as the space left and at most
+     * `max_h` tall (0: no limit), its origin over it, scaled to the
+     * session's viewport. Draw it each frame it should show; the picture
+     * streams only while it is drawn. Don't send it input (fill, click,
+     * navigate) while it is drawn: two hands on one page fight. Reading it
+     * (observe) is fine. True when it was drawn; false gives the reason to
+     * `out`.
+     */
+    bool (*app_background_browser_live_view)(OakUi *ui, OakStr handle, float max_h, OakSink out, void *out_user);
 };
 
 /* Text from a C string, and from a literal. */

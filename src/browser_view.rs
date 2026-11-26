@@ -342,6 +342,86 @@ pub(crate) fn watch(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, max_h: f32) {
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
 }
 
+/// A background session the user works (interface 17): the same page as
+/// `watch`, with the pointer, wheel and keys going to it, so a plugin can
+/// step out of a flow and hand it over without losing what the session has
+/// (cookies, a signup half done). The bar says so. Frames stream only while
+/// this is drawn and on screen.
+pub(crate) fn live(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, max_h: f32) {
+    let (w, h) = inst.viewport_css();
+    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+    let width = ui.available_width().max(1.0);
+    let mut k = width / w;
+    if max_h > 0.0 {
+        k = k.min((max_h - BAR_H).max(1.0) / h);
+    }
+    let page_size = vec2(w * k, h * k);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, page_size.y + BAR_H), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let frame = Rect::from_center_size(rect.center(), vec2(page_size.x, rect.height()));
+    let bar = Rect::from_min_size(frame.min, vec2(frame.width(), BAR_H));
+    let page = Rect::from_min_max(bar.left_bottom(), frame.max);
+    let (url, loading, status) = {
+        let v = inst.view.lock().unwrap();
+        (v.url.clone(), v.loading, v.status.clone())
+    };
+    let origin = reqwest::Url::parse(&url).ok().filter(|url| url.has_host())
+        .map(|url| url.origin().ascii_serialization()).unwrap_or_default();
+    let p = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    p.rect_filled(bar, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, t.panel);
+    p.text(egui::pos2(bar.left() + 10.0, bar.center().y), Align2::LEFT_CENTER, origin, FontId::proportional(12.5), t.ink2);
+    let note = if loading { "Loading…" } else { "Yours to use: click and type here" };
+    p.text(egui::pos2(bar.right() - 10.0, bar.center().y), Align2::RIGHT_CENTER, note, FontId::proportional(12.0), t.ink3);
+    if loading {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    let ppp = ui.ctx().pixels_per_point();
+    inst.shown(k * ppp, [(page.width() * ppp).ceil() as u32, (page.height() * ppp).ceil() as u32]);
+    upload(ui.ctx(), inst);
+    p.rect_filled(page, 0.0, Color32::WHITE);
+    if let Some(texture) = inst.texture.lock().unwrap().as_ref() {
+        paint_page_texture(&p, texture, page);
+    }
+    match &status {
+        Status::Ready => {}
+        Status::Starting => {
+            p.rect_filled(page, 0.0, t.bg);
+            p.text(page.center(), Align2::CENTER_CENTER, "Starting the browser…", FontId::proportional(13.0), t.ink3);
+        }
+        Status::Failed(e) | Status::Quit(e) => {
+            p.rect_filled(page, 0.0, t.bg);
+            let galley = ui.painter().layout(e.clone(), FontId::proportional(13.0), t.error, (page.width() - 40.0).max(40.0));
+            p.galley(page.center() - galley.size() / 2.0, galley, t.error);
+        }
+    }
+    p.rect_stroke(frame, 6.0, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+    if matches!(status, Status::Ready) {
+        // The user's input is the page's, as in the lightbox, and a
+        // `<select>`'s options open in Oak (a headless page has no popup).
+        let page_id = page_id(&inst.conv);
+        let sel_id = page_id.with("select");
+        let resp = ui.interact(page, page_id, Sense::click_and_drag());
+        let (cursor, select) = {
+            let v = inst.view.lock().unwrap();
+            (v.cursor, v.select.clone())
+        };
+        let open = ui.data(|d| d.get_temp::<OpenSelect>(sel_id));
+        if open.is_none() {
+            forward_input(ui, inst, page, k, page_id, resp.hovered(), select.as_ref());
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(cursor);
+        }
+        if let Some(s) = open {
+            select_view(ui, t, inst, page, k, sel_id, &s);
+        }
+    }
+    // The page streams frames while it is shown: keep drawing them.
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+}
+
 impl Drop for PrivatePage {
     fn drop(&mut self) {
         browser::close(&self.inst.conv);

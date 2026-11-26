@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 16;
+pub const OAK_API_VERSION: u32 = 17;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -2104,6 +2104,20 @@ c_api! {
     /// keeps the account as Home's Add account does. A new one replaces one
     /// still waiting. True: `out` got the URL to load; false: a reason.
     fn background_sign_in(provider: OakStr, out: OakSink, user: *mut c_void) -> bool;
+
+    // Version 17: a background session the user takes over.
+
+    /// Draws a session the plugin opened with `background_browser_open` so
+    /// that the user works it, as a conversation's browser is worked:
+    /// pointer, wheel and keys go to that same page, so the cookies and
+    /// anything typed before stay. As wide as the space left and at most
+    /// `max_h` tall (0: no limit), its origin over it, scaled to the
+    /// session's viewport. Draw it each frame it should show; the picture
+    /// streams only while it is drawn. Don't send it input (fill, click,
+    /// navigate) while it is drawn: two hands on one page fight. Reading it
+    /// (observe) is fine. True when it was drawn; false gives the reason to
+    /// `out`.
+    fn app_background_browser_live_view(ui: *mut OakUi, handle: OakStr, max_h: f32, out: OakSink, out_user: *mut c_void) -> bool;
 }
 
 /// The C header: everything declared above, in C.

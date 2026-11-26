@@ -81,6 +81,20 @@ impl App {
         Ok(())
     }
 
+    /// Draws a session the plugin owns so the user can work it (interface
+    /// 17): the same page, with their pointer and keys reaching it.
+    pub(crate) fn plugin_background_browser_live_view(&mut self, ui: &mut Ui, t: &Theme, handle: &str, max_h: f32) -> Result<(), String> {
+        if !browser::automation::is_detached(handle)
+            && (self.page != Page::Plugin
+                || !self.background_browser.as_ref().is_some_and(|b| b.owner == self.plugin_page && b.handle() == handle))
+        {
+            return Err("That background browser isn't open on this page.".into());
+        }
+        let inst = browser::automation::instance(handle).ok_or("That background browser isn't open.")?;
+        browser_view::live(ui, t, &inst, max_h);
+        Ok(())
+    }
+
     /// Shows Settings; its X comes back to what was shown.
     pub(crate) fn plugin_go_settings(&mut self) {
         if self.page != Page::Settings {
