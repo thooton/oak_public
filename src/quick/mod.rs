@@ -124,7 +124,8 @@ pub struct Model {
 }
 
 /// What each mode is for, in Quick's own words: `fast` is quickest,
-/// `smart` balances quality and speed, `balanced` weighs cost.
+/// `smart` balances quality and speed, `balanced` weighs cost. In the
+/// picker's order: Smart, Balanced, Fast.
 pub const MODELS: &[Model] = &[
     Model {
         id: "smart",
@@ -137,15 +138,15 @@ pub const MODELS: &[Model] = &[
         efforts: &["low", "medium", "high"],
     },
     Model {
-        id: "fast",
-        name: "Quick Fast",
+        id: "balanced",
+        name: "Quick Balanced",
         context: 1_000_000,
         max_output: 64_000,
         efforts: &["low", "medium", "high"],
     },
     Model {
-        id: "balanced",
-        name: "Quick Balanced",
+        id: "fast",
+        name: "Quick Fast",
         context: 1_000_000,
         max_output: 64_000,
         efforts: &["low", "medium", "high"],
@@ -1466,12 +1467,34 @@ pub fn accounts() -> Vec<Account> {
     login::all().iter().map(account_of).collect()
 }
 
-/// The login conversation `conv` is on (its seat), else the first.
+/// The login conversation `conv` is on (its seat), else the one its first
+/// request would go through (`expected_login`: a new conversation's), else
+/// the first.
 pub fn account_of_conv(conv: &str) -> Option<Account> {
     let all = accounts();
-    let seat = crate::rotation::seat(api::Provider::Quick, conv);
-    seat.and_then(|id| all.iter().find(|a| a.id == id).cloned())
+    let id = crate::rotation::seat(api::Provider::Quick, conv)
+        .filter(|id| all.iter().any(|a| &a.id == id))
+        .or_else(|| expected_login(conv));
+    id.and_then(|id| all.iter().find(|a| a.id == id).cloned())
         .or_else(|| all.into_iter().next())
+}
+
+/// The login a conversation without a seat would start on, as `login_for`
+/// picks it (the usable one with the most left after the conversations
+/// already on each), without taking a seat.
+fn expected_login(conv: &str) -> Option<String> {
+    let now = api::now_ms();
+    let cands = candidates(now);
+    let usable: Vec<_> = cands.iter().filter(|c| c.usable).cloned().collect();
+    let pool = if usable.is_empty() { &cands } else { &usable };
+    crate::rotation::preview(api::Provider::Quick, conv, pool, now).or_else(|| pool.first().map(|c| c.id.clone()))
+}
+
+/// How login `id` is named to the user: its email, else its label.
+pub(crate) fn login_name(id: &str) -> String {
+    login::stored_of(id)
+        .map(|s| account_of(&s))
+        .map_or_else(|| id.to_string(), |a| if a.email.is_empty() { a.label } else { a.email })
 }
 
 /// A Quick login is set.
@@ -2009,13 +2032,25 @@ const SO_FAR_FILE: &str = "quick-conversation-";
 /// the conversation itself, and a later fresh Quick thread is sent it anew. The
 /// transcript shows it as one closed row (`a_catch_up_read_is_left_out`).
 pub(crate) fn is_boot(b: &Value) -> bool {
-    if b["type"] != "tool_call" || !b[crate::agent::BY_KEY].as_str().is_some_and(|by| by.starts_with("quick")) {
+    b[crate::agent::BY_KEY].as_str().is_some_and(|by| by.starts_with("quick")) && reads_handoff(b)
+}
+
+/// Whether call `b` reads the files of a message too long to send
+/// (`handoff::deliver`), or was answered with the reminder to: Quick
+/// catching up, as the transcript shows it, also while the reply streams in
+/// (before its blocks say who wrote them, `is_boot`).
+pub(crate) fn reads_handoff(b: &Value) -> bool {
+    if b["type"] != "tool_call" {
         return false;
     }
     if b[CATCH_UP_KEY] == true {
         return true;
     }
-    let input = b["input"].to_string();
+    names_handoff(&b["input"].to_string()) || b["_oak_partial"].as_str().is_some_and(names_handoff)
+}
+
+/// Whether `input` names a file of `handoff::deliver`.
+fn names_handoff(input: &str) -> bool {
     input.match_indices(SO_FAR_FILE).any(|(i, _)| {
         let rest = &input[i + SO_FAR_FILE.len()..];
         let id = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '-').len();
@@ -2034,6 +2069,12 @@ fn so_far_body(unseen: &[Value], part: usize, max: usize) -> Option<(String, boo
         c
     };
     let mut names = std::collections::HashMap::new();
+    // A snippet's own call (`QUIET_KEY`, or one the Oak calls it ran follow)
+    // and its result are left out, as for every other provider
+    // (`agent::for_provider`): those calls, with their results, are the
+    // conversation's on their own, and the two together had every call and
+    // result in it twice.
+    let mut snippets = std::collections::HashSet::new();
     let mut turns: Vec<String> = vec![];
     // The newest user turns' files go with the message itself
     // (`turn::attached_images`), as their text and pictures do.
@@ -2041,7 +2082,23 @@ fn so_far_body(unseen: &[Value], part: usize, max: usize) -> Option<(String, boo
     for (k, m) in unseen.iter().enumerate() {
         let assistant = m["role"] == "assistant";
         let mut lines = vec![];
-        for b in m["content"].as_array().into_iter().flatten() {
+        let blocks = m["content"].as_array().map_or(&[][..], Vec::as_slice);
+        for (i, b) in blocks.iter().enumerate() {
+            let ran_calls = || {
+                blocks.get(i + 1).is_some_and(|n| {
+                    oak::is_call(n) && !n["name"].as_str().is_some_and(is_snippet)
+                })
+            };
+            if oak::is_call(b)
+                && b["name"].as_str().is_some_and(is_snippet)
+                && (b[QUIET_KEY] == true || ran_calls())
+            {
+                snippets.insert(b["id"].as_str().unwrap_or("").to_string());
+                continue;
+            }
+            if oak::is_result(b) && b["call_id"].as_str().is_some_and(|id| snippets.contains(id)) {
+                continue;
+            }
             match b["type"].as_str().unwrap_or("") {
                 "text" => {
                     let t = b["text"].as_str().unwrap_or("").trim();
@@ -3144,6 +3201,37 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The conversation's files have each of Oak's calls once: not also the
+    /// snippet it ran from, nor that snippet's result.
+    #[test]
+    fn the_conversation_so_far_has_each_call_once() {
+        let mut quiet = json!({"type": "tool_call", "id": "s1", "name": "run_python_on_device", "input": {"code": "READ(path=\"a\")"}});
+        quiet[QUIET_KEY] = json!(true);
+        // (Without the key too: Oak's calls following it say what it was.)
+        let bare = json!({"type": "tool_call", "id": "s2", "name": "run_python_outpost_local", "input": {"code": "READ(path=\"b\")"}});
+        let failed = json!({"type": "tool_call", "id": "s3", "name": "run_python_on_device", "input": {"code": "x = 1"}});
+        let unseen = vec![
+            json!({"role": "assistant", "content": [
+                quiet, {"type": "tool_call", "id": "s1_oak0", "name": "READ", "input": {"path": "a"}},
+                bare, {"type": "tool_call", "id": "s2_oak0", "name": "READ", "input": {"path": "b"}},
+                failed,
+            ]}),
+            json!({"role": "user", "content": [
+                {"type": "tool_result", "call_id": "s1", "content": "[1/1] READ a"},
+                {"type": "tool_result", "call_id": "s1_oak0", "content": "a's text"},
+                {"type": "tool_result", "call_id": "s2", "content": "[1/1] READ b"},
+                {"type": "tool_result", "call_id": "s2_oak0", "content": "b's text"},
+                {"type": "tool_result", "call_id": "s3", "content": "not a call", "is_error": true},
+            ]}),
+        ];
+        let (body, _) = so_far_body(&unseen, usize::MAX, usize::MAX).unwrap();
+        assert_eq!(body.matches("called READ").count(), 2, "{body}");
+        assert_eq!(body.matches("Result of READ").count(), 2, "{body}");
+        assert!(!body.contains("[1/1]"), "{body}");
+        // A snippet that ran nothing stays, with why.
+        assert!(body.contains("called run_python_on_device") && body.contains("not a call"), "{body}");
+    }
 
     #[test]
     fn a_missing_outpost_retries_only_if_the_reply_ends_without_access() {

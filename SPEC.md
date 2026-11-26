@@ -477,7 +477,13 @@ can't read.
   Reading them is Quick catching up (`quick::is_boot`, by their name
   `quick-conversation-<thread>-<n>-<k>.md`): no model is sent those reads or their results, nor
   what Quick said just before them, and the transcript shows each as one closed row
-  (`a_catch_up_read_is_left_out`).
+  (`a_catch_up_read_is_left_out`). What Quick wrote first (text, thinking, in the same message)
+  and its reads, through the last, are one closed line, "Rereading context files…", then
+  "Reread context files" once the reads are back and Quick went on; opened, it shows them
+  (`transcript::catch_up_end`, `quick_catching_up_is_one_unit`; while the reply streams in too,
+  `quick::reads_handoff`). The conversation in the files has each Oak call once: a snippet's own
+  call and result (`QUIET_KEY`, or one the Oak calls it ran follow) are left out, as for any other
+  provider, and a snippet that ran nothing stays (`the_conversation_so_far_has_each_call_once`).
 - A local llama.cpp server (`src/local.rs`) gets only the basic tools and the `{{#local}}` parts of
   the prompt, and is never offered to subagents (it serves one request at a time). Its model's name
   and context come from the server (`/v1/models`, `/props`), read at start, on adding it and after
@@ -1068,7 +1074,7 @@ prompt points the agent at Xvfb, xdotool and ImageMagick instead.
 The AWS Quick provider (`src/quick/`) is a provider of the Freebuff kind: a separate agent Oak
 talks to as a pipe. Quick runs its own system prompt, agent loop and model (Claude Opus through
 Bedrock; `turn_usage.resolved_model_id` says which), so Oak sends neither its prompt nor its
-tools, and the picker's models are Quick's three modes (`smart`, `fast`, `balanced`, sent as
+tools, and the picker's models are Quick's three modes (`smart`, `balanced`, `fast`, in that order; sent as
 `agent_mode`), not model ids. Every model picker (a conversation's, the new screen's, a subagent's
 or swarm member's) lists all three once Quick is signed in, each with its own effort levels
 (`agent::efforts`: low, medium and high for each; `quick_modes_offer_their_own_efforts`). Quick has
@@ -1090,10 +1096,13 @@ A conversation's Quick thread lives on its login, so a conversation keeps its
 login (`quick::login_for`, a seat in `seats.json` like any provider's) while that one can run, and
 moves only when it can't (its session window or month used up, Quick saying it may not run, or its
 renewal failing); with none that can, it stays and Quick says why. A proactive move (from the
-usage reading or a login change) sends the conversation with the request (`all_unseen`). A limit
+usage reading or a login change) sends the conversation with the request (`all_unseen`), and the
+transcript gets the "account rotated to" line other providers' rotations get (the login's email). A limit
 reported during a turn gets a handoff instead (below). The turn's login is the thread's (`login::set_using`, which
 its tool threads take with them). Home lists every login, with its month; Quick's provider box
-averages them, and the account box shows the conversation's own.
+averages them, and the account box shows the conversation's own; before a conversation has one
+(the new screen), the login its first request would take (`quick::expected_login`, rotation's pick
+without taking a seat).
 
 **On a vault.** Connected to one, a sign-in goes to the vault (kind `quick`) with what renews it:
 the client Oak registered and its secret, the Identity Center region or Gateway endpoint and

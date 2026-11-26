@@ -656,6 +656,11 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
                 if moved || unseated {
                     crate::quick::moved_out(&conv);
                 }
+                // Rotation moved it to another login: a line in the
+                // transcript says so, as for other providers.
+                if moved && tx.send(Sse::Rotated(crate::quick::login_name(&a))).is_err() {
+                    return;
+                }
                 if crate::quick::moving(&conv) && body.instruction.is_none() {
                     body.unseen = crate::quick::all_unseen(&body.messages);
                 }

@@ -2187,7 +2187,7 @@ fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
     let room = end - x - lines.as_ref().map_or(0.0, |g| g.size().x + 8.0);
     // Quick catching up on a fresh thread (`quick::is_boot`): one closed row
     // saying so, its read in full when opened.
-    let summary = if crate::quick::is_boot(b) {
+    let summary = if crate::quick::reads_handoff(b) {
         "the conversation so far (AWS Quick catching up)".to_string()
     } else {
         tool_summary(name, input)
@@ -2973,13 +2973,27 @@ pub(crate) fn units(items: &[Item]) -> Vec<std::ops::Range<usize>> {
 /// `units`, with one starting at item `split` (where old tool output stops
 /// being cleared, `cleared_split`) even in the middle of a run.
 pub(crate) fn units_split(items: &[Item], split: Option<usize>) -> Vec<std::ops::Range<usize>> {
+    units_of(items, split, true)
+}
+
+/// `units_split`; with `groups`, Quick catching up on a fresh thread is one
+/// unit (`catch_up_end`).
+fn units_of(items: &[Item], split: Option<usize>, groups: bool) -> Vec<std::ops::Range<usize>> {
     let work = |x: &Item| matches!(x, Item::Thinking(..) | Item::Tool(..));
+    let group = |i: usize| {
+        catch_up_end(items, i).filter(|&e| groups && split.is_none_or(|s| s <= i || s >= e))
+    };
     let mut out = vec![];
     let mut i = 0;
     while i < items.len() {
+        if let Some(end) = group(i) {
+            out.push(i..end);
+            i = end;
+            continue;
+        }
         let end = if work(&items[i]) {
             (i + 1..items.len())
-                .find(|&j| !work(&items[j]) || Some(j) == split)
+                .find(|&j| !work(&items[j]) || Some(j) == split || group(j).is_some())
                 .unwrap_or(items.len())
         } else {
             i + 1
@@ -2988,6 +3002,85 @@ pub(crate) fn units_split(items: &[Item], split: Option<usize>) -> Vec<std::ops:
         i = end;
     }
     out
+}
+
+/// The message and block of a model's item (text, thinking, a call).
+fn model_key(x: &Item) -> Option<(usize, usize)> {
+    match x {
+        Item::Text(_, key, ..) | Item::Thinking(_, key, ..) | Item::Tool(_, key) => Some(*key),
+        _ => None,
+    }
+}
+
+/// Where Quick catching up on a fresh thread ends, when it starts at item
+/// `i`: what it wrote first (text, thinking, in the same message) and its
+/// reads of the files the conversation was sent in (`quick::reads_handoff`),
+/// through the last of them. The transcript shows it as one closed line
+/// (`catch_up_view`). None when none starts there.
+pub(crate) fn catch_up_end(items: &[Item], i: usize) -> Option<usize> {
+    let lead = |x: &Item| matches!(x, Item::Text(..) | Item::Thinking(..));
+    let boot = |x: &Item| matches!(x, Item::Tool(b, _) if crate::quick::reads_handoff(b));
+    let first = (i..items.len()).find(|&j| !lead(&items[j]))?;
+    if !boot(&items[first]) {
+        return None;
+    }
+    let msg = model_key(&items[first]).map(|k| k.0);
+    if items[i..first].iter().any(|x| model_key(x).map(|k| k.0) != msg) {
+        return None;
+    }
+    let mut end = first + 1;
+    for (j, x) in items.iter().enumerate().skip(first + 1) {
+        if boot(x) {
+            end = j + 1;
+        } else if !lead(x) {
+            break;
+        }
+    }
+    Some(end)
+}
+
+/// Quick catching up on a fresh thread (`catch_up_end`, unit `u`): one line,
+/// closed, saying it is rereading the conversation, or has once its reads are
+/// back and it went on; opened, what it did meanwhile.
+fn catch_up_view(
+    ui: &mut Ui,
+    t: &Theme,
+    items: &[Item],
+    u: std::ops::Range<usize>,
+    results: &Results,
+    revert: Option<&[Value]>,
+) {
+    let run = &items[u.clone()];
+    let reads: Vec<&str> = run
+        .iter()
+        .filter_map(|x| match x {
+            Item::Tool(b, _) if crate::quick::reads_handoff(b) => b["id"].as_str(),
+            _ => None,
+        })
+        .collect();
+    let back = reads.iter().all(|id| results.contains_key(id));
+    let streaming = run.iter().any(|x| model_key(x).is_some_and(|k| k.0 == usize::MAX));
+    let done = back && (u.end < items.len() || !streaming);
+    let label = if done { "Reread context files" } else { "Rereading context files\u{2026}" };
+    // (By its first read, which keeps its id once the reply is saved.)
+    let id = Id::unique(("catch-up-open", reads.first().copied().unwrap_or(""), SALT.with(|c| c.get())));
+    collapse_row(
+        ui,
+        t,
+        id,
+        label,
+        |r| r.width() - 46.0,
+        true,
+        true,
+        false,
+        |p, rect| glyph(p, rect, FILE_ICON, t),
+        |open, _| (!open).then(|| "AWS Quick reading the conversation back on a fresh thread".to_string()),
+        |ui, _| {
+            for s in units_of(run, None, false) {
+                unit_view(ui, t, items, s.start + u.start..s.end + u.start, results, revert);
+            }
+        },
+    );
 }
 
 /// What a unit's height depends on, hashed: when it changes, the unit is
@@ -3097,6 +3190,21 @@ pub(crate) fn tail_sig(conv: &Conversation, live: &Live, editing: &Option<Editin
 /// model's items and the messages from other sessions also revert to
 /// before them there.
 pub(crate) fn transcript_unit(
+    ui: &mut Ui,
+    t: &Theme,
+    items: &[Item],
+    u: std::ops::Range<usize>,
+    results: &Results,
+    revert: Option<&[Value]>,
+) {
+    if catch_up_end(items, u.start) == Some(u.end) {
+        return catch_up_view(ui, t, items, u, results, revert);
+    }
+    unit_view(ui, t, items, u, results, revert);
+}
+
+/// `transcript_unit`, for a unit that isn't Quick catching up.
+fn unit_view(
     ui: &mut Ui,
     t: &Theme,
     items: &[Item],
@@ -4265,6 +4373,27 @@ mod tests {
         assert!(out.is_empty());
         push_assistant(&mut out, &read, (0, 1), false, false);
         assert!(matches!(out[..], [Item::Tool(b, _)] if b["name"] == "READ"));
+    }
+
+    /// Quick catching up on a fresh thread (what it said first, then its
+    /// reads of the conversation's files) is one unit; what it does after
+    /// is not in it.
+    #[test]
+    fn quick_catching_up_is_one_unit() {
+        let read = |id: &str, n: u32| serde_json::json!({"type": "tool_call", "id": id, "name": "file_read", "input": {"path": format!("workspace/attached_files/quick-conversation-th1-5-{n}.md")}});
+        let (r1, r2) = (read("r1", 1), read("r2", 2));
+        let after = serde_json::json!({"type": "tool_call", "id": "e1", "name": "EXECUTE", "input": {"command": "ls"}});
+        let items = vec![
+            Item::Text("Reading the files first.", (3, 0), None, None, None, false),
+            Item::Tool(&r1, (3, 1)),
+            Item::Tool(&r2, (3, 2)),
+            Item::Tool(&after, (3, 3)),
+        ];
+        assert_eq!(units(&items), vec![0..3, 3..4]);
+        // Text from another message before it isn't Quick's catching up.
+        let items = vec![Item::Text("Done.", (1, 0), None, None, None, true), Item::Tool(&r1, (3, 1))];
+        assert_eq!(units(&items), vec![0..1, 1..2]);
+        assert_eq!(catch_up_end(&items, 1), Some(2));
     }
 
     /// AWS Quick's tools take the colors of OAK's that do the same work, and
