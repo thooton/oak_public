@@ -2272,8 +2272,9 @@ impl Worker {
         self.retry_sleep(Duration::from_secs(wait)) || self.absorb_queued()
     }
 
-    /// Write a continuation note without changing the conversation's model
-    /// or id. Save the note and fresh Quick thread together before resuming.
+    /// Go on in a fresh Quick thread on another account, keeping the
+    /// conversation's model and id: the thread is sent the whole
+    /// conversation (`move_quick_thread`), not a summary of it.
     fn handoff_quick(&self, exhausted: &mut std::collections::HashSet<String>) -> bool {
         use crate::quick::recovery;
         let id = self.conv.lock().unwrap().id.clone();
@@ -2286,42 +2287,24 @@ impl Worker {
             return false;
         };
         if !self.hold_while_paused() { return false; }
-        let (messages, state) = {
-            let mut c = self.conv.lock().unwrap();
-            let cut = c.rolling.base();
-            c.messages.load_from(cut);
-            let messages = c.rolling.view(&c.messages);
-            let notes = c.notes.iter().map(|n| format!("Note {}: {}", n.id, n.text)).collect::<Vec<_>>().join("\n");
-            let state = format!("Working folder: {}\nActive Oak goal: {}\n{}", c.folder.display(), c.goal, notes);
-            (messages, state)
-        };
-        self.set(|l| l.status = "Writing AWS Quick handoff".into());
-        // Don't consume the interrupt flag here: the turn loop still needs
-        // to handle any user message queued with it.
-        let Some((label, note, usd)) = recovery::handoff(&messages, &state, || {
-            self.deleted.load(Ordering::SeqCst) || self.interrupt.load(Ordering::SeqCst) || self.reverting()
-        }) else { return false };
-        self.install_quick_handoff(next, label, note, usd);
+        self.move_quick_thread(next, QUICK_LIMIT_MARK.into(), recovery::LIMIT_FRESH);
         true
     }
 
-    fn install_quick_handoff(
-        &self,
-        next: crate::quick::recovery::Session,
-        label: String,
-        note: String,
-        usd: f64,
-    ) {
+    /// Go on in `next`, a fresh Quick thread, opened by `text` (marked
+    /// `recovery::FRESH_KEY`), with a mark saying so (`label`). Until Quick
+    /// replies on it, each request sends it the whole conversation
+    /// (`unseen_by`), and Oak's briefing with it (once per thread).
+    fn move_quick_thread(&self, next: crate::quick::recovery::Session, label: String, text: &str) {
         let now = api::now_ms();
-        let text = format!("[Oak] Continue the active task from this handoff. Respect the user's constraints and don't repeat completed work. New user instructions, if any, take precedence.\n\n{note}");
         let mut c = self.conv.lock().unwrap();
-        c.spent += usd;
         c.cache.cold();
         crate::rotation::used(api::Provider::Quick, &c.id, &next.account, 0, now);
-        c.quick_session = Some(next);
-        add_mark(&mut c, MarkKind::QuickHandoff, label, note, now);
-        let mut block = context_block(&text);
+        let mut block = context_block(text);
         block["_oak_at"] = json!(now);
+        block[crate::quick::recovery::FRESH_KEY] = json!(next.thread);
+        c.quick_session = Some(next);
+        add_mark(&mut c, MarkKind::QuickHandoff, label, text.into(), now);
         if let Some(last) = c.messages.last_mut().filter(|m| m["role"] == "user") {
             last["content"].as_array_mut().unwrap().push(block);
         } else {
@@ -2458,6 +2441,17 @@ impl Worker {
                     (&mut quick_failures, if detail.is_empty() { "AWS Quick session error" } else { detail }, partial.then_some(recovery::ERROR_RETRY))
                 };
                 if !retry_quick(attempts, why) { return; }
+                // A thread that still can't reach this device once asked
+                // again goes on in a fresh one on the same account (a cold
+                // start's first thread often never gets it): misses alternate
+                // asking again and moving on.
+                if reason == recovery::DEVICE && *attempts % 2 == 0 {
+                    let id = self.conv.lock().unwrap().id.clone();
+                    if let Some(next) = recovery::fresh_session(&id) {
+                        self.move_quick_thread(next, QUICK_DEVICE_MARK.into(), recovery::DEVICE_FRESH);
+                        continue;
+                    }
+                }
                 quick_retry = prompt;
                 continue;
             }
@@ -3163,6 +3157,18 @@ fn cache_choice(
 /// replied (`unseen_by`).
 pub(crate) const BY_KEY: &str = "_oak_by";
 
+/// The transcript's marks for a conversation that went on in a fresh Quick
+/// thread (`Worker::move_quick_thread`).
+const QUICK_LIMIT_MARK: &str = "Continued in a fresh AWS Quick thread on another account (usage limit), with the whole conversation";
+const QUICK_DEVICE_MARK: &str = "Continued in a fresh AWS Quick thread (the last one couldn't reach this device), with the whole conversation";
+
+/// Whether message `m` opens a fresh Quick thread (`recovery::FRESH_KEY`).
+fn opens_quick_thread(m: &Value) -> bool {
+    m["content"]
+        .as_array()
+        .is_some_and(|c| c.iter().any(|b| b.get(crate::quick::recovery::FRESH_KEY).is_some()))
+}
+
 /// Marks each of a reply's blocks as written by `by`'s model.
 fn mark_by(blocks: &mut [Value], by: Option<api::Provider>) {
     let Some(by) = by else { return };
@@ -3190,7 +3196,10 @@ fn written_by(m: &Value) -> Option<&str> {
 /// a request sends messages (`messages`: `request_messages` of the
 /// `transcript`, whose summary cut is `cut`), what came after its own last
 /// reply, once another provider's model replied since; or all of it (the
-/// summary first) when another provider's model wrote some and it none.
+/// summary first) when another provider's model wrote some and it none, or
+/// when its thread is a fresh one it hasn't replied on yet (the message that
+/// opened it is marked `recovery::FRESH_KEY`: its replies before that are on
+/// another thread).
 /// Left out: the newest user turns' text and pictures (the request sends
 /// them), and the results of its own calls (it has those). Empty when it has
 /// seen everything, or nothing says otherwise (replies from before Oak
@@ -3204,7 +3213,11 @@ fn unseen_by(
     let n = transcript.len();
     let me = provider.id();
     let assistant = |k: &usize| transcript[*k]["role"] == "assistant";
-    let mine = (cut..n).rev().filter(assistant).find(|&k| written_by(&transcript[k]) == Some(me));
+    let fresh = (cut..n).rev().find(|&k| opens_quick_thread(&transcript[k]));
+    let mine = (fresh.unwrap_or(cut)..n)
+        .rev()
+        .filter(assistant)
+        .find(|&k| written_by(&transcript[k]) == Some(me));
     let others = |from: usize| {
         (from..n)
             .filter(assistant)
@@ -3217,7 +3230,7 @@ fn unseen_by(
         Some(k) if others(k + 1) => offset + (k - cut) + 1,
         // Its own replies are all before the summary's cut, or there are
         // none: the summary and all after it.
-        None if others(cut) => 0,
+        None if fresh.is_some() || others(cut) => 0,
         _ => return vec![],
     };
     let mut out: Vec<Value> = messages[from.min(messages.len())..].to_vec();

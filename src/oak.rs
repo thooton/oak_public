@@ -248,6 +248,9 @@ pub struct Request {
     /// sent besides the newest user turn (`agent::unseen_by`).
     pub unseen: Vec<Value>,
     pub quick_session: Option<crate::quick::recovery::Session>,
+    /// The session's scratchpad (Quick): where the whole of `unseen` is
+    /// written when the message carries it cut short (`quick::so_far`).
+    pub scratch: Option<String>,
 }
 
 impl Request {

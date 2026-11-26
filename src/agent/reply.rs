@@ -637,6 +637,8 @@ impl Worker {
             anchor: cache.anchor,
             unseen,
             quick_session: c.quick_session.clone().filter(|_| provider == api::Provider::Quick),
+            scratch: (provider == api::Provider::Quick)
+                .then(|| super::prompt::scratchpad(&mut c).to_string_lossy().into_owned()),
             ..Default::default()
         };
         (req, c.messages.len(), c.rolling.base())

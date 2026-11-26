@@ -1721,7 +1721,7 @@ fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, 
     };
     // What the thread hasn't seen of the conversation goes first (a
     // summary's own request carries its instruction alone).
-    let newest = match so_far(&r.unseen).filter(|_| r.instruction.is_none()) {
+    let newest = match r.instruction.is_none().then(|| so_far(r, thread)).flatten() {
         Some(s) => format!("{s}\n\n{newest}"),
         None => newest,
     };
@@ -1896,15 +1896,58 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 /// The conversation so far that Quick's thread doesn't have (a request's
-/// `unseen`: other models wrote it), as text for the message: its turns in
-/// order, "Assistant" for the model's (Quick's own, as Quick reads them).
-/// The model isn't told of any switch: this is the conversation, which
-/// its thread lacks. None when there is nothing.
-fn so_far(unseen: &[Value]) -> Option<String> {
-    so_far_limit(unseen, SO_FAR_CHARS)
+/// `unseen`: other models wrote it, or the thread is a fresh one), as text
+/// for the message: its turns in order, "Assistant" for the model's (Quick's
+/// own, as Quick reads them). The model isn't told of any switch: this is the
+/// conversation, which its thread lacks. Each call's input and result is cut
+/// to `SO_FAR_PART`, and a conversation past `SO_FAR_CHARS` to its start and
+/// newest turns; when anything is cut, the whole of it, uncut, is written to
+/// the session's scratchpad (`so_far_file`) and the message names the file,
+/// so nothing is lost. None when there is nothing.
+fn so_far(r: &Request, thread: &str) -> Option<String> {
+    let (body, cut) = so_far_body(&r.unseen, SO_FAR_PART, SO_FAR_CHARS)?;
+    let whole = match cut.then(|| so_far_file(r, thread)).flatten() {
+        Some(path) => format!(
+            " Long tool inputs and results are cut short here, and so is the middle of a long conversation; the whole conversation, uncut, is in {}: READ it for anything you need from what was cut.",
+            path.display()
+        ),
+        None => String::new(),
+    };
+    Some(format!(
+        "<conversation_so_far>\nThis conversation so far, which this thread's history doesn't have, oldest first (\"Assistant\" is you). Carry on from it.{whole}\n\n{body}\n</conversation_so_far>"
+    ))
 }
 
-fn so_far_limit(unseen: &[Value], max: usize) -> Option<String> {
+/// The whole of `r.unseen`, uncut, in a file in the session's scratchpad
+/// named for the thread: its path, or None with no scratchpad or when it
+/// can't be written.
+fn so_far_file(r: &Request, thread: &str) -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(r.scratch.as_deref().filter(|s| !s.is_empty())?);
+    let (body, _) = so_far_body(&r.unseen, usize::MAX, usize::MAX)?;
+    let name: String = thread
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let path = dir.join(format!("quick-conversation-{name}.md"));
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::write(
+        &path,
+        format!("# The conversation so far, oldest first (\"Assistant\" is you)\n\n{body}\n"),
+    )
+    .ok()?;
+    Some(path)
+}
+
+/// The turns of `unseen` as text, each call's input and result cut to
+/// `part` characters and the whole to about `max` bytes (its start and its
+/// newest turns), and whether anything was cut. None when there is nothing.
+fn so_far_body(unseen: &[Value], part: usize, max: usize) -> Option<(String, bool)> {
+    let mut cut = false;
+    let mut cut_to = |s: &str| {
+        let c = clip(s, part);
+        cut |= c.len() != s.len();
+        c
+    };
     let mut names = std::collections::HashMap::new();
     let mut turns: Vec<String> = vec![];
     for m in unseen {
@@ -1921,7 +1964,7 @@ fn so_far_limit(unseen: &[Value], max: usize) -> Option<String> {
                 "tool_call" => {
                     let name = b["name"].as_str().unwrap_or("tool");
                     names.insert(b["id"].as_str().unwrap_or("").to_string(), name.to_string());
-                    lines.push(format!("Assistant called {name}: {}", clip(&b["input"].to_string(), SO_FAR_PART)));
+                    lines.push(format!("Assistant called {name}: {}", cut_to(&b["input"].to_string())));
                 }
                 "tool_result" => {
                     let name = names.get(b["call_id"].as_str().unwrap_or("")).map_or("the call", String::as_str);
@@ -1939,7 +1982,7 @@ fn so_far_limit(unseen: &[Value], max: usize) -> Option<String> {
                         _ => String::new(),
                     };
                     let error = if b["is_error"] == true { " (an error)" } else { "" };
-                    lines.push(format!("Result of {name}{error}: {}", clip(content.trim(), SO_FAR_PART)));
+                    lines.push(format!("Result of {name}{error}: {}", cut_to(content.trim())));
                 }
                 "image" => lines.push("[a picture]".into()),
                 "document" => lines.push(format!("[a document: {}]", b["title"].as_str().unwrap_or("untitled"))),
@@ -1963,10 +2006,9 @@ fn so_far_limit(unseen: &[Value], max: usize) -> Option<String> {
         let head = boundary(&body, max / 4);
         let tail = boundary(&body, body.len() - (max - head));
         body = format!("{}\n\n[Earlier context clipped here.]\n\n{}", &body[..head], &body[tail..]);
+        cut = true;
     }
-    Some(format!(
-        "<conversation_so_far>\nThis conversation so far, which this thread's history doesn't have, oldest first (\"Assistant\" is you). Carry on from it.\n\n{body}\n</conversation_so_far>"
-    ))
+    Some((body, cut))
 }
 
 /// What Quick is sent when Oak asks again in the middle of a turn with
@@ -3222,6 +3264,39 @@ mod tests {
         quiet.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "t1", "content": "error"}]}));
         let text = user_message(&quiet, thread, m, outpost)["payload"]["text"].as_str().unwrap().to_string();
         assert!(text.contains(CARRY_ON_SO_FAR) && text.contains("<conversation_so_far>"), "{text}");
+    }
+
+    /// A conversation so far that the message cuts short is written whole
+    /// to the session's scratchpad, and the message names the file.
+    #[test]
+    fn a_cut_conversation_so_far_is_written_whole_to_the_scratchpad() {
+        let m = &MODELS[0];
+        let dir = std::env::temp_dir().join(format!("oak-quick-so-far-{}", std::process::id()));
+        let long = format!("{}TAIL-OF-THE-RESULT", "x".repeat(SO_FAR_PART + 100));
+        let r = Request {
+            provider: crate::providers::Kind::Quick,
+            model: m.id.into(),
+            messages: vec![json!({"role": "user", "content": [{"type": "text", "text": "go on"}]})],
+            unseen: vec![
+                json!({"role": "assistant", "content": [{"type": "tool_call", "id": "t1", "name": "READ", "input": {"path": "a.rs"}}]}),
+                json!({"role": "user", "content": [{"type": "tool_result", "call_id": "t1", "content": long}]}),
+            ],
+            scratch: Some(dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let text = user_message(&r, "th-cut", m, Some("dev"))["payload"]["text"].as_str().unwrap().to_string();
+        let file = dir.join("quick-conversation-th-cut.md");
+        assert!(text.contains(&file.display().to_string()), "the file is named: {text}");
+        assert!(!text.contains("TAIL-OF-THE-RESULT"), "the message has it cut: {text}");
+        let whole = std::fs::read_to_string(&file).expect("the whole conversation");
+        assert!(whole.contains(&long) && whole.contains("a.rs"), "{whole}");
+        // Nothing cut: no file.
+        let mut short = r.clone();
+        short.unseen[1]["content"][0]["content"] = json!("ok");
+        let text = user_message(&short, "th-short", m, Some("dev"))["payload"]["text"].as_str().unwrap().to_string();
+        let so_far = &text[text.find("<conversation_so_far>").expect("the conversation so far")..];
+        assert!(so_far.contains("Result of READ: ok") && !so_far.contains("quick-conversation-"), "{so_far}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Oak's calls through Quick's device Python are blocks of their own,

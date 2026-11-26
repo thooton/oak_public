@@ -2284,8 +2284,6 @@ pub struct Settings {
     /// The OpenRouter model that names sessions (an id in
     /// `crate::openrouter::TITLE_CHOICES`).
     pub title_model: String,
-    /// Ordered models for Quick handoffs. Empty uses one available model per provider.
-    pub quick_handoff_models: Vec<Fallback>,
     /// How OpenRouter requests pick a provider (an id of
     /// `crate::openrouter::Routing`).
     pub or_routing: String,
@@ -2343,7 +2341,6 @@ impl Default for Settings {
             notes_alert: true,
             notes_limit: crate::agent::DEFAULT_NOTES_LIMIT,
             title_model: crate::openrouter::TITLE_CHOICES[0].0.into(),
-            quick_handoff_models: vec![],
             or_routing: "balanced".into(),
             or_models: vec![],
             paused_on_close: vec![],
