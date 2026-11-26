@@ -694,7 +694,7 @@ fn forking_a_long_saved_quick_conversation_is_quick() {
 /// Quick's modes offer their own effort levels wherever a model is picked.
 #[test]
 fn quick_modes_offer_their_own_efforts() {
-    assert_eq!(efforts("smart"), ["low", "medium", "high", "max"]);
+    assert_eq!(efforts("smart"), ["low", "medium", "high"]);
     assert_eq!(efforts("fast"), ["low", "medium", "high"]);
     assert_eq!(efforts("balanced"), ["low", "medium", "high"]);
     assert_eq!(effort_for("fast", "max"), "high");

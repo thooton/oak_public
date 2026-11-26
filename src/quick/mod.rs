@@ -131,10 +131,10 @@ pub const MODELS: &[Model] = &[
         name: "Quick Smart",
         context: 1_000_000,
         max_output: 64_000,
-        // No `xhigh`: Quick's levels are off, low, medium, high and max (its
-        // own client sends anything else as `off`), so Smart at `xhigh`
-        // thought at none and showed no thinking. It goes as `high` now.
-        efforts: &["low", "medium", "high", "max"],
+        // No `xhigh` or `max`: Quick's own client sends an effort it doesn't
+        // know as `off`, and `max` as `high` ("max is currently disabled,
+        // capped at high"). Either goes as `high`.
+        efforts: &["low", "medium", "high"],
     },
     Model {
         id: "fast",
@@ -3198,7 +3198,7 @@ mod tests {
         r.effort = Some("high".into());
         assert_eq!(effort(&r, m), "high");
         r.effort = Some("ultra".into());
-        assert_eq!(effort(&r, m), "max");
+        assert_eq!(effort(&r, m), "high");
         r.purpose = oak::Purpose::Title;
         assert_eq!(effort(&r, m), "off");
     }

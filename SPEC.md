@@ -1068,9 +1068,9 @@ Bedrock; `turn_usage.resolved_model_id` says which), so Oak sends neither its pr
 tools, and the picker's models are Quick's three modes (`smart`, `fast`, `balanced`, sent as
 `agent_mode`), not model ids. Every model picker (a conversation's, the new screen's, a subagent's
 or swarm member's) lists all three once Quick is signed in, each with its own effort levels
-(`agent::efforts`: Smart up to max, Fast and Balanced up to high; `quick_modes_offer_their_own_efforts`).
-Quick has no `xhigh` (its own client sends an effort it doesn't know as `off`, so Smart then thinks at
-none): Smart offers low, medium, high and max, and a conversation at `xhigh` goes as `high`.
+(`agent::efforts`: low, medium and high for each; `quick_modes_offer_their_own_efforts`). Quick has
+no `xhigh` or `max` (its own client sends an effort it doesn't know as `off`, and `max` as `high`), so a
+conversation at either goes as `high`.
 
 **Signing in** is Quick's own OIDC flow against AWS IAM Identity Center: Oak registers a public
 client for itself (`/client/register`), copies a link to the authorization endpoint with PKCE
