@@ -3651,7 +3651,25 @@ fn for_provider_since(messages: &[Value], provider: api::Provider, opened: Optio
         };
         let before = content.len();
         if assistant {
-            content.retain(|b| !foreign(b) && !quiet(b) && !boot(b));
+            // What Quick said just before its catch-up reads is about them
+            // ("reading the conversation first"): it goes where they do.
+            let mut narration = std::collections::HashSet::new();
+            let mut run = vec![];
+            for (i, b) in content.iter().enumerate() {
+                if oak::is(b, "text") {
+                    run.push(i);
+                } else if boot(b) {
+                    narration.extend(run.drain(..));
+                } else if !oak::is_reasoning(b) {
+                    run.clear();
+                }
+            }
+            let mut i = 0;
+            content.retain(|b| {
+                let at = i;
+                i += 1;
+                !narration.contains(&at) && !foreign(b) && !quiet(b) && !boot(b)
+            });
             for b in content.iter_mut().filter(|b| wrapped(b)) {
                 if let Some(o) = b["input"].as_object_mut() {
                     o.remove(crate::freebuff_tools::KEY);

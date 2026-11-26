@@ -44,6 +44,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 pub(crate) mod calls;
+pub(crate) mod handoff;
 pub(crate) mod keeper;
 pub(crate) mod recovery;
 #[cfg(test)]
@@ -1733,11 +1734,26 @@ pub(crate) fn moving(conv: &str) -> bool {
     !conv.is_empty() && MOVED.lock().unwrap_or_else(|e| e.into_inner()).contains(conv)
 }
 
+/// Whether conversation `conv` has a Quick thread somewhere (Quick ran
+/// snippets in it) but no seat saying which login holds it: the seat was
+/// lost (seats.json rewritten by another Oak running at the same time, or
+/// the login forgotten). `login_for` then seats it on whichever login it
+/// picks and calls that no move, so the request went as a thread's next
+/// message, unbriefed and with nothing of the conversation, to a login
+/// whose thread was empty: Quick's agent woke up with no idea what it was
+/// doing. Such a request is sent as a move instead (`moved_out`).
+pub(crate) fn seat_lost(r: &Request, conv: &str) -> bool {
+    !conv.is_empty()
+        && r.instruction.is_none()
+        && crate::rotation::seat(api::Provider::Quick, conv).is_none()
+        && quick_worked_here(r)
+}
+
 /// Whether Quick has run snippets in this conversation's thread already (so
 /// it holds the briefing they were called by). Not those in what the thread
 /// lacks (`unseen`): a fork's, or a moved login's, are another thread's,
 /// which Oak can't otherwise tell after a restart (`MOVED` is in memory).
-fn quick_worked_here(r: &Request) -> bool {
+pub(crate) fn quick_worked_here(r: &Request) -> bool {
     let calls = |ms: &[Value]| -> Vec<String> {
         ms.iter()
             .filter(|m| m["role"] == "assistant")
@@ -1768,7 +1784,7 @@ fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, 
     };
     // What the thread hasn't seen of the conversation goes first (a
     // summary's own request carries its instruction alone).
-    let newest = match r.instruction.is_none().then(|| so_far(r, thread)).flatten() {
+    let newest = match r.instruction.is_none().then(|| so_far(r)).flatten() {
         Some(s) => format!("{s}\n\n{newest}"),
         None => newest,
     };
@@ -1782,6 +1798,13 @@ fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, 
         format!("{preface}\n\n{newest}")
     } else {
         newest
+    };
+    // Quick's service turns away a longer message: all of it goes in files
+    // in the thread's workspace, and the message says where.
+    let text = if text.len() > handoff::MESSAGE_MAX {
+        handoff::deliver(&text, thread)
+    } else {
+        text
     };
     let trace = hex_uuid();
     let mut payload = json!({
@@ -1927,13 +1950,6 @@ pub(crate) fn steer_message(
 /// user has said nothing since (a turn under way moved to Quick).
 pub(crate) const CARRY_ON_SO_FAR: &str = "Carry on with the work from where the conversation above leaves off.";
 
-/// The most of the conversation so far a message carries (characters): the
-/// newest turns, and a line saying earlier ones were left out.
-const SO_FAR_CHARS: usize = 400_000;
-
-/// The most of one call's input or result it carries (characters).
-const SO_FAR_PART: usize = 6_000;
-
 /// `s`, clipped to `max` characters, saying so.
 fn clip(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
@@ -1946,32 +1962,23 @@ fn clip(s: &str, max: usize) -> String {
 /// `unseen`: other models wrote it, or the thread is a fresh one), as text
 /// for the message: its turns in order, "Assistant" for the model's (Quick's
 /// own, as Quick reads them). The model isn't told of any switch: this is the
-/// conversation, which its thread lacks. Each call's input and result is cut
-/// to `SO_FAR_PART`, and a conversation past `SO_FAR_CHARS` to its start and
-/// newest turns; when anything is cut, the whole of it, uncut, is written to
-/// the session's scratchpad (`so_far_file`) and the message names the file,
-/// so nothing is lost. None when there is nothing.
-fn so_far(r: &Request, thread: &str) -> Option<String> {
-    let (body, cut) = so_far_body(&r.unseen, SO_FAR_PART, SO_FAR_CHARS)?;
-    let whole = match cut.then(|| so_far_file(r, thread)).flatten() {
-        Some(path) => format!(
-            " Long tool inputs and results are cut short here, and so is the middle of a long conversation. The whole of it, uncut, is in {}: don't read it to catch up (what is here is enough for that); READ only the part you need, with offset and limit, if the work needs something that was cut.",
-            path.display()
-        ),
-        None => String::new(),
-    };
+/// conversation, which its thread lacks, uncut: what any other model would
+/// be sent of it. A message too long for Quick's service goes in files
+/// (`handoff`). None when there is nothing.
+fn so_far(r: &Request) -> Option<String> {
+    let (body, _) = so_far_body(&r.unseen, usize::MAX, usize::MAX)?;
     Some(format!(
-        "<conversation_so_far>\nThe conversation you are in, so far, oldest first (\"Assistant\" is you, the same assistant): it began before this thread, so this thread's history doesn't hold it. It is not a new task or a fresh start: carry on from where it leaves off, without starting over, introducing yourself, or looking again at what it already shows.{whole}\n\n{body}\n</conversation_so_far>"
+        "<conversation_so_far>\nThe conversation you are in, so far, oldest first (\"Assistant\" is you, the same assistant): it began before this thread, so this thread's history doesn't hold it. It is not a new task or a fresh start: carry on from where it leaves off, without starting over, introducing yourself, or looking again at what it already shows.\n\n{body}\n</conversation_so_far>"
     ))
 }
 
-/// What the file with the conversation so far (`so_far_file`) is named
-/// with, before the thread's id and `.md`.
+/// What the files of a message too long to send (`handoff::deliver`) are
+/// named with, before the thread's id, their own numbers and `.md`.
 const SO_FAR_FILE: &str = "quick-conversation-";
 
 /// Whether `b` is Quick catching up on a fresh thread: a call its agent made
-/// (`agent::BY_KEY`) on the file with the conversation so far (`so_far_file`),
-/// reading back what the conversation already holds. Every request leaves it
+/// (`agent::BY_KEY`) on a file of a message too long to send
+/// (`handoff::deliver`), reading back what the conversation already holds. Every request leaves it
 /// and its result out (`agent::for_provider`): another provider's model has
 /// the conversation itself, and a later fresh Quick thread is sent it anew. The
 /// transcript shows it as one closed row (`a_catch_up_read_is_left_out`).
@@ -1985,26 +1992,6 @@ pub(crate) fn is_boot(b: &Value) -> bool {
         let id = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '-').len();
         id > 0 && rest[id..].starts_with(".md")
     })
-}
-
-/// The whole of `r.unseen`, uncut, in a file in the session's scratchpad
-/// named for the thread: its path, or None with no scratchpad or when it
-/// can't be written.
-fn so_far_file(r: &Request, thread: &str) -> Option<std::path::PathBuf> {
-    let dir = std::path::PathBuf::from(r.scratch.as_deref().filter(|s| !s.is_empty())?);
-    let (body, _) = so_far_body(&r.unseen, usize::MAX, usize::MAX)?;
-    let name: String = thread
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    let path = dir.join(format!("{SO_FAR_FILE}{name}.md"));
-    std::fs::create_dir_all(&dir).ok()?;
-    std::fs::write(
-        &path,
-        format!("# The conversation so far, oldest first (\"Assistant\" is you)\n\n{body}\n"),
-    )
-    .ok()?;
-    Some(path)
 }
 
 /// The turns of `unseen` as text, each call's input and result cut to
@@ -3372,13 +3359,13 @@ mod tests {
         assert!(text.contains(CARRY_ON_SO_FAR) && text.contains("<conversation_so_far>"), "{text}");
     }
 
-    /// A conversation so far that the message cuts short is written whole
-    /// to the session's scratchpad, and the message names the file.
+    /// The conversation so far goes uncut, as another model would be sent
+    /// it; a message too long for Quick's service goes whole in files
+    /// (`handoff`), and the message names them and asks for them all read.
     #[test]
-    fn a_cut_conversation_so_far_is_written_whole_to_the_scratchpad() {
+    fn a_message_too_long_to_send_goes_whole_in_files() {
         let m = &MODELS[0];
-        let dir = std::env::temp_dir().join(format!("oak-quick-so-far-{}", std::process::id()));
-        let long = format!("{}TAIL-OF-THE-RESULT", "x".repeat(SO_FAR_PART + 100));
+        let long = format!("{}TAIL-OF-THE-RESULT", "x".repeat(handoff::MESSAGE_MAX));
         let r = Request {
             provider: crate::providers::Kind::Quick,
             model: m.id.into(),
@@ -3387,22 +3374,40 @@ mod tests {
                 json!({"role": "assistant", "content": [{"type": "tool_call", "id": "t1", "name": "READ", "input": {"path": "a.rs"}}]}),
                 json!({"role": "user", "content": [{"type": "tool_result", "call_id": "t1", "content": long}]}),
             ],
-            scratch: Some(dir.to_string_lossy().into_owned()),
             ..Default::default()
         };
         let text = user_message(&r, "th-cut", m, Some("dev"))["payload"]["text"].as_str().unwrap().to_string();
-        let file = dir.join("quick-conversation-th-cut.md");
-        assert!(text.contains(&file.display().to_string()), "the file is named: {text}");
-        assert!(!text.contains("TAIL-OF-THE-RESULT"), "the message has it cut: {text}");
-        let whole = std::fs::read_to_string(&file).expect("the whole conversation");
-        assert!(whole.contains(&long) && whole.contains("a.rs"), "{whole}");
-        // Nothing cut: no file.
+        assert!(text.len() <= handoff::MESSAGE_MAX, "{} bytes", text.len());
+        assert!(!text.contains("TAIL-OF-THE-RESULT") && text.contains("read every one of them"), "{text}");
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(handoff::dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().contains("quick-conversation-th-cut-"))
+            .collect();
+        assert!(!files.is_empty());
+        for f in &files {
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(text.contains(&name), "each file is named: {text}");
+            assert!(is_boot(&json!({"type": "tool_call", "_oak_by": "quick", "input": {"path": format!("workspace/attached_files/{name}")}})), "reading it is catching up");
+        }
+        let mut files = files;
+        let number = |f: &std::path::PathBuf| -> u32 {
+            let stem = f.file_stem().unwrap().to_string_lossy().into_owned();
+            stem.rsplit('-').next().unwrap().parse().unwrap()
+        };
+        files.sort_by_key(number);
+        let whole: String = files.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect();
+        assert!(whole.contains("TAIL-OF-THE-RESULT") && whole.contains("a.rs") && whole.contains("go on"), "all of it");
+        // Short enough: the conversation goes in the message, uncut.
         let mut short = r.clone();
-        short.unseen[1]["content"][0]["content"] = json!("ok");
+        short.unseen[1]["content"][0]["content"] = json!(format!("{}OK-END", "y".repeat(8_000)));
         let text = user_message(&short, "th-short", m, Some("dev"))["payload"]["text"].as_str().unwrap().to_string();
         let so_far = &text[text.find("<conversation_so_far>").expect("the conversation so far")..];
-        assert!(so_far.contains("Result of READ: ok") && !so_far.contains("quick-conversation-"), "{so_far}");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(so_far.contains("OK-END") && !so_far.contains("quick-conversation-"), "{so_far}");
+        for f in files {
+            let _ = std::fs::remove_file(f);
+        }
     }
 
     /// Oak's calls through Quick's device Python are blocks of their own,

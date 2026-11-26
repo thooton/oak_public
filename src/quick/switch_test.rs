@@ -121,7 +121,7 @@ fn the_conversation_so_far_carries_card_answers_and_text_files() {
             {"type": "document", "media_type": "text/plain", "title": "new.txt", "data": "NEWEST FILE"}
         ]}),
     ];
-    let (body, cut) = so_far_body(&unseen, SO_FAR_PART, SO_FAR_CHARS).unwrap();
+    let (body, cut) = so_far_body(&unseen, usize::MAX, usize::MAX).unwrap();
     assert!(!cut);
     assert!(
         body.contains(&format!("User: {}", markup::decision_response(answers))),
@@ -165,6 +165,49 @@ fn a_login_move_is_briefed_until_a_message_gets_there() {
     moved_in(conv);
     assert!(!moving(conv));
     assert!(oak_preface(&r, conv).is_none());
+}
+
+/// A conversation Quick worked on whose seat was lost (another Oak
+/// rewrote seats.json) lands on whatever login is picked, whose thread may
+/// be empty: it is sent as a move, briefed and with all of it, not as the
+/// thread's next message. One with its seat, or Quick never ran in, isn't.
+#[test]
+fn a_lost_seat_is_sent_as_a_move() {
+    let conv = "switch-lost-seat";
+    let mut r = request(
+        conv,
+        vec![
+            user("start the swarm"),
+            json!({"role": "assistant", "content": [
+                {"type": "tool_call", "id": "ls1", "name": "run_python_outpost_local", "input": {"code": "READ(path=\"a\")"}}
+            ]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "call_id": "ls1", "content": "a"}]}),
+            assistant("posted to the board"),
+            user("why did the switch fail?"),
+        ],
+    );
+    assert!(seat_lost(&r, conv), "Quick worked here and no seat says where");
+    assert!(oak_preface(&r, conv).is_none(), "unbriefed, as it went before");
+    // What the request path does with it: a move.
+    moved_out(conv);
+    r.unseen = all_unseen(&r.messages);
+    let text = text_of(&user_message(&r, conv, model("smart").unwrap(), None));
+    assert!(text.contains("<tools_loaded>"), "briefed: {text}");
+    let so_far = text.split("<conversation_so_far>").nth(1).expect("the conversation goes");
+    assert!(so_far.contains("User: start the swarm"));
+    assert!(so_far.contains("Assistant: posted to the board"));
+    assert_eq!(text.matches("why did the switch fail?").count(), 1);
+    moved_in(conv);
+    // Seated: its login's thread holds it.
+    crate::rotation::used(api::Provider::Quick, conv, "lost-seat-account", 0, api::now_ms());
+    assert!(!seat_lost(&r, conv));
+    // Never on Quick, or a summary's own request: nothing to lose.
+    let fresh = request("switch-lost-seat-new", vec![user("hi")]);
+    assert!(!seat_lost(&fresh, "switch-lost-seat-new"));
+    let mut summary = r.clone();
+    summary.conv = Some("switch-lost-seat-summary".into());
+    summary.instruction = Some("Summarize.".into());
+    assert!(!seat_lost(&summary, "switch-lost-seat-summary"));
 }
 
 /// A fork of a conversation Quick worked on goes on in a new thread: after

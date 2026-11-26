@@ -531,19 +531,23 @@ fn a_catch_up_read_is_left_out() {
         reply(api::Provider::Quick, vec![
             oak::text("Catching up"),
             read("boot1", file),
+            read("boot2", "workspace/attached_files/quick-conversation-0f3a9c-11-482913-2.md"),
+            oak::text("Back to the build"),
             read("own1", "src/quick-conversation-notes.rs"),
         ]),
-        json!({"role": "user", "content": [result_of("boot1", "THE WHOLE CONVERSATION"), result_of("own1", "own notes")]}),
+        json!({"role": "user", "content": [result_of("boot1", "THE WHOLE CONVERSATION"), result_of("boot2", "ITS SECOND PART"), result_of("own1", "own notes")]}),
         reply(api::Provider::Claude, vec![read("claude1", file)]),
         json!({"role": "user", "content": [result_of("claude1", "Claude read it")]}),
     ];
     assert!(crate::quick::is_boot(&messages[1]["content"][1]));
-    assert!(!crate::quick::is_boot(&messages[1]["content"][2]));
+    assert!(crate::quick::is_boot(&messages[1]["content"][2]), "a part in Quick's workspace");
+    assert!(!crate::quick::is_boot(&messages[1]["content"][4]));
     assert!(!crate::quick::is_boot(&messages[3]["content"][0]), "Claude's own read is Claude's");
     for p in [api::Provider::Claude, api::Provider::Quick, api::Provider::Codex] {
         let sent = all_text(&for_provider(&messages, p));
-        assert!(!sent.contains("THE WHOLE CONVERSATION") && !sent.contains("boot1"), "{p:?}: {sent}");
-        assert!(sent.contains("own notes") && sent.contains("Claude read it") && sent.contains("Catching up"), "{p:?}: {sent}");
+        assert!(!sent.contains("THE WHOLE CONVERSATION") && !sent.contains("ITS SECOND PART") && !sent.contains("boot"), "{p:?}: {sent}");
+        assert!(!sent.contains("Catching up"), "what Quick said of the read goes with it: {p:?}: {sent}");
+        assert!(sent.contains("own notes") && sent.contains("Claude read it") && sent.contains("Back to the build"), "{p:?}: {sent}");
     }
 }
 

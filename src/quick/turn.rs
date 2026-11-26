@@ -644,13 +644,16 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
     // sends what that login's thread lacks: all of it.
     let conv = body.seat_conv();
     let session = body.quick_session.take().filter(|q| login::all().iter().any(|a| a.id == q.account));
+    // A conversation Quick worked on whose login Oak lost (`seat_lost`)
+    // goes where it lands as a move: that thread may have none of it.
+    let unseated = session.is_none() && parked.is_none() && crate::quick::seat_lost(&body, &conv);
     let acct = match &parked {
         Some(_) => crate::rotation::seat(crate::api::Provider::Quick, &conv),
         None if session.is_some() => session.as_ref().map(|q| q.account.clone()),
         None => match crate::quick::login_for(&conv) {
             Some((a, moved)) => {
                 // (Until a message gets there: `quick::MOVED`.)
-                if moved {
+                if moved || unseated {
                     crate::quick::moved_out(&conv);
                 }
                 if crate::quick::moving(&conv) && body.instruction.is_none() {
@@ -1120,6 +1123,10 @@ fn pump(
         if !mine {
             continue;
         }
+        // Quick reading the files its message went in (`handoff`).
+        if matches!(kind.as_str(), "tool_start" | "tool_arguments" | "tool_call" | "tool_result") {
+            crate::quick::handoff::saw(&turn.thread, &frame);
+        }
         // Quick's own record of a call's result. When its relay fails to
         // reach the device it records its own error for the call (`SNCS
         // outpost invoke error (500)`), and that can be what its agent reads
@@ -1197,8 +1204,16 @@ fn pump(
                 let reply = match calls.reply_for(&call, &key) {
                     Some(reply) => reply,
                     None => {
-                        let (result, shown) =
-                            run_call(sock, ctl, tx, turn, &call, &name, &args, folder, foreign)?;
+                        // Oak's calls before Quick has read the files its
+                        // message went in: the first is answered with a
+                        // reminder to read them, once (`handoff::remind`).
+                        let reminder = (!foreign && is_snippet(&name))
+                            .then(|| crate::quick::handoff::remind(&turn.thread))
+                            .flatten();
+                        let (result, shown) = match reminder {
+                            Some(r) => (Ok(r), None),
+                            None => run_call(sock, ctl, tx, turn, &call, &name, &args, folder, foreign)?,
+                        };
                         if std::env::var("OAK_QUICK_DEBUG").is_ok() {
                             eprintln!(
                                 "TOOL {name} {args} -> {}",

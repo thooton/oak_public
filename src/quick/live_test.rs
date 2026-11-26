@@ -17,6 +17,12 @@ use std::sync::mpsc::channel;
 
 /// What one live turn said: its text, and the error it ended on (if any).
 fn live_turn(prompt: &str, model: &str) -> (String, Option<String>) {
+    let thread = std::env::var("OAK_QUICK_THREAD").unwrap_or_else(|_| format!("oak-probe-{}", crate::api::now_ms()));
+    live_turn_on(prompt, model, &thread)
+}
+
+/// `live_turn`, on thread `thread`.
+fn live_turn_on(prompt: &str, model: &str, thread: &str) -> (String, Option<String>) {
     let _ = std::env::var("OAK_DIR").expect("set OAK_DIR to a scratch profile with quick.json");
     crate::api::load_auth();
     assert!(crate::quick::on(), "Quick isn't signed in");
@@ -33,10 +39,7 @@ fn live_turn(prompt: &str, model: &str) -> (String, Option<String>) {
             serde_json::json!({"role": "user", "content": [{"type": "text", "text": prompt}]}),
         ],
         folder: Some(folder),
-        conv: Some(
-            std::env::var("OAK_QUICK_THREAD")
-                .unwrap_or_else(|_| format!("oak-probe-{}", crate::api::now_ms())),
-        ),
+        conv: Some(thread.to_string()),
         thinking: true,
         effort: Some("low".into()),
         ..Default::default()
@@ -73,7 +76,7 @@ fn live_turn(prompt: &str, model: &str) -> (String, Option<String>) {
                         by_block.insert(*index, block["text"].as_str().unwrap_or("").to_string());
                     }
                 }
-                crate::oak::Event::Stop { reason, .. } => println!("stop: {reason}"),
+                crate::oak::Event::Stop { reason, detail, .. } => println!("stop: {reason} detail: {detail:?}"),
                 _ => {}
             },
             Ok(Sse::Done) => break,
@@ -383,4 +386,118 @@ fn live_on(thread: &str, prompt: &str, folder: &str) -> (String, Option<String>)
         by_block.values().cloned().collect::<Vec<_>>().join("\n"),
         err,
     )
+}
+
+/// A message of `OAK_QUICK_BIG` characters (default 450000) on a fresh
+/// thread: whether Quick takes a message that size.
+#[test]
+#[ignore]
+fn quick_live_big_message() {
+    let n: usize = std::env::var("OAK_QUICK_BIG").ok().and_then(|s| s.parse().ok()).unwrap_or(450_000);
+    let mut filler = String::new();
+    let mut i = 0;
+    while filler.len() < n {
+        filler.push_str(&format!("Line {i}: the quick brown fox jumps over the lazy dog.\n"));
+        i += 1;
+    }
+    filler.truncate(n);
+    let prompt = format!("{filler}\n\nIgnore the filler above. Reply with exactly: BIG-OK");
+    println!("message: {} bytes", prompt.len());
+    let (text, err) = live_turn(&prompt, &model());
+    println!("err: {err:?}");
+    assert!(err.is_none(), "{err:?}");
+    assert!(text.contains("BIG-OK"), "{text}");
+}
+
+/// A file uploaded to a fresh thread's workspace before the thread's first
+/// message: whether Quick has it there, and how much of it one read brings
+/// back (`OAK_QUICK_UPLOAD_LINES` lines, default 6000, about 335k characters).
+#[test]
+#[ignore]
+fn quick_live_upload_before_first_message() {
+    let _ = std::env::var("OAK_DIR").expect("set OAK_DIR to a scratch profile with quick.json");
+    crate::api::load_auth();
+    assert!(crate::quick::on(), "Quick isn't signed in");
+    let n: usize = std::env::var("OAK_QUICK_UPLOAD_LINES").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
+    let mut body = String::new();
+    for i in 0..n {
+        body.push_str(&format!("Line {i}: the quick brown fox jumps over the lazy dog.\n"));
+    }
+    body.push_str("END-MARKER-XYZ\n");
+    let thread = format!("oak-upload-{}", crate::api::now_ms());
+    // The upload goes through the login the thread's turn will (`stream`).
+    crate::quick::login::set_using(crate::quick::login_for(&thread).map(|(a, _)| a));
+    let up = crate::quick::outpost::upload(body.as_bytes(), "quick-conversation-probe.md", "text/plain", &thread);
+    println!("upload: {up:?}");
+    let up = up.expect("the upload");
+    let prompt = format!(
+        "A file is in your workspace at {} ({}). Read the whole of it with as few tool calls as you can (one if possible), then reply with: the number of tool calls you used, the highest line number you saw, and whether you saw END-MARKER-XYZ.",
+        up["path"].as_str().unwrap_or(""),
+        up["workspace_path"].as_str().unwrap_or("")
+    );
+    let (text, err) = live_turn_on(&prompt, &model(), &thread);
+    println!("err: {err:?}");
+    assert!(err.is_none(), "{err:?}");
+    assert!(!text.is_empty());
+}
+
+/// The conversation in `OAK_QUICK_CONV` (a conversation file) moved to a
+/// fresh Quick thread, as a switch sends it: its whole transcript unseen.
+#[test]
+#[ignore]
+fn quick_live_switch_conversation() {
+    let _ = std::env::var("OAK_DIR").expect("set OAK_DIR to a scratch profile with quick.json");
+    crate::api::load_auth();
+    assert!(crate::quick::on(), "Quick isn't signed in");
+    let path = std::env::var("OAK_QUICK_CONV").expect("OAK_QUICK_CONV");
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let mut messages = v["messages"].as_array().cloned().unwrap_or_default();
+    let ask = std::env::var("OAK_QUICK_ASK").unwrap_or_else(|_| "Reply with exactly: SWITCH-OK".into());
+    messages.push(serde_json::json!({"role": "user", "content": [{"type": "text", "text": ask}]}));
+    let unseen = crate::quick::all_unseen(&messages);
+    let thread = format!("oak-switch-{}", crate::api::now_ms());
+    // A login kept here, not on the vault (a test has no plugins).
+    if let Some(local) = crate::quick::login::all().into_iter().find(|l| !l.remote) {
+        crate::rotation::used(crate::api::Provider::Quick, &thread, &local.id, 0, crate::api::now_ms());
+    }
+    let scratch = std::env::current_dir().unwrap().join(".oak").join("tmp").join("temp157");
+    let body = Request {
+        provider: crate::providers::Kind::Quick,
+        model: model(),
+        system: String::new(),
+        messages,
+        unseen,
+        folder: Some(std::env::current_dir().unwrap().to_string_lossy().to_string()),
+        conv: Some(thread.clone()),
+        thinking: true,
+        effort: Some(std::env::var("OAK_QUICK_EFFORT").unwrap_or_else(|_| "low".into())),
+        scratch: Some(scratch.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    // (The message itself isn't built here: one too long to send goes in
+    // files, `handoff`, which only the turn's own login should upload.)
+    let (tx, rx) = channel();
+    let handle = std::thread::spawn(move || crate::quick::turn::stream(body, tx));
+    let start = std::time::Instant::now();
+    let mut text = String::new();
+    let mut err = None;
+    while start.elapsed() < std::time::Duration::from_secs(300) {
+        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(Sse::Event(crate::oak::Event::Text { text: t, .. })) => text.push_str(&t),
+            Ok(Sse::Event(crate::oak::Event::Block { block, .. })) if block["type"] == "tool_call" => {
+                println!("tool: {} {}", block["name"], block["input"]);
+            }
+            Ok(Sse::Done) => break,
+            Ok(Sse::Err(e)) => {
+                err = Some(e);
+                break;
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => break,
+        }
+    }
+    handle.join().ok();
+    println!("text: {text}\nerr: {err:?}");
+    assert!(err.is_none(), "{err:?}");
 }
