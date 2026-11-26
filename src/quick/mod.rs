@@ -131,7 +131,10 @@ pub const MODELS: &[Model] = &[
         name: "Quick Smart",
         context: 1_000_000,
         max_output: 64_000,
-        efforts: &["low", "medium", "high", "xhigh", "max"],
+        // No `xhigh`: Quick's levels are off, low, medium, high and max (its
+        // own client sends anything else as `off`), so Smart at `xhigh`
+        // thought at none and showed no thinking. It goes as `high` now.
+        efforts: &["low", "medium", "high", "max"],
     },
     Model {
         id: "fast",

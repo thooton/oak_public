@@ -29,7 +29,7 @@ fn text_of(v: &Value) -> String {
 /// A conversation keeps its effort across a switch: Claude's `xhigh` or
 /// thinking off, or Smart's `max` taken to Fast. Each goes to the mode's
 /// nearest level below, never above (off went as the mode's highest, and
-/// `xhigh` as `max`).
+/// `xhigh`, which Quick doesn't take, as `high`).
 #[test]
 fn an_effort_carried_across_a_switch_fits_the_mode() {
     let smart = model("smart").unwrap();
@@ -39,7 +39,7 @@ fn an_effort_carried_across_a_switch_fits_the_mode() {
         r.effort = e.map(String::from);
         effort(r, m)
     };
-    assert_eq!(at(&mut r, Some("xhigh"), smart), "xhigh");
+    assert_eq!(at(&mut r, Some("xhigh"), smart), "high");
     assert_eq!(at(&mut r, Some("max"), smart), "max");
     assert_eq!(at(&mut r, Some("ultra"), smart), "max");
     assert_eq!(at(&mut r, Some("high"), smart), "high");
