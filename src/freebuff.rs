@@ -1991,13 +1991,17 @@ fn build_request(
         json!({"role": "system", "content": fill_prompt(include_str!("../assets/freebuff-system.txt"), label)}),
     ];
     msgs.extend(chat_messages(&body.messages_with_instruction()));
-    // Oak's prompt and tools open the conversation's first message (the
-    // service checks the system prompt and tools as the CLI sends them).
+    // The conversation's first message asks for the file with Oak's prompt
+    // and tools to be read (the service checks the system prompt and tools
+    // as the CLI sends them); without a file, they open it themselves.
     if let Some(b) = oak_briefing(body)
         && let Some(first) = msgs.iter_mut().find(|m| m["role"] == "user")
         && let Some(text) = first["content"].as_str()
     {
-        first["content"] = json!(format!("{b}\n\n{text}"));
+        first["content"] = json!(match &b.file {
+            Some(f) => format!("{}{text}", f.ask),
+            None => format!("{}\n\n{text}", b.text),
+        });
     }
     let mut meta = json!({
         "freebuff_instance_id": instance(),
@@ -2033,34 +2037,111 @@ fn build_request(
     req
 }
 
+/// Oak's prompt and tools for Freebuff (`freebuff_tools::briefing`), and
+/// the file in the scratchpad they are read from.
+#[derive(Clone)]
+struct Briefing {
+    text: String,
+    file: Option<BriefFile>,
+}
+
+#[derive(Clone)]
+struct BriefFile {
+    /// Its path as the first message names it (from the working folder).
+    shown: String,
+    path: std::path::PathBuf,
+    lines: u64,
+    /// What the first message opens with (`freebuff_tools::read_line`).
+    ask: String,
+}
+
 /// The briefings sent, by conversation: the hash of the conversation's first
 /// message they went with, and the briefing.
-static BRIEFINGS: LazyLock<Mutex<std::collections::HashMap<String, (String, String)>>> =
+static BRIEFINGS: LazyLock<Mutex<std::collections::HashMap<String, (String, Briefing)>>> =
     LazyLock::new(Mutex::default);
 
-/// What a request's first message opens with (`freebuff_tools::briefing`):
+/// What a request's first message brings of Oak: a line asking for the
+/// briefing's file to be read, picked for the conversation. The briefing is
 /// as first sent until that message changes (a summary replaced what it
-/// began), so the notes, kits and day the prompt holds don't change what
-/// was sent, as on other providers. None for a request without Oak's prompt
-/// and tools (a title).
-fn oak_briefing(body: &Request) -> Option<String> {
+/// began), so the notes, kits and day the prompt holds don't change it, as
+/// on other providers; after a restart, the file as it was written. None for
+/// a request without Oak's prompt and tools (a title).
+fn oak_briefing(body: &Request) -> Option<Briefing> {
     if body.system.trim().is_empty() || body.tools.is_empty() || body.purpose == oak::Purpose::Title {
         return None;
     }
     let first = hash_hex(&body.messages.first()?.to_string());
     let key = body.conv.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| chat_key(body));
     let mut sent = BRIEFINGS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((h, b)) = sent.get(&key)
-        && *h == first
-    {
-        return Some(b.clone());
+    let path = body.scratch.as_deref().filter(|s| !s.is_empty()).map(|s| std::path::Path::new(s).join(crate::freebuff_tools::briefing_name(&key)));
+    let pinned = sent.get(&key).filter(|(h, _)| *h == first).map(|(_, b)| b.clone());
+    let restarted = !sent.contains_key(&key);
+    let text = match (&pinned, &path) {
+        (Some(b), _) => b.text.clone(),
+        (None, Some(p)) if restarted => std::fs::read_to_string(p).ok().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| crate::freebuff_tools::briefing(&body.system, &body.tools)),
+        _ => crate::freebuff_tools::briefing(&body.system, &body.tools),
+    };
+    // Written again when it is gone (a cleared scratchpad) or out of date.
+    let file = path.filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t == text) || std::fs::write(p, &text).is_ok()).map(|p| {
+        let shown = body
+            .folder
+            .as_deref()
+            .and_then(|f| p.strip_prefix(f).ok())
+            .unwrap_or(&p)
+            .to_string_lossy()
+            .replace('\\', "/");
+        BriefFile { ask: crate::freebuff_tools::read_line(&shown, &format!("{key}\n{first}")), shown, lines: text.lines().count() as u64, path: p }
+    });
+    let b = Briefing { text, file };
+    if pinned.is_none() {
+        if sent.len() >= 256 {
+            sent.clear();
+        }
+        sent.insert(key, (first, b.clone()));
     }
-    if sent.len() >= 256 {
-        sent.clear();
-    }
-    let b = crate::freebuff_tools::briefing(&body.system, &body.tools);
-    sent.insert(key, (first, b.clone()));
     Some(b)
+}
+
+/// What keeps Freebuff's calls from running until it has read the whole of
+/// the briefing's file: its paths, and what a refused call is told.
+struct Gate {
+    shown: String,
+    path: String,
+    why: String,
+}
+
+/// A path as compared with the file's: lowercase, forward slashes.
+fn norm(p: &str) -> String {
+    p.replace('\\', "/").trim_start_matches("./").to_lowercase()
+}
+
+impl Gate {
+    /// The gate for a request: None once every line of the file has been
+    /// read (in one READ or several), or without a file.
+    fn of(body: &Request) -> Option<Gate> {
+        let f = oak_briefing(body)?.file?;
+        let mut g = Gate { shown: norm(&f.shown), path: norm(&f.path.to_string_lossy()), why: String::new() };
+        let seen = crate::freebuff_tools::lines_read(&body.messages, |p| g.names(p));
+        let read = (1..=f.lines).filter(|n| seen.contains(n)).count() as u64;
+        let missing = (1..=f.lines).find(|n| !seen.contains(n))?;
+        g.why = if read == 0 {
+            format!("Not run: read {} first, the whole file. Oak runs nothing else until you have.", f.shown)
+        } else {
+            format!("Not run: you've read only {read} of the {} lines of {}. Read the rest first (from offset={missing}): Oak runs nothing else until you have.", f.lines, f.shown)
+        };
+        Some(g)
+    }
+
+    fn names(&self, p: &str) -> bool {
+        let p = norm(p);
+        p == self.shown || p == self.path || p.ends_with(&format!("/{}", self.shown))
+    }
+
+    /// Whether a call (as the OAK calls that run it) may run: only reads,
+    /// one of them of the file.
+    fn lets(&self, calls: &[(String, String, Value)]) -> bool {
+        calls.iter().all(|c| c.1 == "READ") && calls.iter().any(|c| c.2["path"].as_str().is_some_and(|p| self.names(p)))
+    }
 }
 
 /// Says a retry is coming (the client's own event), and how long it waits.
@@ -2171,6 +2252,8 @@ struct Blocks {
     message_id: Option<String>,
     /// Whether the reply ended by asking for tools.
     tool_calls: bool,
+    /// Until the briefing's file is read, only reads of it run.
+    gate: Option<Gate>,
     count: crate::nodeclub::ThinkCount,
 }
 
@@ -2241,7 +2324,9 @@ impl Blocks {
                         } else {
                             id.to_string()
                         };
-                        let early = crate::freebuff_tools::early_name(name);
+                        // Behind the gate a call may become a refusal, so
+                        // its block waits for the arguments.
+                        let early = crate::freebuff_tools::early_name(name).filter(|_| self.gate.is_none());
                         if let Some(oak) = early {
                             out.push(tool_start(block, &id, oak, Some(name)));
                         }
@@ -2325,10 +2410,11 @@ fn close_all(b: &mut Blocks, out: &mut Vec<Event>) {
     stop(&mut b.text, out);
     stop(&mut b.think, out);
     for t in std::mem::take(&mut b.tools) {
-        for (k, (id, oak, input)) in crate::freebuff_tools::to_oak(&t.id, &t.name, &t.args)
-            .into_iter()
-            .enumerate()
-        {
+        let mut calls = crate::freebuff_tools::to_oak(&t.id, &t.name, &t.args);
+        if let Some(g) = b.gate.as_ref().filter(|g| !g.lets(&calls)) {
+            calls = crate::freebuff_tools::refused(&t.id, &t.name, &t.args, &g.why);
+        }
+        for (k, (id, oak, input)) in calls.into_iter().enumerate() {
             let index = if k == 0 { t.block } else { b.index() };
             if k > 0 || !t.opened {
                 let shown = crate::freebuff_tools::shows_origin(&input).then_some(t.name.as_str());
@@ -2414,7 +2500,10 @@ fn stream_once(body: Request, tx: Sender<Sse>, attempt: u8) {
     let Some(resp) = open_turn(&body, m, &chat, &mut turn, &tx, attempt) else {
         return;
     };
-    let mut b = Blocks::default();
+    let mut b = Blocks {
+        gate: (!summary).then(|| Gate::of(&body)).flatten(),
+        ..Default::default()
+    };
     for line in std::io::BufReader::new(resp).lines() {
         let Ok(line) = line else {
             return drop(tx.send(Sse::Err("Stream broke.".into())));
@@ -2735,7 +2824,7 @@ mod tests {
         let first = |b: &Request| req(b)["messages"][1]["content"].as_str().unwrap().to_string();
         let sent = first(&b);
         assert!(sent.starts_with("<instructions_loaded>\nYou are Oak.\n</instructions_loaded>\n\n<tools_loaded>\n### TASK\nBackground commands.\n"), "{sent}");
-        assert!(sent.ends_with("[End of Oak's notes. The conversation follows.]\n\n<environment>context</environment>fix it"), "{sent}");
+        assert!(sent.ends_with("[End of Oak's notes.]\n\n\n<environment>context</environment>fix it"), "{sent}");
         let r = req(&b);
         assert!(r["messages"][0]["content"].as_str().unwrap().starts_with("You are Buffy"));
         assert_eq!(r["tools"], json!(cli_tools()));
@@ -2746,6 +2835,57 @@ mod tests {
         assert!(first(&b).contains("with a note"), "a new first message renews it");
         b.system.clear();
         assert!(first(&b).starts_with("<environment>"), "no prompt, no briefing");
+    }
+
+    /// With a scratchpad, the briefing is a file the first message asks for,
+    /// and nothing but reads of it runs until every line of it was read.
+    #[test]
+    fn the_briefing_is_a_file_read_before_anything_runs() {
+        let dir = std::env::temp_dir().join(format!("oak-briefing-{}", crate::api::now_ms()));
+        let scratch = dir.join(".oak/tmp/temp9");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let mut b = body();
+        b.conv = Some(format!("gate-{}", crate::api::now_ms()));
+        b.folder = Some(dir.to_string_lossy().into_owned());
+        b.scratch = Some(scratch.to_string_lossy().into_owned());
+        b.system = "You are Oak.".into();
+        b.tools = vec![json!({"name": "TASK", "description": "Background commands.", "input_schema": {"type": "object"}})];
+        let f = oak_briefing(&b).unwrap().file.unwrap();
+        assert!(f.shown.starts_with(".oak/tmp/temp9/") && f.shown.ends_with(".md"), "{}", f.shown);
+        let text = std::fs::read_to_string(&f.path).unwrap();
+        assert!(text.starts_with("<instructions_loaded>\nYou are Oak.\n"));
+        let req = build_request(&b, "m", "m", None, &turn());
+        let first = req["messages"][1]["content"].as_str().unwrap();
+        assert!(first.starts_with(&f.ask) && f.ask.contains(&f.shown) && first.ends_with("fix it"), "{first}");
+        assert!(!first.contains("instructions_loaded"));
+        // Unread: a call is refused, its block opened only once it is in.
+        let g = Gate::of(&b).unwrap();
+        assert!(g.why.starts_with(&format!("Not run: read {} first", f.shown)), "{}", g.why);
+        let task = crate::freebuff_tools::to_oak("t", "run_terminal_command", r#"{"command": "TASK(action=\"list\")"}"#);
+        assert!(!g.lets(&task));
+        let read = crate::freebuff_tools::to_oak("r", "read_files", &json!({"paths": [f.path.to_string_lossy(), "x.rs"]}).to_string());
+        assert!(g.lets(&read));
+        let mut blocks = Blocks { gate: Some(g), ..Default::default() };
+        let ev = |name: &str, args: &str| json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "t", "function": {"name": name, "arguments": args}}]}}]});
+        assert!(blocks.feed(&ev("write_file", r#"{"path": "a", "content": "b"}"#)).is_empty());
+        let out = blocks.feed(&json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}));
+        let Event::Input { json, .. } = &out[1] else { panic!("{out:?}") };
+        let input: Value = serde_json::from_str(json).unwrap();
+        assert!(input["command"].as_str().unwrap().starts_with("printf"), "{input}");
+        assert!(input[crate::freebuff_tools::KEY]["local"]["errorMessage"].as_str().unwrap().starts_with("Not run"));
+        // Part of it read: the rest is asked for; all of it: the gate opens.
+        let lines = text.lines().count();
+        let shown = |from: usize, to: usize| (from..=to).map(|n| format!("{n:>6}\t{}\n", text.lines().nth(n - 1).unwrap())).collect::<String>();
+        let read_part = |b: &mut Request, k: usize, from: usize, to: usize| {
+            b.messages.push(json!({"role": "assistant", "content": [{"type": "tool_call", "id": format!("r{k}"), "name": "READ", "input": {"path": f.shown, "offset": from}}]}));
+            b.messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": format!("r{k}"), "content": shown(from, to)}]}));
+        };
+        read_part(&mut b, 1, 1, 3);
+        let g = Gate::of(&b).unwrap();
+        assert!(g.why.contains(&format!("read only 3 of the {lines} lines")) && g.why.contains("offset=4"), "{}", g.why);
+        read_part(&mut b, 2, 4, lines);
+        assert!(Gate::of(&b).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

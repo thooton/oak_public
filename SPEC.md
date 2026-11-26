@@ -424,11 +424,22 @@ can't read.
 - Freebuff still works with Oak's tools, without changing what the service checks. Its CLI's tools
   run as Oak's (`freebuff_tools::to_oak`: read_files as READs, str_replace as EDITs,
   run_terminal_command as EXECUTE or TASK, and so on), answered as the CLI answers them. Oak's own
-  prompt and tools open the first user message on the wire (`freebuff_tools::briefing`, as Quick's
-  briefing: `<instructions_loaded>`, `<tools_loaded>`, then how to call them), pinned per
-  conversation as first sent until that message changes, so notes, kits and the day don't change
-  it (`freebuff::oak_briefing`, tested by `oaks_prompt_and_tools_open_the_first_message`). Oak's
-  other tools go through run_terminal_command: a command whose first line opens with one of Oak's
+  prompt and tools (`freebuff_tools::briefing`, as Quick's briefing: `<instructions_loaded>`,
+  `<tools_loaded>`, then how to call them; no line longer than READ shows) are a file in the
+  session's scratchpad, named per conversation from a few (`briefing_name`), and the first user
+  message on the wire opens with a line asking for it to be read: one of a dozen wordings, its case
+  and ending varied and now and then a typo or two outside the path (`read_line`), picked by a
+  generator seeded from the conversation and its first message, so it reads like a person wrote it
+  and is the same every time it is sent, after a restart too. The briefing is pinned as first sent
+  until that message changes (a summary), so notes, kits and the day don't change it; after a
+  restart the file as written is the pin (`freebuff::oak_briefing`). Until every line of the file
+  has been read, in one READ or several (`lines_read`: the line numbers READ results showed, a
+  cleared one's asked-for lines), each call of a reply that isn't only reads, one of the file, is
+  refused before it runs (`freebuff::Gate`): it only shows why and is answered with it (read the
+  file first, or the rest of it from the first line not read). A summary renews the file and the
+  gate with it. Without a scratchpad the briefing opens the message itself. Tested by
+  `the_briefing_is_a_file_read_before_anything_runs` and `the_read_line_varies_but_keeps_the_path`.
+  Oak's other tools go through run_terminal_command: a command whose first line opens with one of Oak's
   tools in capitals and `(` (no shell command does) is Oak calls, read as Quick's snippets are
   (`quick::calls::calls_in`, ASK allowed), and each runs as its own Oak call, shown as itself; the
   answer is the CLI's JSON with each call's result under its line in `stdout`, and their images
