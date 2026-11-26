@@ -1635,6 +1635,15 @@ impl<'scope, 'env> Batch<'scope, 'env> {
         self.started.iter().any(|&s| s)
     }
 
+    /// An ASK running alongside the reply (`asks_alongside`) has no result
+    /// yet: the reply ended before it ran, or while it runs.
+    pub(crate) fn asks_unsettled(&self) -> bool {
+        self.calls
+            .iter()
+            .zip(&self.results)
+            .any(|(c, r)| r.is_none() && asks_alongside(c))
+    }
+
     /// Marks the batch as interrupted by the user so unstarted calls do not
     /// run and `finish` reports that the turn was stopped.
     pub(crate) fn stop(&self) {
@@ -1818,7 +1827,18 @@ impl Drop for Batch<'_, '_> {
 /// (the user is asked once the reply is done), nor one whose input didn't
 /// parse (the reply's end says why).
 fn early_ok(call: &Value) -> bool {
-    call["name"] != "ASK" && call.get("_oak_raw").is_none()
+    (call["name"] != "ASK" || asks_alongside(call)) && call.get("_oak_raw").is_none()
+}
+
+/// An ASK that runs alongside the reply's other calls, as soon as it is
+/// in: the decision cards Quick wrote mid-turn during a goal
+/// (`quick::ASK_NOW_CALL`). It returns at once, and Quick's turn goes on,
+/// its calls with it, so it neither waits for them nor holds them.
+pub(crate) fn asks_alongside(call: &Value) -> bool {
+    call["name"] == "ASK"
+        && call["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with(crate::quick::ASK_NOW_CALL))
 }
 
 /// For each of a reply's tool calls, the calls before it that it waits
@@ -1859,7 +1879,7 @@ pub(crate) fn waits_for(calls: &[Value], folder: &Path) -> Vec<Vec<usize>> {
             (
                 paths,
                 browser || matches!(name, "WRITE" | "EDIT" | "SCREENSHOT"),
-                matches!(name, "ASK" | "CD" | "REPL" | "SWITCH"),
+                matches!(name, "ASK" | "CD" | "REPL" | "SWITCH") && !asks_alongside(c),
             )
         })
         .collect();

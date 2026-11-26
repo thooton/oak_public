@@ -17,7 +17,7 @@ pub use search::{parse_results as search_results, search};
 pub const MAX_OUTPUT: usize = 30_000;
 
 /// The longest TASK wait may wait, in seconds.
-pub const TASK_WAIT_MAX: u64 = 900;
+pub const TASK_WAIT_MAX: u64 = 180;
 
 /// The `summary` of EXECUTE and TASK new, which the user sees in place of
 /// the command.

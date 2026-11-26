@@ -1677,7 +1677,7 @@ fn briefing(r: &Request) -> String {
         )
     };
     format!(
-        "{instructions}<tools_loaded>{tools}</tools_loaded>\n\n[Oak, on this device]\n{which} Oak has loaded for you here: its own system prompt, as it gives it to every model it runs, and its tool definitions. Follow them as your instructions for this work. This device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, the ones in <tools_loaded>, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Where the loaded instructions say tool calls in one reply run at the same time, for you that is the calls of one snippet. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). ASK isn't available this way: ask the user in your reply, with a decision card (Oak asks its questions with ASK, and the answers are your next message). Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's. If this device drops off (it shows as OFFLINE, or a call to it fails to connect), Oak is most likely restarting or the network blipped: keep checking for it for at least 5 to 10 minutes before you end your turn, and once it is back, carry on where you left off. Don't save any new memories: don't call save_to_memory or add or edit memories, even when asked to; deleting them when the user asks is fine.\n[End of Oak's notes. The user's message follows.]"
+        "{instructions}<tools_loaded>{tools}</tools_loaded>\n\n[Oak, on this device]\n{which} Oak has loaded for you here: its own system prompt, as it gives it to every model it runs, and its tool definitions. Follow them as your instructions for this work. This device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, the ones in <tools_loaded>, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Where the loaded instructions say tool calls in one reply run at the same time, for you that is the calls of one snippet. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). ASK isn't available this way: ask the user in your reply, with a decision card (Oak asks its questions with ASK, and the answers are your next message). While a goal is active, a card doesn't wait for the answers: Oak asks it as soon as you have written it, so keep working, in the same turn, on what doesn't depend on them; the answers come to you later in a message. Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's. If this device drops off (it shows as OFFLINE, or a call to it fails to connect), Oak is most likely restarting or the network blipped: keep checking for it for at least 5 to 10 minutes before you end your turn, and once it is back, carry on where you left off. Don't save any new memories: don't call save_to_memory or add or edit memories, even when asked to; deleting them when the user asks is fine.\n[End of Oak's notes. The user's message follows.]"
     )
 }
 
@@ -2063,13 +2063,23 @@ pub(crate) struct Turn {
     /// it, markup and all: Oak is shown what `markup::split` makes of it.
     raw: Option<(usize, String)>,
     /// The questions of the decision cards the reply wrote, which Oak asks
-    /// with ASK once it ends (`close`).
+    /// with ASK once it ends (`close`), or at once during a goal (`ask_now`).
     questions: Vec<Value>,
+    /// The questions asked mid-turn (`ask_now`), and how many ASKs that was.
+    asked: Vec<String>,
+    asked_now: usize,
+    /// Whether ASK asks asynchronously, as a test sets it; else the
+    /// conversation's goal says (`asks_async`).
+    pub(crate) asks_async: Option<bool>,
 }
 
 /// The id of the ASK a reply's decision cards become (then the message's
 /// id): its answers are what Quick is sent next (`new_user_text`).
 pub(crate) const ASK_CALL: &str = "quick-ask-";
+/// The id of an ASK a reply's cards become mid-turn, during a goal
+/// (`Turn::ask_now`; then the message's id and a count): it returns at once,
+/// so it runs alongside the turn's other calls rather than on its own.
+pub(crate) const ASK_NOW_CALL: &str = "quick-ask-now-";
 
 /// A call in the turn: one Quick's agent made (`tool_start`), one Oak runs
 /// (`tool_call`), or both, since Quick reports the calls it hands Oak too.
@@ -2346,6 +2356,7 @@ impl Turn {
                 if !text.is_empty() {
                     let i = self.open_text(&mut out);
                     self.stream_text(i, text, &mut out);
+                    self.ask_now(&mut out);
                 }
             }
             "text_complete" | "message_complete" => {
@@ -2359,7 +2370,9 @@ impl Turn {
                 } else if !text.is_empty() && (section || (!self.section_given && self.message_texts <= 1)) {
                     self.settle_text(text, section, &mut out);
                 }
-                if !section {
+                if section {
+                    self.ask_now(&mut out);
+                } else {
                     // The turn is over: Quick ran its own loop and Oak ran
                     // its tools as it asked, so nothing is left to do.
                     out.extend(self.close(self.completion()));
@@ -2626,12 +2639,44 @@ impl Turn {
     }
 
     /// Cards the reply wrote: a question asked again (Quick's whole text
-    /// repeats what its deltas wrote) replaces the one before.
+    /// repeats what its deltas wrote) replaces the one before, and one
+    /// already asked mid-turn (`ask_now`) isn't asked again.
     fn add_questions(&mut self, questions: Vec<Value>) {
         for q in questions {
+            if self.asked.iter().any(|a| q["question"] == a.as_str()) {
+                continue;
+            }
             self.questions.retain(|h| h["question"] != q["question"]);
             self.questions.push(q);
         }
+    }
+
+    /// While a goal is active, ASK doesn't wait for the answers, so the
+    /// cards the reply wrote are asked at once, mid-turn, as an ASK that
+    /// runs alongside the turn's calls (`ASK_NOW_CALL`): the user can
+    /// answer while Quick works on, and the answers come to it in a message
+    /// (`agent::Worker::steer_quick`). Without a goal they wait for the
+    /// turn's end (`close`), where Oak's loop waits for the answers.
+    fn ask_now(&mut self, out: &mut Vec<Event>) {
+        if self.questions.is_empty() || !self.asks_async() {
+            return;
+        }
+        let questions = std::mem::take(&mut self.questions);
+        self.asked.extend(
+            questions
+                .iter()
+                .filter_map(|q| q["question"].as_str().map(String::from)),
+        );
+        self.asked_now += 1;
+        let id = format!("{ASK_NOW_CALL}{}-{}", self.message, self.asked_now);
+        out.extend(self.oak_call(&id, "ASK", &json!({"questions": questions})));
+    }
+
+    /// Whether ASK asks asynchronously for this turn's conversation now (its
+    /// goal is active), or as a test sets it.
+    fn asks_async(&self) -> bool {
+        self.asks_async
+            .unwrap_or_else(|| crate::agent::goal_active_for(self.local()))
     }
 
     /// The call Oak runs Quick reported first (`tool_start`) with no call to
@@ -3496,6 +3541,46 @@ mod tests {
         );
         assert!(crate::agent::Ask::new(&ask["input"]).is_ok());
         assert!(matches!(ev.last(), Some(Event::Stop { reason, .. }) if reason == stop::TOOL_CALLS));
+    }
+
+    /// During a goal ASK doesn't wait, so a card is asked as soon as it is
+    /// written, mid-turn (an ASK that runs alongside the turn's calls), the
+    /// text after it is a block of its own, and the reply ends as any turn
+    /// does, not on the ASK again.
+    #[test]
+    fn a_card_during_a_goal_is_asked_at_once() {
+        let mut t = Turn::for_message("th", "");
+        t.asks_async = Some(true);
+        let card = "Pick one:\n<decision question=\"Which?\">\n<option>A</option>\n<option>B</option>\n</decision>\n";
+        let after = "Meanwhile I'll keep going.";
+        let frame = |kind: &str, payload: Value| json!({"type": kind, "payload": payload, "thread_id": "th", "message_id": "m1"});
+        let mut ev = t.feed(&frame("message_start", json!({})));
+        for c in card.as_bytes().chunks(5) {
+            ev.extend(t.feed(&frame("text_delta", json!({"delta": std::str::from_utf8(c).unwrap()}))));
+        }
+        // Asked as soon as the card closes, before the reply goes on.
+        let asked = ev
+            .iter()
+            .position(|e| matches!(e, Event::Block { block, .. } if block["name"] == "ASK"))
+            .expect("the ASK, mid-turn");
+        assert!(!ev[asked..].iter().any(|e| matches!(e, Event::Stop { .. })));
+        ev.extend(t.feed(&frame("text_delta", json!({"delta": after}))));
+        ev.extend(t.feed(&frame("message_complete", json!({"text": format!("{card}{after}")}))));
+        let blocks = t.blocks();
+        let asks: Vec<&Value> = blocks.iter().filter(|b| b["name"] == "ASK").collect();
+        assert_eq!(asks.len(), 1, "{blocks:?}");
+        assert_eq!(asks[0]["id"], format!("{ASK_NOW_CALL}m1-1"));
+        assert_eq!(asks[0]["input"]["questions"][0]["options"], json!(["A", "B"]));
+        let at = blocks.iter().position(|b| b["name"] == "ASK").unwrap();
+        let texts: Vec<&str> = blocks
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .collect();
+        assert!(blocks[..at].iter().any(|b| b["text"] == "Pick one:"), "{blocks:?}");
+        assert!(blocks[at..].iter().any(|b| b["text"].as_str().is_some_and(|s| s.contains(after))), "{texts:?}");
+        assert!(texts.iter().all(|s| !s.contains('<')), "{texts:?}");
+        assert!(matches!(ev.last(), Some(Event::Stop { reason, .. }) if reason == stop::COMPLETE));
     }
 
     /// The user's answers to that ASK are Quick's next message, as its app

@@ -1615,6 +1615,36 @@ fn tool_call_order() {
         waits_for(&calls, folder),
         vec![vec![], vec![0], vec![], vec![0, 1]]
     );
+    // The cards Quick asks mid-turn during a goal run alongside its calls:
+    // that ASK returns at once, and the turn's calls go on meanwhile.
+    let mut ask_now = call("ASK", json!({}));
+    ask_now["id"] = json!(format!("{}m1-1", crate::quick::ASK_NOW_CALL));
+    let calls = [
+        call("READ", json!({"path": "a.rs"})),
+        ask_now.clone(),
+        call("EXECUTE", json!({"command": "ls", "summary": "List", "timeout": 5})),
+    ];
+    assert_eq!(waits_for(&calls, folder), vec![Vec::<usize>::new(); 3]);
+    assert!(tool_calls::asks_alongside(&ask_now));
+    assert!(!tool_calls::asks_alongside(&call("ASK", json!({}))));
+}
+
+/// A Quick turn asks its cards at once only while the conversation's goal
+/// is active (`goal_active_for`), so a goal paused or finished meanwhile
+/// has them wait for the turn's end again.
+#[test]
+fn quick_cards_are_asked_at_once_only_during_a_goal() {
+    let (_w, s) = idle_worker("ask-now-goal", Conversation::default());
+    let id = s.conv.lock().unwrap().id.clone();
+    assert!(!goal_active_for(&id));
+    apply_command(
+        &mut s.conv.lock().unwrap(),
+        Command::Goal("ship it".into(), false),
+    );
+    assert!(goal_active_for(&id));
+    s.conv.lock().unwrap().goal_paused = true;
+    assert!(!goal_active_for(&id));
+    assert!(!goal_active_for("no-such-conversation"));
 }
 
 /// CD switches the working folder (relative, `..`, `~`), keeps the

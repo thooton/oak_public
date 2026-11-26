@@ -194,6 +194,14 @@ fn find_session(id: &str) -> Option<Session> {
     SESSIONS.lock().unwrap().get(id).cloned()
 }
 
+/// Whether conversation `id` runs with its goal active, so ASK asks
+/// asynchronously (`tool_calls::goal_active`): a Quick turn asks its
+/// decision cards at once then (`quick::Turn::ask_now`).
+pub(crate) fn goal_active_for(id: &str) -> bool {
+    let conv = SESSIONS.lock().unwrap().get(id).map(|s| s.conv.clone());
+    conv.is_some_and(|c| tool_calls::goal_active(&c.lock().unwrap()))
+}
+
 /// The subagents AGENT_NEW started since the last call, with their
 /// conversation ids, for the app to list.
 pub fn take_spawned() -> Vec<(String, Session)> {
@@ -436,6 +444,12 @@ pub struct Live {
     waiting: usize,
     /// Its phase (`pulse`) and since when (ms since 1970).
     phase_at: (&'static str, i64),
+    /// Answers to questions asked during a goal (`ANSWERS_TAG` messages in
+    /// `Conversation::inbox`) handed to the Quick turn running meanwhile, as
+    /// a typed message is (`Worker::steer_quick`): its steer id, the text,
+    /// and whether Quick took it in (then it joins the transcript where
+    /// Quick read it, `absorb_notices`, and no request sends it again).
+    steered_answers: Vec<(u64, String, bool)>,
 }
 
 /// Counts a tool call in `Live::tools` while it runs (a wait also in
@@ -1818,9 +1832,23 @@ impl Worker {
             return;
         }
         let inbox = std::mem::take(&mut self.conv.lock().unwrap().inbox);
-        let notes = std::mem::take(&mut self.live.lock().unwrap().notes);
+        let (notes, taken) = {
+            let mut l = self.live.lock().unwrap();
+            let (taken, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut l.steered_answers)
+                .into_iter()
+                .partition(|(_, _, taken)| *taken);
+            l.steered_answers = rest;
+            let taken: Vec<String> = taken.into_iter().map(|(_, t, _)| t).collect();
+            (std::mem::take(&mut l.notes), taken)
+        };
         let mut content: Vec<Value> = notes.iter().map(|(_, t)| oak::text(t)).collect();
         content.extend(inbox.iter().map(|t| oak::text(t)));
+        // Answers Quick's turn took in mid-turn: where it read them.
+        content.extend(taken.iter().map(|t| {
+            let mut b = oak::text(t);
+            b[crate::quick::STEERED_KEY] = json!(true);
+            b
+        }));
         if !content.is_empty() {
             self.push("user", content);
         }
@@ -2489,6 +2517,11 @@ impl Worker {
             // nothing more, unless a goal isn't finished: that keeps Quick
             // going as it keeps any model (`a_done_turn_carries_a_goal_on`).
             if done {
+                // A card Quick asked mid-turn (an ASK alongside its calls)
+                // gets its result in before the turn goes on or ends.
+                if batch.asks_unsettled() {
+                    batch.finish(&[], &stop);
+                }
                 if self.goal_step() {
                     continue;
                 }

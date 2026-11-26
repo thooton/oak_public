@@ -722,6 +722,17 @@ impl Worker {
     /// as Quick's app does: its agent takes each in at its next step. They
     /// stay queued (shown as sent) till Quick says it took them in.
     fn steer_quick(&self, thread: &str) {
+        // The answers to questions asked during a goal go to the turn too:
+        // ASK didn't wait for them, so neither does Quick's turn.
+        let answers: Vec<String> = self
+            .conv
+            .lock()
+            .unwrap()
+            .inbox
+            .iter()
+            .filter(|t| t.starts_with(super::ANSWERS_TAG))
+            .cloned()
+            .collect();
         let mut l = self.live.lock().unwrap();
         for q in l
             .queued
@@ -730,6 +741,14 @@ impl Worker {
         {
             q.steered = true;
             crate::quick::turn::steer(thread, q.id, &q.text);
+        }
+        for text in answers {
+            if l.steered_answers.iter().any(|(_, t, _)| *t == text) {
+                continue;
+            }
+            let id = l.next_queued_id();
+            crate::quick::turn::steer(thread, id, &text);
+            l.steered_answers.push((id, text, false));
         }
     }
 
@@ -742,6 +761,23 @@ impl Worker {
         let mut l = self.live.lock().unwrap();
         for q in l.queued.iter_mut().filter(|q| q.steered) {
             q.steered = took.contains(&q.id);
+        }
+        // Answers Quick took in leave the inbox (they join the transcript
+        // with the next request's input, `absorb_notices`); the rest stay
+        // there for the next request.
+        l.steered_answers.retain_mut(|(id, _, taken)| {
+            *taken = *taken || took.contains(id);
+            *taken
+        });
+        let taken: Vec<String> = l.steered_answers.iter().map(|(_, t, _)| t.clone()).collect();
+        drop(l);
+        if !taken.is_empty() {
+            let mut c = self.conv.lock().unwrap();
+            let before = c.inbox.len();
+            c.inbox.retain(|t| !taken.contains(t));
+            if c.inbox.len() != before {
+                c.save();
+            }
         }
     }
 
