@@ -161,11 +161,11 @@ pub(crate) fn read_only_view(ui: &mut Ui, t: &Theme, conv: &store::Conversation,
 
 /// What the session's subagents are doing, for the transcript's tail
 /// (`transcript_status`): any still pausing, and for a swarm's
-/// coordinator how many are at work (`App::swarm_running`).
-#[derive(Clone, Copy, Default)]
+/// coordinator its members, a row each (`App::swarm_running`).
+#[derive(Clone, Default)]
 pub(crate) struct Group {
     pub(crate) agents_pausing: bool,
-    pub(crate) running: usize,
+    pub(crate) running: Vec<transcript::MemberRow>,
 }
 
 /// A conversation's transcript. Returns what was done to the queue.
@@ -200,7 +200,7 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         } else {
             built.insert(Built::take(id, &conv)).frame(&conv, &live)
         };
-        let mut tail = tail_sig(&conv, &live, editing) ^ agents_pausing as u64 ^ (running as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let mut tail = tail_sig(&conv, &live, editing) ^ agents_pausing as u64 ^ transcript::MemberRow::sig(&running);
         if let Some(a) = &ask {
             // (Another ASK can replace them, as many questions or not.)
             tail ^= a.questions.iter().fold(a.background as u64 + 1, |h, q| h.wrapping_mul(31).wrapping_add(q.text.len() as u64 + q.options.len() as u64));
@@ -232,7 +232,7 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         shown_from = units.get(list.first_shown()).map_or(usize::MAX, |u| msgs[u.start]);
         // The end: what OAK is doing, then its questions and the queue.
         let tail = |ui: &mut Ui| {
-            transcript_status(ui, t, &conv, &live, agents_pausing, running);
+            transcript_status(ui, t, &conv, &live, agents_pausing, &running);
             if let Some(a) = ask.as_mut()
                 && ask_view(ui, t, a)
             {

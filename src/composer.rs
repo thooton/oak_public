@@ -562,7 +562,7 @@ pub(crate) fn last_user_text(messages: &[Value]) -> Option<String> {
     let blocks = messages.iter().rev().filter(|m| m["role"] == "user").filter_map(|m| m["content"].as_array());
     blocks.flat_map(|b| b.iter().rev()).find_map(|b| {
         let text = b["text"].as_str().filter(|t| !t.trim().is_empty())?;
-        (b["type"] == "text" && b.get("_oak_file").is_none() && crate::transcript::user_authored(b)).then(|| text.to_string())
+        (b["type"] == "text" && b.get("_oak_file").is_none() && !crate::images::is_copy_note(b) && crate::transcript::user_authored(b)).then(|| text.to_string())
     })
 }
 

@@ -152,7 +152,12 @@ own in `images/`, named after the SHA-256 of their bytes (`src/blobs.rs`): an im
 file (`blob`) and size (`_oak_size`) instead of holding base64 `data`, which goes back in only as a
 request is sent (`api::stream`). Pictures still saved as data are moved out at the next start
 (only data that reads back byte for byte, so requests send what they did); files are never
-deleted. At start only each conversation's metadata is read, and where each message is in its
+deleted. Each picture the user sends in a message is also copied to a file of its own in
+`image-temp/`, and a text block right after it in the message (marked `_oak_image_copy`) tells the
+model `[image saved at <path>, deleted in 1 minute: copy it to your scratchpad to keep it]`, for
+every provider (`images::with_copies`, as a queued message joins the conversation, once per
+message); each copy is deleted a minute after it was written, and copies older than that are swept
+at start. At start only each conversation's metadata is read, and where each message is in its
 file, while the window is set up (`preload` in `src/lib.rs`): from `conversations/index.bin` for
 the files unchanged since the last start (by size and time; a cache, rewritten after a start that
 read any file), else from the file. A conversation's messages are read when first looked at, and then only the last ones
@@ -240,13 +245,27 @@ pass Oak draws each group's backdrop (glass that sees the same one) into a textu
 renderer, and blurs it.
 Antigravity (`src/gravity.rs`, id `antigravity`) is based on the desktop Hub's dark Onyx, with cooler
 surfaces, the arch's colors as accents, rounded controls, panels and dialogs, and the page inset in a
-rounded pane. Its left sidebar (`src/gravity_side.rs`) replaces the horizontal tab strip: New
-conversation, Home, Conversations and Usage, a scrollable list of open tabs with the same shortcuts
-and menus, and Settings at the foot. Home (`src/gravity_home.rs`) starts as a desktop over the chosen
-wallpaper, with a local clock (the ring shows seconds), a calendar marking the dates of conversations'
-latest activity, counts, recent conversations, running and paused work, and a usage preview. The tiles
-reflow and scroll in smaller windows. The dock replaces Home's corner buttons, opening the same lists
-and providers menu (with plugin tabs and links), a new conversation or Settings. It stays visible when
+rounded pane. Its boxes are edged as the app's are (measured from its message box): as the frame ends,
+each rounded box in the theme's surfaces or with its line's stroke (cards, chat bubbles, tool blocks,
+fields, buttons, menus, windows, plugins' boxes too) gets, in place of the stroke, a crisp one-pixel
+white hairline (4.4% over its fill along the top, 3% down the sides, 2.6% along the bottom) and a lighter
+line (7.7%) in the pixel under the top edge that follows the top corners and fades out down the sides,
+and a faint shadow (black at 23%) in the pixel under the bottom edge;
+its body stays flat, a box 40 points tall or more has corners half again as round (up to 22 points),
+and a focus ring stays as it is.
+Its left sidebar (`src/gravity_side.rs`) replaces the horizontal tab strip: New
+conversation, Home, Conversations (Home, its search focused; Home stays the lit row) and Usage, a scrollable list of open tabs
+with the same shortcuts and menus, and Settings at the foot. Home (`src/gravity_home.rs`) is a desktop
+over the chosen wallpaper with the conversations on it: their tile has New, the search field (Ctrl+F,
+Enter opens the first match) and the sort, chips for all of them, those at work and those paused, and
+the list, those at work and then those paused pinned first, each under its heading, and the rest under
+Today, Yesterday, This week and Earlier; a row lights under the pointer and fades in its quick actions
+(Rename, Fork, Delete; its right-click menu also clears the scratchpad), and a title cut short shows in
+full in its tooltip. Beside it, a local clock (the ring shows seconds), a calendar marking the dates
+of conversations' latest activity (a click on one lists that day's, a chip clearing it), counts (a click
+on one filters the list) and a usage preview. The tiles reflow and scroll in smaller windows. The dock
+replaces Home's corner buttons: the conversations' search, the menu on Cloud, Protocols and Plugins (with
+the providers, plugin tabs and links), a new conversation or Settings. It stays visible when
 the menu opens. Theme switches leave the open tabs, conversations and wallpaper alone.
 The room above the gear is the plugins' corner (`Hooks::composer_corner`, `src/plugins.rs`): a
 plugin can draw one row there. Only hooks that lay out or paint a row take space, and each row
@@ -478,8 +497,10 @@ can't read.
 **The agent** (`src/agent.rs`, `src/agent/`). One worker thread per conversation. Its tools
 (`src/tools/defs.rs`): READ, WRITE, EDIT, EXECUTE, SEARCH, FETCH, SCREENSHOT, DISPLAY, ASK,
 ACCOUNTS, LOAD, UNLOAD, and TASK, NOTE, HEARTBEAT, PROGRESS and GOAL, which each take an
-`action` and show as tools of their own (`TASK action=wait` is TASK_WAIT). LOAD loads a kit (AGENT,
-BROWSER, WINDOW, or another protocol by its name): a tool and its instructions, left out of the
+`action` and show as tools of their own (`TASK action=output` is TASK_GET_NEW_OUTPUT). TASK has no
+`wait`: TASK_WAIT is retired (`tools::RETIRED`), its code kept but its definition gone, so the model
+isn't given it and a call is refused with what to do instead (a task says when it ends; MONITOR
+brings its lines). LOAD loads a kit (AGENT, BROWSER, WINDOW, MONITOR, or another protocol by its name): a tool and its instructions, left out of the
 prompt until needed; UNLOAD takes one the model is done with back out (see the prefix above).
 NOTE's actions: new, update (the whole text), edit (an exact `old_string` to `new_string`, as
 EDIT), append (a new line at the end), delete (`id`, or several at once with `ids`; unknown ids
@@ -517,6 +538,22 @@ that path. Launched console programs use `CREATE_NO_WINDOW` (their GUI windows s
 desktop, and their output still goes to the log): without it, Windows Terminal could open a console
 on the user's real desktop despite `lpDesktop`. The Tk regression also checks that no console is
 attached. Elsewhere WINDOW stays instructions (Xvfb, xdotool).
+
+**MONITOR** (`src/monitor.rs`, a kit any session but a chat or local model can load, subagents and
+swarm members too; modelled on Claude Code's Monitor tool). `start` watches a `command` it runs as a
+new task (added to the task list, but its exit is told by the watch, not the task notification) or
+task `task` (from its next line on), with an optional `filter` (`|`-separated texts, any of which a
+line must contain, case-insensitive) and `summary`. A thread per watch waits on the task's output
+(`Proc::lines_since`, woken by the reader as lines come, no polling) and sends each new line, or
+each matching one, to the session as a `<task-notification>` (`Worker::monitor_deliver`: the
+session's notes, which wake it when idle and join the next request when busy); lines within 0.5s of
+the first go in one, at most 50 lines or 8,000 characters shown (the rest counted, with the log's
+path). It reads apart from TASK action=output's cursor. A watch ends at its deadline
+(`timeout_minutes`, default 5, at most 30, or none with `persistent`), with one notice saying so
+(its own command is stopped); when its own command exits (one notice with how), or the watched task
+exits (no notice: the task's own says so); on `stop` (its own command stopped, no notice); past 300
+lines a minute (stopped, with a notice to filter); or when its session is gone. `list` shows them.
+Watches are the running Oak's only: they don't outlive it, and go with their conversation.
 
 **Protocols** (`src/mcp.rs`; MCP servers, as models know them, and Oak's own kits). The user sees
 "Protocols"; the model's prompts say MCP. Oak's own are this repository's `protocols/` files (built
@@ -649,10 +686,12 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   output line; a task opens its output file), its menu opens Oak or hides it. When they have all
   ended it says so in a notification and goes. It runs from a copy of oak.exe (`tray/Oak
   tasks.exe` in Oak's folder), not oak.exe itself, and not when Oak is restarting. A
-  TASK wait under way when Oak closes (Pause all and close, or Exit now with the tasks kept) isn't
-  ended or answered with "Oak closed": the next Oak runs it again first thing, for what was left of
-  its timeout (only the time Oak ran counts, `Conversation::task_waits`), and its result says how
-  long Oak was closed; a task that ended meanwhile reports its real running time. Other calls cut
+  TASK wait (retired: only in conversations from before) under way when Oak closes (Pause all and
+  close, or Exit now with the tasks kept) isn't ended or answered with "Oak closed": the next Oak runs
+  it again first thing, for what was left of its timeout (only the time Oak ran counts,
+  `Conversation::task_waits`), and its result says how long Oak was closed; a task that ended
+  meanwhile reports its real running time. Carried on this way (`tools::CARRIED`), it runs out
+  although new TASK wait calls are refused (`tools::validate_as`). Other calls cut
   off by a close get a result saying so. Every
   command's PATH starts with Oak's `bin/` folder, which holds the ripgrep bundled at build time
   (`src/toolbin.rs`; written there on a run's first command when missing or different), and the
@@ -771,7 +810,9 @@ marks "swarm started on …", and the conversation gets a seat (`Conversation::s
 name `coordinator`). One with nothing sent yet has the SWARM kit from its first request; one under
 way is told to LOAD it (LOAD refuses SWARM without a seat). The kit holds its text (`{{#swarm}}` in
 `prompts/tools.md`: the coordinator's from Antigravity's coordinator skill, the members' from its
-worker prompt) and one tool family, SWARM: status, models, add, model, kill, title, post, read,
+worker prompt, which has members name @coordinator only for a final [done] result, a blocker only
+it can resolve or a result no peer acts on next, and post claims and progress naming nobody or the
+peer who acts next) and one tool family, SWARM: status, models, add, model, kill, title, post, read,
 wait. Members are the coordinator's subagents (`<coordinator>-agentN`, titled `@name`, the
 coordinator's folder, role and, unless `model` pins another, model), each with a seat and the
 kit from its start; they get the worker text in place of the subagent paragraph (`{{#member}}` and
@@ -779,7 +820,11 @@ kit from its start; they get the worker text in place of the subagent paragraph 
 monitor and user are reserved), a brief, and `n` or `tasks` for a numbered group (name-1…); the
 brief is posted to the board as the adder ("@name brief"), which is the member's first message.
 The board is append-only and shared, with sequence numbers: a post goes at once to the members it
-names (@name, @group for a numbered group, @all) and those asleep for any post, as
+addresses (@name, @group for a numbered group, @all; `swarm::addressees`: the @names that open the
+post, a line or a sentence, each with the run of @names right after it, while one mid-sentence, in
+parentheses, `code` or quotes, or in a word or path is a reference that wakes nobody; the Graph's
+arrows count the same) and those asleep for any post (from its SWARM wait until its next turn starts, or its turn goes
+on after the wait because something came in: then it is asleep for mentions only again), as
 `<agent-message from="@x" type="board post" seq="N">`, waking them; a post naming nobody waits to
 be read. Members' turns end without a final reply (no report to the parent); ending a turn, or
 SWARM wait (which ends the turn once the reply's calls are in, unless something came meanwhile,
@@ -794,8 +839,24 @@ doesn't start with [done], and someone posted since its last stall post, it post
 The coordinator's tab has a strip over its transcript (Chat, Board, Members, Graph, then the
 swarm's title and how many members work): Board shows every post live, mentions colored; Members
 each one's state (working, waiting, stopped, killed), model, who added it and its posts (a click
-opens it, the right-click menu removes it); Graph the members around the coordinator with an
-arrow for who named whom. Under its transcript "n subagents running" counts the members at work,
+opens it, the right-click menu removes it); Graph the swarm alive: each member an Oak bot
+(`src/bot.rs`: one of the Oak Bots plugin's 26 shapes, Grok Bot's drawings, picked by the
+member's name with a hash of its own, so stable; embedded as `assets/bot-shapes.json`, the
+plugin's paths without the eyes, rasterized per pixel size and kept as textures, so solid and
+crisp from 14 points up, the pumpkin keeping its stem; also the running-agents list's icon) in
+its board color, the coordinator bigger in the middle, laid out by a small force simulation (members spring to a ring
+around it, push apart, and those that talk pull together). A working bot breathes in a glow and
+bobs, a waiting one dims, a stopped one dims in a red ring, a killed one is faded grey with a
+small x. A curved arrow for who named whom, thicker for more posts and lit in the
+author's color for a while after the last; each new post sends a pulse along it, rippling where
+it leaves and lands. Hovering a bot says its role, state, model, who added it, its posts and its
+last one, and lights its edges; a click opens it, a drag moves it (it springs back), dragging the
+background pans, scrolling zooms, a double click resets. It repaints at full rate only while
+something moves, at 30 fps while a member works, else once a second. Under its transcript a list of its members (not the killed; gone once the job is done and none
+works) has a row each, like a card: the member's Oak bot (`src/bot.rs`, its shape, eyeless, in its color on
+the board), its name (its role), its brief's first sentence, faint, and on the right its state
+(working with a spinner, a dot while the coordinator's own status spins; waiting; done, with a
+check, once its last post holds [done]; paused; stopped); hovering shows what it is doing,
 and its session box has a swarm row (title, how many work); a member's says its name and swarm
 and opens the coordinator. The workspace is the shared folder (no per-member copies).
 
@@ -981,7 +1042,9 @@ The AWS Quick provider (`src/quick/`) is a provider of the Freebuff kind: a sepa
 talks to as a pipe. Quick runs its own system prompt, agent loop and model (Claude Opus through
 Bedrock; `turn_usage.resolved_model_id` says which), so Oak sends neither its prompt nor its
 tools, and the picker's models are Quick's three modes (`smart`, `fast`, `balanced`, sent as
-`agent_mode`), not model ids.
+`agent_mode`), not model ids. Every model picker (a conversation's, the new screen's, a subagent's
+or swarm member's) lists all three once Quick is signed in, each with its own effort levels
+(`agent::efforts`: Smart up to max, Fast and Balanced up to high; `quick_modes_offer_their_own_efforts`).
 
 **Signing in** is Quick's own OIDC flow against AWS IAM Identity Center: Oak registers a public
 client for itself (`/client/register`), copies a link to the authorization endpoint with PKCE
@@ -993,7 +1056,8 @@ access token with it when the one it has is about to expire.
 **Accounts.** Quick has as many logins as were signed in (`quick.json` holds `logins`; a single
 login from before is read as the first). Each has an id: its email, lowercased, else one made from
 its client; signing the same account in again renews it in place. Each keeps this machine's outpost
-for that account. A conversation's Quick thread lives on its login, so a conversation keeps its
+for that account, an id of its own (`outpost::fresh_id`, one per login, not one per process).
+A conversation's Quick thread lives on its login, so a conversation keeps its
 login (`quick::login_for`, a seat in `seats.json` like any provider's) while that one can run, and
 moves only when it can't (its session window or month used up, Quick saying it may not run, or its
 renewal failing); with none that can, it stays and Quick says why. A proactive move (from the
@@ -1025,7 +1089,13 @@ snippet with anything else is refused before any of it runs. Each call becomes a
 reply (`Turn::oak_call`) that the conversation's agent runs as it runs any model's calls, all at
 once (those on a file one of them writes in order), so they show, stream and are tracked as Oak's
 own; the turn waits for their results (`turn::run_oak_alive`, handed each by the batch through
-`turn::ran`) and answers Quick with each one's, in order. The snippet's own call is no row of the
+`turn::ran`) and answers Quick with each one's, in order. What came in while they ran (messages
+from other sessions and board posts, task notifications; not ASK answers, which are steered) goes
+in the first such result after its own text (`Worker::with_arrivals`), since a Quick turn is one
+request and the notices other providers get with their next request (`absorb_notices`) would
+otherwise wait for its end: a TASK or SWARM wait one ended ("a message arrived (it follows)") shows
+it, and later waits in the turn don't end at once on it
+(`a_quick_snippets_call_carries_what_came_in`). The snippet's own call is no row of the
 transcript (`quick::QUIET_KEY`, `a_quiet_call_is_not_shown`): the user sees only the Oak calls it
 ran, unless it failed (a snippet Oak refused), when it shows with why. ASK can't be called that way (it waits for the reply's end, which the turn never
 reaches while it waits). A snippet of a thread no conversation's agent reads runs here directly,
@@ -1096,6 +1166,22 @@ results in its newest user turn, and it tells Quick to carry on (`CARRY_ON`) rat
 to an older user turn, which sent the user's first message again
 (`a_request_mid_turn_does_not_send_the_first_message_again`). A summary sends its instruction.
 
+**The outpost stays ONLINE while any turn runs** (`quick/keeper.rs`). Quick takes an outpost's
+status from the newest chat socket naming it: closing an older one changes nothing, but closing the
+newest takes the outpost OFFLINE, though older sockets naming it stay connected; on one account
+only, not across accounts sharing an id (measured: `outpost_test::quick_outpost_shared_sockets`).
+Every turn opens its own socket naming its login's outpost, so conversations on one login lost the
+device whenever another's turn ended, until a new turn connected. So each turn's socket holds its
+login's outpost (`keeper::hold`, kept by the socket), and when one closes while others still hold
+it, a keeper connects: a socket naming the outpost with no thread of its own, then the newest. The
+next close replaces it (the old one closes once the new one is connected), Quick dropping it
+reconnects it, and it closes with the login's last turn socket. It reads what Quick sends and
+answers nothing: Quick hands a device call to every socket naming the outpost, the keeper first
+when it is the newest, and the turn's own socket gets it too and answers it, which is the answer
+Quick takes (`quick_outpost_calls_reach_the_turn`, with `OAK_PROBE_KEEPER_SILENT=1` as the keeper
+behaves) (`a_turn_closing_under_another_starts_a_keeper`,
+`a_keeper_stays_until_its_successor_connects`; live: `quick_outpost_keeper_holds`).
+
 **Recovery.** If `list_outposts` says no devices are accessible to the current turn and the reply
 ends without recovering access, Oak sends a new message asking Quick to check again and continue
 (`DEVICE_RETRY`). If the thread still can't reach the device after that, the conversation goes on
@@ -1108,6 +1194,13 @@ attempt limit; pause and interrupt still work. A successful reply or a real ques
 
 When Quick reports its usage limit in a reply or error frame, Oak keeps the work so far, excludes
 that login and goes on in a fresh Quick thread on another usable login (opened by `LIMIT_FRESH`).
+A rate limit is handled the same way (`recovery::RATE`, opened by `RATE_FRESH`): an error frame whose
+code or message says the account is throttled or rate-limited (`rate_error`), or a session error
+saying so (`rate_limited`: too many requests, rate exceeded, throttling, HTTP 429). The login is
+passed over for five minutes, and with no other usable login the turn waits and retries on this one,
+as after a session error, rather than stopping
+(`a_quick_rate_limit_moves_or_retries_and_never_ends_the_turn`). No other error moves a conversation to
+another login (`recognizes_a_rate_limit_but_not_other_errors`).
 A fresh thread, either way, is sent the whole conversation, not a summary of it: the message that
 opens it is marked `recovery::FRESH_KEY`, so Quick's replies before it count as unseen
 (`agent::unseen_by`), and each request sends all of it as `<conversation_so_far>`, with Oak's
@@ -1115,6 +1208,25 @@ briefing, until Quick replies on the new thread (`a_quick_handoff_keeps_the_chat
 The transcript gets a mark saying the conversation moved. The Oak conversation, working folder and
 parent-agent relationship do not change. With no usable alternate account, Oak reports why it
 cannot continue.
+
+The conversation so far tells Quick's agent it is the same conversation, carried on, not a new task.
+When anything in it is cut, the whole of it, uncut, goes to `quick-conversation-<thread>.md` in the
+scratchpad, which the agent is told to read only in part, for what was cut. When it reads that file
+anyway, the call is Quick catching up (`quick::is_boot`: a call Quick wrote whose input names that
+file): no request carries it or its result, for any provider, Quick included
+(`agent::for_provider`, `a_catch_up_read_is_left_out`), since every other model has the
+conversation itself and a later fresh thread is sent it anew; the transcript shows it as one closed
+row, "the conversation so far (AWS Quick catching up)", which opens to the read.
+
+**A revert** (or a rewind mid-turn) that takes out anything Quick's thread holds (a reply Quick wrote
+from the revert point on, or anything while the conversation is on Quick) moves the conversation to
+a fresh Quick thread on the same login (`agent::quick_thread_reverted`): Quick's service has no way
+to take messages out of a thread (its app's `edit_message` frame replaces one user message by the
+id the app gave it, which Oak doesn't keep), and its agent would go on from what was reverted. Quick's
+earlier replies count as another thread's (`quick_replies_elsewhere`, which also clears the
+messages it took in mid-turn), so the fresh thread is sent the conversation as it is after the
+revert, with Oak's briefing (`a_revert_moves_quick_to_a_fresh_thread`). Reverting only what other
+providers wrote since Quick's last reply keeps its thread.
 
 **A message typed while Quick works goes into its turn**, as Quick's app sends one: a `user_message`
 with `mid_turn: true` and a `message_id` of its own (`steer_message`), on the turn's socket, between

@@ -103,16 +103,16 @@ pub fn chat_definitions() -> Vec<Value> {
 }
 
 /// The kits a session can load: a subagent has AGENT always (to reach the
-/// main session) and no browser. BROWSER and WINDOW are protocols too
+/// main session) and no browser (WINDOW and MONITOR it has). BROWSER and WINDOW are protocols too
 /// (`crate::mcp`, this repository's `protocols/`): there only while
 /// switched on.
 pub fn kits_for(agent: bool) -> Vec<&'static str> {
-    KITS.iter().map(|(k, _)| *k).filter(|k| !agent || *k == "WINDOW").filter(|k| !NATIVE.contains(k) || crate::mcp::enabled(&k.to_lowercase())).collect()
+    KITS.iter().map(|(k, _)| *k).filter(|k| !agent || *k == "WINDOW" || *k == "MONITOR").filter(|k| !NATIVE.contains(k) || crate::mcp::enabled(&k.to_lowercase())).collect()
 }
 
 /// The kits: what each is, as LOAD's description says (BROWSER's and
 /// WINDOW's from their protocol files).
-const KITS: &[(&str, &str)] = &[("AGENT", "subagents (only when the user asks for them)"), ("BROWSER", ""), ("WINDOW", ""), ("SWARM", "coordinating a swarm of agents on a shared board (only once the user starts one with /swarm)")];
+const KITS: &[(&str, &str)] = &[("AGENT", "subagents (only when the user asks for them)"), ("BROWSER", ""), ("WINDOW", ""), ("MONITOR", "watching a command's or task's output: each new line, or each matching a filter, comes to you as a notification as it appears, with no waiting or polling"), ("SWARM", "coordinating a swarm of agents on a shared board (only once the user starts one with /swarm)")];
 
 /// Oak's kits that are protocols as well.
 const NATIVE: [&str; 2] = ["BROWSER", "WINDOW"];
@@ -129,6 +129,9 @@ pub fn kit_of(tool: &str, agent: bool) -> Option<&'static str> {
     }
     if tool.starts_with("WINDOW_") {
         return Some("WINDOW");
+    }
+    if tool.starts_with("MONITOR_") {
+        return Some("MONITOR");
     }
     (!agent && tool.starts_with("AGENT_")).then_some("AGENT")
 }
@@ -189,6 +192,7 @@ fn family_intro(family: &str, agent: bool) -> String {
         "GOAL" => "Only while a goal is set. A goal is separate from the user's ordinary requests: the user sets it explicitly, it arrives in a <goal> message and stays listed under \"Goal\" in your system prompt until finished. With no goal listed there, there is none: don't use this tool, even for a big task.".into(),
         "BROWSER" => BROWSER_INTRO.into(),
         "WINDOW" => "GUI apps on Oak's hidden desktop, driven without touching the user's screen, mouse, keyboard or focus; and, with their permission (attach), the user's own windows, driven the same way (they stay where they are). The user sees your current window live beside the transcript. Coordinates are pixels of the window's client area, as in its screenshots.".into(),
+        "MONITOR" => "Watches in the background, for you: a command's output or a task's, each new line (or matching line) sent to you as a <task-notification> as it appears, while your turns go on or you are idle. Nothing to wait or poll for.".into(),
         "SWARM" => "Your swarm (/swarm): its members, each an Oak agent in its own conversation in this folder, and the board they share. There are no private messages: everything goes on the board, and a post reaches at once (waking them) only the members it names: @name, @group for numbered members (fix for fix-1, fix-2...), @all".into(),
         "AGENT" if agent => "The main session (id 0) and its other subagents.".into(),
         "AGENT" => "Subagents: other agents with your tools (except ASK), working in this folder in the background. Their messages, and the final reply each sends when it ends its turn, come to you as <agent-message> blocks with your next request.".into(),
@@ -302,9 +306,8 @@ fn definitions_with(agent: bool) -> Value {
             json!({"command": {"type": "string"}, "summary": {"type": "string", "description": SUMMARY}}), &["command", "summary"]),
         tool("TASK_GET_NEW_OUTPUT", "the lines task `id` printed since the last call, and whether it is still running",
             json!({"id": {"type": "integer"}}), &["id"]),
-        tool("TASK_WAIT", &format!("like output, but first wait for the task to finish, at most `timeout` seconds (1 to {TASK_WAIT_MAX}); the wait also ends when the user sends a message"),
-            json!({"id": {"type": "integer"},
-                   "timeout": {"type": "integer", "description": format!("For wait: seconds, 1 to {TASK_WAIT_MAX}")}}), &["id", "timeout"]),
+        // No TASK_WAIT: the model isn't given it (`RETIRED`); it is told when
+        // a task ends, and MONITOR brings its lines as they come.
         tool("TASK_LIST", "the tasks: ID, running time, status, start of the command", json!({}), &[]),
         tool("TASK_DELETE", "stop task `id` (SIGINT, then SIGKILL after 2 seconds) and remove it",
             json!({"id": {"type": "integer"}}), &["id"]),
@@ -455,6 +458,7 @@ fn definitions_with(agent: bool) -> Value {
     ]);
     let list = all.as_array_mut().expect("a list");
     list.extend(swarm_definitions().as_array().cloned().unwrap_or_default());
+    list.extend(monitor_definitions().as_array().cloned().unwrap_or_default());
     let at = list.iter().position(|d| d["name"] == "BROWSER_HELP").unwrap_or(list.len());
     list.splice(at..at, more.as_array().cloned().unwrap_or_default());
     // WINDOW's (Windows only: elsewhere WINDOW is instructions).
@@ -490,6 +494,25 @@ fn swarm_definitions() -> Value {
         tool("SWARM_READ", "the board, oldest first, each post with its seq and author: those after `since`, or without it the latest 20", json!({"since": since}), &[]),
         tool("SWARM_WAIT", "sleep on the board until a post you are meant to see arrives, ending your turn (waiting costs nothing); returns at once instead with the posts after `since` that would wake you", 
             json!({"since": since, "mentions_only": {"type": "boolean", "description": "For wait: wake only for posts naming you or @all (default true); false wakes you for any post"}}), &[]),
+    ])
+}
+
+/// MONITOR's actions (`crate::monitor`).
+fn monitor_definitions() -> Value {
+    let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
+        json!({"name": name, "description": description, "input_schema": {"type": "object", "properties": properties, "required": required}, "eager_input_streaming": true})
+    };
+    use crate::monitor::{DEFAULT_MINUTES, MAX_MINUTES};
+    json!([
+        tool("MONITOR_START", "watch `command` (run as a new task, stopped when the watch ends) or task `task` (one you started, from its next line on): each new output line, or each containing one of `filter`'s texts, comes to you as a <task-notification> as it appears, lines that come together in one. Returns the monitor's ID. It ends at its deadline (you get one notice, to start it again if still needed), when the command exits, or on stop",
+            json!({"command": {"type": "string", "description": "A command printing one line per event, e.g. `tail -f app.log`, or a loop that polls and prints what changed"},
+                   "task": {"type": "integer", "description": "Instead of `command`: the ID of a task to watch"},
+                   "summary": {"type": "string", "description": "A few words on what it watches, shown with each notification (and the task's summary, for `command`)"},
+                   "filter": {"type": "string", "description": "Only lines containing one of these `|`-separated texts (case-insensitive), e.g. \"error|FAILED|listening on\"; default every line"},
+                   "timeout_minutes": {"type": "integer", "description": format!("The deadline, 1 to {MAX_MINUTES} minutes (default {DEFAULT_MINUTES})")},
+                   "persistent": {"type": "boolean", "description": "No deadline: it runs until stop, the command's exit or Oak's close"}}), &[]),
+        tool("MONITOR_STOP", "end monitor `id` without a notice (its own command is stopped)", json!({"id": {"type": "integer"}}), &["id"]),
+        tool("MONITOR_LIST", "the monitors running: ID, task, running time, time left, lines sent, filter, what it watches", json!({}), &[]),
     ])
 }
 

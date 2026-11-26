@@ -83,6 +83,17 @@ pub(super) fn note_limit(id: &str, now: i64) {
     k.observed_limit_until = until.unwrap_or(now + 5 * 60_000);
 }
 
+/// How long a rate-limited login is passed over (ms).
+const RATE_COOL_MS: i64 = 5 * 60_000;
+
+/// Login `id` was rate-limited just now: passed over for `RATE_COOL_MS`
+/// (or as long as a usage limit already noted holds it).
+pub(super) fn note_rate_limit(id: &str, now: i64) {
+    let mut all = KEPT.lock().unwrap();
+    let k = all.entry(id.to_string()).or_default();
+    k.observed_limit_until = k.observed_limit_until.max(now + RATE_COOL_MS);
+}
+
 pub(super) fn observed_limit(id: &str, now: i64) -> bool {
     KEPT.lock().unwrap().get(id).is_some_and(|k| k.observed_limit_until > now)
 }

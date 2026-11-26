@@ -873,6 +873,9 @@ struct UserBlock<'a> {
     text: Option<&'a str>,
     /// Carries `_oak_file` (an attached text file).
     file: bool,
+    /// Carries `images::COPY_KEY`: where the image before it was saved, for
+    /// the model. Part of the user's message, but not shown.
+    copy_note: bool,
     /// Carries `_oak_goal` or `_oak_context` (`agent::is_hidden_block`).
     hidden: bool,
     at: Option<i64>,
@@ -889,6 +892,7 @@ impl<'a> UserBlock<'a> {
             kind,
             text,
             file,
+            copy_note,
             goal,
             context,
             at,
@@ -903,6 +907,7 @@ impl<'a> UserBlock<'a> {
                 "type",
                 "text",
                 "_oak_file",
+                crate::images::COPY_KEY,
                 "_oak_goal",
                 "_oak_context",
                 "_oak_at",
@@ -917,6 +922,7 @@ impl<'a> UserBlock<'a> {
             kind: kind.and_then(Value::as_str),
             text: text.and_then(Value::as_str),
             file: file.is_some(),
+            copy_note: copy_note.is_some(),
             hidden: goal.is_some() || context.is_some(),
             at: at.and_then(Value::as_i64),
             call_id,
@@ -942,6 +948,7 @@ impl<'a> UserBlock<'a> {
             Some("text") => {
                 let text = self.text.unwrap_or("");
                 self.file
+                    || self.copy_note
                     || !(self.hidden()
                         || text.starts_with(NOTE_TAG)
                         || text.starts_with(agent::ALERT_TAG)
@@ -980,7 +987,7 @@ fn user_messages_of(blocks: &[UserBlock]) -> Vec<std::ops::Range<usize>> {
             continue;
         }
         let s = *start.get_or_insert(i);
-        if b.kind == Some("text") && !b.file {
+        if b.kind == Some("text") && !b.file && !b.copy_note {
             out.push(s..i + 1);
             start = None;
         }
@@ -1078,15 +1085,16 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
         }
         blocks.clear();
         blocks.extend(content.iter().map(UserBlock::of));
-        // The last block of each message the user sent, with where a
-        // revert to before that message goes.
+        // The last shown block of each message the user sent (not an
+        // image's copy note), with where a revert to before that message
+        // goes.
         // (A list, not a map: a turn holds a message or two, and most
         // hold none, only tool results.)
         let ends: Vec<(usize, RevertAt)> = user_messages_of(&blocks)
             .into_iter()
             .map(|r| {
                 (
-                    r.end - 1,
+                    (r.start..r.end).rev().find(|&i| !blocks[i].copy_note).unwrap_or(r.end - 1),
                     RevertAt {
                         msg: mi,
                         block: r.start,
@@ -1106,6 +1114,7 @@ pub(crate) fn conv_items<'a>(conv: &'a Conversation) -> (Vec<Item<'a>>, Vec<usiz
             match f.kind {
                 Some("image") => out.push(Item::Image(b, revert)),
                 Some("document") => out.push(Item::File(b, revert)),
+                Some("text") if f.copy_note => {}
                 Some("text") if f.file => out.push(Item::File(b, revert)),
                 Some("text") => {
                     let text = f.text.unwrap_or("");
@@ -1740,6 +1749,8 @@ const TASK_NOTE_ICON: &str = "\u{f07ea}";
 const GOAL_ICON: &str = "\u{f4de}";
 /// A message from another session (nf-md-robot).
 const AGENT_ICON: &str = "\u{f06a9}";
+/// A swarm member that finished (nf-md-check).
+const CHECK_ICON: &str = "\u{f012c}";
 
 /// A usage limit stopped the conversation: when it resets, and whether OAK
 /// carried on (it does so on its own; the model isn't told). With several
@@ -1919,7 +1930,7 @@ pub(crate) fn row(
     let hovered = clickable && resp.hovered();
     if hovered {
         ui.painter()
-            .rect_filled(rect, 0.0, if in_block { t.tool_hover } else { t.tool_bg });
+            .rect_filled(rect, crate::gravity::round(t, 7.0), if in_block { t.tool_hover } else { t.tool_bg });
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if clickable && resp.clicked() {
@@ -2174,7 +2185,14 @@ fn tool_row(ui: &mut Ui, t: &Theme, b: &Value, results: &Results, name_w: f32) {
         });
     let end = rect.right() - 10.0 - timeout.as_ref().map_or(0.0, |g| g.size().x + 12.0);
     let room = end - x - lines.as_ref().map_or(0.0, |g| g.size().x + 8.0);
-    let summary = clip_width(ui, &tool_summary(name, input), &font, room.max(40.0));
+    // Quick catching up on a fresh thread (`quick::is_boot`): one closed row
+    // saying so, its read in full when opened.
+    let summary = if crate::quick::is_boot(b) {
+        "the conversation so far (AWS Quick catching up)".to_string()
+    } else {
+        tool_summary(name, input)
+    };
+    let summary = clip_width(ui, &summary, &font, room.max(40.0));
     let drawn = ui.painter().text(
         egui::pos2(x, y),
         Align2::LEFT_CENTER,
@@ -2897,6 +2915,7 @@ fn work_block(ui: &mut Ui, t: &Theme, run: &[Item], results: &Results, revert: O
     ui.add_space(2.0);
     egui::Frame::new()
         .fill(t.tool_bg)
+        .corner_radius(crate::gravity::radius(t, 10.0))
         .inner_margin(Margin::symmetric(0, 3))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -2942,7 +2961,7 @@ pub(crate) fn transcript_view(ui: &mut Ui, t: &Theme, conv: &Conversation, live:
     for u in units(&items) {
         transcript_unit(ui, t, &items, u, &results, Some(&conv.messages));
     }
-    transcript_status(ui, t, conv, live, false, 0);
+    transcript_status(ui, t, conv, live, false, &[]);
 }
 
 /// The transcript in units: a run of tool calls and thinking (shown as one
@@ -3777,32 +3796,122 @@ fn file_link(ui: &mut Ui, t: &Theme, name: &str, path: &str, note: &str) {
     });
 }
 
+/// A swarm member as the list under its coordinator's transcript shows it
+/// (`App::swarm_running`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MemberRow {
+    /// Its name on the board: its role ("parser", "verifier").
+    pub(crate) name: String,
+    /// Its brief's first sentence.
+    pub(crate) task: String,
+    /// What OAK is doing in it, while it works.
+    pub(crate) status: String,
+    pub(crate) state: crate::agent::swarm::MemberState,
+    /// It waits, and its last post was a [done] result.
+    pub(crate) done: bool,
+}
+
+impl MemberRow {
+    /// `rows` hashed, for the transcript's tail (`tail_sig`).
+    pub(crate) fn sig(rows: &[MemberRow]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for r in rows {
+            (&r.name, &r.task, &r.status, r.state.describe(), r.done).hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
 /// Under the transcript's end: paused, or what OAK is doing. "Paused" shows
 /// once the pause has taken hold, and `agents_pausing` (its subagents still
 /// pausing) holds it back too; until then the pause button spins and this
-/// says what OAK is still doing. Then, for a swarm's coordinator, how many
-/// of its subagents (the swarm's members) are `running`.
+/// says what OAK is still doing. Then, for a swarm's coordinator, its
+/// `members`, a row each (`member_row`).
 pub(crate) fn transcript_status(
     ui: &mut Ui,
     t: &Theme,
     conv: &Conversation,
     live: &Live,
     agents_pausing: bool,
-    running: usize,
+    members: &[MemberRow],
 ) {
     status_line(ui, t, conv, live, agents_pausing);
-    if running > 0 {
-        ui.horizontal(|ui| {
-            if live.busy {
-                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                crate::widgets::state_dot(ui.painter(), t, r.center(), false);
-            } else {
-                ui.spinner();
+    if !members.is_empty() {
+        ui.add_space(4.0);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            for m in members {
+                member_row(ui, t, m, live.busy);
             }
-            let text = format!("{running} subagent{} running", crate::plural(running as u64));
-            ui.label(RichText::new(text).color(t.ink3));
         });
     }
+}
+
+/// A row of the members' list: the member's bot (eyeless, in its color on
+/// the board), its name, its task (faint, cut to fit) and, on the right,
+/// its state. Hovering shows what it is doing. A working member's spinner
+/// is a dot while OAK's own status line spins (`busy`).
+fn member_row(ui: &mut Ui, t: &Theme, m: &MemberRow, busy: bool) {
+    use crate::agent::swarm::MemberState;
+    const PAD: f32 = 10.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
+    let p = ui.painter().clone();
+    let r = crate::gravity::radius(t, 8.0);
+    p.rect_filled(rect, r, t.panel);
+    p.rect_stroke(rect, r, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+    let cy = rect.center().y;
+    crate::bot::paint(&p, egui::pos2(rect.left() + PAD + 7.0, cy), 14.0, crate::swarm_view::name_color(t, &m.name), &m.name);
+    let galley = |ui: &Ui, text: RichText, wrap: egui::TextWrapMode, width: f32| egui::WidgetText::from(text).into_galley(ui, Some(wrap), width, egui::TextStyle::Body);
+    let name = galley(ui, RichText::new(&m.name).strong().color(t.ink), egui::TextWrapMode::Extend, f32::INFINITY);
+    let name_x = rect.left() + PAD + 14.0 + 10.0;
+    let name_w = name.size().x;
+    p.galley(egui::pos2(name_x, cy - name.size().y / 2.0), name, t.ink);
+    // The state, right-aligned, after its sign.
+    let (word, color) = match &m.state {
+        MemberState::Working => ("Working", t.ink2),
+        MemberState::Waiting if m.done => ("Done", t.accent),
+        MemberState::Waiting => ("Waiting", t.ink3),
+        MemberState::Paused => ("Paused", t.ink3),
+        MemberState::Failed(_) | MemberState::Gone => ("Stopped", t.error),
+        MemberState::Killed => ("Killed", t.ink4),
+    };
+    let state = galley(ui, RichText::new(word).small().color(color), egui::TextWrapMode::Extend, f32::INFINITY);
+    let state_x = rect.right() - PAD - state.size().x;
+    p.galley(egui::pos2(state_x, cy - state.size().y / 2.0), state, color);
+    let sign = Rect::from_center_size(egui::pos2(state_x - 6.0 - 6.0, cy), vec2(12.0, 12.0));
+    match &m.state {
+        MemberState::Working if !busy => {
+            ui.put(sign, egui::Spinner::new().size(12.0).color(t.ink3));
+        }
+        MemberState::Working => crate::widgets::state_dot(&p, t, sign.center(), false),
+        MemberState::Waiting if m.done => {
+            p.text(sign.center(), egui::Align2::CENTER_CENTER, CHECK_ICON, crate::look::icon_font(13.0), color);
+        }
+        MemberState::Paused => paint_pause(&p, sign, color),
+        MemberState::Failed(_) | MemberState::Gone => {
+            p.circle_filled(sign.center(), 3.0, color);
+        }
+        _ => {
+            p.circle_stroke(sign.center(), 3.0, Stroke::new(1.2, color));
+        }
+    }
+    // The task, between the name and the state, cut to fit.
+    let task_x = name_x + name_w + 10.0;
+    let room = sign.left() - 12.0 - task_x;
+    if room > 20.0 && !m.task.is_empty() {
+        let task = galley(ui, RichText::new(&m.task).small().color(t.ink3), egui::TextWrapMode::Truncate, room);
+        p.galley(egui::pos2(task_x, cy - task.size().y / 2.0), task, t.ink3);
+    }
+    resp.on_hover_ui(|ui| {
+        ui.label(RichText::new(format!("@{}: {}", m.name, m.state.describe())).color(t.ink));
+        if !m.status.is_empty() && m.state == MemberState::Working {
+            ui.label(RichText::new(&m.status).color(t.ink2));
+        }
+        if !m.task.is_empty() {
+            ui.label(RichText::new(&m.task).small().color(t.ink3));
+        }
+    });
 }
 
 /// `transcript_status`'s first line: paused, or what OAK is doing.

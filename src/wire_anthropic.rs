@@ -194,7 +194,7 @@ fn ids_in(m: &Value, kind: &str, key: &str) -> Vec<String> {
 /// are, and what one becomes depends only on it and the reply before it, so
 /// requests still only grow (`crate::prefix`). A reply with calls that ends
 /// the messages is left alone: its results haven't come yet.
-pub fn pair_calls(messages: &mut Vec<Value>) {
+pub fn pair_calls(messages: &mut [Value]) {
     // The calls of the last reply, not yet answered.
     let mut asked: Vec<String> = vec![];
     let mut i = 0;

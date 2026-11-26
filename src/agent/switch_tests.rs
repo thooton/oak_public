@@ -182,7 +182,7 @@ fn a_fresh_quick_thread_gets_messages_steered_into_the_old_one() {
 #[test]
 fn a_switch_during_quick_recovery_goes_on_on_the_new_model() {
     use crate::quick::recovery;
-    for reason in [recovery::ERROR, recovery::DEVICE, recovery::LIMIT] {
+    for reason in [recovery::ERROR, recovery::DEVICE, recovery::LIMIT, recovery::RATE] {
         let (w, s) = idle_worker(&format!("switch-recovery-{reason}"), Conversation {
             provider: Some(api::Provider::Quick),
             model: QUICK.into(),
@@ -209,7 +209,7 @@ fn a_switch_during_quick_recovery_goes_on_on_the_new_model() {
                     assert_eq!(last["content"], json!([oak::text(CARRY_ON)]), "{reason}");
                     let sent = all_text(&req.messages);
                     assert!(sent.contains("Half done"), "{reason}: {sent}");
-                    for t in [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::DEVICE_FRESH] {
+                    for t in [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::RATE_FRESH, recovery::DEVICE_FRESH] {
                         assert!(!sent.contains(t), "{reason}: {sent}");
                     }
                     Reply::Done(vec![oak::text("Fixed")], oak::stop::END.into(), Usage::default())
@@ -513,4 +513,107 @@ fn a_switch_ends_a_retry_wait() {
     let t = Instant::now();
     assert!(w.retry_sleep(Duration::from_secs(30)));
     assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+}
+
+fn result_of(id: &str, text: &str) -> Value {
+    json!({"type": "tool_result", "call_id": id, "content": text})
+}
+
+/// Quick reading back the conversation on a fresh thread (`quick::is_boot`)
+/// goes to no provider: Claude has the conversation itself, and a later fresh
+/// Quick thread is sent it anew. Other reads, Quick's or Claude's, still go.
+#[test]
+fn a_catch_up_read_is_left_out() {
+    let read = |id: &str, path: &str| json!({"type": "tool_call", "id": id, "name": "READ", "input": {"path": path}});
+    let file = "C:/work/.oak/tmp/temp3/quick-conversation-0f3a9c-11.md";
+    let messages = vec![
+        user("Go on"),
+        reply(api::Provider::Quick, vec![
+            oak::text("Catching up"),
+            read("boot1", file),
+            read("own1", "src/quick-conversation-notes.rs"),
+        ]),
+        json!({"role": "user", "content": [result_of("boot1", "THE WHOLE CONVERSATION"), result_of("own1", "own notes")]}),
+        reply(api::Provider::Claude, vec![read("claude1", file)]),
+        json!({"role": "user", "content": [result_of("claude1", "Claude read it")]}),
+    ];
+    assert!(crate::quick::is_boot(&messages[1]["content"][1]));
+    assert!(!crate::quick::is_boot(&messages[1]["content"][2]));
+    assert!(!crate::quick::is_boot(&messages[3]["content"][0]), "Claude's own read is Claude's");
+    for p in [api::Provider::Claude, api::Provider::Quick, api::Provider::Codex] {
+        let sent = all_text(&for_provider(&messages, p));
+        assert!(!sent.contains("THE WHOLE CONVERSATION") && !sent.contains("boot1"), "{p:?}: {sent}");
+        assert!(sent.contains("own notes") && sent.contains("Claude read it") && sent.contains("Catching up"), "{p:?}: {sent}");
+    }
+}
+
+/// A revert takes out what Quick's thread holds: the conversation goes on in
+/// a fresh thread on the same account, sent the whole conversation as it is
+/// after the revert (not what was reverted), with Oak's briefing.
+#[test]
+fn a_revert_moves_quick_to_a_fresh_thread() {
+    let (w, s) = idle_worker("switch-revert-quick", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        messages: vec![
+            user("First ask"),
+            reply(api::Provider::Quick, vec![oak::text("First answer")]),
+            user("Second ask"),
+            reply(api::Provider::Quick, vec![oak::text("Second answer")]),
+        ].into(),
+        ..Default::default()
+    });
+    let id = s.conv.lock().unwrap().id.clone();
+    crate::rotation::used(api::Provider::Quick, &id, "revert-account", 0, api::now_ms());
+    let was = s.conv.lock().unwrap().messages[2]["content"][0].clone();
+    w.apply_revert(&RevertTo::Block(2, 0, was));
+    let thread = {
+        let mut c = s.conv.lock().unwrap();
+        assert_eq!(c.messages.len(), 2);
+        let q = c.quick_session.clone().expect("a fresh thread");
+        assert_eq!(q.account, "revert-account");
+        assert_ne!(q.thread, id);
+        c.messages.push(user("Another ask"));
+        q
+    };
+    let (req, ..) = w.request_body();
+    assert_eq!(req.quick_session, Some(thread));
+    let unseen = all_text(&req.unseen);
+    assert!(unseen.contains("First ask") && unseen.contains("First answer"), "{unseen}");
+    assert!(!unseen.contains("Second"), "{unseen}");
+    assert_eq!(crate::quick::new_user_text(&req).as_deref(), Some("Another ask"));
+}
+
+/// Reverting what only another provider wrote, after Quick's last reply,
+/// leaves Quick's thread as it is.
+#[test]
+fn reverting_another_providers_work_keeps_quicks_thread() {
+    let (w, s) = idle_worker("switch-revert-claude", Conversation {
+        provider: Some(api::Provider::Claude),
+        model: CLAUDE.into(),
+        messages: vec![
+            user("First ask"),
+            reply(api::Provider::Quick, vec![oak::text("Quick's answer")]),
+            user("Second ask"),
+            reply(api::Provider::Claude, vec![oak::text("Claude's answer")]),
+        ].into(),
+        ..Default::default()
+    });
+    let id = s.conv.lock().unwrap().id.clone();
+    crate::rotation::used(api::Provider::Quick, &id, "revert-account-2", 0, api::now_ms());
+    let was = s.conv.lock().unwrap().messages[2]["content"][0].clone();
+    w.apply_revert(&RevertTo::Block(2, 0, was));
+    let c = s.conv.lock().unwrap();
+    assert_eq!(c.messages.len(), 2);
+    assert!(c.quick_session.is_none());
+    assert_eq!(written_by(&c.messages[1]), Some(api::Provider::Quick.id()));
+}
+
+/// Quick's modes offer their own effort levels wherever a model is picked.
+#[test]
+fn quick_modes_offer_their_own_efforts() {
+    assert_eq!(efforts("smart"), ["low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(efforts("fast"), ["low", "medium", "high"]);
+    assert_eq!(efforts("balanced"), ["low", "medium", "high"]);
+    assert_eq!(effort_for("fast", "max"), "high");
 }

@@ -34,6 +34,15 @@ pub(crate) enum Closing {
     Done,
 }
 
+/// `text`'s first sentence, on one line (a brief's, for the members' list).
+fn first_sentence(text: &str) -> String {
+    let line = crate::look::one_line(text);
+    match line.find(". ") {
+        Some(i) => line[..i + 1].to_string(),
+        None => line,
+    }
+}
+
 impl App {
     /// The subagents of `s`, and theirs, that run in this app.
     fn agents_of(&self, s: &Session) -> Vec<&Session> {
@@ -48,14 +57,45 @@ impl App {
         out
     }
 
-    /// For a swarm's coordinator, how many of its subagents (the swarm's
-    /// members) are at work; 0 for any other session.
-    pub(crate) fn swarm_running(&self, s: &Session) -> usize {
-        let coordinator = s.conv.lock().unwrap().swarm.as_ref().is_some_and(|seat| seat.name == crate::swarm::COORDINATOR);
-        if !coordinator {
-            return 0;
+    /// For a swarm's coordinator, its members (not it, nor the killed), for
+    /// the list under its transcript: each one's state, its brief's first
+    /// sentence and, while it works, what it is doing. None for any other
+    /// session, nor once the job is done (`Swarm::done`) and none works.
+    pub(crate) fn swarm_running(&self, s: &Session) -> Vec<crate::transcript::MemberRow> {
+        use crate::agent::swarm::{MemberState, state_of};
+        let Some(id) = s.conv.lock().unwrap().swarm.as_ref().filter(|seat| seat.name == crate::swarm::COORDINATOR).map(|seat| seat.swarm.clone()) else {
+            return vec![];
+        };
+        let sw = crate::swarm::get(&id);
+        let (members, done) = {
+            let s = sw.lock().unwrap();
+            let members: Vec<_> = s
+                .roster
+                .members
+                .iter()
+                .filter(|m| !m.killed && m.name != crate::swarm::COORDINATOR)
+                .map(|m| {
+                    // Its brief: what its adder posted as "@name <brief>".
+                    let at = format!("@{} ", m.name);
+                    let task = s.posts.iter().find(|p| p.from == m.added_by && p.text.starts_with(&at)).map_or_else(String::new, |p| first_sentence(&p.text[at.len()..]));
+                    let done = s.posts.iter().rev().find(|p| p.from == m.name).is_some_and(|p| p.text.to_lowercase().contains("[done]"));
+                    (m.clone(), task, done)
+                })
+                .collect();
+            (members, s.done())
+        };
+        let rows: Vec<crate::transcript::MemberRow> = members
+            .into_iter()
+            .map(|(m, task, done)| {
+                let state = state_of(&m).0;
+                let status = if state == MemberState::Working { self.sessions.get(&m.conv).map(|a| a.live.lock().unwrap().status.clone()).unwrap_or_default() } else { String::new() };
+                crate::transcript::MemberRow { name: m.name, task, status, state, done }
+            })
+            .collect();
+        if done && !rows.iter().any(|r| r.state == MemberState::Working) {
+            return vec![];
         }
-        self.agents_of(s).iter().filter(|a| a.live.lock().unwrap().busy).count()
+        rows
     }
 
     /// Whether any subagent of `s` is still pausing.

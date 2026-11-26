@@ -2,7 +2,7 @@
 // reaches for `sleep 60; cat log`, which ties the session up for the whole
 // minute however soon the thing is ready. EXECUTE refuses such a command
 // before it starts and says what to do instead: poll with an until-loop, or
-// run the command as a task and wait on it with TASK_WAIT. The check reads
+// run the command as a task, which says when it ends. The check reads
 // the command the way bash would: quotes, escapes, comments, `$(...)`,
 // backticks, redirections and heredoc bodies are not taken for commands. A
 // sleep is refused when it is longer than LIMIT_SECS on its own (anywhere,
@@ -52,7 +52,7 @@ pub fn check(command: &str) -> Result<(), String> {
     let followed = if after.is_empty() { String::new() } else { format!(" followed by: {after}") };
     Err(format!(
         "Blocked: {what}{followed}. To wait for a condition, use an until-loop (e.g. `until <check>; do sleep 2; done`). \
-         To wait for a command you started, run it with TASK action=new (or EXECUTE with timeout 0) and use TASK action=wait. \
+         To wait for a command you started, run it with TASK action=new (or EXECUTE with timeout 0): you are told when it finishes, so keep working or end your turn. \
          Do not chain shorter sleeps to work around this block."
     ))
 }
@@ -305,8 +305,8 @@ mod tests {
         assert_eq!(
             e,
             "Blocked: sleep 60 followed by: cat /tmp/x/baseline.txt cat /tmp/x/by4q0v0p4.output. To wait for a condition, use an until-loop \
-             (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, run it with TASK action=new (or EXECUTE with timeout 0) \
-             and use TASK action=wait. Do not chain shorter sleeps to work around this block."
+             (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, run it with TASK action=new (or EXECUTE with timeout 0): \
+             you are told when it finishes, so keep working or end your turn. Do not chain shorter sleeps to work around this block."
         );
         assert!(check("sleep 30").unwrap_err().starts_with("Blocked: sleep 30. To wait"));
         for cmd in [

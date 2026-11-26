@@ -1,6 +1,6 @@
 //! Antigravity's sidebar (`gravity.rs`), in place of the tab strip, as the
 //! Hub has it: a New conversation pill at the top, Home, Conversations
-//! (Home's menu, on its list) and Usage under it, then the open tabs as
+//! (Home's desktop, its search focused) and Usage under it, then the open tabs as
 //! rows (a click shows one, drag to move it, its x or a middle click closes
 //! it, a right click has the tab strip's menu), and Settings at the foot.
 //! The keys are the tab strip's (`tab_bar_keys`).
@@ -45,20 +45,22 @@ impl App {
             ui.memory_mut(|m| m.request_focus(Id::unique("composer")));
         }
         y = pill.bottom() + 10.0;
-        let lists = self.page == Page::Home && self.home_menu && self.home_list == home::LOCAL_TAB;
+        // Conversations are on Home's desktop: Home stays lit there, and
+        // Conversations (which focuses their search) is never lit on its
+        // own, so the light doesn't jump on the same page.
         for (icon, label, hint, on, nav) in [
             (
                 HOME_ICON,
                 "Home",
                 "Alt+H",
-                self.page == Page::Home && !lists,
+                self.page == Page::Home,
                 Nav::Home,
             ),
             (
                 LIST_ICON,
                 "Conversations",
                 "Ctrl+F",
-                lists,
+                false,
                 Nav::Conversations,
             ),
             (
@@ -78,9 +80,8 @@ impl App {
                     }
                     Nav::Conversations => {
                         self.page = Page::Home;
-                        self.home_menu = true;
-                        self.home_list = home::LOCAL_TAB.into();
-                        ui.memory_mut(|m| m.request_focus(Id::unique("home-chat-search")));
+                        self.home_menu = false;
+                        crate::gravity_home::focus_search(ui.ctx());
                     }
                     Nav::Usage => self.page = Page::Usage,
                 }

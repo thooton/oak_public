@@ -108,7 +108,8 @@ impl App {
             let (mut text, mut attachments) = (String::new(), vec![]);
             for b in &content[range] {
                 match b["text"].as_str() {
-                    Some(t) if b["type"] == "text" && b.get("_oak_file").is_none() => text = t.to_string(),
+                    Some(t) if b["type"] == "text" && b.get("_oak_file").is_none() && !crate::images::is_copy_note(b) => text = t.to_string(),
+                    _ if crate::images::is_copy_note(b) => {}
                     _ => attachments.push(b.clone()),
                 }
             }

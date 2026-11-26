@@ -3,7 +3,8 @@
 //! the conversations (or another of its tabs: Cloud, those plugins add,
 //! Plugins; plugins' links at the row's end) on the left and the accounts on the right.
 //! Antigravity replaces the bare wallpaper and corner buttons with
-//! desktop tiles and a dock (`gravity_home.rs`).
+//! desktop tiles and a dock (`gravity_home.rs`), the conversations' list
+//! one of the tiles.
 
 use super::*;
 use crate::api::Provider;
@@ -35,10 +36,11 @@ impl App {
         for h in &crate::plugins::parts().hooks {
             h.home_scene(ui, self);
         }
+        // Antigravity's desktop has the conversations on it: Ctrl+F shuts
+        // the menu and searches them there.
         if round && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
-            self.home_menu = true;
-            self.home_list = LOCAL_TAB.into();
-            ui.memory_mut(|m| m.request_focus(Id::unique("home-chat-search")));
+            self.home_menu = false;
+            crate::gravity_home::focus_search(ui.ctx());
         }
         if round && !self.home_menu {
             self.desktop(ui, t, rect);
@@ -1601,6 +1603,7 @@ pub(crate) fn paint_cover(p: &egui::Painter, rect: Rect, tex: &egui::TextureHand
 }
 
 /// A conversation in Home's list.
+#[derive(Clone)]
 pub(crate) struct ChatRow {
     pub(crate) id: String,
     pub(crate) title: String,
@@ -1635,7 +1638,7 @@ impl ChatSort {
         }
     }
 
-    fn setting(self) -> &'static str {
+    pub(crate) fn setting(self) -> &'static str {
         match self {
             ChatSort::Recent => "",
             ChatSort::Scratchpad => "scratchpad",
@@ -1662,14 +1665,15 @@ pub(crate) fn sort_by_scratch(rows: &mut [ChatRow], size: impl Fn(&str) -> Optio
 
 /// The sort picker right of the search field, in `rect`: the current
 /// order, and a menu of the orders. Gives the one picked.
-fn sort_button(ui: &mut Ui, t: &Theme, rect: Rect, now: ChatSort) -> Option<ChatSort> {
+pub(crate) fn sort_button(ui: &mut Ui, t: &Theme, rect: Rect, now: ChatSort) -> Option<ChatSort> {
     let resp = ui.interact(rect, Id::unique("home-chat-sort"), Sense::click());
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     let lit = resp.hovered() || open;
     let p = ui.painter();
+    let round = crate::gravity::round(t, 8.0).max(3.0);
     p.rect_filled(
         rect,
-        3.0,
+        round,
         if lit {
             t.tool_hover
         } else {
@@ -1678,7 +1682,7 @@ fn sort_button(ui: &mut Ui, t: &Theme, rect: Rect, now: ChatSort) -> Option<Chat
     );
     p.rect_stroke(
         rect,
-        3.0,
+        round,
         Stroke::new(1.0, if lit { t.ink3 } else { t.line }),
         egui::StrokeKind::Inside,
     );
@@ -1844,16 +1848,16 @@ pub(crate) fn chat_list(
 }
 
 /// The search field's height over Home's conversations.
-const SEARCH_H: f32 = 28.0;
+pub(crate) const SEARCH_H: f32 = 28.0;
 /// The sort picker's width, right of the search field.
-const SORT_W: f32 = 140.0;
+pub(crate) const SORT_W: f32 = 140.0;
 /// Nerd Font: a magnifying glass.
 const SEARCH_ICON: &str = "\u{f002}";
 
 /// Home's conversation search in `rect`: a magnifying glass, the query,
 /// and an X clearing it. Ctrl+F focuses it, Esc clears it. True when
 /// Enter was pressed in it.
-fn search_field(ui: &mut Ui, t: &Theme, rect: Rect, query: &mut String) -> bool {
+pub(crate) fn search_field(ui: &mut Ui, t: &Theme, rect: Rect, query: &mut String) -> bool {
     let id = Id::unique("home-chat-search");
     if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
         ui.memory_mut(|m| m.request_focus(id));

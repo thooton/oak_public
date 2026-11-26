@@ -30,6 +30,10 @@ pub(crate) struct Socket {
     heard_at: std::time::Instant,
     /// Bytes read off the socket that don't make a whole message yet.
     inbuf: Vec<u8>,
+    /// A turn's socket holds its login's outpost (`keeper`): when it goes
+    /// while another turn's still runs, a keeper keeps the outpost ONLINE.
+    /// (Last, so it lets go after the connection has closed.)
+    _hold: Option<super::keeper::Hold>,
 }
 
 /// What a bounded poll of the socket found.
@@ -315,6 +319,7 @@ impl Socket {
             acked_at: std::time::Instant::now(),
             heard_at: std::time::Instant::now(),
             inbuf: Vec::new(),
+            _hold: None,
         };
         let key = base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 16]>());
         let hello = format!(
@@ -352,6 +357,7 @@ impl Socket {
         // Reads go in short slices from here on, so the socket can be kept
         // read while Oak does other work (`keep_alive`).
         let _ = s.tls.sock.set_read_timeout(Some(READ_SLICE));
+        s._hold = super::keeper::hold(path);
         Ok(s)
     }
 

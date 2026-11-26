@@ -113,16 +113,24 @@ pub fn id() -> String {
     if !saved.is_empty() && saved != DEFAULT_OUTPOST_ID {
         return saved;
     }
-    let fresh = fresh_id();
+    let fresh = fresh_id(&login::current().unwrap_or_default());
     login::set_outpost(&fresh);
     fresh
 }
 
-/// A new outpost id for this process (a v4 UUID), the same on every call so
-/// one that couldn't be saved (no login yet) doesn't change under the turn.
-fn fresh_id() -> String {
-    static FRESH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    FRESH.get_or_init(|| uuid_v4(rand::random())).clone()
+/// A new outpost id for login `login` (a v4 UUID), the same on every call in
+/// this process so one that couldn't be saved (no login yet) doesn't change
+/// under the turn. Each login has its own: one id for the whole process gave
+/// every login that needed one the same, which isn't one device per account.
+fn fresh_id(login: &str) -> String {
+    static FRESH: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::LazyLock::new(Default::default);
+    FRESH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(login.to_string())
+        .or_insert_with(|| uuid_v4(rand::random()))
+        .clone()
 }
 
 /// `b` as a v4 UUID (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`).
@@ -652,8 +660,10 @@ mod tests {
         assert_ne!(x, y);
         assert_eq!(x.len(), 36);
         assert_ne!(x, DEFAULT_OUTPOST_ID);
-        // One process keeps one fresh id, so a turn doesn't see it change.
-        assert_eq!(fresh_id(), fresh_id());
+        // One process keeps one fresh id per login, so a turn doesn't see it
+        // change, and each login has its own.
+        assert_eq!(fresh_id("a@x"), fresh_id("a@x"));
+        assert_ne!(fresh_id("a@x"), fresh_id("b@x"));
     }
 
     #[test]

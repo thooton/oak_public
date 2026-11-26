@@ -37,9 +37,14 @@ impl Worker {
     /// as with any call, paused or not, and once they end the turn carries
     /// on (when resumed, if paused), as it would have without the restart.
     pub(super) fn carry_on_waits(&self) {
-        let calls = std::mem::take(&mut *self.open_waits.lock().unwrap());
+        let mut calls = std::mem::take(&mut *self.open_waits.lock().unwrap());
         if calls.is_empty() {
             return;
+        }
+        // TASK wait is retired (`tools::RETIRED`), but a wait from before
+        // that Oak closed on still runs out.
+        for c in &mut calls {
+            c[tools::CARRIED] = json!(true);
         }
         self.set(|l| l.busy = true);
         std::thread::scope(|s| Batch::new(self, s).finish(&calls, ""));
@@ -73,6 +78,64 @@ impl Worker {
             let _ = wake.send(());
             ctx.request_repaint();
         }));
+    }
+
+    /// Where MONITOR's watches send their notifications: the session's
+    /// notes, as a task's exit (false once the session is gone).
+    fn monitor_deliver(&self) -> crate::monitor::Deliver {
+        let (live, wake, ctx) = (Arc::downgrade(&self.live), self.wake.clone(), self.ctx.clone());
+        Arc::new(move |text: String| {
+            let Some(live) = live.upgrade() else { return false };
+            live.lock().unwrap().notes.push((u64::MAX, format!("{NOTE_TAG}{text}</task-notification>")));
+            ctx.request_repaint();
+            wake.send(()).is_ok()
+        })
+    }
+
+    /// MONITOR's actions (`crate::monitor`): a watch on a command of its
+    /// own (a task the watch stops when it ends; its exit is the watch's
+    /// to tell) or on a task the model started.
+    fn monitor_tool(&self, name: &str, input: &Value, folder: &Path) -> Result<String, String> {
+        let conv = self.tasks.conv().to_string();
+        match name {
+            "MONITOR_START" => {
+                let minutes = crate::monitor::minutes(input)?;
+                let summary = input["summary"].as_str().unwrap_or("");
+                let filter = input["filter"].as_str().unwrap_or("").trim().to_string();
+                let command = input["command"].as_str().filter(|c| !c.trim().is_empty());
+                let (task, proc, own) = match (command, input["task"].as_u64()) {
+                    (Some(_), Some(_)) => return Err("Give `command` or `task`, not both.".into()),
+                    (None, None) => return Err("Give `command` (to run and watch) or `task` (the ID of a task to watch).".into()),
+                    (None, Some(id)) => {
+                        let p = self.task(id)?;
+                        if p.exit().is_some() {
+                            return Err(format!("Task {id} has exited already; TASK action=output reads its output."));
+                        }
+                        (id, p, false)
+                    }
+                    (Some(cmd), None) => {
+                        crate::guard::check(cmd, folder)?;
+                        let p = tasks::spawn(cmd, folder)?;
+                        let id = self.alloc_task_id();
+                        // Not `adopt`: the watch tells of its exit.
+                        self.tasks.add(id, p.clone(), summary);
+                        (id, p, true)
+                    }
+                };
+                let what = crate::monitor::what(summary, &proc.command);
+                let spec = crate::monitor::Spec { task, proc, own, what, filter, minutes };
+                let id = crate::monitor::start(&conv, spec, self.monitor_deliver());
+                let ends = match minutes {
+                    Some(m) => format!("ends in {m} minute{}", if m == 1 { "" } else { "s" }),
+                    None => "runs until stopped".into(),
+                };
+                let on = if own { format!("its command runs as task {task}") } else { format!("watching task {task}") };
+                Ok(format!("Started monitor {id} ({on}); it {ends}. New lines come to you as notifications."))
+            }
+            "MONITOR_STOP" => crate::monitor::stop(&conv, input["id"].as_u64().unwrap_or(0)),
+            "MONITOR_LIST" => Ok(crate::monitor::list(&conv)),
+            _ => Err(format!("Unknown tool {name}")),
+        }
     }
 
     /// Records that the model has seen task `id` finish (or be removed), and
@@ -411,7 +474,7 @@ impl Worker {
             }
         } else if let Err(e) = &canon {
             (format!("Invalid input: {e}"), true, false)
-        } else if let Err(e) = tools::validate(name, input) {
+        } else if let Err(e) = tools::validate_as(name, input, call.get(tools::CARRIED).is_some()) {
             (format!("Invalid input: {e}"), true, false)
         } else if name == "DISPLAY" {
             // The files go with the result for the chat to show (never sent).
@@ -1072,6 +1135,7 @@ impl Worker {
             "AGENT_DELETE" => self.agent_delete(id),
             "AGENT_WAIT" => return self.agent_wait(input),
             n if n.starts_with("SWARM_") => self.swarm_tool(n, input),
+            n if n.starts_with("MONITOR_") => self.monitor_tool(n, input, &folder),
             _ => Err(format!("Unknown tool {name}")),
         };
         (result, false)
@@ -1754,6 +1818,8 @@ impl<'scope, 'env> Batch<'scope, 'env> {
                     true,
                 )
             });
+            // (A Quick snippet's call carries what came in meanwhile.)
+            let r = w.with_arrivals(r);
             w.deliver(r.clone());
             // A Quick turn may be waiting for it (a call of Quick's snippet).
             crate::quick::turn::ran(&r);

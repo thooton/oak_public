@@ -81,12 +81,27 @@ const FAMILIES: &[(&str, &[(&str, &str)])] = &[
         ("clear_data", "BROWSER_CLEAR_DATA"), ("emulate", "BROWSER_EMULATE"), ("console", "BROWSER_CONSOLE"), ("network", "BROWSER_NETWORK"),
         ("profiles", "BROWSER_PROFILES"), ("help", "BROWSER_HELP"),
     ]),
+    ("MONITOR", &[("start", "MONITOR_START"), ("stop", "MONITOR_STOP"), ("list", "MONITOR_LIST")]),
     ("WINDOW", &[
         ("launch", "WINDOW_LAUNCH"), ("list", "WINDOW_LIST"), ("shot", "WINDOW_SHOT"), ("click", "WINDOW_CLICK"), ("move", "WINDOW_MOVE"),
         ("drag", "WINDOW_DRAG"), ("scroll", "WINDOW_SCROLL"), ("type", "WINDOW_TYPE"), ("key", "WINDOW_KEY"), ("resize", "WINDOW_RESIZE"),
         ("close", "WINDOW_CLOSE"), ("attach", "WINDOW_ATTACH"), ("detach", "WINDOW_DETACH"),
     ]),
 ];
+
+/// Tools OAK still runs but the model is no longer given (they have no
+/// definition): calls from conversations before they went still show and
+/// are named as their family's action, and a TASK wait Oak closed on can
+/// carry on, but a new call is refused (`validate`) with what to do instead.
+pub const RETIRED: [(&str, &str); 1] = [(
+    "TASK_WAIT",
+    "TASK has no action wait: you are told when a task finishes, so keep working or end your turn; TASK action=output reads its output so far, and the MONITOR kit (LOAD) brings you its new lines as they come",
+)];
+
+/// Why a call of `tool` is refused, if it is a retired one (`RETIRED`).
+pub fn retired(tool: &str) -> Option<&'static str> {
+    RETIRED.iter().find(|(t, _)| *t == tool).map(|(_, why)| *why)
+}
 
 /// Whether a tool OAK runs is only for a session the user started: those
 /// in MAIN_ONLY, and the browser's (it belongs to the conversation it
@@ -113,7 +128,7 @@ pub fn canonical(name: &str, input: &Value) -> Result<(String, Value), String> {
     let Some((_, actions)) = FAMILIES.iter().find(|(f, _)| *f == name) else {
         return Ok((name.to_string(), input.clone()));
     };
-    let list = actions.iter().map(|(a, _)| *a).collect::<Vec<_>>().join(", ");
+    let list = actions.iter().filter(|(_, t)| retired(t).is_none()).map(|(a, _)| *a).collect::<Vec<_>>().join(", ");
     let action = input["action"].as_str().map(|a| a.trim().to_lowercase());
     let Some(action) = action else {
         return Err(format!("Missing required field `action` (one of {list})"));
@@ -224,8 +239,8 @@ pub fn definitions(agent: bool) -> Value {
 /// No notes, heartbeats, progress meters, subagents (it serves one request
 /// at a time), SCREENSHOT or SEARCH's images (it sees no images); GOAL only while a goal
 /// is set, so that one can be finished.
-pub const LOCAL_TOOLS: [&str; 13] = [
-    "READ", "WRITE", "EDIT", "EXECUTE", "TASK_NEW", "TASK_GET_NEW_OUTPUT", "TASK_WAIT", "TASK_LIST", "TASK_DELETE", "SEARCH", "FETCH", "ASK", "DISPLAY",
+pub const LOCAL_TOOLS: [&str; 12] = [
+    "READ", "WRITE", "EDIT", "EXECUTE", "TASK_NEW", "TASK_GET_NEW_OUTPUT", "TASK_LIST", "TASK_DELETE", "SEARCH", "FETCH", "ASK", "DISPLAY",
 ];
 /// All a chat (`store::Conversation::chat`) has: the web and the
 /// conversation itself. Nothing that reaches the user's files or runs
@@ -318,8 +333,21 @@ pub fn display(folder: &Path, input: &Value) -> Result<(String, Vec<Value>), Str
 /// A family's call (`TASK` with an action) is checked as the action's
 /// tool (`canonical`).
 pub fn validate(name: &str, input: &Value) -> Result<(), String> {
+    validate_as(name, input, false)
+}
+
+/// Marks a call Oak carries on from before it closed (a TASK wait), which
+/// a retired tool's call may be (`validate_as`).
+pub const CARRIED: &str = "_oak_carried";
+
+/// `validate`, letting a retired tool's call through when it is carried
+/// on from before (`carried`, `CARRIED`): such a tool has no schema left.
+pub fn validate_as(name: &str, input: &Value, carried: bool) -> Result<(), String> {
     let (name, input) = canonical(name, input)?;
     let (name, input) = (name.as_str(), &input);
+    if let Some(why) = retired(name) {
+        return if carried { Ok(()) } else { Err(why.to_string()) };
+    }
     let defs = defs::run_definitions(false, false, false, false);
     let def = defs.iter().find(|d| d["name"] == name).ok_or(format!("Unknown tool {name}"))?;
     let schema = &def["input_schema"];
@@ -953,6 +981,26 @@ mod tests {
         assert_eq!(upload["input"], json!({"action": "upload", "ref": 2, "paths": ["a.png"]}));
         assert_eq!(repair("LOAD", json!({"name": "AGENT"})), json!({"name": "AGENT"}));
         assert_eq!(repair("LOAD", json!({"name": "TASK", "input": {"action": "wait", "id": "1"}}))["input"]["id"], "1");
+    }
+
+    /// TASK wait is retired: no model is given it, and a call is refused
+    /// (unless carried on from before), with what to do instead.
+    #[test]
+    fn task_wait_is_retired() {
+        for agent in [false, true] {
+            let defs = definitions(agent);
+            let task = defs.as_array().unwrap().iter().find(|d| d["name"] == "TASK").unwrap();
+            assert!(!task["input_schema"]["properties"]["action"]["enum"].as_array().unwrap().iter().any(|a| a == "wait"));
+            assert!(!task["description"].as_str().unwrap().contains("wait"));
+        }
+        let wait = json!({"action": "wait", "id": 1, "timeout": 5});
+        assert!(validate("TASK", &wait).unwrap_err().starts_with("TASK has no action wait"));
+        assert!(validate_as("TASK", &wait, true).is_ok());
+        assert_eq!(canonical("TASK", &json!({"action": "nap"})).unwrap_err(), "Unknown action `nap` for TASK: use one of new, output, list, delete");
+        let kits = definitions_with_kits(false, false, false, &["MONITOR".into()]);
+        assert!(kits.iter().any(|d| d["name"] == "MONITOR"));
+        assert!(!definitions_with_kits(true, false, false, &[]).iter().any(|d| d["name"] == "MONITOR"));
+        assert!(kit_help("MONITOR", true).contains("- action: start|stop|list"));
     }
 
     /// A kit's tools are there once it is loaded; LOAD offers the others.

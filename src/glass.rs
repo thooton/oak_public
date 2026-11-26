@@ -96,6 +96,8 @@ pub(crate) struct Frame {
 impl Frame {
     pub(crate) fn begin(ctx: &egui::Context, t: &Theme, render: Option<&egui_wgpu::RenderState>) -> Frame {
         KIT.set(is(t).then(|| Kit::of(t, render.cloned())));
+        // Antigravity's edge lighting is laid out as the frame ends too.
+        crate::gravity::begin_frame(t);
         Frame { ctx: ctx.clone() }
     }
 }
@@ -105,6 +107,7 @@ impl Drop for Frame {
         if let Some(kit) = KIT.take() {
             kit.finish(&self.ctx);
         }
+        crate::gravity::end_frame(&self.ctx);
     }
 }
 

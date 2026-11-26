@@ -162,10 +162,11 @@ impl Swarm {
         self.roster.members.iter().filter(|m| names(&m.name, name)).collect()
     }
 
-    /// Who post `p` wakes: the members it names (@name, @group, @all) and
-    /// those asleep for any post, but not its author or the killed.
+    /// Who post `p` wakes: the members it addresses (@name, @group, @all,
+    /// as `addressees` reads them) and those asleep for any post, but not
+    /// its author or the killed.
     pub fn recipients(&self, p: &Post) -> Vec<Member> {
-        let mentioned = mentions(&p.text);
+        let mentioned = addressees(&p.text);
         self.roster
             .members
             .iter()
@@ -175,9 +176,9 @@ impl Swarm {
             .collect()
     }
 
-    /// Whether post `p` names `member` (or all).
+    /// Whether post `p` addresses `member` (or all).
     pub fn names_member(p: &Post, member: &str) -> bool {
-        mentions(&p.text).iter().any(|x| x == "all" || names(member, x))
+        addressees(&p.text).iter().any(|x| x == "all" || names(member, x))
     }
 
     /// The posts after `since`, at most `max`.
@@ -213,21 +214,80 @@ impl Swarm {
     }
 }
 
-/// The names a text mentions (`@parser`, `@fix`, `@all`), lowercased,
-/// without the @. An @ inside a word (an email address) isn't one.
-pub fn mentions(text: &str) -> Vec<String> {
+/// The name an @ at `chars[i]` starts (`@parser`, `@fix-1`), lowercased,
+/// without the @, and how many chars it takes (with the @). A sentence's
+/// full stop or a trailing dash isn't part of it.
+fn name_at(chars: &[char], i: usize) -> Option<(String, usize)> {
+    let raw: String = chars[i + 1..].iter().take_while(|c| c.is_alphanumeric() || **c == '-' || **c == '_' || **c == '.').collect();
+    let name = raw.trim_end_matches(['.', '-']);
+    (!name.is_empty()).then(|| (name.to_lowercase(), 1 + name.chars().count()))
+}
+
+/// The names a post addresses, lowercased, without the @: the @names that
+/// open it, a line or a sentence (after `.`, `!`, `?`, `:` or `;` and a
+/// space; list markers before them don't count), each with the run of
+/// @names right after it ("@parser, @lexer and @fix take #4"). An @name
+/// anywhere else is a reference, which wakes nobody: in mid-sentence or
+/// parentheses ("ask @theme"), in `code`, in "quotes", or in a word or a
+/// path (an email address, `C:/x/@y`).
+pub fn addressees(text: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     let chars: Vec<char> = text.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        if c != '@' || (i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_')) {
+    // Only blanks and list markers since the post's, a line's or a
+    // sentence's start; right after an addressee (its run goes on).
+    let (mut lead, mut run) = (true, false);
+    let (mut code, mut quote) = (false, false);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            while i < chars.len() && chars[i] == '`' {
+                i += 1;
+            }
+            code = !code;
+            (lead, run) = (false, false);
             continue;
         }
-        let name: String = chars[i + 1..].iter().take_while(|c| c.is_alphanumeric() || **c == '-' || **c == '_' || **c == '.').collect();
-        // (A sentence's full stop or a trailing dash isn't part of it.)
-        let name = name.trim_end_matches(['.', '-']).to_lowercase();
-        if !name.is_empty() && !out.contains(&name) {
-            out.push(name);
+        if code {
+            i += 1;
+            continue;
         }
+        if matches!(c, '"' | '\u{201c}' | '\u{201d}') {
+            quote = if c == '"' { !quote } else { c == '\u{201c}' };
+            (lead, run) = (false, false);
+            i += 1;
+            continue;
+        }
+        if quote {
+            // (A quote left open ends with its line.)
+            quote = c != '\n';
+            lead = c == '\n';
+            i += 1;
+            continue;
+        }
+        if c == '@'
+            && (lead || run)
+            && let Some((name, len)) = name_at(&chars, i)
+        {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+            (lead, run) = (false, true);
+            i += len;
+            continue;
+        }
+        let next_blank = chars.get(i + 1).is_none_or(|n| n.is_whitespace());
+        if c == '\n' || (matches!(c, '.' | '!' | '?' | ':' | ';') && next_blank) {
+            (lead, run) = (true, false);
+        } else if c.is_whitespace() || (lead && matches!(c, '-' | '*' | '>' | '\u{2022}')) || (run && matches!(c, ',' | '&' | '/')) {
+            // (Blanks keep a lead or a run going, and a run's separators it.)
+        } else if run && chars[i..].starts_with(&['a', 'n', 'd']) && chars.get(i + 3).is_some_and(|n| n.is_whitespace()) {
+            i += 3;
+            continue;
+        } else {
+            (lead, run) = (false, false);
+        }
+        i += 1;
     }
     out
 }
@@ -304,10 +364,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mentions_pick_names_groups_and_all() {
-        assert_eq!(mentions("@parser see #4, @fix and @ALL. mail a@b.c"), ["parser", "fix", "all"]);
-        assert_eq!(mentions("@coordinator [done] ok."), ["coordinator"]);
+    fn addressees_pick_names_groups_and_all() {
+        assert_eq!(addressees("@parser, @fix and @ALL see #4. mail a@b.c"), ["parser", "fix", "all"]);
+        assert_eq!(addressees("@coordinator [done] ok."), ["coordinator"]);
         assert!(names("fix-2", "fix") && names("fix", "fix") && !names("fixer", "fix") && !names("fix-a", "fix"));
+        assert!(!names("agents-list", "agents") && !names("agents", "agents-list"));
+    }
+
+    #[test]
+    fn only_addressees_wake_not_references() {
+        // Sentences and lines start with their addressees; list markers
+        // and numbers before them are fine.
+        assert_eq!(addressees("@verifier-ui [done] it works. @coordinator [done] one line"), ["verifier-ui", "coordinator"]);
+        assert_eq!(addressees("Plan:\n- @parser take #2\n1. @lexer take #3\n> @fix-1 too"), ["parser", "lexer", "fix-1"]);
+        assert_eq!(addressees("Done: @tools has it"), ["tools"]);
+        // References wake nobody: mid-sentence, in parentheses, code,
+        // quotes, paths and words.
+        assert_eq!(addressees("@img-temp You work for @tools (report to @tools by name)."), ["img-temp"]);
+        assert_eq!(addressees("You own it. Others may ask you (@quick, @theme): make them."), Vec::<String>::new());
+        assert_eq!(addressees("Then post \"@verifier-ui [done] <what>\" and `@coordinator` in C:/x/@y or a@b"), Vec::<String>::new());
+        assert_eq!(addressees("```\n@parser\n```\nok"), Vec::<String>::new());
+        assert_eq!(addressees("Told @agents-list in #16."), Vec::<String>::new());
+        // A quote left open ends with its line.
+        assert_eq!(addressees("He said \"hi\n@parser go"), ["parser"]);
     }
 
     #[test]
@@ -316,7 +395,7 @@ mod tests {
         for (name, any) in [(COORDINATOR, false), ("parser", false), ("fix-1", false), ("fix-2", true), ("old", false)] {
             s.roster.members.push(Member { name: name.into(), any, killed: name == "old", ..Default::default() });
         }
-        let p = s.post(COORDINATOR, "@fix take #2, @old too", 1);
+        let p = s.post(COORDINATOR, "@fix, @old take #2 (ask @parser)", 1);
         let woken: Vec<String> = s.recipients(&p).into_iter().map(|m| m.name).collect();
         assert_eq!(woken, ["fix-1", "fix-2"]);
         let p = s.post("parser", "@all the API changed", 2);

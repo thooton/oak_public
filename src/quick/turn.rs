@@ -1033,9 +1033,14 @@ fn finish_stop(
 /// Close the partial reply without rerunning any Quick or Oak tools in it.
 fn finish_error(turn: &mut Turn, tx: &Sender<Sse>, error: &str) {
     let detected = turn.completion();
-    let reason = if detected == stop::COMPLETE { recovery::ERROR } else { detected };
+    let reason = match detected {
+        // The socket or the service said the account is rate-limited.
+        stop::COMPLETE if recovery::rate_limited(error) => recovery::RATE,
+        stop::COMPLETE => recovery::ERROR,
+        other => other,
+    };
     let mut events = turn.close(reason);
-    if reason == recovery::ERROR
+    if (reason == recovery::ERROR || reason == recovery::RATE)
         && let Some(Event::Stop { detail, .. }) = events.last_mut()
     {
         *detail = Some(error.to_string());
@@ -1286,6 +1291,14 @@ fn pump(
                     let mut events = turn.show_limit_notice();
                     events.extend(turn.close(recovery::LIMIT));
                     for ev in events {
+                        if tx.send(Sse::Event(ev)).is_err() { break; }
+                    }
+                    return Ok(Pumped::Done);
+                }
+                // Rate-limited: Oak goes on on another account
+                // (`agent::Worker::handoff_quick`), or waits on this one.
+                if recovery::rate_error(&frame["payload"]) {
+                    for ev in turn.close(recovery::RATE) {
                         if tx.send(Sse::Event(ev)).is_err() { break; }
                     }
                     return Ok(Pumped::Done);
@@ -2908,7 +2921,7 @@ fn outpost() -> Option<String> {
     (!saved.is_empty()).then_some(saved)
 }
 
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

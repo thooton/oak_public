@@ -743,7 +743,10 @@ impl Worker {
         for q in l
             .queued
             .iter_mut()
-            .filter(|q| !q.held && !q.steered && !q.text.trim().is_empty())
+            // (Not one with pictures: a mid-turn message is text alone, so
+            // it goes with the next request, which uploads them with their
+            // copies' notes, `images::with_copies`.)
+            .filter(|q| !q.held && !q.steered && !q.text.trim().is_empty() && q.images.is_empty())
         {
             q.steered = true;
             crate::quick::turn::steer(thread, q.id, &q.text);

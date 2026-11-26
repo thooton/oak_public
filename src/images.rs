@@ -473,10 +473,131 @@ fn close_button(ui: &Ui, rect: egui::Rect, style: &ViewerStyle) -> bool {
 /// Writes the image to a temp file and opens it with the default viewer.
 fn open_externally(block: &Value) {
     let Some(bytes) = crate::blobs::bytes_of(block) else { return };
-    let ext = block["media_type"].as_str().map(|m| match m { "image/jpeg" => "jpg", "image/gif" => "gif", "image/webp" => "webp", _ => "png" }).unwrap_or("png");
+    let ext = ext_of(block);
     let path = std::env::temp_dir().join(format!("oak-image-{:x}.{ext}", crate::hash_of(&bytes)));
     if std::fs::write(&path, &bytes).is_ok() {
         let _ = open::that(&path);
+    }
+}
+
+/// An image block's file extension, by its media type.
+fn ext_of(block: &Value) -> &'static str {
+    match block["media_type"].as_str() {
+        Some("image/jpeg") => "jpg",
+        Some("image/gif") => "gif",
+        Some("image/webp") => "webp",
+        _ => "png",
+    }
+}
+
+// ---------------------------------------------------------------- copies
+//
+// Each image the user sends in a message is also written to a file in
+// `image-temp/` under Oak's data folder, and the model is told its path in a
+// text block right after the image (marked `COPY_KEY`), so it can copy the
+// picture into its work. The file is deleted a minute after it was written;
+// a sweep at start deletes those a closed Oak left behind.
+
+/// Marks the text block that tells the model where an image's copy is
+/// (its value: the copy's file name).
+pub const COPY_KEY: &str = "_oak_image_copy";
+/// How long a copy is kept.
+const COPY_LIFE: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn copies_dir() -> std::path::PathBuf {
+    crate::store::dir().join("image-temp")
+}
+
+/// Whether `b` is the note about an image's copy (`with_copies`).
+pub fn is_copy_note(b: &Value) -> bool {
+    b.get(COPY_KEY).is_some()
+}
+
+/// A user message's attachments as they go into the conversation: each
+/// image followed by a note with the path of a copy of it, deleted a minute
+/// later. Notes already there (a reverted message sent again) are replaced.
+pub fn with_copies(blocks: Vec<Value>) -> Vec<Value> {
+    if !blocks.iter().any(|b| b["type"] == "image" || is_copy_note(b)) {
+        return blocks;
+    }
+    with_copies_in(&copies_dir(), blocks, COPY_LIFE)
+}
+
+fn with_copies_in(dir: &Path, blocks: Vec<Value>, life: std::time::Duration) -> Vec<Value> {
+    let mut out = Vec::with_capacity(blocks.len() * 2);
+    for b in blocks {
+        if is_copy_note(&b) {
+            continue;
+        }
+        let copy = (b["type"] == "image").then(|| save_copy(dir, &b, life));
+        out.push(b);
+        match copy {
+            Some(Ok(path)) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let mut note = crate::oak::text(&format!(
+                    "[image saved at {}, deleted in {}: copy it to your scratchpad to keep it]",
+                    path.display(),
+                    life_text(life)
+                ));
+                note[COPY_KEY] = json!(name);
+                out.push(note);
+            }
+            Some(Err(e)) => eprintln!("oak: couldn't save a copy of an image: {e}"),
+            None => {}
+        }
+    }
+    out
+}
+
+fn life_text(life: std::time::Duration) -> String {
+    match life.as_secs() {
+        60 => "1 minute".into(),
+        s if s >= 60 && s % 60 == 0 => format!("{} minutes", s / 60),
+        s => format!("{s} seconds"),
+    }
+}
+
+/// Writes an image block's bytes to a new file in `dir`, deleted after `life`.
+fn save_copy(dir: &Path, b: &Value, life: std::time::Duration) -> Result<std::path::PathBuf, String> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let bytes = crate::blobs::bytes_of(b).ok_or("its data couldn't be read")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let name = format!(
+        "image-{}-{}-{}.{}",
+        crate::api::now_ms(),
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed),
+        ext_of(b)
+    );
+    let path = dir.join(name);
+    std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let gone = path.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(life);
+        let _ = std::fs::remove_file(gone);
+    });
+    Ok(path)
+}
+
+/// Deletes the copies a closed Oak left behind (older than their life), in
+/// the background.
+pub fn sweep_copies() {
+    std::thread::spawn(|| sweep_in(&copies_dir(), COPY_LIFE));
+}
+
+fn sweep_in(dir: &Path, life: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_none_or(|age| age >= life);
+        if stale && e.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
 }
 
@@ -498,5 +619,34 @@ mod tests {
         let pasted = ColorImage::from_rgba_unmultiplied([2000, 1000], &vec![200u8; 2000 * 1000 * 4]);
         let img = from_color_image(&pasted).unwrap();
         assert_eq!((img.media_type, img.width, img.height), ("image/png", 1568, 784));
+    }
+
+    #[test]
+    fn image_copies_are_saved_noted_and_deleted() {
+        let dir = std::env::temp_dir().join(format!("oak-copies-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let life = std::time::Duration::from_millis(300);
+        let img = from_bytes(&png(4, 4)).unwrap().block();
+        let old_note = json!({"type": "text", "text": "old", COPY_KEY: "x.png"});
+        let blocks = vec![img.clone(), old_note, crate::oak::text("hi")];
+        let out = with_copies_in(&dir, blocks, life);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], img);
+        assert!(is_copy_note(&out[1]) && out[2]["text"] == "hi");
+        let text = out[1]["text"].as_str().unwrap();
+        assert!(text.ends_with("deleted in 0 seconds: copy it to your scratchpad to keep it]"), "{text}");
+        let path = dir.join(out[1][COPY_KEY].as_str().unwrap());
+        assert!(text.contains(&path.display().to_string()));
+        assert_eq!(std::fs::read(&path).unwrap(), crate::blobs::bytes_of(&img).unwrap());
+        std::thread::sleep(life * 3);
+        assert!(!path.exists());
+        // The sweep deletes what is older than the life, and keeps the rest.
+        std::fs::write(dir.join("stale.png"), b"x").unwrap();
+        std::thread::sleep(life * 2);
+        std::fs::write(dir.join("fresh.png"), b"x").unwrap();
+        sweep_in(&dir, life);
+        assert!(!dir.join("stale.png").exists() && dir.join("fresh.png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(life_text(COPY_LIFE), "1 minute");
     }
 }

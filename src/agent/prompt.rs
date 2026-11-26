@@ -120,7 +120,7 @@ pub(crate) fn system_prompt_on(
     let local = crate::local::basic(model);
     let text = with_tools(self::role(role).text, TOOLS);
     let swarm = has("SWARM");
-    let text = keep_blocks(&text, &[("full", !local), ("local", local), ("goal", !local || has("GOAL")), ("window", has("WINDOW")), ("agents", has("AGENT")), ("swarm", swarm), ("member", swarm), ("solo", !swarm)]);
+    let text = keep_blocks(&text, &[("full", !local), ("local", local), ("goal", !local || has("GOAL")), ("window", has("WINDOW")), ("monitor", has("MONITOR")), ("agents", has("AGENT")), ("swarm", swarm), ("member", swarm), ("solo", !swarm)]);
     let out = with_notes_limit(fill_prompt(&text, folder, scratch, day, &crate::api::model_name(model), agent), notes_limit);
     // Loaded MCP servers' instructions, as Claude Code adds them.
     let mcp = if local { String::new() } else { crate::mcp::prompt_section(kits) };
@@ -133,6 +133,7 @@ pub(crate) fn system_prompt_on(
 pub(crate) fn kit_prompt(kit: &str, agent: Option<&str>) -> String {
     let block = match kit {
         "WINDOW" => "window",
+        "MONITOR" => "monitor",
         "AGENT" => "agents",
         "SWARM" => "swarm",
         _ => return String::new(),

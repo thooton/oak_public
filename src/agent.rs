@@ -326,6 +326,10 @@ pub fn efforts(model: &str) -> Vec<&'static str> {
     if let Some(m) = crate::musecode::model(model) {
         return m.efforts.to_vec();
     }
+    // Quick's modes take levels of their own (Fast and Balanced stop at high).
+    if let Some(m) = crate::quick::model(model) {
+        return m.efforts.to_vec();
+    }
     if crate::local::serves(model) {
         return crate::local::EFFORTS.to_vec();
     }
@@ -775,7 +779,13 @@ pub struct Queued {
 impl Queued {
     /// The message's content blocks: images first, as the API suggests.
     fn content(self) -> Vec<Value> {
-        let mut c = self.images;
+        // (Each image with the note of where its copy is.)
+        let mut c = crate::images::with_copies(self.images);
+        if self.steered {
+            for n in c.iter_mut().filter(|b| crate::images::is_copy_note(b)) {
+                n[crate::quick::STEERED_KEY] = json!(true);
+            }
+        }
         if !self.text.trim().is_empty() {
             let mut b = oak::text(&self.text);
             if self.steered {
@@ -1497,6 +1507,7 @@ impl Worker {
                 continue;
             }
             self.set(|l| l.busy = true);
+            self.turn_starts();
             if let Some(first) = users.first() {
                 self.first_title(first);
             }
@@ -1646,10 +1657,18 @@ impl Worker {
     /// was under way.
     fn apply_revert(&self, to: &RevertTo) {
         let mut c = self.conv.lock().unwrap();
+        let from = match to {
+            RevertTo::Block(msg, ..) => *msg,
+            RevertTo::End(n) => *n,
+        };
+        let quick_had = quick_holds(&mut c, from);
         let done = match to {
             RevertTo::Block(msg, block, was) => revert_to(&mut c, *msg, *block, was),
             RevertTo::End(n) => revert_to_end(&mut c, *n),
         };
+        if done && quick_had {
+            quick_thread_reverted(&mut c);
+        }
         // Questions asked during a goal go too (with `Live::ask`).
         let asked = !std::mem::take(&mut c.pending_ask).is_null();
         if done || asked {
@@ -1820,6 +1839,50 @@ impl Worker {
             users.into_iter().flat_map(Queued::content).collect(),
         );
         true
+    }
+
+    /// A call of a Quick snippet ran (its id `<call>_oakN`, `quick::turn`):
+    /// Quick's turn gets its result at once, as the snippet's answer, but
+    /// what came in meanwhile (messages from other sessions and board
+    /// posts, task notifications) would wait for the turn to end
+    /// (`absorb_notices` runs between requests, and a Quick turn is one), so
+    /// a wait ended by it ("a message arrived (it follows)") showed nothing,
+    /// and every wait after it in that turn ended at once. It goes in the
+    /// result instead, after its text, where the model reads it now. (Not
+    /// the answers to questions asked during a goal: `steer_quick` hands
+    /// those to the turn.)
+    fn with_arrivals(&self, mut r: Value) -> Value {
+        let of_quick = r["call_id"]
+            .as_str()
+            .and_then(|id| id.rsplit_once("_oak"))
+            .is_some_and(|(_, k)| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()));
+        if !of_quick || self.reverting() {
+            return r;
+        }
+        let inbox: Vec<String> = {
+            let mut c = self.conv.lock().unwrap();
+            let (answers, rest): (Vec<String>, Vec<String>) = std::mem::take(&mut c.inbox).into_iter().partition(|t| t.starts_with(ANSWERS_TAG));
+            c.inbox = answers;
+            if !rest.is_empty() {
+                c.save();
+            }
+            rest
+        };
+        let notes = std::mem::take(&mut self.live.lock().unwrap().notes);
+        let came: Vec<String> = notes.into_iter().map(|(_, t)| t).chain(inbox).collect();
+        if came.is_empty() {
+            return r;
+        }
+        let came = came.join("\n\n");
+        match &mut r["content"] {
+            Value::String(s) => {
+                s.push_str(if s.ends_with('\n') { "\n" } else { "\n\n" });
+                s.push_str(&came);
+            }
+            Value::Array(a) => a.push(oak::text(&came)),
+            other => *other = json!(came),
+        }
+        r
     }
 
     /// Puts the notifications of tasks that finished since the last request,
@@ -2284,19 +2347,33 @@ impl Worker {
     /// Go on in a fresh Quick thread on another account, keeping the
     /// conversation's model and id: the thread is sent the whole
     /// conversation (`move_quick_thread`), not a summary of it.
-    fn handoff_quick(&self, exhausted: &mut std::collections::HashSet<String>) -> bool {
+    /// `rate`: the account was rate-limited, not out of usage; with no other
+    /// account it is false and sets no error (the turn waits and retries on
+    /// this one).
+    fn handoff_quick(&self, exhausted: &mut std::collections::HashSet<String>, rate: bool) -> bool {
         use crate::quick::recovery;
         let id = self.conv.lock().unwrap().id.clone();
         if let Some(account) = crate::rotation::seat(api::Provider::Quick, &id) {
-            recovery::note_limit(&account);
+            if rate {
+                recovery::note_rate_limit(&account);
+            } else {
+                recovery::note_limit(&account);
+            }
             exhausted.insert(account);
         }
         let Some(next) = recovery::next_session(&id, exhausted) else {
-            self.set(|l| l.error = Some("AWS Quick reached its usage limit and no other Quick account is available. Try again when usage resets or sign in to another account.".into()));
+            if !rate {
+                self.set(|l| l.error = Some("AWS Quick reached its usage limit and no other Quick account is available. Try again when usage resets or sign in to another account.".into()));
+            }
             return false;
         };
         if !self.hold_while_paused() { return false; }
-        self.move_quick_thread(next, QUICK_LIMIT_MARK.into(), recovery::LIMIT_FRESH);
+        let (mark, text) = if rate {
+            (QUICK_RATE_MARK, recovery::RATE_FRESH)
+        } else {
+            (QUICK_LIMIT_MARK, recovery::LIMIT_FRESH)
+        };
+        self.move_quick_thread(next, mark.into(), text);
         true
     }
 
@@ -2451,7 +2528,9 @@ impl Worker {
             let partial = !blocks.is_empty();
             let calls = self.keep_reply(blocks);
             let (reason, detail) = stop.split_once('\n').unwrap_or((&stop, ""));
-            if matches!(reason, recovery::LIMIT | recovery::DEVICE | recovery::ERROR) {
+            // A rate limit that came as a session error (`recovery::rate_limited`).
+            let reason = if reason == recovery::ERROR && recovery::rate_limited(detail) { recovery::RATE } else { reason };
+            if matches!(reason, recovery::LIMIT | recovery::RATE | recovery::DEVICE | recovery::ERROR) {
                 // Only Oak calls that were actually issued are in the batch.
                 // Finish them and store their results before retrying or handing off.
                 if batch.finish(&[], oak::stop::COMPLETE) { return; }
@@ -2463,15 +2542,22 @@ impl Worker {
                     continue;
                 }
                 if reason == recovery::LIMIT {
-                    if self.handoff_quick(&mut exhausted) { continue; }
+                    if self.handoff_quick(&mut exhausted, false) { continue; }
                     if self.interrupt.load(Ordering::SeqCst) { continue; }
                     return;
+                }
+                // Rate-limited: another account if there is one, else wait
+                // and retry on this one, as after a session error.
+                if reason == recovery::RATE {
+                    if self.handoff_quick(&mut exhausted, true) { continue; }
+                    if self.interrupt.load(Ordering::SeqCst) { continue; }
                 }
                 let (attempts, why, prompt) = if reason == recovery::DEVICE {
                     quick_failures = 0;
                     (&mut missing_device, "AWS Quick could not access this device", Some(recovery::DEVICE_RETRY))
                 } else {
-                    (&mut quick_failures, if detail.is_empty() { "AWS Quick session error" } else { detail }, partial.then_some(recovery::ERROR_RETRY))
+                    let fallback = if reason == recovery::RATE { "AWS Quick rate limit" } else { "AWS Quick session error" };
+                    (&mut quick_failures, if detail.is_empty() { fallback } else { detail }, partial.then_some(recovery::ERROR_RETRY))
                 };
                 if !retry_quick(attempts, why) { return; }
                 if self.switching_away() {
@@ -3152,8 +3238,10 @@ fn apply_command(
 /// off the Claude model that wrote it (`switch_cache`): the model, the
 /// effort (part of the cache's key where it can't change per message), and
 /// the cache's state then.
-static CLAUDE_CACHES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, (String, String, crate::cache_ttl::State)>>> =
-    std::sync::LazyLock::new(Default::default);
+static CLAUDE_CACHES: std::sync::LazyLock<Mutex<ClaudeCaches>> = std::sync::LazyLock::new(Default::default);
+
+/// By conversation id: the Claude model, the effort and the cache's state.
+type ClaudeCaches = std::collections::HashMap<String, (String, String, crate::cache_ttl::State)>;
 
 /// The prompt cache across a switch from `left` (provider, model) to
 /// `c.model` on `to`. The new model has none of the conversation cached:
@@ -3239,6 +3327,7 @@ pub(crate) const BY_KEY: &str = "_oak_by";
 /// The transcript's marks for a conversation that went on in a fresh Quick
 /// thread (`Worker::move_quick_thread`).
 const QUICK_LIMIT_MARK: &str = "Continued in a fresh AWS Quick thread on another account (usage limit), with the whole conversation";
+const QUICK_RATE_MARK: &str = "Continued in a fresh AWS Quick thread on another account (rate limit), with the whole conversation";
 const QUICK_DEVICE_MARK: &str = "Continued in a fresh AWS Quick thread (the last one couldn't reach this device), with the whole conversation";
 
 /// Whether message `m` opens a fresh Quick thread (`recovery::FRESH_KEY`).
@@ -3271,7 +3360,7 @@ fn is_quick_recovery(b: &Value) -> bool {
     b["_oak_context"] == true
         && (b.get(recovery::FRESH_KEY).is_some()
             || b["text"].as_str().is_some_and(|t| {
-                [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::DEVICE_FRESH].contains(&t)
+                [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::RATE_FRESH, recovery::DEVICE_FRESH].contains(&t)
             }))
 }
 
@@ -3289,6 +3378,20 @@ pub(crate) fn quick_replies_elsewhere(c: &mut Conversation) {
     let quick = api::Provider::Quick.id();
     c.messages.load_all();
     let mut any = false;
+    // The messages Quick took in mid-turn (`quick::STEERED_KEY`) are in the
+    // old thread only: the new one is sent them with the rest.
+    for k in 0..c.messages.len() {
+        if c.messages[k]["role"] != "user" {
+            continue;
+        }
+        if let Some(blocks) = c.messages[k]["content"].as_array_mut() {
+            for b in blocks.iter_mut() {
+                if let Some(o) = b.as_object_mut() {
+                    o.remove(crate::quick::STEERED_KEY);
+                }
+            }
+        }
+    }
     for k in 0..c.messages.len() {
         let by_quick = c.messages[k]["role"] == "assistant"
             && c.messages[k]["content"].as_array().is_some_and(|b| b.iter().any(|b| b[BY_KEY] == quick));
@@ -3305,6 +3408,34 @@ pub(crate) fn quick_replies_elsewhere(c: &mut Conversation) {
     if any {
         crate::quick::moved_out(&c.id);
     }
+}
+
+/// Whether Quick's thread holds any of conversation `c` from message `from`
+/// on, which a revert there takes out: a reply Quick wrote there, or anything
+/// at all while the conversation is on Quick (its newest message, and the
+/// start of a reply, may be in the thread before the reply is back).
+fn quick_holds(c: &mut Conversation, from: usize) -> bool {
+    if c.provider() == api::Provider::Quick {
+        return true;
+    }
+    let quick = api::Provider::Quick.id();
+    c.messages.load_all();
+    (from..c.messages.len()).any(|k| written_by(&c.messages[k]) == Some(quick))
+}
+
+/// A revert took out what conversation `c`'s Quick thread holds. Quick's
+/// service can't take messages out of a thread, and the thread's history is
+/// what Quick's agent reads, so it would go on from what was reverted: the
+/// conversation goes on in a fresh thread on the same account instead, sent
+/// the whole conversation as it is now, with Oak's briefing, until Quick
+/// replies there (`quick_replies_elsewhere`, `unseen_by`). Nothing is done for
+/// a conversation that never had a Quick thread (no seat).
+pub(crate) fn quick_thread_reverted(c: &mut Conversation) {
+    let Some(next) = crate::quick::recovery::fresh_session(&c.id) else {
+        return;
+    };
+    quick_replies_elsewhere(c);
+    c.quick_session = Some(next);
 }
 
 /// Marks each of a reply's blocks as written by `by`'s model.
@@ -3412,7 +3543,9 @@ fn unseen_by(
 ///   out for any other provider: the Oak calls it ran are in the transcript
 ///   on their own, with their results, and the snippet's tool is Quick's;
 /// - the Freebuff call an Oak call was made from (`freebuff_tools::KEY`, in
-///   its input) goes to Freebuff alone.
+///   its input) goes to Freebuff alone;
+/// - Quick's reading back of the conversation on a fresh thread
+///   (`quick::is_boot`) and its result go to no one, Quick included.
 ///
 /// A message left with nothing says so in a line, so the turn still has
 /// content. Borrowed as it is when nothing is left out.
@@ -3439,7 +3572,10 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
     // device, a fresh thread) means nothing to another provider's model,
     // which has no such tools or threads: it reads a plain carry-on.
     let recovery = |b: &Value| !quick && is_quick_recovery(b);
-    let touched = |b: &Value| foreign(b) || quiet(b) || wrapped(b);
+    // Quick catching up on a fresh thread by reading back the conversation
+    // (`quick::is_boot`): every provider has the conversation itself.
+    let boot = |b: &Value| crate::quick::is_boot(b);
+    let touched = |b: &Value| foreign(b) || quiet(b) || wrapped(b) || boot(b);
     let has = |(k, m): (usize, &Value)| {
         let blocks = m["content"].as_array().map_or(&[][..], Vec::as_slice);
         (m["role"] == "assistant" && blocks.iter().any(touched))
@@ -3454,7 +3590,7 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
         .iter()
         .filter(|m| m["role"] == "assistant")
         .flat_map(|m| m["content"].as_array().into_iter().flatten())
-        .filter(|b| quiet(b))
+        .filter(|b| quiet(b) || boot(b))
         .filter_map(|b| b["id"].as_str())
         .collect();
     let snippet_result =
@@ -3467,7 +3603,7 @@ fn for_provider(messages: &[Value], provider: api::Provider) -> std::borrow::Cow
         };
         let before = content.len();
         if assistant {
-            content.retain(|b| !foreign(b) && !quiet(b));
+            content.retain(|b| !foreign(b) && !quiet(b) && !boot(b));
             for b in content.iter_mut().filter(|b| wrapped(b)) {
                 if let Some(o) = b["input"].as_object_mut() {
                     o.remove(crate::freebuff_tools::KEY);

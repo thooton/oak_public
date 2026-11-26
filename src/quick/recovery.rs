@@ -9,12 +9,19 @@ pub(crate) const DEVICE: &str = "quick_device_unavailable";
 pub(crate) const LIMIT: &str = "quick_usage_limit";
 pub(super) const LIMIT_NOTICE: &str =
     "You've reached your usage limit. Check your profile for details.";
+/// Quick's service turned the account's requests away for a while (a rate
+/// limit, throttling): the conversation goes on on another account, as at a
+/// usage limit, or waits and retries on this one when there is none.
+pub(crate) const RATE: &str = "quick_rate_limit";
 pub(crate) const ERROR: &str = "quick_error";
 pub(crate) const DEVICE_RETRY: &str = "[Oak] Please check for this device again with list_outposts. If the device is accessible, continue the existing task from where you left off, respecting its constraints. Do not repeat work already done.";
 pub(crate) const ERROR_RETRY: &str = "[Oak] The previous Quick reply was interrupted by a service error. Please continue the existing task from where you left off. Check the results and current state before repeating any work.";
 /// What a fresh thread is sent after the conversation so far when the last
 /// account reached its usage limit (`agent::Worker::handoff_quick`).
 pub(crate) const LIMIT_FRESH: &str = "[Oak] The previous AWS Quick account reached its usage limit, so this conversation goes on in this fresh thread, on another account; the conversation so far is above. Continue the existing task from where it left off, respecting its constraints. Do not repeat work already done.";
+/// What a fresh thread is sent after the conversation so far when the last
+/// account was rate-limited (`agent::Worker::handoff_quick`).
+pub(crate) const RATE_FRESH: &str = "[Oak] The previous AWS Quick account was rate-limited, so this conversation goes on in this fresh thread, on another account; the conversation so far is above. Continue the existing task from where it left off, respecting its constraints. Do not repeat work already done.";
 /// What a fresh thread is sent after the conversation so far when the last
 /// thread couldn't reach this device, even when asked again (`fresh_session`).
 pub(crate) const DEVICE_FRESH: &str = "[Oak] The previous AWS Quick thread couldn't reach this device, so this conversation goes on in this fresh thread; the conversation so far is above. Check for the device with list_outposts, and once it is accessible, continue the existing task from where it left off, respecting its constraints. Do not repeat work already done.";
@@ -31,6 +38,11 @@ pub(crate) struct Session {
 
 pub(crate) fn note_limit(account: &str) {
     usage::note_limit(account, api::now_ms());
+}
+
+/// `account` was rate-limited: rotation passes it over for a few minutes.
+pub(crate) fn note_rate_limit(account: &str) {
+    usage::note_rate_limit(account, api::now_ms());
 }
 
 pub(crate) fn next_session(
@@ -82,6 +94,52 @@ pub(super) fn limit_error(p: &Value) -> bool {
             .into_iter()
             .any(|key| p[key].as_str().is_some_and(limit_notice))
         || p["error"].is_object() && limit_error(&p["error"])
+}
+
+/// An error frame's payload that says the account is rate-limited or
+/// throttled (by its code or its message), not any other error: only these
+/// and the usage limit move a conversation to another account.
+pub(super) fn rate_error(p: &Value) -> bool {
+    ["code", "errorCode", "error_code", "type", "status", "statusCode"]
+        .into_iter()
+        .any(|key| match &p[key] {
+            Value::String(code) => rate_code(code),
+            Value::Number(n) => n.as_u64() == Some(429),
+            _ => false,
+        })
+        || ["message", "error"]
+            .into_iter()
+            .any(|key| p[key].as_str().is_some_and(rate_limited))
+        || p["error"].is_object() && rate_error(&p["error"])
+}
+
+fn rate_code(code: &str) -> bool {
+    let c = code.to_ascii_lowercase().replace(['-', ' '], "_");
+    c.contains("throttl")
+        || c.contains("rate_limit")
+        || c.contains("ratelimit")
+        || c.contains("too_many_requests")
+        || c.contains("toomanyrequests")
+        || c == "rate_exceeded"
+        || c == "429"
+}
+
+/// Whether an error Quick's service or its socket gave (not a reply's text)
+/// says the account is rate-limited: "Too many requests", "Rate exceeded",
+/// throttling, a rate limit or an HTTP 429.
+pub(crate) fn rate_limited(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    let http_429 = e.match_indices("429").any(|(i, _)| {
+        let digit = |c: Option<char>| c.is_some_and(|c| c.is_ascii_digit());
+        !digit(e[..i].chars().next_back()) && !digit(e[i + 3..].chars().next())
+    });
+    http_429
+        || e.contains("too many requests")
+        || e.contains("rate exceeded")
+        || e.contains("rate limit")
+        || e.contains("rate-limit")
+        || e.contains("ratelimit")
+        || e.contains("throttl")
 }
 
 /// list_outposts can return the object, JSON text, or a tool content envelope.
@@ -161,5 +219,33 @@ mod tests {
         assert!(!limit_error(
             &json!({"code": "RATE_LIMITED", "message": "Too many requests"})
         ));
+    }
+
+    /// A rate limit is its own reason (`RATE`), and only a rate limit is:
+    /// other service errors don't move the conversation to another account.
+    #[test]
+    fn recognizes_a_rate_limit_but_not_other_errors() {
+        for p in [
+            json!({"code": "RATE_LIMITED", "message": "Too many requests"}),
+            json!({"error": {"code": "ThrottlingException"}}),
+            json!({"errorCode": "TooManyRequestsException"}),
+            json!({"statusCode": 429}),
+            json!({"message": "Rate exceeded"}),
+        ] {
+            assert!(rate_error(&p), "{p}");
+            assert!(!limit_error(&p), "{p}");
+        }
+        for p in [
+            json!({"code": "INTERNAL_ERROR", "message": "Something went wrong"}),
+            json!({"code": "USAGE_LIMIT_REACHED"}),
+            json!({"message": "Session 14290 not found"}),
+            json!({"error": "Validation failed"}),
+        ] {
+            assert!(!rate_error(&p), "{p}");
+        }
+        assert!(rate_limited("Quick socket: HTTP 429 Too Many Requests"));
+        assert!(rate_limited("Quick: request throttled"));
+        assert!(!rate_limited("Quick: connection reset (os error 10054)"));
+        assert!(!rate_limited("AWS Quick stream ended unexpectedly"));
     }
 }

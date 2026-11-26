@@ -532,6 +532,51 @@ fn quick_recovery_keeps_retrying_in_the_same_turn_and_stops_on_success() {
     assert_eq!(reply_text(&s.conv.lock().unwrap()).as_deref(), Some("Finished"));
 }
 
+/// A rate limit (an error frame's, or a session error saying so) goes on in a
+/// fresh thread on another Quick account, or, with none to go to, waits and
+/// retries on this one, as after a session error; it never ends the turn
+/// with an error, as a usage limit with nowhere to go does. (Other tests add
+/// Quick logins in parallel, so either can happen here.)
+#[test]
+fn a_quick_rate_limit_moves_or_retries_and_never_ends_the_turn() {
+    use crate::quick::recovery;
+    let (w, s) = idle_worker("quick-rate-retry", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: "smart".into(),
+        messages: vec![json!({"role": "user", "content": [oak::text("Fix the build")]})].into(),
+        ..Default::default()
+    });
+    let mut request = 0;
+    let mut retries = 0;
+    let mut moves = 0;
+    std::thread::scope(|scope| w.turn_loop_with(scope, |_| {
+        let (req, ..) = w.request_body();
+        let text = crate::quick::new_user_text(&req).unwrap();
+        if request > 0 {
+            match text.as_str() {
+                recovery::ERROR_RETRY => {}
+                recovery::RATE_FRESH => moves += 1,
+                other => panic!("request {request}: {other}"),
+            }
+        }
+        let stop = match request {
+            0 => { assert_eq!(text, "Fix the build"); format!("{}\nQuick: Too many requests", recovery::ERROR) }
+            1 => recovery::RATE.to_string(),
+            2 => oak::stop::COMPLETE.to_string(),
+            _ => panic!("A successful turn must not be retried"),
+        };
+        request += 1;
+        Reply::Done(vec![oak::text(if request == 3 { "Fixed" } else { "Partial reply" })], stop, Usage::default())
+    }, |attempts, _| {
+        *attempts += 1;
+        retries += 1;
+        true
+    }));
+    assert_eq!((request, retries + moves), (3, 2));
+    assert!(s.live.lock().unwrap().error.is_none());
+    assert_eq!(reply_text(&s.conv.lock().unwrap()).as_deref(), Some("Fixed"));
+}
+
 #[test]
 fn a_quick_handoff_keeps_the_chat_and_seeds_a_fresh_thread() {
     let (w, s) = idle_worker("quick-handoff-test", Conversation {
@@ -4228,6 +4273,19 @@ fn swarms_talk_on_their_board() {
     assert!(pw.tool("SWARM_WAIT", &json!({"since": 0})).0.unwrap().starts_with("Not waiting"));
     assert!(pw.tool("SWARM_WAIT", &json!({"since": 1})).0.unwrap().starts_with("Asleep"));
     assert!(pw.parked() && !pw.parked());
+    // Asleep for any post: one that names nobody reaches it, even while its
+    // reply's last calls still run after the wait; the turn then goes on,
+    // and from there only posts addressing it reach it.
+    assert!(pw.tool("SWARM_WAIT", &json!({"since": 1, "mentions_only": false})).0.unwrap().starts_with("Asleep"));
+    ps.live.lock().unwrap().busy = true;
+    cw.tool("SWARM_POST", &json!({"text": "notes for anyone (verifier read this)"})).0.unwrap();
+    assert_eq!(ps.conv.lock().unwrap().inbox.len(), 1, "a parked any-sleeper gets an unaddressed post");
+    assert!(vs.conv.lock().unwrap().inbox.is_empty(), "a mid-sentence name doesn't wake");
+    assert!(!pw.parked());
+    ps.conv.lock().unwrap().inbox.clear();
+    cw.tool("SWARM_POST", &json!({"text": "more notes"})).0.unwrap();
+    assert!(ps.conv.lock().unwrap().inbox.is_empty(), "its turn went on: no longer asleep for any post");
+    ps.live.lock().unwrap().busy = false;
     // Its turn ends without a final reply to the coordinator.
     pw.report_to_parent();
     assert!(cs.conv.lock().unwrap().inbox.is_empty());
@@ -4258,4 +4316,55 @@ fn swarms_talk_on_their_board() {
     assert!(cw.tool("SWARM_STATUS", &json!({})).0.unwrap().contains("@verifier: killed"));
     assert!(cw.tool("SWARM_ADD", &json!({"name": "verifier", "brief": "x"})).0.unwrap_err().contains("taken"));
     crate::swarm::remove(&coord);
+}
+
+/// A call of a Quick snippet that ran while a board post (or a task
+/// notification) came in carries it in its result: Quick reads the result
+/// at once, while notices wait for its whole turn to end. So a wait it
+/// ended ("a message arrived (it follows)") shows what came, and the next
+/// wait doesn't end at once on it. Other providers' calls leave it to the
+/// next request (`absorb_notices`), and answers stay for `steer_quick`.
+#[test]
+fn a_quick_snippets_call_carries_what_came_in() {
+    let (w, _s) = idle_worker("quick-arrivals", Conversation::default());
+    let post = "<agent-message from=\"@coordinator\" type=\"board post\" seq=\"58\">\n@parser take #4\n</agent-message>".to_string();
+    let answers = format!("{ANSWERS_TAG}yes</ask-answers>");
+    let wait = "Task 1 is running (6.5s so far); the wait ended after 0s because a message arrived (it follows).\nok 16\n";
+    w.conv.lock().unwrap().inbox = vec![post.clone(), answers.clone()];
+    w.live.lock().unwrap().notes.push((1, format!("{NOTE_TAG}Task 0 finished</task-notification>")));
+    // Another provider's call: left for the next request.
+    let other = w.with_arrivals(json!({"type": "tool_result", "call_id": "toolu_1", "content": wait}));
+    assert_eq!(other["content"], wait);
+    assert_eq!(w.conv.lock().unwrap().inbox.len(), 2);
+    // Quick's: the note and the post follow the wait's own text.
+    let r = w.with_arrivals(json!({"type": "tool_result", "call_id": "9a30-4021_oak0", "content": wait}));
+    assert_eq!(r["content"], format!("{wait}\n{NOTE_TAG}Task 0 finished</task-notification>\n\n{post}"));
+    assert_eq!(w.conv.lock().unwrap().inbox, [answers], "answers stay for steer_quick");
+    assert!(w.live.lock().unwrap().notes.is_empty());
+    // Nothing more came: the next call's result is its own.
+    let again = w.with_arrivals(json!({"type": "tool_result", "call_id": "9a30-4021_oak1", "content": [{"type": "text", "text": "x"}]}));
+    assert_eq!(again["content"], json!([{"type": "text", "text": "x"}]));
+}
+
+/// MONITOR start runs a command as a task and sends its lines to the
+/// session as task notifications, then one when it exits (not the task's
+/// own); a task it watches is the model's, and stop ends the watch.
+#[test]
+fn monitor_lines_come_as_notifications() {
+    let (w, _s) = idle_worker("monitor", Conversation::default());
+    let r = w.tool("MONITOR_START", &json!({"command": "echo hello; echo world", "summary": "greeting", "filter": "world"})).0.unwrap();
+    assert!(r.starts_with("Started monitor 1 (its command runs as task 0)"), "{r}");
+    wait_until("the end notice", || w.live.lock().unwrap().notes.iter().any(|(_, t)| t.contains("ended")));
+    let notes: Vec<String> = w.live.lock().unwrap().notes.iter().map(|(_, t)| t.clone()).collect();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert_eq!(notes[0], format!("{NOTE_TAG}Monitor 1 (greeting, task 0): 1 new line matching `world`:\nworld</task-notification>"));
+    assert!(notes[1].contains("Monitor 1 (greeting) ended: its command (task 0) exited with code 0"));
+    assert!(w.tool("MONITOR_START", &json!({"task": 0})).0.unwrap_err().contains("exited already"));
+    assert!(w.tool("MONITOR_START", &json!({})).0.is_err());
+    w.tool("TASK_NEW", &json!({"command": "while true; do echo x; sleep 1; done", "summary": "loop"})).0.unwrap();
+    assert!(w.tool("MONITOR_START", &json!({"task": 1, "persistent": true})).0.unwrap().contains("watching task 1"));
+    assert!(w.tool("MONITOR_LIST", &json!({})).0.unwrap().contains("persistent"));
+    assert!(w.tool("MONITOR_STOP", &json!({"id": 2})).0.unwrap().starts_with("Monitor 2 stopped"));
+    assert!(w.tool("MONITOR_LIST", &json!({})).0.unwrap() == "No monitors.");
+    w.tool("TASK_DELETE", &json!({"id": 1})).0.unwrap();
 }

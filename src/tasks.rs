@@ -176,6 +176,9 @@ pub struct Proc {
     state: Mutex<State>,
     /// Signalled when `state.exit` is set, for those waiting on it.
     exit_cv: Condvar,
+    /// Signalled (with `lines`) when lines come or the command exits, for
+    /// those watching its output as it comes (`lines_since`, MONITOR).
+    grew: Condvar,
     pid: u32,
     #[cfg(windows)]
     job: usize,
@@ -351,6 +354,7 @@ pub fn spawn(command: &str, cwd: &Path) -> Result<Arc<Proc>, String> {
         lines: Mutex::new(vec![]),
         state: Mutex::new(State { exit: None, ended_ms: None, ended: None, cursor: 0, notify: vec![], note: None }),
         exit_cv: Condvar::new(),
+        grew: Condvar::new(),
         pid: child.id(),
         #[cfg(windows)]
         job,
@@ -414,6 +418,8 @@ fn read_on(p: &Arc<Proc>, from: u64) -> std::thread::Thread {
                         let rest = pending.split_off(end + 1);
                         let mut lines = p.lines.lock().unwrap();
                         lines.extend(split_lines(&pending));
+                        drop(lines);
+                        p.grew.notify_all();
                         pending = rest;
                     }
                     idle = Duration::from_millis(5);
@@ -421,6 +427,7 @@ fn read_on(p: &Arc<Proc>, from: u64) -> std::thread::Thread {
                 _ if done => {
                     if !pending.is_empty() {
                         p.lines.lock().unwrap().extend(split_lines(&pending));
+                        p.grew.notify_all();
                     }
                     break;
                 }
@@ -526,6 +533,10 @@ impl Proc {
             self.exit_cv.notify_all();
             std::mem::take(&mut s.notify)
         };
+        // (Taking `lines` first: a watcher between its check and its wait
+        // still gets this.)
+        drop(self.lines.lock().unwrap());
+        self.grew.notify_all();
         for f in notify {
             f();
         }
@@ -593,6 +604,21 @@ impl Proc {
             s.cursor += 1;
         }
         (out, s.cursor < lines.len())
+    }
+
+    /// How many output lines it has printed so far.
+    pub fn line_count(&self) -> usize {
+        self.lines.lock().unwrap().len()
+    }
+
+    /// The output lines from line `from` on, waiting up to `timeout` for
+    /// one when there are none yet (not past the command's exit), and the
+    /// line to go on from. Independent of the model's own reading (`take_new`).
+    pub fn lines_since(&self, from: usize, timeout: Duration) -> (Vec<String>, usize) {
+        let lines = self.lines.lock().unwrap();
+        let (lines, _) = self.grew.wait_timeout_while(lines, timeout, |l| l.len() <= from && self.exit().is_none()).unwrap();
+        let from = from.min(lines.len());
+        (lines[from..].to_vec(), lines.len())
     }
 
     /// Runs `f` when the command exits (at once if it already has).
@@ -934,6 +960,7 @@ fn revive(r: &Record, closed_ms: i64) -> Arc<Proc> {
         lines: Mutex::new(lines),
         state: Mutex::new(State { exit, ended_ms, ended: ended_ms.map(instant_at), cursor, notify: vec![], note }),
         exit_cv: Condvar::new(),
+        grew: Condvar::new(),
         pid: r.pid,
         #[cfg(windows)]
         job,
@@ -1293,6 +1320,7 @@ impl Tasks {
 
     /// The conversation is gone: so are its records and the tasks' output.
     pub fn forget(&self) {
+        crate::monitor::stop_all(&self.conv);
         for p in self.map.lock().unwrap().values() {
             p.keep.store(false, Ordering::SeqCst);
             p.files.remove();
@@ -1373,6 +1401,11 @@ impl Tasks {
                 t.save();
             }
         }));
+    }
+
+    /// The conversation's id.
+    pub fn conv(&self) -> &str {
+        &self.conv
     }
 
     pub fn get(&self, id: u64) -> Option<Arc<Proc>> {

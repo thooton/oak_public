@@ -58,6 +58,7 @@ mod rewrites;
 mod rolling;
 mod rotation;
 mod scratch;
+mod monitor;
 mod sleeps;
 mod startup;
 mod store;
@@ -83,6 +84,7 @@ mod wire_anthropic;
 // The window's parts, drawn from the state above.
 mod autoscroll;
 mod blender_view;
+mod bot;
 mod browser_view;
 mod chat_view;
 mod cloud_view;
@@ -663,6 +665,7 @@ impl App {
             nodeclub::model(id).map(|m| m.name),
             refuseless::model(id).map(|m| m.name),
             musecode::model(id).map(|m| m.name),
+            quick::model(id).map(|m| m.name),
         ];
         if antigravity::serves(id) {
             return antigravity::model_name(id);
@@ -1192,6 +1195,7 @@ pub fn main() -> eframe::Result {
         ..Default::default()
     };
     preload();
+    images::sweep_copies();
     startup::step("ready for the window");
     let run = || eframe::run_native("OAK", options, Box::new(|cc| Ok(Box::new(App::new(cc)))));
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {

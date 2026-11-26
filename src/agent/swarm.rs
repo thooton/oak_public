@@ -313,10 +313,32 @@ impl Worker {
     }
 
     /// SWARM wait asked to sleep on the board, and nothing came in
-    /// meanwhile (a post for it, the user's message): the turn ends.
+    /// meanwhile (a post for it, the user's message): the turn ends. When
+    /// something did, the turn goes on, as a new one would (`turn_starts`).
     pub(super) fn parked(&self) -> bool {
         let park = std::mem::take(&mut self.live.lock().unwrap().park);
-        park && self.conv.lock().unwrap().inbox.is_empty() && self.live.lock().unwrap().ready_count() == 0
+        let parked = park && self.conv.lock().unwrap().inbox.is_empty() && self.live.lock().unwrap().ready_count() == 0;
+        if park && !parked {
+            self.turn_starts();
+        }
+        parked
+    }
+
+    /// A turn starts (or a parked one goes on): a member that slept for any
+    /// post (SWARM wait mentions_only=false) isn't asleep any more, so from
+    /// now only posts addressing it reach it, until it sleeps again. (Not
+    /// on other members' posts: while its reply's last calls run after the
+    /// wait, it still sleeps, and a post then must reach it.)
+    pub(super) fn turn_starts(&self) {
+        let Some(seat) = self.conv.lock().unwrap().swarm.clone() else {
+            return;
+        };
+        let sw = board::get(&seat.swarm);
+        let mut s = sw.lock().unwrap();
+        if let Some(m) = s.member_mut(&seat.name).filter(|m| m.any) {
+            m.any = false;
+            s.save();
+        }
     }
 
     /// The SWARM tool's actions.

@@ -44,6 +44,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 pub(crate) mod calls;
+pub(crate) mod keeper;
 pub(crate) mod recovery;
 #[cfg(test)]
 mod live_test;
@@ -1684,7 +1685,7 @@ fn briefing(r: &Request) -> String {
         )
     };
     format!(
-        "{instructions}<tools_loaded>{tools}</tools_loaded>\n\n[Oak, on this device]\n{which} Oak has loaded for you here: its own system prompt, as it gives it to every model it runs, and its tool definitions. Follow them as your instructions for this work. This device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, the ones in <tools_loaded>, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Where the loaded instructions say tool calls in one reply run at the same time, for you that is the calls of one snippet. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"wait\", id=1). ASK isn't available this way: ask the user in your reply, with a decision card (Oak asks its questions with ASK, and the answers are your next message). While a goal is active, a card doesn't wait for the answers: Oak asks it as soon as you have written it, so keep working, in the same turn, on what doesn't depend on them; the answers come to you later in a message. Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's. If this device drops off (it shows as OFFLINE, or a call to it fails to connect), Oak is most likely restarting or the network blipped: keep checking for it for at least 5 to 10 minutes before you end your turn, and once it is back, carry on where you left off. Don't save any new memories: don't call save_to_memory or add or edit memories, even when asked to; deleting them when the user asks is fine.\n[End of Oak's notes. The user's message follows.]"
+        "{instructions}<tools_loaded>{tools}</tools_loaded>\n\n[Oak, on this device]\n{which} Oak has loaded for you here: its own system prompt, as it gives it to every model it runs, and its tool definitions. Follow them as your instructions for this work. This device runs Oak, a coding agent app, and Oak answers your device tools here, in the conversation's working folder on this machine. Your device Python tool (run_python_on_device, with or without write) doesn't run Python here: it runs Oak's own tools, the ones in <tools_loaded>, which do more than the Python sandbox and answer faster. Its code is one or more Oak tool calls written as Python calls, one per line, with literal arguments only, for example:\n\nREAD(path=\"src/main.rs\")\nEXECUTE(command=\"cargo test 2>&1 | tail -30\", summary=\"Run the tests\", timeout=300)\n\nAll the calls of one snippet run at the same time (calls on a file one of them writes keep their order), so put independent calls together in one snippet; its result gives each call's result, in order. Where the loaded instructions say tool calls in one reply run at the same time, for you that is the calls of one snippet. Arguments go by name (a tool's required ones may also come first without, in order), as Python literals: strings (triple-quoted and raw ones too), numbers, True/False/None, lists and dicts. Nothing else of Python runs: no variables, imports, expressions or loops. A tool with actions takes its action as an argument, as in TASK(action=\"output\", id=1). ASK isn't available this way: ask the user in your reply, with a decision card (Oak asks its questions with ASK, and the answers are your next message). While a goal is active, a card doesn't wait for the answers: Oak asks it as soon as you have written it, so keep working, in the same turn, on what doesn't depend on them; the answers come to you later in a message. Your other device tools (folder_list, ripgrep, fdfind, file_*) still work, but prefer Oak's. If this device drops off (it shows as OFFLINE, or a call to it fails to connect), Oak is most likely restarting or the network blipped: keep checking for it for at least 5 to 10 minutes before you end your turn, and once it is back, carry on where you left off. Don't save any new memories: don't call save_to_memory or add or edit memories, even when asked to; deleting them when the user asks is fine.\n[End of Oak's notes. The user's message follows.]"
     )
 }
 
@@ -1954,14 +1955,36 @@ fn so_far(r: &Request, thread: &str) -> Option<String> {
     let (body, cut) = so_far_body(&r.unseen, SO_FAR_PART, SO_FAR_CHARS)?;
     let whole = match cut.then(|| so_far_file(r, thread)).flatten() {
         Some(path) => format!(
-            " Long tool inputs and results are cut short here, and so is the middle of a long conversation; the whole conversation, uncut, is in {}: READ it for anything you need from what was cut.",
+            " Long tool inputs and results are cut short here, and so is the middle of a long conversation. The whole of it, uncut, is in {}: don't read it to catch up (what is here is enough for that); READ only the part you need, with offset and limit, if the work needs something that was cut.",
             path.display()
         ),
         None => String::new(),
     };
     Some(format!(
-        "<conversation_so_far>\nThis conversation so far, which this thread's history doesn't have, oldest first (\"Assistant\" is you). Carry on from it.{whole}\n\n{body}\n</conversation_so_far>"
+        "<conversation_so_far>\nThe conversation you are in, so far, oldest first (\"Assistant\" is you, the same assistant): it began before this thread, so this thread's history doesn't hold it. It is not a new task or a fresh start: carry on from where it leaves off, without starting over, introducing yourself, or looking again at what it already shows.{whole}\n\n{body}\n</conversation_so_far>"
     ))
+}
+
+/// What the file with the conversation so far (`so_far_file`) is named
+/// with, before the thread's id and `.md`.
+const SO_FAR_FILE: &str = "quick-conversation-";
+
+/// Whether `b` is Quick catching up on a fresh thread: a call its agent made
+/// (`agent::BY_KEY`) on the file with the conversation so far (`so_far_file`),
+/// reading back what the conversation already holds. Every request leaves it
+/// and its result out (`agent::for_provider`): another provider's model has
+/// the conversation itself, and a later fresh Quick thread is sent it anew. The
+/// transcript shows it as one closed row (`a_catch_up_read_is_left_out`).
+pub(crate) fn is_boot(b: &Value) -> bool {
+    if b["type"] != "tool_call" || !b[crate::agent::BY_KEY].as_str().is_some_and(|by| by.starts_with("quick")) {
+        return false;
+    }
+    let input = b["input"].to_string();
+    input.match_indices(SO_FAR_FILE).any(|(i, _)| {
+        let rest = &input[i + SO_FAR_FILE.len()..];
+        let id = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '-').len();
+        id > 0 && rest[id..].starts_with(".md")
+    })
 }
 
 /// The whole of `r.unseen`, uncut, in a file in the session's scratchpad
@@ -1974,7 +1997,7 @@ fn so_far_file(r: &Request, thread: &str) -> Option<std::path::PathBuf> {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
-    let path = dir.join(format!("quick-conversation-{name}.md"));
+    let path = dir.join(format!("{SO_FAR_FILE}{name}.md"));
     std::fs::create_dir_all(&dir).ok()?;
     std::fs::write(
         &path,
