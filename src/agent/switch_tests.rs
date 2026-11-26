@@ -23,6 +23,42 @@ fn all_text(v: &[Value]) -> String {
     serde_json::to_string(v).unwrap()
 }
 
+/// Quick's count has its own prompt and its agent's steps, so Oak's copy
+/// can be smaller than the keep while the count is past the trigger (331k
+/// counted, a 200k copy, a 225k keep): the keep is the same share of the
+/// copy, or no cut would ever keep that much. A copy as big as the count,
+/// or no copy at all, keeps the setting.
+#[test]
+fn quick_keep_fits_the_copy() {
+    assert_eq!(quick_keep(225_000, 200_000, 331_000), 135_951);
+    assert!(quick_keep(225_000, 200_000, 331_000) < 200_000);
+    assert_eq!(quick_keep(40_000, 300_000, 300_000), 40_000);
+    assert_eq!(quick_keep(40_000, 0, 300_000), 40_000);
+}
+
+/// The summary a Quick conversation's file (`OAK_QUICK_CONV`, read only)
+/// would plan now, at the settings' keep `OAK_KEEP` (default 225k): its
+/// cut, or none.
+#[test]
+#[ignore]
+fn quick_plan_on_a_real_conversation() {
+    let path = std::env::var("OAK_QUICK_CONV").expect("OAK_QUICK_CONV");
+    let keep: u64 = std::env::var("OAK_KEEP").ok().and_then(|k| k.parse().ok()).unwrap_or(225_000);
+    let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let messages = v["messages"].as_array().unwrap();
+    let r = &v["rolling"];
+    let base = r["summary"]["cut"].as_u64().unwrap() as usize;
+    let cleared = r["summary"]["clear"].as_u64().unwrap() as usize;
+    let counted = v["cache"]["last"]["tokens"].as_u64().unwrap();
+    let measured: Vec<rolling::Measure> = serde_json::from_value(r["measured"].clone()).unwrap();
+    let summary = r["summary"]["text"].as_str().unwrap().len();
+    let view = rolling::estimate(summary + messages[base..].iter().map(rolling::chars).sum::<usize>());
+    for k in [keep, quick_keep(keep, view, counted)] {
+        let plan = rolling::plan_within(messages, base, cleared, view, &measured, k, 10_000, true, rolling::summary_cap(QUICK));
+        println!("messages {} base {base} counted {counted} view {view} keep {k}: {plan:?}", messages.len());
+    }
+}
+
 fn switch(s: &Session, p: api::Provider, m: &str) {
     let mut c = s.conv.lock().unwrap();
     apply_command(&mut c, Command::Model(p, m.into()));

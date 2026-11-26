@@ -4038,11 +4038,22 @@ pub(crate) fn quick_view_size(c: &mut Conversation, n: usize, base: usize) -> u6
     rolling::estimate(summary + c.messages[base.min(n)..n].iter().map(rolling::chars).sum::<usize>())
 }
 
+/// The keep setting `keep` in the units of Oak's copy of a Quick
+/// conversation (`quick_view_size`, `view` tokens) when Quick counted its
+/// thread at `counted`: Quick's count also has its own prompt and its
+/// agent's steps, so the copy can be smaller than the keep while the count
+/// is past the trigger, and no cut would ever keep that much. The same
+/// share of the copy stays, as the setting asks of Quick's thread.
+pub(crate) fn quick_keep(keep: u64, view: u64, counted: u64) -> u64 {
+    if counted > view && view > 0 { (keep as u128 * view as u128 / counted as u128) as u64 } else { keep }
+}
+
 /// What to summarize of the first `n` messages of a request built on the
-/// summary cut `base`, whose prompt came to `total` tokens.
-fn plan_summary(c: &mut Conversation, n: usize, base: usize, total: u64) -> Option<Plan> {
+/// summary cut `base`, whose prompt came to `total` tokens, keeping about
+/// `keep` verbatim.
+fn plan_summary(c: &mut Conversation, n: usize, base: usize, total: u64, keep: u64) -> Option<Plan> {
     let cap = rolling::summary_cap(&c.model);
-    plan_summary_within(c, n, base, total, cap)
+    plan_summary_within(c, n, base, total, keep, cap)
 }
 
 /// Why no summary can make room on `model` though one could be made, but
@@ -4059,10 +4070,9 @@ fn too_big_to_summarize(model: &str) -> String {
 }
 
 /// `plan_summary` with the part before the cut at most `cap` tokens.
-fn plan_summary_within(c: &mut Conversation, n: usize, base: usize, total: u64, cap: u64) -> Option<Plan> {
+fn plan_summary_within(c: &mut Conversation, n: usize, base: usize, total: u64, keep: u64, cap: u64) -> Option<Plan> {
     c.messages.load_from(base);
     let cleared = c.rolling.cleared_to();
-    let keep = rolling::config_for(&c.model).keep;
     // (What one summary request on this model can hold: after a switch
     // from a model with a bigger window, or from Quick, the conversation
     // may be past it.)

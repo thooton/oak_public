@@ -1093,9 +1093,15 @@ impl Worker {
             }
         }
         // Quick's count is of its own thread: where the cut goes is placed
-        // by what Oak's copy of the conversation holds (`quick_view_size`).
-        let total = if body.provider == api::Provider::Quick { super::quick_view_size(&mut c, n, base) } else { usage.prompt };
-        let Some(plan) = plan_summary(&mut c, n, base, total) else {
+        // by what Oak's copy of the conversation holds (`quick_view_size`),
+        // and the keep is taken to the copy's units (`quick_keep`).
+        let (total, keep) = if body.provider == api::Provider::Quick {
+            let view = super::quick_view_size(&mut c, n, base);
+            (view, super::quick_keep(cfg.keep, view, usage.prompt))
+        } else {
+            (usage.prompt, cfg.keep)
+        };
+        let Some(plan) = plan_summary(&mut c, n, base, total, keep) else {
             return;
         };
         // The request that just finished, with only the part the summary
@@ -1159,10 +1165,11 @@ impl Worker {
                     context,
                 )
             });
-        let plan = match plan_summary(&mut c, n, base, total) {
+        let keep = rolling::config_for(&c.model).keep;
+        let plan = match plan_summary(&mut c, n, base, total, keep) {
             Some(plan) => plan,
             // One could be made, but not in one request on this model.
-            None if plan_summary_within(&mut c, n, base, total, u64::MAX).is_some() => {
+            None if plan_summary_within(&mut c, n, base, total, keep, u64::MAX).is_some() => {
                 return Err(too_big_to_summarize(&c.model));
             }
             None => return Err("nothing old enough to summarize".into()),

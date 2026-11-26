@@ -721,7 +721,10 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   least that allows the keep, so it is always for the keep in the box. Turning smart context
   off for a conversation stops new summaries; the one in use stays. On Quick it works the same,
   with the same settings and box: the trigger is Quick's own count of its thread (its prompt and
-  its agent's steps too), and the cut is placed by what Oak's copy holds (`agent::quick_view_size`).
+  its agent's steps too), and the cut is placed by what Oak's copy holds (`agent::quick_view_size`),
+  with the keep taken to the copy's units: the same share of it as the keep is of Quick's count
+  (`agent::quick_keep`), since the copy can be smaller than the keep while the count is past the
+  trigger, and then no summary would ever be made (`quick_keep_fits_the_copy`).
   Quick writes the summary on a throwaway thread of its own, without this device's tools, sent
   exactly the part it replaces, then the instruction (`agent::summary_request_for`); only the
   text after its last call is the summary (`oak::text_after_calls`). Once a summary is in, made
