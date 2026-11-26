@@ -86,6 +86,8 @@ impl Frame {
     /// at the end, with the scroll bar, the minimap (`cut` marks where the
     /// summary open covers it) and the jump bar. `cleared`: the unit before
     /// which old tool output is cleared, marked in the transcript only.
+    /// `tail` is told the empty room above it (under what the last unit
+    /// shows) and gives the room to leave under it.
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &self,
@@ -96,7 +98,7 @@ impl Frame {
         units: &[Range<usize>],
         results: &transcript::Results,
         revert: Option<&[Value]>,
-        mut tail: impl FnMut(&mut Ui),
+        mut tail: impl FnMut(&mut Ui, f32) -> f32,
         cut: impl FnOnce(&Ui) -> Option<usize>,
         cleared: Option<usize>,
     ) {
@@ -110,17 +112,39 @@ impl Frame {
         // Where the line marking the summarized part ends: at the minimap
         // (its cut line goes on from there), else at the scroll bar.
         let mark_end = map.map_or(track.left(), |m| m.left()) - 4.0;
+        // The empty room under what the last unit shows, for the tail: the
+        // list's spacing and what the unit leaves empty at its end
+        // (`transcript::shown_end`), a message's bar too (it shows only on
+        // hover). This frame's, as the last unit is laid out just before
+        // the tail; else the last frame's.
+        let room_id = Id::unique(("oak-tail-room", list as *const vlist::List as usize));
+        let mut room = ui.data(|d| d.get_temp::<f32>(room_id)).unwrap_or(TAIL_PAD);
+        let last = units.len().checked_sub(1);
         let mut render = |ui: &mut Ui, i: usize| {
             if i == 0 {
-                ui.add_space(20.0);
+                ui.add_space(TAIL_PAD);
             }
             crate::find::begin_unit(i);
             let top = ui.cursor().top();
             match units.get(i) {
-                Some(u) => transcript_unit(ui, t, items, u.clone(), results, revert),
+                Some(u) => {
+                    let is_last = last == Some(i);
+                    if is_last {
+                        transcript::take_shown_end();
+                    }
+                    transcript_unit(ui, t, items, u.clone(), results, revert);
+                    if is_last {
+                        let end = ui.min_rect().bottom();
+                        let shown = match transcript::take_shown_end() {
+                            Some((shown, to)) if to > end - 0.5 => shown,
+                            _ => end,
+                        };
+                        room = end + ui.spacing().item_spacing.y - shown;
+                    }
+                }
                 None => {
-                    tail(ui);
-                    ui.add_space(20.0);
+                    let pad = tail(ui, if last.is_some() { room } else { TAIL_PAD });
+                    ui.add_space(pad);
                 }
             }
             if cut == Some(i) && i > 0 {
@@ -130,6 +154,7 @@ impl Frame {
             }
         };
         list.show(ui, view, col, &mut render);
+        ui.data_mut(|d| d.insert_temp(room_id, room));
         list.scene_view = Rect::from_min_max(view.min, egui::pos2(map.map_or(track.left(), |m| m.left()), view.bottom()));
         list.bar_paint(ui, t, track);
         if let Some(map) = map {
@@ -141,9 +166,12 @@ impl Frame {
     }
 }
 
+/// The room under the transcript's end, above the message box.
+const TAIL_PAD: f32 = 20.0;
+
 /// A transcript nothing can be reverted from (a cloud session's, an Oak
 /// agent's), with `tail` at its end (its state hashed in `tail_sig`).
-pub(crate) fn read_only_view(ui: &mut Ui, t: &Theme, conv: &store::Conversation, live: &Live, list: &mut vlist::List, tail_sig: u64, tail: impl FnMut(&mut Ui)) {
+pub(crate) fn read_only_view(ui: &mut Ui, t: &Theme, conv: &store::Conversation, live: &Live, list: &mut vlist::List, tail_sig: u64, mut tail: impl FnMut(&mut Ui)) {
     let frame = Frame::new(ui.max_rect());
     let (mut items, msgs, results) = items_at(conv, live);
     for x in &mut items {
@@ -156,7 +184,10 @@ pub(crate) fn read_only_view(ui: &mut Ui, t: &Theme, conv: &store::Conversation,
     sigs.push(tail_sig);
     rebase(list, &units, &msgs);
     list.sync(&sigs, frame.col.span());
-    crate::transcript::for_conversation(&conv.id, || frame.show(ui, t, list, &items, &units, &results, None, tail, |_| None, None));
+    crate::transcript::for_conversation(&conv.id, || frame.show(ui, t, list, &items, &units, &results, None, |ui, _| {
+        tail(ui);
+        TAIL_PAD
+    }, |_| None, None));
 }
 
 /// What the session's subagents are doing, for the transcript's tail
@@ -231,8 +262,8 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
         }
         shown_from = units.get(list.first_shown()).map_or(usize::MAX, |u| msgs[u.start]);
         // The end: what OAK is doing, then its questions and the queue.
-        let tail = |ui: &mut Ui| {
-            transcript_status(ui, t, &conv, &live, agents_pausing, &running);
+        let tail = |ui: &mut Ui, room: f32| {
+            let status = transcript_status(ui, t, &conv, &live, agents_pausing, &running, room);
             if let Some(a) = ask.as_mut()
                 && ask_view(ui, t, a)
             {
@@ -240,6 +271,11 @@ pub(crate) fn chat_view(ui: &mut Ui, t: &Theme, id: &str, s: &Session, list: &mu
             }
             crate::approval::view(ui, t, id);
             action = queue_view(ui, t, id, &live.queued, editing);
+            // The status line last: as much room under it as above it.
+            match status {
+                Some(s) if ui.min_rect().bottom() <= s.bottom + 0.5 => s.pad,
+                _ => TAIL_PAD,
+            }
         };
         // The summarized part, always marked: the newest summary's cut,
         // regardless of the banner's open state.
@@ -670,5 +706,76 @@ mod tests {
         assert_eq!(shared.lock().unwrap().rev(), rev);
         shared.lock().unwrap().title.push('!');
         assert_ne!(shared.lock().unwrap().rev(), rev);
+    }
+
+    /// The status line under a working transcript ("Thinking", with its
+    /// spinner) sits midway between what is above it and the view's
+    /// bottom (the message box's top line): as much room above it as
+    /// below, whatever the transcript ends with and in every theme.
+    #[test]
+    fn status_line_is_centered_above_the_message_box() {
+        use crate::app_hover_test::{run_frame, test_ctx};
+        use serde_json::json;
+        let user = |s: &str| json!({"role": "user", "content": [{"type": "text", "text": s}]});
+        let reply = |s: &str| json!({"role": "assistant", "content": [{"type": "text", "text": s}]});
+        let call = json!({"role": "assistant", "content": [{"type": "tool_call", "id": "c1", "name": "EXECUTE", "input": {"command": "ls", "summary": "List files"}}]});
+        let result = json!({"role": "user", "content": [{"type": "tool_result", "call_id": "c1", "content": "a\nb"}]});
+        // (Long enough to fill the view: it shows its end.)
+        let filler: String = (0..40).map(|i| format!("Paragraph {i} of filler.\n\n")).collect();
+        let start = vec![user("go"), reply(&filler)];
+        let thought = json!({"role": "assistant", "content": [{"type": "reasoning", "text": "Weighing it."}]});
+        let ends: [(&str, Vec<serde_json::Value>); 4] = [
+            ("thinking", [start.clone(), vec![user("more"), thought]].concat()),
+            ("a reply", [start.clone(), vec![user("more"), reply("Last line of the reply.")]].concat()),
+            ("a call", [start.clone(), vec![user("more"), call, result]].concat()),
+            ("a message", [start.clone(), vec![user("Last line of the message.")]].concat()),
+        ];
+        let themes = [("oak", Theme::oak()), ("antigravity", crate::gravity::theme()), ("glass", crate::glass::theme())];
+        for (theme, t) in themes {
+            for (what, messages) in &ends {
+                let (ctx, _) = test_ctx(true, true);
+                crate::theme::apply_theme(&ctx, &t);
+                let conv = Conversation { id: format!("unit-test-status-{theme}-{}-{}", what.len(), api::now_ms()), folder: std::env::temp_dir(), messages: messages.clone().into(), ..Default::default() };
+                let id = conv.id.clone();
+                let s = agent::Session::start(conv, ctx.clone());
+                let mut list = vlist::List::default();
+                let mut editing = None;
+                let mut time = 0.0;
+                let mut out = None;
+                for _ in 0..6 {
+                    {
+                        // (Each frame: the session, idle, clears it.)
+                        let mut live = s.live.lock().unwrap();
+                        live.busy = true;
+                        live.status = "Thinking".into();
+                    }
+                    out = Some(run_frame(&ctx, vec2(1000.0, 500.0), &mut time, 0.1, vec![], |ui| {
+                        chat_view(ui, &t, &id, &s, &mut list, &mut editing, Group::default());
+                    }));
+                }
+                s.delete();
+                let out = out.unwrap();
+                let rects: Vec<(Option<String>, Rect)> = out
+                    .shapes
+                    .iter()
+                    .filter(|c| c.clip_rect.is_positive())
+                    // (What shows: no empty text, no unfilled, unstroked boxes.)
+                    .filter(|c| match &c.shape {
+                        egui::Shape::Text(x) => !x.galley.text().trim().is_empty(),
+                        egui::Shape::Rect(r) => r.fill.a() > 0 || (r.stroke.width > 0.0 && r.stroke.color.a() > 0),
+                        egui::Shape::Noop => false,
+                        _ => true,
+                    })
+                    .map(|c| (if let egui::Shape::Text(x) = &c.shape { Some(x.galley.text().to_string()) } else { None }, c.shape.visual_bounding_rect().intersect(c.clip_rect)))
+                    .filter(|(_, r)| r.is_positive())
+                    .collect();
+                let status = rects.iter().find(|(s, _)| s.as_deref() == Some("Thinking")).map(|(_, r)| *r).unwrap_or_else(|| panic!("the status line: {:?}", rects.iter().filter_map(|(s, r)| s.as_ref().map(|s| (s, r.top()))).collect::<Vec<_>>()));
+                // The row: its text and the spinner beside it.
+                let row = rects.iter().filter(|(_, r)| r.top() < status.bottom() && r.bottom() > status.top() && r.width() < 200.0 && r.height() < 40.0).fold(status, |a, (_, r)| a.union(*r));
+                let above = rects.iter().filter(|(_, r)| r.bottom() <= row.top() + 0.5 && r.height() < 400.0).map(|(_, r)| r.bottom()).fold(f32::MIN, f32::max);
+                let (gap_above, gap_below) = (row.top() - above, 500.0 - row.bottom());
+                assert!((gap_above - gap_below).abs() <= 3.0, "{theme}, ending with {what}: {gap_above} above the status line, {gap_below} below");
+            }
+        }
     }
 }

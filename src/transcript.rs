@@ -2819,13 +2819,15 @@ pub(crate) fn thinking_row(
         in_block,
     );
     let color = if hovered { t.ink2 } else { t.ink3 };
-    ui.painter().text(
+    let shown = ui.painter().text(
         egui::pos2(rect.left() + x, mid_y(ui, rect)),
         Align2::LEFT_CENTER,
         label,
         FontId::proportional(13.0),
         color,
     );
+    // (Closed, the row shows its label: the room under it looks empty.)
+    shown_end(shown.bottom(), rect.bottom());
     if open && !text.is_empty() {
         row_details(ui, x, |ui| match rewrite {
             None => {
@@ -2913,7 +2915,7 @@ fn work_block(ui: &mut Ui, t: &Theme, run: &[Item], results: &Results, revert: O
         // TASK_GET_NEW_OUTPUT) shouldn't push them all far to the right.
         .min(width(&"M".repeat(NAME_COLUMN)) * 0.8);
     ui.add_space(2.0);
-    egui::Frame::new()
+    let block = egui::Frame::new()
         .fill(t.tool_bg)
         .corner_radius(crate::gravity::radius(t, 10.0))
         .inner_margin(Margin::symmetric(0, 3))
@@ -2950,6 +2952,7 @@ fn work_block(ui: &mut Ui, t: &Theme, run: &[Item], results: &Results, revert: O
             }
         });
     ui.add_space(2.0);
+    shown_end(block.response.rect.bottom(), ui.min_rect().bottom());
 }
 
 /// The whole transcript, laid out at once (tests; the app shows it as a
@@ -2961,7 +2964,7 @@ pub(crate) fn transcript_view(ui: &mut Ui, t: &Theme, conv: &Conversation, live:
     for u in units(&items) {
         transcript_unit(ui, t, &items, u, &results, Some(&conv.messages));
     }
-    transcript_status(ui, t, conv, live, false, &[]);
+    transcript_status(ui, t, conv, live, false, &[], STATUS_ROOM);
 }
 
 /// The transcript in units: a run of tool calls and thinking (shown as one
@@ -3704,6 +3707,7 @@ pub(crate) fn message_bar(
     // Tucked right under the message, not a full item gap below it.
     ui.add_space(2.0 - ui.spacing().item_spacing.y);
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
+    shown_end(msg.bottom(), bar.bottom());
     let now = ui.input(|i| i.time);
     // A copy shows its check mark for a moment, pointer or not.
     let copied = ui
@@ -3933,11 +3937,45 @@ impl MemberRow {
     }
 }
 
+/// The room the status line (`status_line`) keeps above it, and below it
+/// when it ends the transcript: at least this, more when what is above it
+/// leaves more (the same below then), so it sits midway between the
+/// transcript and the message box.
+pub(crate) const STATUS_ROOM: f32 = 20.0;
+
+/// Where the status line ended (`transcript_status`): its row's bottom,
+/// and the room to leave under it when nothing comes after it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StatusEnd {
+    pub(crate) bottom: f32,
+    pub(crate) pad: f32,
+}
+
+thread_local! {
+    /// The last `shown_end`.
+    static SHOWN_END: std::cell::Cell<Option<(f32, f32)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Marks that what a unit shows ends at `shown`, and the room from there
+/// down to `to` (the unit's end, if nothing comes after) looks empty: the
+/// spacing after a box, a message's bar (it shows only on hover).
+fn shown_end(shown: f32, to: f32) {
+    SHOWN_END.with(|s| s.set(Some((shown, to))));
+}
+
+/// The last `shown_end` since the last call: where what shows ended, and
+/// where the empty room under it did.
+pub(crate) fn take_shown_end() -> Option<(f32, f32)> {
+    SHOWN_END.with(|s| s.take())
+}
+
 /// Under the transcript's end: paused, or what OAK is doing. "Paused" shows
 /// once the pause has taken hold, and `agents_pausing` (its subagents still
 /// pausing) holds it back too; until then the pause button spins and this
 /// says what OAK is still doing. Then, for a swarm's coordinator, its
-/// `members`, a row each (`member_row`).
+/// `members`, a row each (`member_row`). `room`: the empty room above it,
+/// under what the transcript shows last. Returns where the status line
+/// ended, when there is one.
 pub(crate) fn transcript_status(
     ui: &mut Ui,
     t: &Theme,
@@ -3945,8 +3983,9 @@ pub(crate) fn transcript_status(
     live: &Live,
     agents_pausing: bool,
     members: &[MemberRow],
-) {
-    status_line(ui, t, conv, live, agents_pausing);
+    room: f32,
+) -> Option<StatusEnd> {
+    let end = status_line(ui, t, conv, live, agents_pausing, room);
     if !members.is_empty() {
         ui.add_space(4.0);
         ui.scope(|ui| {
@@ -3956,6 +3995,7 @@ pub(crate) fn transcript_status(
             }
         });
     }
+    end
 }
 
 /// A click on a member's row in the list under a coordinator's transcript
@@ -4047,9 +4087,20 @@ fn member_row(ui: &mut Ui, t: &Theme, m: &MemberRow, busy: bool) {
     });
 }
 
-/// `transcript_status`'s first line: paused, or what OAK is doing.
-fn status_line(ui: &mut Ui, t: &Theme, conv: &Conversation, live: &Live, agents_pausing: bool) {
-    if live.pause_settled(conv.paused) && !agents_pausing {
+/// `transcript_status`'s first line: paused, or what OAK is doing, with
+/// as much room above it as below it (`STATUS_ROOM`; `room` is above it
+/// already).
+fn status_line(ui: &mut Ui, t: &Theme, conv: &Conversation, live: &Live, agents_pausing: bool, room: f32) -> Option<StatusEnd> {
+    let paused = live.pause_settled(conv.paused) && !agents_pausing;
+    if !paused && !(live.busy || conv.paused || live.pause_queued) {
+        return None;
+    }
+    let gap = room.max(STATUS_ROOM);
+    ui.add_space(gap - room);
+    // Under the row: an item's spacing after it, the pad, and the list's
+    // spacing after the tail.
+    let pad = (gap - 2.0 * ui.spacing().item_spacing.y).max(0.0);
+    let row = if paused {
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
             paint_pause(ui.painter(), r, t.accent);
@@ -4059,8 +4110,8 @@ fn status_line(ui: &mut Ui, t: &Theme, conv: &Conversation, live: &Live, agents_
                 "Paused"
             };
             ui.label(RichText::new(what).color(t.ink2));
-        });
-    } else if live.busy || conv.paused || live.pause_queued {
+        })
+    } else {
         let status = if live.pause_settled(conv.paused) {
             "Pausing subagents"
         } else if live.status.is_empty() || live.status == "Paused" {
@@ -4071,8 +4122,9 @@ fn status_line(ui: &mut Ui, t: &Theme, conv: &Conversation, live: &Live, agents_
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(RichText::new(status).color(t.ink3));
-        });
-    }
+        })
+    };
+    Some(StatusEnd { bottom: row.response.rect.bottom(), pad })
 }
 
 /// ASK's questions: options to click and an Other field for each. True
@@ -4321,7 +4373,9 @@ mod tests {
         let rows = [row("parser", MemberState::Waiting), row("quick", MemberState::Working), row("theme", MemberState::Working), row("verifier", MemberState::Waiting)];
         let (conv, live) = (Conversation::default(), Live::default());
         let mut time = 0.0;
-        let mut frame = |events| run_frame(&ctx, vec2(800.0, 600.0), &mut time, 0.1, events, |ui| transcript_status(ui, &t, &conv, &live, false, &rows));
+        let mut frame = |events| run_frame(&ctx, vec2(800.0, 600.0), &mut time, 0.1, events, |ui| {
+            transcript_status(ui, &t, &conv, &live, false, &rows, STATUS_ROOM);
+        });
         let out = frame(vec![]);
         let shown = painted(&out);
         // (By their tasks' tops: the same text, so the same glyphs.)
