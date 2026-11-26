@@ -1260,11 +1260,29 @@ conversation itself and a later fresh thread is sent it anew; the transcript sho
 row, "the conversation so far (AWS Quick catching up)", which opens to the read.
 
 **A revert** (or a rewind mid-turn) that takes out anything Quick's thread holds (a reply Quick wrote
-from the revert point on, or anything while the conversation is on Quick) moves the conversation to
-a fresh Quick thread on the same login (`agent::quick_thread_reverted`): Quick's service has no way
-to take messages out of a thread (its app's `edit_message` frame replaces one user message by the
-id the app gave it, which Oak doesn't keep), and its agent would go on from what was reverted. The
-fresh thread says where it starts (`recovery::Session::from`: the number of messages left), and
+from the revert point on, or anything while the conversation is on Quick) goes on as Quick's own edit
+of a message where it can, as its app edits one. Each user turn Oak sends Quick as a thread's next
+message is kept on its message, once Quick has replied to it, with the thread, login and
+`message_id` it went as (`agent::QUICK_MSG_KEY`, `quick::turn::Sent`). When the revert keeps whole
+replies only and the first message after the newest one kept went on the thread and login the
+conversation is on now (`agent::quick_edit_target`), the conversation stays on that thread
+(`agent::quick_thread_edited`, `recovery::Session::edit`), and its next message goes as an
+`edit_message` frame naming that one (`quick::as_edit`: `user_message`'s payload, with
+`original_message_id` and `root_session_id`, without `send_origin` and `had_physical_input`):
+Quick's service takes it and all after it out of the thread and answers the new text in its place,
+so the request carries only the new turn, re-briefed if the briefing went with what was taken out
+(`a_revert_edits_the_message_in_quicks_thread`). The edit is done once Quick replies to it
+(`agent::quick_request_over`); an edit Quick doesn't reply to (an error, a refusal, a stop before
+any reply) may have left what was reverted in the thread, so the conversation goes on in a fresh
+thread instead, sent all of it (`an_edit_quick_didnt_answer_moves_to_a_fresh_thread`): a failed
+edit costs a resend, never a thread holding what was reverted. A live check is
+`quick::live_test::quick_live_edit_message` (ignored; needs a profile with Quick logins).
+
+Where Quick has no edit for it (a revert that keeps part of a reply, a message sent on a thread or
+login since left, one from before Oak kept them, no login to put it on), the conversation moves to
+a fresh Quick thread on the same login (`agent::quick_thread_reverted`,
+`a_revert_quick_cant_edit_opens_a_fresh_thread`): Quick's agent would otherwise go on from what was
+reverted. The fresh thread says where it starts (`recovery::Session::from`: the number of messages left), and
 everything before that counts as another thread's: Quick's replies there (`agent::unseen_since`) and
 the messages it took in mid-turn there (`agent::for_provider_since`), so the fresh thread is sent the
 conversation as it is after the revert, with Oak's briefing (`a_revert_moves_quick_to_a_fresh_thread`).

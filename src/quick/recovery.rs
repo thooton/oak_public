@@ -47,6 +47,14 @@ pub(crate) struct Session {
     /// summary and all after it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) compacted: bool,
+    /// A revert took this thread back to before the user message Oak sent
+    /// on it as this `message_id` (`agent::quick_edit_target`): the next
+    /// message goes as Quick's own edit of it (`edit_message`), which
+    /// Quick's service answers as its app's edit is answered, taking that
+    /// message and all after it out of the thread. Cleared once a message
+    /// went (`agent::note_quick_sent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) edit: Option<String>,
 }
 
 /// The thread conversation `conv` goes on in once a summary replaces the
@@ -58,7 +66,7 @@ pub(crate) fn compacted_session(conv: &str, current: Option<&Session>) -> Option
         .map(|q| q.account.clone())
         .filter(|a| !a.is_empty())
         .or_else(|| crate::rotation::seat(api::Provider::Quick, conv))?;
-    Some(Session { account, thread: hex_uuid(), from: None, compacted: true })
+    Some(Session { account, thread: hex_uuid(), compacted: true, ..Default::default() })
 }
 
 /// The thread a summary of conversation `conv` is written on: a throwaway
@@ -70,7 +78,7 @@ pub(crate) fn summary_session(conv: &str, current: Option<&Session>) -> Option<S
         .filter(|a| !a.is_empty())
         .or_else(|| crate::rotation::seat(api::Provider::Quick, conv))
         .or_else(|| login::all().first().map(|l| l.id.clone()))?;
-    Some(Session { account, thread: hex_uuid(), from: None, compacted: false })
+    Some(Session { account, thread: hex_uuid(), ..Default::default() })
 }
 
 pub(crate) fn note_limit(account: &str) {
@@ -93,8 +101,7 @@ pub(crate) fn next_session(
     Some(Session {
         account,
         thread: hex_uuid(),
-        from: None,
-        compacted: false,
+        ..Default::default()
     })
 }
 
@@ -106,8 +113,7 @@ pub(crate) fn fresh_session(conv: &str) -> Option<Session> {
     Some(Session {
         account,
         thread: hex_uuid(),
-        from: None,
-        compacted: false,
+        ..Default::default()
     })
 }
 

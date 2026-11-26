@@ -1879,6 +1879,23 @@ fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, 
     json!({"type": "user_message", "payload": payload})
 }
 
+/// `user`, a `user_message` frame on `thread`, as Quick's `edit_message` of
+/// the user message Oak sent there as `original` (its `message_id`): what
+/// Quick's app sends when the user edits a message, the same payload with
+/// the message it edits named (and the thread as the session's root), not
+/// how it was typed. Quick's service takes that message and all after it
+/// out of the thread and answers the new text in its place.
+pub(crate) fn as_edit(mut user: Value, original: &str, thread: &str) -> Value {
+    user["type"] = json!("edit_message");
+    if let Some(p) = user["payload"].as_object_mut() {
+        p.remove("send_origin");
+        p.remove("had_physical_input");
+        p.insert("original_message_id".into(), json!(original));
+        p.insert("root_session_id".into(), json!(thread));
+    }
+    user
+}
+
 /// What the user said since Quick last replied: the text of the user turn
 /// (or turns) after the newest assistant message, past Oak's own additions
 /// (`_oak_file` blocks). Quick keeps the thread's history, so this is all it
@@ -2199,7 +2216,7 @@ pub(crate) fn document_text(b: &Value) -> Option<String> {
 /// nothing new from the user (only the results of the calls Oak ran).
 pub(crate) const CARRY_ON: &str = "(From Oak, the device that runs your tools.) The connection to you was cut in the middle of your turn. There is no new message from me: carry on with what I asked from where you stopped, without starting over or repeating tool calls that already ran.";
 
-fn hex_uuid() -> String {
+pub(crate) fn hex_uuid() -> String {
     let b: [u8; 16] = rand::random();
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",

@@ -23,6 +23,16 @@ fn live_turn(prompt: &str, model: &str) -> (String, Option<String>) {
 
 /// `live_turn`, on thread `thread`.
 fn live_turn_on(prompt: &str, model: &str, thread: &str) -> (String, Option<String>) {
+    live_turn_in(prompt, model, thread, None)
+}
+
+/// `live_turn_on`, in Quick session `session` (its thread, an edit).
+fn live_turn_in(
+    prompt: &str,
+    model: &str,
+    thread: &str,
+    session: Option<crate::quick::recovery::Session>,
+) -> (String, Option<String>) {
     let _ = std::env::var("OAK_DIR").expect("set OAK_DIR to a scratch profile with quick.json");
     crate::api::load_auth();
     assert!(crate::quick::on(), "Quick isn't signed in");
@@ -42,6 +52,7 @@ fn live_turn_on(prompt: &str, model: &str, thread: &str) -> (String, Option<Stri
         conv: Some(thread.to_string()),
         thinking: true,
         effort: Some("low".into()),
+        quick_session: session,
         ..Default::default()
     };
     let handle = std::thread::spawn(move || crate::quick::turn::stream(body, tx));
@@ -500,4 +511,36 @@ fn quick_live_switch_conversation() {
     handle.join().ok();
     println!("text: {text}\nerr: {err:?}");
     assert!(err.is_none(), "{err:?}");
+}
+
+/// A revert goes on as Quick's own edit of the message (`edit_message`):
+/// Quick's thread forgets what the edited message said and all after it,
+/// and answers the new text in its place, on the same thread.
+#[test]
+#[ignore]
+fn quick_live_edit_message() {
+    let thread = format!("oak-edit-{}", crate::api::now_ms());
+    let first = "Remember this code word: APPLE. Reply with just OK.";
+    let (_, err) = live_turn_on(first, &model(), &thread);
+    assert!(err.is_none(), "{err:?}");
+    let sent = crate::quick::turn::take_sent(&thread);
+    let original = sent.first().expect("the first message, as sent").clone();
+    assert!(!original.edit);
+    let session = crate::quick::recovery::Session {
+        account: original.account.clone(),
+        thread: thread.clone(),
+        edit: Some(original.id.clone()),
+        ..Default::default()
+    };
+    let edited = "Remember this code word: BANANA. Reply with just OK.";
+    let (_, err) = live_turn_in(edited, &model(), &thread, Some(session.clone()));
+    assert!(err.is_none(), "the edit: {err:?}");
+    let sent = crate::quick::turn::take_sent(&thread);
+    assert!(sent.first().is_some_and(|s| s.edit && s.thread == thread), "{sent:?}");
+    let on = crate::quick::recovery::Session { edit: None, ..session };
+    let ask = "What code word did I give you, and did I ever give you any other? Reply with the word(s) only.";
+    let (text, err) = live_turn_in(ask, &model(), &thread, Some(on));
+    assert!(err.is_none(), "{err:?}");
+    let t = text.to_uppercase();
+    assert!(t.contains("BANANA") && !t.contains("APPLE"), "the thread still has the edited message: {text}");
 }

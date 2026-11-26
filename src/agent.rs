@@ -1662,12 +1662,17 @@ impl Worker {
             RevertTo::End(n) => *n,
         };
         let quick_had = quick_holds(&mut c, from);
+        // (Read before the revert takes the message out.)
+        let edit = if quick_had { quick_edit_target(&mut c, to) } else { None };
         let done = match to {
             RevertTo::Block(msg, block, was) => revert_to(&mut c, *msg, *block, was),
             RevertTo::End(n) => revert_to_end(&mut c, *n),
         };
         if done && quick_had {
-            quick_thread_reverted(&mut c);
+            match edit {
+                Some(original) => quick_thread_edited(&mut c, original),
+                None => quick_thread_reverted(&mut c),
+            }
         } else if done {
             // A thread a revert opened starts no later than what is left.
             let n = c.messages.len();
@@ -3474,6 +3479,181 @@ pub(crate) fn quick_thread_reverted(c: &mut Conversation) {
     };
     next.from = Some(c.messages.len());
     c.quick_session = Some(next);
+}
+
+/// On a user message Oak sent Quick as a thread's next message: the thread,
+/// the account and the `message_id` it went as (`quick::turn::Sent`), so a
+/// revert to before it can go on as Quick's own edit of it.
+pub(crate) const QUICK_MSG_KEY: &str = "_oak_quick_msg";
+
+/// The `message_id` of the user message Quick's own edit would take conversation
+/// `c`'s thread back to for a revert to `to`, as its app's edit of a message
+/// does: the first message after the newest reply the revert keeps whole,
+/// when Oak sent it as a message on the thread the conversation is on now,
+/// on its account (`QUICK_MSG_KEY`). Quick's thread then holds what the
+/// conversation keeps before it; the user turns kept from it on go with the
+/// next message, the edit (`quick::new_user_text`). None when the revert
+/// keeps part of a reply (Quick has no edit for that), or that message
+/// wasn't sent on this thread (another provider's turn, a thread since left,
+/// a message from before Oak kept them): a fresh thread then.
+fn quick_edit_target(c: &mut Conversation, to: &RevertTo) -> Option<String> {
+    let kept = match to {
+        RevertTo::Block(msg, block, _) => {
+            c.messages.load_from(*msg);
+            let m = c.messages.get(*msg)?;
+            if *block == 0 {
+                *msg
+            } else if m["role"] == "assistant" {
+                // (Only thinking left goes too: `revert_to`.)
+                let left = m["content"].as_array()?.iter().take(*block).any(|b| !oak::is_reasoning(b));
+                if left {
+                    return None;
+                }
+                *msg
+            } else {
+                *msg + 1
+            }
+        }
+        RevertTo::End(n) => *n,
+    };
+    // The newest reply before `kept`, reading back only as far as it.
+    let mut at = kept.min(c.messages.len());
+    while at > 0 {
+        if at <= c.messages.base() {
+            c.messages.load_from(at.saturating_sub(64));
+        }
+        if c.messages[at - 1]["role"] == "assistant" {
+            break;
+        }
+        at -= 1;
+    }
+    let sent = &c.messages.get(at)?[QUICK_MSG_KEY];
+    let thread = c.quick_session.as_ref().map_or_else(|| c.id.clone(), |q| q.thread.clone());
+    let account = c
+        .quick_session
+        .as_ref()
+        .map(|q| q.account.clone())
+        .or_else(|| crate::rotation::seat(api::Provider::Quick, &c.id))?;
+    (sent["thread"] == thread.as_str() && sent["account"] == account.as_str())
+        .then(|| sent["id"].as_str().map(String::from))
+        .flatten()
+}
+
+/// A revert took conversation `c`'s Quick thread back to before the user
+/// message Oak sent there as `original` (`quick_edit_target`): it goes on in
+/// the same thread, its next message going as Quick's edit of that one
+/// (`recovery::Session::edit`), which takes it and all after it out of the
+/// thread, as when the user edits a message in Quick's app. Not a fresh
+/// thread sent the whole conversation again (`quick_thread_reverted`).
+pub(crate) fn quick_thread_edited(c: &mut Conversation, original: String) {
+    let n = c.messages.len();
+    match c.quick_session.as_mut() {
+        Some(q) => {
+            q.edit = Some(original);
+            if let Some(f) = q.from.as_mut() {
+                *f = (*f).min(n);
+            }
+        }
+        // The conversation's own thread (named for it) on its seat.
+        None => match crate::rotation::seat(api::Provider::Quick, &c.id) {
+            Some(account) => {
+                c.quick_session = Some(crate::quick::recovery::Session {
+                    account,
+                    thread: c.id.clone(),
+                    edit: Some(original),
+                    ..Default::default()
+                })
+            }
+            None => return quick_thread_reverted(c),
+        },
+    }
+    // A turn parked on the thread would read on past the edit.
+    crate::quick::turn::drop_parked(&c.id, false);
+}
+
+/// Where the user turn a request with conversation `c`'s first `n` messages
+/// sent Quick begins: the first message after the newest reply among them,
+/// which Quick's thread takes as its message. None when they end in a reply,
+/// or it isn't among the messages held.
+pub(crate) fn quick_turn_start(c: &Conversation, n: usize) -> Option<usize> {
+    let n = n.min(c.messages.len());
+    let base = c.messages.base();
+    let mut at = n;
+    while at > base && c.messages[at - 1]["role"] != "assistant" {
+        at -= 1;
+    }
+    let reply_before = at > 0 && c.messages[at - 1]["role"] == "assistant";
+    (at < n && (reply_before || at == 0)).then_some(at)
+}
+
+/// Keeps what a request with conversation `c`'s first `n` messages sent Quick
+/// (`quick::turn::take_sent`) on the user message it was (`QUICK_MSG_KEY`),
+/// for a revert to edit, and clears an edit that went (`Session::edit`). The
+/// first message a user turn went as stays (Quick's thread has it from
+/// there, a resend after it), unless an edit replaced it. True when the
+/// conversation changed.
+pub(crate) fn note_quick_sent(c: &mut Conversation, n: usize, sent: Vec<crate::quick::turn::Sent>) -> bool {
+    let mut changed = false;
+    for s in sent {
+        if let Some(q) = c.quick_session.as_mut().filter(|q| q.thread == s.thread && q.edit.is_some()) {
+            q.edit = None;
+            changed = true;
+        }
+        let Some(at) = quick_turn_start(c, n) else { continue };
+        let had = &c.messages[at][QUICK_MSG_KEY];
+        if !s.edit && had["thread"] == s.thread.as_str() && had["account"] == s.account.as_str() {
+            continue;
+        }
+        if let Some(m) = c.messages.get_mut(at) {
+            m[QUICK_MSG_KEY] = json!({"thread": s.thread, "account": s.account, "id": s.id});
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// A Quick request with conversation `c`'s first `n` messages is over, its
+/// user turn having gone as `sent` (`quick::turn::take_sent`). When Quick
+/// `replied`, its thread has the message: it is kept for a revert to edit
+/// (`note_quick_sent`). When it didn't (an error, a refusal, a stop before
+/// any reply) and the message was an edit, Quick may not have taken out
+/// what the revert did, and its thread can't be trusted to lack it: the
+/// conversation goes on in a fresh thread instead, sent all of it
+/// (`quick_edit_failed`), so a failed edit costs a resend, never a thread
+/// that still holds what was reverted. True when the conversation changed.
+pub(crate) fn quick_request_over(
+    c: &mut Conversation,
+    n: usize,
+    sent: Vec<crate::quick::turn::Sent>,
+    replied: bool,
+) -> bool {
+    if replied {
+        return note_quick_sent(c, n, sent);
+    }
+    let edited = sent.iter().any(|s| {
+        s.edit && c.quick_session.as_ref().is_some_and(|q| q.thread == s.thread && q.edit.is_some())
+    });
+    if edited {
+        quick_edit_failed(c);
+    }
+    edited
+}
+
+/// The edit a revert left Quick's thread to make (`Session::edit`) didn't
+/// go through: the conversation goes on in a fresh thread on the same
+/// account, as a revert Quick can't edit does (`quick_thread_reverted`).
+fn quick_edit_failed(c: &mut Conversation) {
+    let account = c.quick_session.as_ref().map(|q| q.account.clone()).unwrap_or_default();
+    quick_thread_reverted(c);
+    if let Some(q) = c.quick_session.as_mut().filter(|q| q.edit.is_some()) {
+        // (No seat to open it on: the session's own account.)
+        *q = crate::quick::recovery::Session {
+            account,
+            thread: crate::quick::hex_uuid(),
+            from: Some(c.messages.len()),
+            ..Default::default()
+        };
+    }
 }
 
 /// Where conversation `c`'s Quick thread starts, when a revert opened it

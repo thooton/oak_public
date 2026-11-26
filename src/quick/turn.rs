@@ -278,6 +278,35 @@ pub(crate) fn drop_parked(thread: &str, pause: bool) {
     }
 }
 
+/// A user message a request sent Quick as a thread's next message (not one
+/// it took in mid-turn): the thread, the account it is on, and the
+/// `message_id` it went as, which an edit of it names (`as_edit`); `edit`
+/// when it went as one. The agent takes these once the request is over
+/// (`take_sent`) and keeps each on the message it was
+/// (`agent::note_quick_sent`), for a revert to edit it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Sent {
+    pub(crate) thread: String,
+    pub(crate) account: String,
+    pub(crate) id: String,
+    pub(crate) edit: bool,
+}
+
+/// What `stream` sent, by conversation, till the agent takes it.
+static SENT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<Sent>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn note_sent(conv: &str, sent: Sent) {
+    if !conv.is_empty() {
+        SENT.lock().unwrap_or_else(|e| e.into_inner()).entry(conv.to_string()).or_default().push(sent);
+    }
+}
+
+/// The messages sent for conversation `conv` since this was last asked.
+pub(crate) fn take_sent(conv: &str) -> Vec<Sent> {
+    SENT.lock().unwrap_or_else(|e| e.into_inner()).remove(conv).unwrap_or_default()
+}
+
 /// Messages the user typed while a Quick turn of theirs ran, by thread. Oak
 /// hands each to the turn (`steer`), the turn sends it on its socket as
 /// Quick's app does (`steer_message`: `mid_turn`), and Quick says when its
@@ -670,7 +699,11 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
         },
     };
     let thread = session.as_ref().map_or_else(|| local.clone(), |q| q.thread.clone());
+    // A revert took the thread back to before a message Oak sent on it:
+    // this one goes as Quick's edit of that one (`recovery::Session::edit`).
+    let edit = session.as_ref().and_then(|q| q.edit.clone());
     body.quick_session = session;
+    let account = acct.clone();
     crate::quick::login::set_using(acct);
     // Quick took in a message typed meanwhile and carries on: this request
     // reads on where the last one stopped, on the same socket. Anything said
@@ -862,6 +895,12 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
     if ctl.aborted().is_some() || ctl.pause_requested() {
         return drop(tx.send(Sse::Done));
     }
+    // An edit takes out the message it edits and all after it, which may
+    // be where the thread was briefed: it is briefed again unless Quick has
+    // run snippets in what is left (`oak_preface`).
+    if edit.is_some() {
+        BRIEFED.lock().unwrap_or_else(|e| e.into_inner()).remove(&thread);
+    }
     let mut user = user_message(&body, &thread, m, outpost.as_deref());
     // Quick's message takes text only: the images the user attached go to
     // the thread's workspace, and the message says where.
@@ -870,9 +909,20 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
         let said = user["payload"]["text"].as_str().unwrap_or("").to_string();
         user["payload"]["text"] = json!(format!("{said}\n\n{}", attached.join("\n")));
     }
+    if let Some(original) = &edit {
+        user = crate::quick::as_edit(user, original, &thread);
+    }
     if let Err(e) = sock.send(&user) {
         BRIEFED.lock().unwrap_or_else(|e| e.into_inner()).remove(&thread);
         return drop(tx.send(Sse::Err(e)));
+    }
+    // What the user said (not Oak's own nudges, a summary's instruction)
+    // goes as a message a revert can edit.
+    if let (Some(account), Some(id)) = (account, user["payload"]["message_id"].as_str())
+        && body.instruction.is_none()
+        && (edit.is_some() || new_user_text(&body).is_some())
+    {
+        note_sent(&local, Sent { thread: thread.clone(), account, id: id.to_string(), edit: edit.is_some() });
     }
     // The login the conversation moved to has it all now.
     if body.instruction.is_none() {

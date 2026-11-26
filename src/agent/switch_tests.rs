@@ -627,6 +627,160 @@ fn a_revert_moves_quick_to_a_fresh_thread() {
     assert_eq!(crate::quick::new_user_text(&req).as_deref(), Some("Another ask"));
 }
 
+/// A user message Oak sent Quick as `id` on `thread`, on `account`
+/// (`QUICK_MSG_KEY`).
+fn sent_as(mut m: Value, thread: &str, account: &str, id: &str) -> Value {
+    m[QUICK_MSG_KEY] = json!({"thread": thread, "account": account, "id": id});
+    m
+}
+
+/// A revert to before a user message Oak sent on the conversation's Quick
+/// thread goes on in that thread: the next message is Quick's own edit of
+/// it (`edit_message`, naming it), with only the new text, not a fresh
+/// thread sent the whole conversation. Once it went, the edit is done and
+/// the message keeps the id it went as.
+#[test]
+fn a_revert_edits_the_message_in_quicks_thread() {
+    let (w, s) = idle_worker("switch-revert-edit", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        ..Default::default()
+    });
+    let id = {
+        let mut c = s.conv.lock().unwrap();
+        let id = c.id.clone();
+        c.messages = vec![
+            user("First ask"),
+            reply(api::Provider::Quick, vec![oak::text("First answer")]),
+            sent_as(user("Second ask"), &id, "edit-account", "msg-second"),
+            reply(api::Provider::Quick, vec![oak::text("Second answer")]),
+        ]
+        .into();
+        id
+    };
+    crate::rotation::used(api::Provider::Quick, &id, "edit-account", 0, api::now_ms());
+    let was = s.conv.lock().unwrap().messages[2]["content"][0].clone();
+    w.apply_revert(&RevertTo::Block(2, 0, was));
+    {
+        let mut c = s.conv.lock().unwrap();
+        assert_eq!(c.messages.len(), 2);
+        let q = c.quick_session.clone().expect("the thread, to edit");
+        assert_eq!((q.account.as_str(), q.thread.as_str()), ("edit-account", id.as_str()), "the same thread");
+        assert_eq!(q.edit.as_deref(), Some("msg-second"));
+        c.messages.push(user("Another ask"));
+    }
+    let (req, n, _) = w.request_body();
+    let q = req.quick_session.clone().unwrap();
+    assert_eq!(q.edit.as_deref(), Some("msg-second"));
+    assert!(req.unseen.is_empty(), "Quick's thread has the rest: {}", all_text(&req.unseen));
+    let m = crate::quick::model(QUICK).unwrap();
+    let frame = crate::quick::as_edit(crate::quick::user_message(&req, &q.thread, m, Some("dev")), "msg-second", &q.thread);
+    assert_eq!(frame["type"], "edit_message");
+    let p = &frame["payload"];
+    assert_eq!(p["original_message_id"], "msg-second");
+    assert_eq!((p["thread_id"].as_str(), p["root_session_id"].as_str()), (Some(id.as_str()), Some(id.as_str())));
+    assert_eq!(p["outpostId"], "dev");
+    assert!(p["text"].as_str().unwrap().ends_with("Another ask") && !p["text"].as_str().unwrap().contains("First"), "{p}");
+    assert!(p.get("send_origin").is_none() && p["message_id"].as_str().is_some_and(|i| i != "msg-second"));
+    // It went: the edit is done, and the message is the one it went as.
+    let sent = |id: &str, edit: bool| crate::quick::turn::Sent { thread: q.thread.clone(), account: "edit-account".into(), id: id.into(), edit };
+    let mut c = s.conv.lock().unwrap();
+    assert!(quick_request_over(&mut c, n, vec![sent("msg-edited", true)], true));
+    assert_eq!(c.quick_session.as_ref().unwrap().edit, None);
+    assert_eq!(c.messages[2][QUICK_MSG_KEY]["id"], "msg-edited");
+    // A resend of the same turn leaves the first it went as.
+    quick_request_over(&mut c, n, vec![sent("msg-resent", false)], true);
+    assert_eq!(c.messages[2][QUICK_MSG_KEY]["id"], "msg-edited");
+    // Oak's key stays Oak's.
+    assert!(!all_text(&oak::clean(vec![c.messages[2].clone()])).contains("msg-edited"));
+}
+
+/// An edit Quick didn't reply to (an error or refusal before any reply) may
+/// have left the reverted messages in its thread: the conversation goes on
+/// in a fresh thread, sent all that is left, never on as if the edit went.
+/// The message isn't kept as sent, nor is one Quick never replied to.
+#[test]
+fn an_edit_quick_didnt_answer_moves_to_a_fresh_thread() {
+    let (w, s) = idle_worker("switch-revert-edit-failed", Conversation {
+        provider: Some(api::Provider::Quick),
+        model: QUICK.into(),
+        ..Default::default()
+    });
+    let id = {
+        let mut c = s.conv.lock().unwrap();
+        let id = c.id.clone();
+        c.messages = vec![
+            user("First ask"),
+            reply(api::Provider::Quick, vec![oak::text("First answer")]),
+            sent_as(user("Second ask"), &id, "edit-account-3", "msg-second"),
+            reply(api::Provider::Quick, vec![oak::text("Second answer")]),
+        ]
+        .into();
+        id
+    };
+    crate::rotation::used(api::Provider::Quick, &id, "edit-account-3", 0, api::now_ms());
+    let was = s.conv.lock().unwrap().messages[2]["content"][0].clone();
+    w.apply_revert(&RevertTo::Block(2, 0, was));
+    s.conv.lock().unwrap().messages.push(user("Another ask"));
+    let (_, n, _) = w.request_body();
+    let edit = crate::quick::turn::Sent { thread: id.clone(), account: "edit-account-3".into(), id: "msg-edit".into(), edit: true };
+    {
+        let mut c = s.conv.lock().unwrap();
+        assert!(quick_request_over(&mut c, n, vec![edit.clone()], false));
+        let q = c.quick_session.clone().expect("a fresh thread");
+        assert_ne!(q.thread, id, "not the thread the edit may not have reached");
+        assert_eq!((q.account.as_str(), q.edit.as_ref(), q.from), ("edit-account-3", None, Some(3)));
+        assert!(c.messages[2].get(QUICK_MSG_KEY).is_none(), "not kept as sent");
+        // A plain message Quick didn't answer isn't kept either.
+        assert!(!quick_request_over(&mut c, n, vec![crate::quick::turn::Sent { edit: false, ..edit }], false));
+        assert!(c.messages[2].get(QUICK_MSG_KEY).is_none());
+    }
+    let (req, ..) = w.request_body();
+    let unseen = all_text(&req.unseen);
+    assert!(unseen.contains("First ask") && unseen.contains("First answer") && !unseen.contains("Second"), "{unseen}");
+    assert_eq!(crate::quick::new_user_text(&req).as_deref(), Some("Another ask"));
+}
+
+/// Quick's thread has no edit for a revert that keeps part of a reply, nor
+/// for a message sent on a thread the conversation has since left: those
+/// still go on in a fresh thread.
+#[test]
+fn a_revert_quick_cant_edit_opens_a_fresh_thread() {
+    for (name, back_to_block) in [("switch-revert-part", true), ("switch-revert-elsewhere", false)] {
+        let (w, s) = idle_worker(name, Conversation {
+            provider: Some(api::Provider::Quick),
+            model: QUICK.into(),
+            ..Default::default()
+        });
+        let id = {
+            let mut c = s.conv.lock().unwrap();
+            let id = c.id.clone();
+            let on = if back_to_block { id.clone() } else { "an-older-thread".to_string() };
+            c.messages = vec![
+                user("First ask"),
+                reply(api::Provider::Quick, vec![oak::text("First answer")]),
+                sent_as(user("Second ask"), &on, "edit-account-2", "msg-second"),
+                reply(api::Provider::Quick, vec![oak::text("Second answer"), oak::text("More of it")]),
+            ]
+            .into();
+            id
+        };
+        crate::rotation::used(api::Provider::Quick, &id, "edit-account-2", 0, api::now_ms());
+        let to = if back_to_block {
+            let was = s.conv.lock().unwrap().messages[3]["content"][1].clone();
+            RevertTo::Block(3, 1, was)
+        } else {
+            let was = s.conv.lock().unwrap().messages[2]["content"][0].clone();
+            RevertTo::Block(2, 0, was)
+        };
+        w.apply_revert(&to);
+        let c = s.conv.lock().unwrap();
+        let q = c.quick_session.clone().expect("a fresh thread");
+        assert_ne!(q.thread, id, "{name}");
+        assert_eq!(q.edit, None, "{name}");
+    }
+}
+
 /// Reverting what only another provider wrote, after Quick's last reply,
 /// leaves Quick's thread as it is.
 #[test]

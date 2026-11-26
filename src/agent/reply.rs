@@ -651,6 +651,28 @@ impl Worker {
         (req, c.messages.len(), c.rolling.base())
     }
 
+    /// What the request's user turn went to Quick as, once it is over
+    /// (`agent::quick_request_over`): kept on its message for a revert to
+    /// edit when Quick replied to it, and an edit Quick didn't reply to
+    /// given up for a fresh thread.
+    fn note_quick_sent(&self, reply: &Reply) {
+        let n = match self.last_request.lock().unwrap().as_ref() {
+            Some((body, n, ..)) if body.provider == api::Provider::Quick => *n,
+            _ => return,
+        };
+        // Quick answered: some of a reply came, or it ended as replies do,
+        // not on one of Quick's own stop reasons (`quick::recovery`).
+        let replied = match reply {
+            Reply::Done(blocks, stop, _) => !blocks.is_empty() || !stop.starts_with("quick_"),
+            _ => false,
+        };
+        let mut c = self.conv.lock().unwrap();
+        let sent = crate::quick::turn::take_sent(&c.id);
+        if !sent.is_empty() && super::quick_request_over(&mut c, n, sent, replied) {
+            c.save();
+        }
+    }
+
     /// One request to the model, its reply streamed into `Live::blocks`. A pause the user asked for meanwhile
     /// (`Session::request_pause`) starts once it is over, however it ended:
     /// the reply is kept, its tool calls run, and the next request waits.
@@ -658,6 +680,7 @@ impl Worker {
         self.set(|l| l.requesting = true);
         let mut reply = self.ask_inner(batch);
         self.end_request();
+        self.note_quick_sent(&reply);
         self.settle_steers();
         // Which provider wrote the reply (`BY_KEY`), on each block.
         let by = self
