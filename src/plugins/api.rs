@@ -813,6 +813,12 @@ impl HostApi for Oak {
         give_result(result, out, user)
     }
 
+    unsafe extern "C" fn app_background_browser_view(ui: *mut OakUi, handle: OakStr, max_h: f32, out: OakSink, out_user: *mut c_void) -> bool {
+        let (ui, t) = (ui_of(ui), theme());
+        let result = app(|a| a.plugin_background_browser_view(ui, &t, str_of(handle), max_h));
+        give_result(result.unwrap_or_else(|| Err(NO_WINDOW.into())).map(|()| String::new()), out, out_user)
+    }
+
     unsafe extern "C" fn app_local_form(ui: *mut OakUi) {
         let (ui, t) = (ui_of(ui), theme());
         app(|a| a.local_rows(ui, &t));

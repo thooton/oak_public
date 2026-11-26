@@ -13,6 +13,10 @@ impl Browser {
         Self(handle)
     }
 
+    pub(crate) fn handle(&self) -> &str {
+        &self.0
+    }
+
     pub fn same_session(&self, other: &Self) -> bool {
         self.0 == other.0
     }

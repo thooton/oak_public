@@ -608,6 +608,14 @@ pub trait App {
     fn open_background_browser(&mut self, _url: &str) -> Result<crate::browser::Browser, String> {
         Err("This window cannot open a background browser.".into())
     }
+    /// Draws the live picture of `browser`, a session this Home plugin page
+    /// opened, read-only (interface 15): as wide as the space left and at
+    /// most `max_h` tall (0: no limit), its origin over it. Draw it each
+    /// frame it should show; the picture streams only while it is drawn.
+    /// The user can watch but not send input, and the plugin gets no pixels.
+    fn background_browser_view(&mut self, _ui: &mut Ui, _browser: &crate::browser::Browser, _max_h: f32) -> Result<(), String> {
+        Err("This window cannot show a background browser.".into())
+    }
     /// Draws a transcript the plugin has, as a conversation's is drawn,
     /// read-only. `key` is its tab; `version` changes when the transcript
     /// does (`make` is called only then); `tail` draws what follows the
@@ -836,6 +844,11 @@ impl App for Window {
     fn open_background_browser(&mut self, url: &str) -> Result<crate::browser::Browser, String> {
         self.settle();
         checked(|out, user| unsafe { (api().app_open_background_browser)(s(url), out, user) }).map(crate::browser::Browser::new)
+    }
+
+    fn background_browser_view(&mut self, ui: &mut Ui, browser: &crate::browser::Browser, max_h: f32) -> Result<(), String> {
+        self.settle();
+        checked(|out, user| unsafe { (api().app_background_browser_view)(ui.as_raw(), s(browser.handle()), max_h, out, user) }).map(|_| ())
     }
 
     fn transcript(&mut self, ui: &mut Ui, key: &str, version: u64, make: &mut dyn FnMut() -> Chat, tail_sig: u64, tail: &mut dyn FnMut(&mut Ui)) {

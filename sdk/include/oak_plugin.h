@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define OAK_ABI 1
-#define OAK_API_VERSION 14
+#define OAK_API_VERSION 15
 #define OAK_CALL_UNKNOWN INT64_MIN
 #define OAK_FILL ((float)INFINITY)
 
@@ -2189,6 +2189,15 @@ struct OakApi {
      * false: a reason.
      */
     bool (*background_browser_command)(OakStr handle, OakStr request, OakSink out, void *user);
+
+    /* Draws the live picture of this page's background session `handle`,
+     * read-only, as wide as the space left and at most `max_h` tall (0:
+     * no limit), with its origin over it. Draw it each frame it should
+     * show (the picture streams only while it is drawn). The user sees
+     * the page but can't send it input; the plugin gets no pixels. True
+     * when it was drawn; false gives the reason to `out`.
+     */
+    bool (*app_background_browser_view)(OakUi *ui, OakStr handle, float max_h, OakSink out, void *out_user);
 };
 
 /* Text from a C string, and from a literal. */

@@ -66,6 +66,22 @@ impl App {
         Ok(handle)
     }
 
+    /// Draws this page's own background session, read-only, so the user can
+    /// watch what the plugin does in it.
+    pub(crate) fn plugin_background_browser_view(&mut self, ui: &mut Ui, t: &Theme, handle: &str, max_h: f32) -> Result<(), String> {
+        if self.page != Page::Plugin {
+            return Err("A background browser can only be shown on a Home plugin page.".into());
+        }
+        let inst = self
+            .background_browser
+            .as_ref()
+            .filter(|b| b.owner == self.plugin_page && b.handle() == handle)
+            .and_then(|b| b.instance())
+            .ok_or("That background browser isn't open on this page.")?;
+        browser_view::watch(ui, t, &inst, max_h);
+        Ok(())
+    }
+
     /// Shows Settings; its X comes back to what was shown.
     pub(crate) fn plugin_go_settings(&mut self) {
         if self.page != Page::Settings {

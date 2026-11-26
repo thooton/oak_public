@@ -39,7 +39,7 @@ use std::ffi::{c_char, c_void};
 /// Changes only if the interface is ever broken (never, by intent).
 pub const OAK_ABI: u32 = 1;
 /// Counts up whenever functions are added at the table's end.
-pub const OAK_API_VERSION: u32 = 14;
+pub const OAK_API_VERSION: u32 = 15;
 /// The symbol a plugin exports: `const OakPlugin *oak_plugin(void)`.
 pub const ENTRY_SYMBOL: &[u8] = b"oak_plugin\0";
 
@@ -2077,6 +2077,16 @@ c_api! {
     /// events on a node from that document. True: `out` got the result;
     /// false: a reason.
     fn background_browser_command(handle: OakStr, request: OakStr, out: OakSink, user: *mut c_void) -> bool;
+
+    // Version 15: watching a background Chromium session.
+
+    /// Draws the live picture of this page's background session `handle`,
+    /// read-only, as wide as the space left and at most `max_h` tall (0:
+    /// no limit), with its origin over it. Draw it each frame it should
+    /// show (the picture streams only while it is drawn). The user sees
+    /// the page but can't send it input; the plugin gets no pixels. True
+    /// when it was drawn; false gives the reason to `out`.
+    fn app_background_browser_view(ui: *mut OakUi, handle: OakStr, max_h: f32, out: OakSink, out_user: *mut c_void) -> bool;
 }
 
 /// The C header: everything declared above, in C.

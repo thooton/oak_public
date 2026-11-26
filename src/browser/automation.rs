@@ -26,6 +26,11 @@ impl Lease {
     pub(crate) fn handle(&self) -> &str {
         &self.handle
     }
+
+    /// The running browser, for the page that owns it to watch.
+    pub(crate) fn instance(&self) -> Option<std::sync::Arc<Instance>> {
+        OPEN.lock().unwrap().get(&self.handle).filter(|inst| inst.is_private()).cloned()
+    }
 }
 
 impl Drop for Lease {

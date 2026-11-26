@@ -285,6 +285,62 @@ impl PrivatePage {
     }
 }
 
+/// A Home plugin page's background session, watched: its origin over its
+/// live picture, as wide as the space left and at most `max_h` tall (0: no
+/// limit). Read-only: nothing here sends the page input, so the plugin's
+/// automation can't be disturbed by a stray click. Frames stream only while
+/// this is drawn and on screen, at the size shown.
+pub(crate) fn watch(ui: &mut Ui, t: &Theme, inst: &Arc<Instance>, max_h: f32) {
+    let (w, h) = inst.viewport_css();
+    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+    let width = ui.available_width().max(1.0);
+    let mut k = width / w;
+    if max_h > 0.0 {
+        k = k.min((max_h - BAR_H).max(1.0) / h);
+    }
+    let page_size = vec2(w * k, h * k);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, page_size.y + BAR_H), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let frame = Rect::from_center_size(rect.center(), vec2(page_size.x, rect.height()));
+    let bar = Rect::from_min_size(frame.min, vec2(frame.width(), BAR_H));
+    let page = Rect::from_min_max(bar.left_bottom(), frame.max);
+    let (url, loading, status) = {
+        let v = inst.view.lock().unwrap();
+        (v.url.clone(), v.loading, v.status.clone())
+    };
+    let origin = reqwest::Url::parse(&url).ok().filter(|url| url.has_host())
+        .map(|url| url.origin().ascii_serialization()).unwrap_or_default();
+    let p = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    p.rect_filled(bar, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, t.panel);
+    p.text(egui::pos2(bar.left() + 10.0, bar.center().y), Align2::LEFT_CENTER, origin, FontId::proportional(12.5), t.ink2);
+    if loading {
+        p.text(egui::pos2(bar.right() - 10.0, bar.center().y), Align2::RIGHT_CENTER, "Loading…", FontId::proportional(12.0), t.ink3);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    let ppp = ui.ctx().pixels_per_point();
+    inst.shown(k * ppp, [(page.width() * ppp).ceil() as u32, (page.height() * ppp).ceil() as u32]);
+    upload(ui.ctx(), inst);
+    p.rect_filled(page, 0.0, Color32::WHITE);
+    if let Some(texture) = inst.texture.lock().unwrap().as_ref() {
+        paint_page_texture(&p, texture, page);
+    }
+    let say = |text: &str, color: Color32| {
+        p.rect_filled(page, 0.0, t.bg);
+        let galley = ui.painter().layout(text.to_string(), FontId::proportional(13.0), color, (page.width() - 40.0).max(40.0));
+        p.galley(page.center() - galley.size() / 2.0, galley, color);
+    };
+    match &status {
+        Status::Ready => {}
+        Status::Starting => say("Starting the browser…", t.ink3),
+        Status::Failed(e) | Status::Quit(e) => say(e, t.error),
+    }
+    p.rect_stroke(frame, 6.0, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+    // The page streams frames while it is shown: keep drawing them.
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+}
+
 impl Drop for PrivatePage {
     fn drop(&mut self) {
         browser::close(&self.inst.conv);

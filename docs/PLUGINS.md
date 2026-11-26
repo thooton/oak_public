@@ -194,6 +194,12 @@ What a plugin works with:
   that refuses headless browsers (AWS's signup, which answers `ERR-837` at its name step) still
   works. Do not send an `accept-language` override of your own with a quality value;
   Chromium adds it.
+- **`App::background_browser_view`** (interface version 15) draws the live picture of a
+  background session the same page opened, read-only: its origin in a bar over the page, as wide
+  as the space left and at most `max_h` tall (0: no limit), scaled to the session's viewport.
+  Draw it every frame it should show; frames stream only while it is drawn and on screen. The
+  user can watch the automation but not click or type into it, and the plugin receives no
+  pixels. It fails for a session that isn't this page's or is no longer open.
 - **`App::private_browser`** (interface version 13) draws Oak's browser inside a Home plugin
   page. The user controls it directly. The plugin supplies an HTTPS entry URL, but gets no
   page content, input, or cookies. The browser uses a temporary profile and closes when the
