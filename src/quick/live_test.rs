@@ -140,8 +140,12 @@ fn typed(p: &std::path::Path) -> String {
 #[test]
 #[ignore]
 fn quick_live_turn() {
-    let prompt =
-        std::env::var("OAK_QUICK_PROMPT").unwrap_or_else(|_| "Reply with exactly: PROBE-OK".into());
+    // (`OAK_QUICK_PROMPT_FILE`: a prompt too big for the environment, such
+    // as a conversation's handoff message.)
+    let prompt = match std::env::var("OAK_QUICK_PROMPT_FILE") {
+        Ok(f) => std::fs::read_to_string(f).expect("OAK_QUICK_PROMPT_FILE"),
+        Err(_) => std::env::var("OAK_QUICK_PROMPT").unwrap_or_else(|_| "Reply with exactly: PROBE-OK".into()),
+    };
     let (text, err) = live_turn(&prompt, &model());
     let _ = std::fs::write(std::env::temp_dir().join("oak_quick_text.txt"), &text);
     assert!(err.is_none(), "{err:?}");

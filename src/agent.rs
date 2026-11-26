@@ -2358,33 +2358,37 @@ impl Worker {
     /// Go on in a fresh Quick thread on another account, keeping the
     /// conversation's model and id: the thread is sent the whole
     /// conversation (`move_quick_thread`), not a summary of it.
-    /// `rate`: the account was rate-limited, not out of usage; with no other
-    /// account it is false and sets no error (the turn waits and retries on
-    /// this one).
-    fn handoff_quick(&self, exhausted: &mut std::collections::HashSet<String>, rate: bool) -> bool {
+    /// `why`: a rate limit, not out of usage, finds no other account false
+    /// and sets no error (the turn waits and retries on this one); a content
+    /// filter, which some accounts' is stricter than others' (it stops a
+    /// fresh thread's catch-up however harmless the conversation), tries each
+    /// other account once, then says so.
+    fn handoff_quick(&self, exhausted: &mut std::collections::HashSet<String>, why: QuickMove) -> bool {
         use crate::quick::recovery;
         let id = self.conv.lock().unwrap().id.clone();
         if let Some(account) = crate::rotation::seat(api::Provider::Quick, &id) {
-            if rate {
-                recovery::note_rate_limit(&account);
-            } else {
-                recovery::note_limit(&account);
+            match why {
+                QuickMove::Limit => recovery::note_limit(&account),
+                QuickMove::Rate => recovery::note_rate_limit(&account),
+                QuickMove::Filter => recovery::note_filtered(&account),
             }
             exhausted.insert(account);
         }
         let Some(mut next) = recovery::next_session(&id, exhausted) else {
-            if !rate {
-                self.set(|l| l.error = Some("AWS Quick reached its usage limit and no other Quick account is available. Try again when usage resets or sign in to another account.".into()));
+            match why {
+                QuickMove::Limit => self.set(|l| l.error = Some("AWS Quick reached its usage limit and no other Quick account is available. Try again when usage resets or sign in to another account.".into())),
+                QuickMove::Filter => self.set(|l| l.error = Some("AWS Quick's content filter stopped the reply on every Quick account Oak could try. Try again later or on another model.".into())),
+                QuickMove::Rate => {}
             }
             return false;
         };
         if !self.hold_while_paused() { return false; }
-        let (mark, text) = if rate {
-            (QUICK_RATE_MARK, recovery::RATE_FRESH)
-        } else {
-            (QUICK_LIMIT_MARK, recovery::LIMIT_FRESH)
+        let (mark, text, said) = match why {
+            QuickMove::Limit => (QUICK_LIMIT_MARK, recovery::LIMIT_FRESH, "on another account, after a usage limit"),
+            QuickMove::Rate => (QUICK_RATE_MARK, recovery::RATE_FRESH, "on another account, after a rate limit"),
+            QuickMove::Filter => (QUICK_FILTER_MARK, recovery::FILTER_FRESH, "on another account, after its content filter"),
         };
-        next.why = Some(if rate { "on another account, after a rate limit" } else { "on another account, after a usage limit" }.into());
+        next.why = Some(said.into());
         self.move_quick_thread(next, mark.into(), text);
         true
     }
@@ -2542,7 +2546,9 @@ impl Worker {
             let (reason, detail) = stop.split_once('\n').unwrap_or((&stop, ""));
             // A rate limit that came as a session error (`recovery::rate_limited`).
             let reason = if reason == recovery::ERROR && recovery::rate_limited(detail) { recovery::RATE } else { reason };
-            if matches!(reason, recovery::LIMIT | recovery::RATE | recovery::DEVICE | recovery::ERROR) {
+            // The account's content filter (`recovery::content_filtered`).
+            let reason = if reason == recovery::ERROR && recovery::content_filtered(detail) { recovery::FILTER } else { reason };
+            if matches!(reason, recovery::LIMIT | recovery::RATE | recovery::FILTER | recovery::DEVICE | recovery::ERROR) {
                 // Only Oak calls that were actually issued are in the batch.
                 // Finish them and store their results before retrying or handing off.
                 if batch.finish(&[], oak::stop::COMPLETE) { return; }
@@ -2553,15 +2559,16 @@ impl Worker {
                     quick_retry = Some(recovery::ERROR_RETRY);
                     continue;
                 }
-                if reason == recovery::LIMIT {
-                    if self.handoff_quick(&mut exhausted, false) { continue; }
+                if reason == recovery::LIMIT || reason == recovery::FILTER {
+                    let why = if reason == recovery::LIMIT { QuickMove::Limit } else { QuickMove::Filter };
+                    if self.handoff_quick(&mut exhausted, why) { continue; }
                     if self.interrupt.load(Ordering::SeqCst) { continue; }
                     return;
                 }
                 // Rate-limited: another account if there is one, else wait
                 // and retry on this one, as after a session error.
                 if reason == recovery::RATE {
-                    if self.handoff_quick(&mut exhausted, true) { continue; }
+                    if self.handoff_quick(&mut exhausted, QuickMove::Rate) { continue; }
                     if self.interrupt.load(Ordering::SeqCst) { continue; }
                 }
                 let (attempts, why, prompt) = if reason == recovery::DEVICE {
@@ -3385,6 +3392,18 @@ pub(crate) const BY_KEY: &str = "_oak_by";
 /// thread (`Worker::move_quick_thread`).
 const QUICK_LIMIT_MARK: &str = "Continued in a fresh AWS Quick thread on another account (usage limit), with the whole conversation";
 const QUICK_RATE_MARK: &str = "Continued in a fresh AWS Quick thread on another account (rate limit), with the whole conversation";
+const QUICK_FILTER_MARK: &str = "Continued in a fresh AWS Quick thread on another account (its content filter stopped the replies), with the whole conversation";
+
+/// Why a Quick conversation goes on on another account (`Worker::handoff_quick`).
+#[derive(Clone, Copy, PartialEq)]
+enum QuickMove {
+    /// The account reached its usage limit.
+    Limit,
+    /// It was rate-limited.
+    Rate,
+    /// Its content filter stopped the reply (`recovery::content_filtered`).
+    Filter,
+}
 const QUICK_DEVICE_MARK: &str = "Continued in a fresh AWS Quick thread (the last one couldn't reach this device), with the whole conversation";
 
 /// Whether message `m` opens a fresh Quick thread (`recovery::FRESH_KEY`).
@@ -3417,7 +3436,7 @@ fn is_quick_recovery(b: &Value) -> bool {
     b["_oak_context"] == true
         && (b.get(recovery::FRESH_KEY).is_some()
             || b["text"].as_str().is_some_and(|t| {
-                [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::RATE_FRESH, recovery::DEVICE_FRESH].contains(&t)
+                [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::RATE_FRESH, recovery::FILTER_FRESH, recovery::DEVICE_FRESH].contains(&t)
             }))
 }
 

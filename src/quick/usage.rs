@@ -94,6 +94,18 @@ pub(super) fn note_rate_limit(id: &str, now: i64) {
     k.observed_limit_until = k.observed_limit_until.max(now + RATE_COOL_MS);
 }
 
+/// How long a login whose content filter stopped a reply is passed over
+/// (ms): its filter stops every fresh thread's catch-up, not one reply.
+const FILTER_COOL_MS: i64 = 6 * 60 * 60_000;
+
+/// Login `id`'s content filter stopped a reply just now: passed over for
+/// `FILTER_COOL_MS`.
+pub(super) fn note_filtered(id: &str, now: i64) {
+    let mut all = KEPT.lock().unwrap();
+    let k = all.entry(id.to_string()).or_default();
+    k.observed_limit_until = k.observed_limit_until.max(now + FILTER_COOL_MS);
+}
+
 pub(super) fn observed_limit(id: &str, now: i64) -> bool {
     KEPT.lock().unwrap().get(id).is_some_and(|k| k.observed_limit_until > now)
 }

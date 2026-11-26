@@ -268,7 +268,7 @@ fn a_switch_during_quick_recovery_goes_on_on_the_new_model() {
                     assert_eq!(last["content"], json!([oak::text(CARRY_ON)]), "{reason}");
                     let sent = all_text(&req.messages);
                     assert!(sent.contains("Half done"), "{reason}: {sent}");
-                    for t in [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::RATE_FRESH, recovery::DEVICE_FRESH] {
+                    for t in [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::RATE_FRESH, recovery::FILTER_FRESH, recovery::DEVICE_FRESH] {
                         assert!(!sent.contains(t), "{reason}: {sent}");
                     }
                     Reply::Done(vec![oak::text("Fixed")], oak::stop::END.into(), Usage::default())

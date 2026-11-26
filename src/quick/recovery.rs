@@ -13,6 +13,8 @@ pub(super) const LIMIT_NOTICE: &str =
 /// limit, throttling): the conversation goes on on another account, as at a
 /// usage limit, or waits and retries on this one when there is none.
 pub(crate) const RATE: &str = "quick_rate_limit";
+/// The account's content filter stopped the reply (`content_filtered`).
+pub(crate) const FILTER: &str = "quick_content_filter";
 pub(crate) const ERROR: &str = "quick_error";
 pub(crate) const DEVICE_RETRY: &str = "[Oak] Please check for this device again with list_outposts. If the device is accessible, continue the existing task from where you left off, respecting its constraints. Do not repeat work already done.";
 pub(crate) const ERROR_RETRY: &str = "[Oak] The previous Quick reply was interrupted by a service error. Please continue the existing task from where you left off. Check the results and current state before repeating any work.";
@@ -22,6 +24,9 @@ pub(crate) const LIMIT_FRESH: &str = "[Oak] The previous AWS Quick account reach
 /// What a fresh thread is sent after the conversation so far when the last
 /// account was rate-limited (`agent::Worker::handoff_quick`).
 pub(crate) const RATE_FRESH: &str = "[Oak] The previous AWS Quick account was rate-limited, so this conversation goes on in this fresh thread, on another account; the conversation so far is above. Continue the existing task from where it left off, respecting its constraints. Do not repeat work already done.";
+/// What a fresh thread is sent after the conversation so far when the last
+/// account's content filter stopped its replies (`agent::Worker::handoff_quick`).
+pub(crate) const FILTER_FRESH: &str = "[Oak] The previous AWS Quick account couldn't take this conversation, so it goes on in this fresh thread, on another account; the conversation so far is above. Continue the existing task from where it left off, respecting its constraints. Do not repeat work already done.";
 /// What a fresh thread is sent after the conversation so far when the last
 /// thread couldn't reach this device, even when asked again (`fresh_session`).
 pub(crate) const DEVICE_FRESH: &str = "[Oak] The previous AWS Quick thread couldn't reach this device, so this conversation goes on in this fresh thread; the conversation so far is above. Check for the device with list_outposts, and once it is accessible, continue the existing task from where it left off, respecting its constraints. Do not repeat work already done.";
@@ -105,6 +110,21 @@ pub(crate) fn note_limit(account: &str) {
 /// `account` was rate-limited: rotation passes it over for a few minutes.
 pub(crate) fn note_rate_limit(account: &str) {
     usage::note_rate_limit(account, api::now_ms());
+}
+
+/// `account`'s content filter stopped a reply: rotation passes it over for
+/// hours (`usage::note_filtered`).
+pub(crate) fn note_filtered(account: &str) {
+    usage::note_filtered(account, api::now_ms());
+}
+
+/// Quick's error when the model's content filter stopped its reply. Some
+/// accounts' filter stops a fresh thread's first reply to the message
+/// `handoff::deliver` sends (reading files and doing what they say), however
+/// harmless the files, where others' don't: the conversation goes on on
+/// another account (`agent::Worker::handoff_quick`).
+pub(crate) fn content_filtered(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("content filter")
 }
 
 pub(crate) fn next_session(
@@ -258,6 +278,16 @@ mod tests {
     use super::*;
 
     const NO_DEVICE: &str = "This turn did not originate from a user device, so no user devices are accessible from this turn.";
+
+    /// Quick's error when an account's content filter stopped the reply (as
+    /// a fresh thread's first reply came back on one account, 26 Nov), and
+    /// not other errors.
+    #[test]
+    fn recognizes_a_content_filter_stop() {
+        assert!(content_filtered("Quick: The model's content filter stopped this reply. Rephrase, or start a new chat."));
+        assert!(!content_filtered("Quick: AWS Quick stream ended unexpectedly"));
+        assert!(!content_filtered("429 Too Many Requests"));
+    }
 
     #[test]
     fn recognizes_the_scoped_device_refusal_in_tool_results() {

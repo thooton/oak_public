@@ -1252,8 +1252,13 @@ code or message says the account is throttled or rate-limited (`rate_error`), or
 saying so (`rate_limited`: too many requests, rate exceeded, throttling, HTTP 429). The login is
 passed over for five minutes, and with no other usable login the turn waits and retries on this one,
 as after a session error, rather than stopping
-(`a_quick_rate_limit_moves_or_retries_and_never_ends_the_turn`). No other error moves a conversation to
-another login (`recognizes_a_rate_limit_but_not_other_errors`).
+(`a_quick_rate_limit_moves_or_retries_and_never_ends_the_turn`). A session error saying the model's
+content filter stopped the reply (`recovery::FILTER`, `content_filtered`) moves it too (opened by
+`FILTER_FRESH`): some logins' filter stops a fresh thread's first reply to the message of
+`handoff::deliver` (files to read and do what they say) however harmless the files, where others'
+let it through, so the login is passed over for six hours (`usage::note_filtered`), each other login
+is tried once, and with none left the turn ends saying so (`recognizes_a_content_filter_stop`). No
+other error moves a conversation to another login (`recognizes_a_rate_limit_but_not_other_errors`).
 A fresh thread, either way, is sent the whole conversation, not a summary of it: the message that
 opens it is marked `recovery::FRESH_KEY`, so Quick's replies before it count as unseen
 (`agent::unseen_by`), and each request sends all of it as `<conversation_so_far>`, with Oak's
