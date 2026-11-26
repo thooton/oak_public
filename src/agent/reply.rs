@@ -1071,6 +1071,11 @@ impl Worker {
             // after a switch to another model mustn't place its cut by it
             // (`rolling::plan`). The size stays, as a guide.
             c.rolling.context = m.prompt + usage.output;
+            // A summary's fresh thread, counted once Quick read it back.
+            let thread = body.quick_session.as_ref().map_or_else(|| c.id.clone(), |q| q.thread.clone());
+            if let Some(start) = crate::quick::take_start(&thread) {
+                super::note_quick_start(&mut c, start);
+            }
         }
         // How long the cache lives, for its cold moments (`request_body`):
         // as Claude's request chose; the user's own server keeps its slot
@@ -1120,7 +1125,8 @@ impl Worker {
         // and the keep is taken to the copy's units (`quick_keep`).
         let (total, keep) = if body.provider == api::Provider::Quick {
             let view = super::quick_view_size(&mut c, n, base);
-            (view, super::quick_keep(cfg.keep, view, usage.prompt))
+            let summary = rolling::estimate(c.rolling.summary.as_ref().map_or(0, |s| s.text.len()));
+            (view, super::quick_keep(cfg.keep, view, usage.prompt, c.rolling.quick_ratio, summary))
         } else {
             (usage.prompt, cfg.keep)
         };

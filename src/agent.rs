@@ -2372,7 +2372,7 @@ impl Worker {
             }
             exhausted.insert(account);
         }
-        let Some(next) = recovery::next_session(&id, exhausted) else {
+        let Some(mut next) = recovery::next_session(&id, exhausted) else {
             if !rate {
                 self.set(|l| l.error = Some("AWS Quick reached its usage limit and no other Quick account is available. Try again when usage resets or sign in to another account.".into()));
             }
@@ -2384,6 +2384,7 @@ impl Worker {
         } else {
             (QUICK_LIMIT_MARK, recovery::LIMIT_FRESH)
         };
+        next.why = Some(if rate { "on another account, after a rate limit" } else { "on another account, after a usage limit" }.into());
         self.move_quick_thread(next, mark.into(), text);
         true
     }
@@ -2581,7 +2582,8 @@ impl Worker {
                 // asking again and moving on.
                 if reason == recovery::DEVICE && *attempts % 2 == 0 {
                     let id = self.conv.lock().unwrap().id.clone();
-                    if let Some(next) = recovery::fresh_session(&id) {
+                    if let Some(mut next) = recovery::fresh_session(&id) {
+                        next.why = Some("on a fresh thread, as the last couldn't reach this device".into());
                         self.move_quick_thread(next, QUICK_DEVICE_MARK.into(), recovery::DEVICE_FRESH);
                         continue;
                     }
@@ -2846,11 +2848,35 @@ pub(crate) fn install_summary(
 /// request is made, not when the summary lands, so a turn that ran on the
 /// old thread meanwhile isn't taken as the new one's.
 pub(crate) fn open_compacted_thread(c: &mut Conversation) {
+    if !c.quick_session.as_ref().is_some_and(|q| q.compacted) {
+        return;
+    }
     let n = c.messages.len();
-    if let Some(q) = c.quick_session.as_mut().filter(|q| q.compacted) {
+    // What it is sent, in Oak's units, for Quick's count of it
+    // (`note_quick_start`).
+    let base = c.rolling.base();
+    let sent = quick_view_size(c, n, base);
+    if let Some(q) = c.quick_session.as_mut() {
         q.compacted = false;
         q.from = Some(n);
+        q.sent = Some(sent);
     }
+}
+
+/// Quick counted `start` tokens of the thread a summary opened, once it read
+/// the conversation back (`quick::take_start`): how that compares with what
+/// it was sent (`Session::sent`) sizes the next summary's kept part
+/// (`quick_keep`). Its own prompt and Oak's briefing are in the count, and
+/// the reads' results are its tokens, not Oak's estimate, so the thread
+/// starts well above what Oak's copy says.
+pub(crate) fn note_quick_start(c: &mut Conversation, start: u64) {
+    let Some(sent) = c.quick_session.as_mut().and_then(|q| q.sent.take()).filter(|&s| s > 0) else {
+        return;
+    };
+    let ratio = (start as f64 / sent as f64).clamp(0.5, 10.0);
+    // (Steadied over summaries: one start can be off, its turn's work in it.)
+    c.rolling.quick_ratio = Some(c.rolling.quick_ratio.map_or(ratio, |r| (r + ratio) / 2.0));
+    c.rolling.quick_start = start;
 }
 
 /// Keeps the first `n` messages, `changed` being the first one that is no
@@ -3445,7 +3471,7 @@ pub(crate) fn quick_replies_elsewhere(c: &mut Conversation) {
         }
     }
     if any {
-        crate::quick::moved_out(&c.id);
+        crate::quick::moved_out(&c.id, "for the fork");
     }
 }
 
@@ -3478,6 +3504,7 @@ pub(crate) fn quick_thread_reverted(c: &mut Conversation) {
         return;
     };
     next.from = Some(c.messages.len());
+    next.why = Some(crate::quick::recovery::WHY_REVERT.into());
     c.quick_session = Some(next);
 }
 
@@ -3651,6 +3678,7 @@ fn quick_edit_failed(c: &mut Conversation) {
             account,
             thread: crate::quick::hex_uuid(),
             from: Some(c.messages.len()),
+            why: Some(crate::quick::recovery::WHY_REVERT.into()),
             ..Default::default()
         };
     }
@@ -4224,7 +4252,15 @@ pub(crate) fn quick_view_size(c: &mut Conversation, n: usize, base: usize) -> u6
 /// agent's steps, so the copy can be smaller than the keep while the count
 /// is past the trigger, and no cut would ever keep that much. The same
 /// share of the copy stays, as the setting asks of Quick's thread.
-pub(crate) fn quick_keep(keep: u64, view: u64, counted: u64) -> u64 {
+///
+/// Once a summary's fresh thread was counted (`ratio`, `note_quick_start`):
+/// what makes the next one start at about `keep` in Quick's count, its
+/// summary (about `summary` tokens of Oak's) included. The share alone left
+/// it starting near the trigger, so summaries came minutes apart.
+pub(crate) fn quick_keep(keep: u64, view: u64, counted: u64, ratio: Option<f64>, summary: u64) -> u64 {
+    if let Some(r) = ratio.filter(|r| *r > 0.0) {
+        return ((keep as f64 / r) as u64).saturating_sub(summary).clamp(keep / 10, keep);
+    }
     if counted > view && view > 0 { (keep as u128 * view as u128 / counted as u128) as u64 } else { keep }
 }
 

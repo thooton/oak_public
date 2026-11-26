@@ -55,7 +55,24 @@ pub(crate) struct Session {
     /// went (`agent::note_quick_sent`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) edit: Option<String>,
+    /// Why the conversation went on in this thread, as the line of Quick
+    /// reading it back says (`transcript::catch_up_view`): "after a context
+    /// summary", "after a revert".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) why: Option<String>,
+    /// What a summary's thread was sent when it was opened, in Oak's units
+    /// (`agent::quick_view_size`), until Quick's own count of it is in
+    /// (`agent::note_quick_start`): their ratio sizes the next summary's
+    /// kept part (`agent::quick_keep`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sent: Option<u64>,
 }
+
+/// The line of Quick reading the conversation back, for a thread a summary
+/// opened.
+pub(crate) const WHY_SUMMARY: &str = "after a context summary";
+/// For a thread a revert opened.
+pub(crate) const WHY_REVERT: &str = "after a revert";
 
 /// The thread conversation `conv` goes on in once a summary replaces the
 /// older part of it: a fresh one on the same account (`current`'s, else the
@@ -66,7 +83,7 @@ pub(crate) fn compacted_session(conv: &str, current: Option<&Session>) -> Option
         .map(|q| q.account.clone())
         .filter(|a| !a.is_empty())
         .or_else(|| crate::rotation::seat(api::Provider::Quick, conv))?;
-    Some(Session { account, thread: hex_uuid(), compacted: true, ..Default::default() })
+    Some(Session { account, thread: hex_uuid(), compacted: true, why: Some(WHY_SUMMARY.into()), ..Default::default() })
 }
 
 /// The thread a summary of conversation `conv` is written on: a throwaway

@@ -153,7 +153,8 @@ fn a_login_move_is_briefed_until_a_message_gets_there() {
         ],
     );
     assert!(oak_preface(&r, conv).is_none(), "Quick worked on this thread: briefed already");
-    moved_out(conv);
+    moved_out(conv, "on another account");
+    assert_eq!(moved_why(conv).as_deref(), Some("on another account"));
     assert!(moving(conv));
     assert!(oak_preface(&r, conv).is_some());
     assert!(oak_preface(&r, conv).is_some(), "again, while no message got there");
@@ -197,7 +198,7 @@ fn a_lost_seat_is_sent_as_a_move() {
     assert!(seat_lost(&r, conv), "Quick worked here and no seat says where");
     assert!(oak_preface(&r, conv).is_none(), "unbriefed, as it went before");
     // What the request path does with it: a move.
-    moved_out(conv);
+    moved_out(conv, "on a new thread");
     r.unseen = all_unseen(&r.messages);
     let text = text_of(&user_message(&r, conv, model("smart").unwrap(), None));
     assert!(text.contains("<tools_loaded>"), "briefed: {text}");

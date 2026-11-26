@@ -683,7 +683,7 @@ pub fn stream(mut body: Request, tx: Sender<Sse>) {
             Some((a, moved)) => {
                 // (Until a message gets there: `quick::MOVED`.)
                 if moved || unseated {
-                    crate::quick::moved_out(&conv);
+                    crate::quick::moved_out(&conv, if moved { "on another account" } else { "on a new thread" });
                 }
                 // Rotation moved it to another login: a line in the
                 // transcript says so, as for other providers.
@@ -1181,8 +1181,10 @@ fn pump(
             continue;
         }
         // Quick reading the files its message went in (`handoff`).
-        if matches!(kind.as_str(), "tool_start" | "tool_arguments" | "tool_call" | "tool_result") {
-            crate::quick::handoff::saw(&turn.thread, &frame);
+        if matches!(kind.as_str(), "tool_start" | "tool_arguments" | "tool_call" | "tool_result")
+            && let Some(why) = crate::quick::handoff::saw(&turn.thread, &frame)
+        {
+            turn.reread_why = Some(why);
         }
         // Quick's own record of a call's result. When its relay fails to
         // reach the device it records its own error for the call (`SNCS

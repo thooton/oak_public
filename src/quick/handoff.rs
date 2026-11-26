@@ -81,20 +81,24 @@ struct Pending {
     names: Vec<String>,
     reminder: String,
     reminded: bool,
+    /// Why the thread was sent the conversation (`Session::why`).
+    why: Option<String>,
 }
 
 static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
 
 /// One of Quick's calls on `thread` (a `tool_start`, `tool_arguments`,
 /// `tool_call` or `tool_result` frame): one that names a file of its message
-/// is Quick reading them, and nothing more is waited for.
-pub(crate) fn saw(thread: &str, frame: &Value) {
+/// is Quick reading them, and nothing more is waited for. Why the thread was
+/// sent them, when this is that read and that was said.
+pub(crate) fn saw(thread: &str, frame: &Value) -> Option<String> {
     let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(p) = pending.get(thread) else { return };
+    let p = pending.get(thread)?;
     let said = frame.to_string();
     if p.names.iter().any(|n| said.contains(n.as_str())) {
-        pending.remove(thread);
+        return pending.remove(thread).and_then(|p| p.why);
     }
+    None
 }
 
 /// What Oak answers the first of its own calls Quick makes on `thread` before
@@ -128,8 +132,9 @@ fn sweep(d: &std::path::Path) {
 
 /// `text`, a message for `thread` too long to send (`MESSAGE_MAX`), put in
 /// files in the thread's workspace (and Oak's folder): the message to send
-/// instead, which says where they are and how to read them.
-pub(crate) fn deliver(text: &str, thread: &str) -> String {
+/// instead, which says where they are and how to read them. `why`: why the
+/// thread is sent the conversation, for the transcript (`saw`).
+pub(crate) fn deliver(text: &str, thread: &str, why: Option<String>) -> String {
     let d = dir();
     let _ = std::fs::create_dir_all(&d);
     sweep(&d);
@@ -192,6 +197,7 @@ pub(crate) fn deliver(text: &str, thread: &str) -> String {
             names,
             reminder,
             reminded: false,
+            why,
         },
     );
     message
@@ -230,6 +236,7 @@ mod tests {
                     names: vec!["quick-conversation-th1-5-1.md".into()],
                     reminder: "read first".into(),
                     reminded: false,
+                    why: Some("after a context summary".into()),
                 },
             );
         };
@@ -237,7 +244,9 @@ mod tests {
         assert_eq!(remind("th-remind").as_deref(), Some("read first"));
         assert_eq!(remind("th-remind"), None, "once");
         pending("th-read");
-        saw("th-read", &json!({"type": "tool_start", "payload": {"tool_name": "file_read", "arguments": {"path": "workspace/attached_files/quick-conversation-th1-5-1.md"}}}));
+        let read = json!({"type": "tool_start", "payload": {"tool_name": "file_read", "arguments": {"path": "workspace/attached_files/quick-conversation-th1-5-1.md"}}});
+        assert_eq!(saw("th-read", &read).as_deref(), Some("after a context summary"), "why it reads them");
+        assert_eq!(saw("th-read", &read), None, "once");
         assert_eq!(remind("th-read"), None, "read already");
         assert_eq!(remind("th-none"), None);
     }

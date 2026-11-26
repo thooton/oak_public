@@ -479,7 +479,10 @@ can't read.
   what Quick said just before them, and the transcript shows each as one closed row
   (`a_catch_up_read_is_left_out`). What Quick wrote first (text, thinking, in the same message)
   and its reads, through the last, are one closed line, "Rereading context files…", then
-  "Reread context files" once the reads are back and Quick went on; opened, it shows them
+  "Reread context files" once the reads are back and Quick went on, with why when Oak knows it
+  ("after a context summary", "on another account", "after a revert", "for the fork"; the
+  thread's `Session::why` or the move's, carried by the reads, `quick::REREAD_KEY`, only for a
+  thread Quick hasn't replied on); opened, it shows them
   (`transcript::catch_up_end`, `quick_catching_up_is_one_unit`; while the reply streams in too,
   `quick::reads_handoff`). The conversation in the files has each Oak call once: a snippet's own
   call and result (`QUIET_KEY`, or one the Oak calls it ran follow) are left out, as for any other
@@ -730,7 +733,14 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   its agent's steps too), and the cut is placed by what Oak's copy holds (`agent::quick_view_size`),
   with the keep taken to the copy's units: the same share of it as the keep is of Quick's count
   (`agent::quick_keep`), since the copy can be smaller than the keep while the count is past the
-  trigger, and then no summary would ever be made (`quick_keep_fits_the_copy`).
+  trigger, and then no summary would ever be made (`quick_keep_fits_the_copy`). That share left a
+  summary's fresh thread starting near the trigger (Quick's count of it has its own prompt, Oak's
+  briefing and the reads' results in its own tokens), so summaries came minutes apart. So Oak
+  counts it: what a summary's thread is sent (`Session::sent`, in the copy's units) and Quick's
+  first count once it read it back (`quick::take_start`) give a ratio (`rolling.quick_ratio`,
+  averaged with the one before), and the next summary keeps what makes its thread start at about
+  the keep: the keep over the ratio, less the summary, between a tenth of the keep and the keep
+  (`quick_keep_follows_the_counted_start`). Until one is counted, the share applies.
   Quick writes the summary on a throwaway thread of its own, without this device's tools, sent
   exactly the part it replaces, then the instruction (`agent::summary_request_for`); only the
   text after its last call is the summary (`oak::text_after_calls`). Once a summary is in, made

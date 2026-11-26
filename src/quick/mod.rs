@@ -1745,14 +1745,21 @@ fn oak_preface(r: &Request, thread: &str) -> Option<String> {
 /// briefing until one gets there (`moved_in`): the move is seen only once,
 /// and a first request that failed to send would otherwise leave the next
 /// one sending its newest turn alone to a thread that has nothing.
-static MOVED: LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+/// With why, as the line of Quick reading it back says ("on another
+/// account", "for the fork").
+static MOVED: LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
     LazyLock::new(Default::default);
 
-/// Conversation `conv`'s thread moved to another login just now.
-pub(crate) fn moved_out(conv: &str) {
+/// Conversation `conv`'s thread moved to another login just now (`why`).
+pub(crate) fn moved_out(conv: &str, why: &str) {
     if !conv.is_empty() {
-        MOVED.lock().unwrap_or_else(|e| e.into_inner()).insert(conv.to_string());
+        MOVED.lock().unwrap_or_else(|e| e.into_inner()).insert(conv.to_string(), why.to_string());
     }
+}
+
+/// Why `conv` moved, while it is moving (`moved_out`).
+fn moved_why(conv: &str) -> Option<String> {
+    MOVED.lock().unwrap_or_else(|e| e.into_inner()).get(conv).cloned()
 }
 
 /// A message with the whole of `conv` reached the login it moved to.
@@ -1762,7 +1769,7 @@ pub(crate) fn moved_in(conv: &str) {
 
 /// Whether `conv` moved to a login no message has reached yet.
 pub(crate) fn moving(conv: &str) -> bool {
-    !conv.is_empty() && MOVED.lock().unwrap_or_else(|e| e.into_inner()).contains(conv)
+    !conv.is_empty() && MOVED.lock().unwrap_or_else(|e| e.into_inner()).contains_key(conv)
 }
 
 /// Whether conversation `conv` has a Quick thread somewhere (Quick ran
@@ -1824,6 +1831,14 @@ fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, 
     } else {
         None
     };
+    // Why the thread is sent the conversation, for the line of Quick reading
+    // it back (`handoff::deliver`): it moved, or it is a fresh thread Quick
+    // hasn't replied on (not one that only missed other models' turns).
+    let why = source.as_ref().filter(|_| r.instruction.is_none()).and_then(|_| {
+        moved_why(&r.seat_conv()).or_else(|| {
+            r.quick_session.as_ref().and_then(|q| q.why.clone()).filter(|_| !quick_worked_here(r))
+        })
+    });
     let newest = match source {
         Some(s) => format!("{s}\n\n{newest}"),
         None => newest,
@@ -1842,7 +1857,7 @@ fn user_message_as(r: &Request, thread: &str, m: &Model, outpost: Option<&str>, 
     // Quick's service turns away a longer message: all of it goes in files
     // in the thread's workspace, and the message says where.
     let text = if text.len() > handoff::MESSAGE_MAX {
-        handoff::deliver(&text, thread)
+        handoff::deliver(&text, thread, why)
     } else {
         text
     };
@@ -2042,6 +2057,28 @@ fn to_summarize(r: &Request) -> Option<String> {
 /// Marks a call of Quick's that Oak answered with a reminder to read the
 /// files of its message instead of running it (`Turn::mark_catch_up`).
 pub(crate) const CATCH_UP_KEY: &str = "_oak_catch_up";
+
+/// On Quick's reads of the files a fresh thread's message went in: why the
+/// thread was sent the conversation (`Session::why`), for their line in the
+/// transcript (`transcript::catch_up_view`).
+pub(crate) const REREAD_KEY: &str = "_oak_reread";
+
+/// Quick's count of each thread once it read the conversation back, by
+/// thread, until the reply's usage takes it (`take_start`).
+static STARTS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    LazyLock::new(Default::default);
+
+fn note_start(thread: &str, tokens: u64) {
+    if !thread.is_empty() && tokens > 0 {
+        STARTS.lock().unwrap_or_else(|e| e.into_inner()).insert(thread.to_string(), tokens);
+    }
+}
+
+/// Quick's count of `thread` once it read the conversation back, if it did
+/// in the turn that just ended (`note_start`).
+pub(crate) fn take_start(thread: &str) -> Option<u64> {
+    STARTS.lock().unwrap_or_else(|e| e.into_inner()).remove(thread)
+}
 
 /// What the files of a message too long to send (`handoff::deliver`) are
 /// named with, before the thread's id, their own numbers and `.md`.
@@ -2247,6 +2284,13 @@ pub(crate) struct Turn {
     // Oak keeps using its original conversation id after a Quick account handoff.
     local: Option<String>,
     outpost_missing: bool,
+    /// Why Quick is reading the conversation back (`handoff::saw`): its
+    /// reads carry it (`REREAD_KEY`).
+    pub(crate) reread_why: Option<String>,
+    /// A read of the files its message went in came back (`reads_handoff`),
+    /// and whether Quick's count after it was taken (`note_start`).
+    read_back: bool,
+    start_noted: bool,
     /// The assistant message's blocks, in order, with how the stream has
     /// filled each.
     blocks: Vec<Value>,
@@ -2750,6 +2794,12 @@ impl Turn {
                     n("cache_read_tokens"),
                     n("output_tokens"),
                 );
+                // Quick's first count once it read the conversation back: what a
+                // fresh thread starts at (`agent::note_quick_start`).
+                if self.read_back && !self.start_noted {
+                    self.start_noted = true;
+                    note_start(&self.thread, self.usage.0);
+                }
                 if let Some(m) = p["resolved_model_id"].as_str().filter(|m| !m.is_empty()) {
                     self.model = m.to_string();
                 }
@@ -3051,6 +3101,12 @@ impl Turn {
     /// Call block `i` (`id`) ends with `result`, which goes in the
     /// transcript as the call's.
     fn end_call(&mut self, i: usize, id: &str, result: &Result<String, String>) -> Vec<Event> {
+        if reads_handoff(&self.blocks[i]) {
+            self.read_back = true;
+            if let Some(why) = &self.reread_why {
+                self.blocks[i][REREAD_KEY] = json!(why);
+            }
+        }
         if same_tool(self.blocks[i]["name"].as_str().unwrap_or(""), "list_outposts") {
             self.record_outposts(result);
         } else if result.is_ok() && self.quick_calls.iter().any(|c| c.block == i && c.device) {

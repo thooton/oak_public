@@ -3064,14 +3064,24 @@ fn catch_up_view(
     let back = reads.iter().all(|id| results.contains_key(id));
     let streaming = run.iter().any(|x| model_key(x).is_some_and(|k| k.0 == usize::MAX));
     let done = back && (u.end < items.len() || !streaming);
-    let label = if done { "Reread context files" } else { "Rereading context files\u{2026}" };
+    // Why it reads it back (`quick::REREAD_KEY`), once a read says.
+    let why = run.iter().find_map(|x| match x {
+        Item::Tool(b, _) => b[crate::quick::REREAD_KEY].as_str(),
+        _ => None,
+    });
+    let label = match (done, why) {
+        (true, Some(w)) => format!("Reread context files ({w})"),
+        (true, None) => "Reread context files".to_string(),
+        (false, Some(w)) => format!("Rereading context files ({w})\u{2026}"),
+        (false, None) => "Rereading context files\u{2026}".to_string(),
+    };
     // (By its first read, which keeps its id once the reply is saved.)
     let id = Id::unique(("catch-up-open", reads.first().copied().unwrap_or(""), SALT.with(|c| c.get())));
     collapse_row(
         ui,
         t,
         id,
-        label,
+        &label,
         |r| r.width() - 46.0,
         true,
         true,

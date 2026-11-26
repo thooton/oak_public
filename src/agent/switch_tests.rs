@@ -30,10 +30,32 @@ fn all_text(v: &[Value]) -> String {
 /// or no copy at all, keeps the setting.
 #[test]
 fn quick_keep_fits_the_copy() {
-    assert_eq!(quick_keep(225_000, 200_000, 331_000), 135_951);
-    assert!(quick_keep(225_000, 200_000, 331_000) < 200_000);
-    assert_eq!(quick_keep(40_000, 300_000, 300_000), 40_000);
-    assert_eq!(quick_keep(40_000, 0, 300_000), 40_000);
+    assert_eq!(quick_keep(225_000, 200_000, 331_000, None, 0), 135_951);
+    assert!(quick_keep(225_000, 200_000, 331_000, None, 0) < 200_000);
+    assert_eq!(quick_keep(40_000, 300_000, 300_000, None, 0), 40_000);
+    assert_eq!(quick_keep(40_000, 0, 300_000, None, 0), 40_000);
+}
+
+/// Once a summary's fresh thread was counted, the next keeps what makes
+/// the next thread start at about the keep in Quick's count: a thread sent
+/// 100k of Oak's copy that Quick counted at 250k keeps 225k / 2.5 less its
+/// summary (10k), 80k; never under a tenth of the keep, nor over it.
+#[test]
+fn quick_keep_follows_the_counted_start() {
+    let mut c = Conversation { quick_session: Some(crate::quick::recovery::Session { sent: Some(100_000), ..Default::default() }), ..Default::default() };
+    note_quick_start(&mut c, 250_000);
+    assert_eq!(c.rolling.quick_ratio, Some(2.5));
+    assert_eq!(c.rolling.quick_start, 250_000);
+    assert_eq!(c.quick_session.as_ref().unwrap().sent, None, "counted once");
+    note_quick_start(&mut c, 900_000);
+    assert_eq!(c.rolling.quick_ratio, Some(2.5), "nothing sent, nothing counted");
+    assert_eq!(quick_keep(225_000, 200_000, 331_000, Some(2.5), 10_000), 80_000);
+    assert_eq!(quick_keep(225_000, 200_000, 331_000, Some(9.0), 10_000), 22_500);
+    assert_eq!(quick_keep(225_000, 200_000, 331_000, Some(0.5), 0), 225_000);
+    // A second start steadies the first.
+    c.quick_session.as_mut().unwrap().sent = Some(100_000);
+    note_quick_start(&mut c, 350_000);
+    assert_eq!(c.rolling.quick_ratio, Some(3.0));
 }
 
 /// The summary a Quick conversation's file (`OAK_QUICK_CONV`, read only)
@@ -53,7 +75,8 @@ fn quick_plan_on_a_real_conversation() {
     let measured: Vec<rolling::Measure> = serde_json::from_value(r["measured"].clone()).unwrap();
     let summary = r["summary"]["text"].as_str().unwrap().len();
     let view = rolling::estimate(summary + messages[base..].iter().map(rolling::chars).sum::<usize>());
-    for k in [keep, quick_keep(keep, view, counted)] {
+    let ratio = r["quick_ratio"].as_f64();
+    for k in [keep, quick_keep(keep, view, counted, ratio, rolling::estimate(summary))] {
         let plan = rolling::plan_within(messages, base, cleared, view, &measured, k, 10_000, true, rolling::summary_cap(QUICK));
         println!("messages {} base {base} counted {counted} view {view} keep {k}: {plan:?}", messages.len());
     }
@@ -1077,6 +1100,8 @@ fn a_summary_moves_quick_to_a_fresh_thread_with_the_summary_and_the_part_kept() 
     let (req, ..) = w.request_body();
     let q = req.quick_session.clone().unwrap();
     assert!(!q.compacted && q.from == Some(5), "{q:?}");
+    assert!(q.sent.is_some_and(|s| s > 0), "what it is sent, for Quick's count of it: {q:?}");
+    assert_eq!(q.why.as_deref(), Some(crate::quick::recovery::WHY_SUMMARY));
     let text = crate::quick::user_message(&req, &q.thread, m, None)["payload"]["text"].as_str().unwrap().to_string();
     assert!(text.contains("SUMMARY-TEXT") && text.contains("KEPT-ASK") && text.contains("KEPT-REPLY"), "{text}");
     assert!(!text.contains("OLD-ASK") && !text.contains("OLD-REPLY"), "what the summary replaced stays out: {text}");

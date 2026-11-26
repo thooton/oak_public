@@ -355,6 +355,18 @@ pub struct State {
     /// Old tool output an older Oak cleared while the cache was cold, between
     /// summaries (`Clearing`): kept as it was sent until the next summary.
     pub cold: Clearing,
+    /// On Quick: its count of a fresh thread a summary opened, once it read
+    /// the conversation back, per token of Oak's copy it was sent
+    /// (`agent::note_quick_start`), which sizes the next summary's kept part
+    /// (`agent::quick_keep`); and that count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quick_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub quick_start: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Tool output an older Oak cleared at a moment the prompt cache was cold
