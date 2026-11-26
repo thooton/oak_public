@@ -177,6 +177,12 @@ impl Shared {
     }
 
     /// Locks the conversation, as `Mutex::lock` does.
+    /// Takes back a lock a thread panicked holding, so the rest of Oak can
+    /// lock it as before (what it guards was only read there).
+    pub fn clear_poison(&self) {
+        self.conv.clear_poison();
+    }
+
     pub fn lock(&self) -> std::sync::LockResult<SharedGuard<'_>> {
         let guard = |g| SharedGuard { g, rev: &self.rev };
         match self.conv.lock() {
@@ -688,6 +694,74 @@ impl Messages {
     /// Every message, read (those not held, from disk).
     fn all(&self) -> Vec<Value> {
         self.read_range(0, self.len())
+    }
+
+    /// A copy of the messages to finish later (`Snapshot::read`), taken
+    /// without reading the file: those held are copied, and the file is only
+    /// opened (where the ones not held are, which only a save changes, by
+    /// writing a new file into place: the one opened keeps what it held). So
+    /// a conversation's lock is held for the copy alone, not the read.
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        let (base, n) = (self.base(), self.len());
+        let held = self.win.get().map(|w| w.list[base.min(w.list.len())..].to_vec()).unwrap_or_default();
+        let head = if base == 0 {
+            Unheld::Read(vec![])
+        } else {
+            let d = lock_disk(&self.disk);
+            let file = (!d.lost && base <= d.ranges.len())
+                .then(|| d.path.as_ref().and_then(|p| std::fs::File::open(p).ok()))
+                .flatten();
+            match file {
+                Some(f) => Unheld::File(f, d.ranges[..base].to_vec()),
+                // (Not on disk as it should be: read now, as a clone does.)
+                None => Unheld::Read(d.messages(0, base)),
+            }
+        };
+        Snapshot { head, held, n, from: (self.lost_from, self.rewrites_from) }
+    }
+}
+
+/// Messages copied for later (`Messages::snapshot`).
+pub(crate) struct Snapshot {
+    head: Unheld,
+    held: Vec<Value>,
+    n: usize,
+    from: (Option<usize>, Option<usize>),
+}
+
+/// The messages a snapshot didn't hold: read already, or where in a file.
+enum Unheld {
+    Read(Vec<Value>),
+    File(std::fs::File, Vec<(u64, u64)>),
+}
+
+impl Snapshot {
+    /// The messages, all read: as `Messages::clone` gives them.
+    pub(crate) fn read(self) -> Messages {
+        let mut list = match self.head {
+            Unheld::Read(v) => v,
+            Unheld::File(mut f, ranges) => {
+                use std::io::{Read, Seek};
+                let (start, end) = (ranges[0].0, ranges[ranges.len() - 1].1);
+                let mut buf = vec![0; (end - start) as usize];
+                let read = f.seek(std::io::SeekFrom::Start(start)).and_then(|_| f.read_exact(&mut buf));
+                match read {
+                    Ok(()) => ranges
+                        .iter()
+                        .map(|&(a, b)| serde_json::from_slice(&buf[(a - start) as usize..(b - start) as usize]).unwrap_or_default())
+                        .collect(),
+                    Err(e) => {
+                        crate::startup::note(format!("Couldn't read a conversation's messages for a copy: {e}"));
+                        vec![Value::Null; ranges.len()]
+                    }
+                }
+            }
+        };
+        list.extend(self.held);
+        debug_assert_eq!(list.len(), self.n);
+        let mut m: Messages = list.into();
+        (m.lost_from, m.rewrites_from) = self.from;
+        m
     }
 }
 
@@ -2391,6 +2465,32 @@ pub fn save_settings(s: &Settings) {
 
 #[cfg(test)]
 mod tests {
+    /// A snapshot holds the messages as they were when it was taken, though
+    /// the file is written again before it is read (a save renames a new file
+    /// into place, which an open snapshot mustn't stop), and reads nothing
+    /// while it is taken.
+    #[test]
+    fn a_snapshot_reads_the_messages_as_they_were() {
+        let file = conversations_dir().join(format!("unit-test-snapshot-{}.json", crate::api::now_ms()));
+        use serde_json::json;
+        let messages: Vec<Value> = (0..800)
+            .map(|i| json!({"role": if i % 2 == 0 { "user" } else { "assistant" }, "content": [{"type": "text", "text": format!("m{i}")}]}))
+            .collect();
+        let mem = Conversation { messages: messages.clone().into(), ..Default::default() };
+        std::fs::write(&file, serde_json::to_vec(&mem).unwrap()).unwrap();
+        let mut read = read_conversation(&file, &|_, _| {}).unwrap();
+        // The newest messages held, as an open conversation has them.
+        read.messages.load_from(700);
+        let snap = read.messages.snapshot();
+        assert!(matches!(snap.head, Unheld::File(..)), "taking it read nothing");
+        let other = Conversation { messages: vec![json!({"role": "user", "content": "changed"})].into(), ..Default::default() };
+        let tmp = file.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&other).unwrap()).unwrap();
+        std::fs::rename(&tmp, &file).expect("a save goes ahead while a snapshot is open");
+        assert_eq!(snap.read(), messages);
+        let _ = std::fs::remove_file(&file);
+    }
+
     /// Settings from before themes had ids keep their theme; new ones
     /// start with Oak's.
     #[test]

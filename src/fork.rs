@@ -26,10 +26,13 @@ pub(crate) fn fork(
     now: i64,
     at: Option<agent::RevertTo>,
 ) -> Option<Conversation> {
-    finish(copy(source, id, now), at)
+    let mut c = copy(source, id, now);
+    c.messages = source.messages.clone();
+    finish(c, at)
 }
 
-/// What a fork takes of `source`: the part made while the source is locked.
+/// What a fork takes of `source` but its messages (`Messages::snapshot`):
+/// the part made while the source is locked.
 fn copy(source: &Conversation, id: String, now: i64) -> Conversation {
     let mut c = Conversation {
         id,
@@ -44,7 +47,6 @@ fn copy(source: &Conversation, id: String, now: i64) -> Conversation {
         chat: source.chat,
         code_mode: source.code_mode,
         mix: source.mix.clone(),
-        messages: source.messages.clone(),
         format: source.format,
         rolling: source.rolling.clone(),
         prefix: source.prefix.clone(),
@@ -117,31 +119,57 @@ fn off_thread(f: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// Copies conversation `source` (holding its lock only for the copy), then,
-/// with no lock held, finishes the copy (`finish`), copies the source's REPL
-/// for Code Mode, saves it, and hands it to the window (`App::open_made`).
+/// Copies conversation `source` (`copy`, and its messages as a snapshot:
+/// its lock is held for those alone, not to read its file), then, with no
+/// lock held, reads the messages, finishes the copy (`finish`), copies the
+/// source's REPL for Code Mode, saves it, and hands it to the window
+/// (`App::open_made`). If any of that panics, the source's lock is taken
+/// back, its side chat can be asked for again, and the user is told
+/// (`what`: "fork" or "side chat") (`a_fork_that_panics_says_so_and_can_be_tried_again`).
 pub(crate) fn make(
     conv: std::sync::Arc<store::Shared>,
     source: String,
+    what: &'static str,
     ctx: &egui::Context,
     copy: impl FnOnce(&Conversation) -> Conversation + Send + 'static,
     finish: impl FnOnce(Conversation) -> Option<Made> + Send + 'static,
 ) {
     let ctx = ctx.clone();
     off_thread(move || {
-        let copied = copy(&conv.lock().unwrap());
-        let made = finish(copied);
-        if let Some(Made::Fork(c) | Made::Side(c)) = &made {
-            if c.code_mode {
-                // Its REPL starts with the source's variables.
-                crate::code_mode::copy_snapshot(&source, &c.id);
+        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (mut copied, messages) = {
+                let s = conv.lock().unwrap_or_else(|e| e.into_inner());
+                (copy(&s), s.messages.snapshot())
+            };
+            copied.messages = messages.read();
+            let made = finish(copied);
+            if let Some(Made::Fork(c) | Made::Side(c)) = &made {
+                if c.code_mode {
+                    // Its REPL starts with the source's variables.
+                    crate::code_mode::copy_snapshot(&source, &c.id);
+                }
+                c.save();
             }
-            c.save();
-        }
+            made
+        }));
+        let unmark = || {
+            MAKING.lock().unwrap_or_else(|e| e.into_inner()).remove(&source);
+        };
         match made {
-            Some(m) => MADE.lock().unwrap_or_else(|e| e.into_inner()).push(m),
+            Ok(Some(m)) => MADE.lock().unwrap_or_else(|e| e.into_inner()).push(m),
             // (The source changed since the user asked: nothing is made.)
-            None => drop(MAKING.lock().unwrap_or_else(|e| e.into_inner()).remove(&source)),
+            Ok(None) => unmark(),
+            Err(panic) => {
+                conv.clear_poison();
+                unmark();
+                let why = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("it stopped unexpectedly");
+                eprintln!("oak: making a {what} failed: {why}");
+                crate::view::toast(crate::view::Tone::Bad, &format!("Couldn't make the {what}: {why}"));
+            }
         }
         ctx.request_repaint();
     });
@@ -168,7 +196,7 @@ impl App {
         let id = format!("fork-{now}-{:016x}", rand::random::<u64>());
         let conv = self.sessions.get(source)?.conv.clone();
         let fork_id = id.clone();
-        make(conv, source.to_string(), ctx, move |s| copy(s, fork_id, now), move |c| finish(c, at).map(Made::Fork));
+        make(conv, source.to_string(), "fork", ctx, move |s| copy(s, fork_id, now), move |c| finish(c, at).map(Made::Fork));
         self.open_made(ctx);
         Some(id)
     }
@@ -201,6 +229,25 @@ mod tests {
 
     fn call(id: &str) -> Value {
         json!({"type": "tool_call", "id": id, "name": "READ", "input": {"path": "x"}})
+    }
+
+    /// Making a fork or side chat that panics, after the copy or during it
+    /// (with the source locked): the user is told, the source's lock is
+    /// usable again, and its side chat can be asked for again.
+    #[test]
+    fn a_fork_that_panics_says_so_and_can_be_tried_again() {
+        let ctx = egui::Context::default();
+        let conv = std::sync::Arc::new(store::Shared::new(source()));
+        let src = format!("panic-source-{}", api::now_ms());
+        assert!(!making_side_chat(&src), "marked as being made");
+        make(conv.clone(), src.clone(), "side chat", &ctx, |s| copy(s, "p1".into(), 0), |_| panic!("boom after the copy"));
+        assert!(crate::view::toasts_now().iter().any(|t| t == "Couldn't make the side chat: boom after the copy"));
+        assert!(!making_side_chat(&src), "it can be asked for again");
+        make(conv.clone(), src.clone(), "fork", &ctx, |_| panic!("boom in the copy"), |c| Some(Made::Fork(c)));
+        assert!(crate::view::toasts_now().iter().any(|t| t == "Couldn't make the fork: boom in the copy"));
+        assert!(conv.lock().is_ok(), "the source's lock isn't left poisoned");
+        assert!(!making_side_chat(&src));
+        MAKING.lock().unwrap().remove(&src);
     }
 
     fn source() -> Conversation {

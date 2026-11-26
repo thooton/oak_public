@@ -777,10 +777,15 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   to just before it, as Revert to before this goes back to, and leaves the source as it is. Files
   in the working folder are shared, as a side chat's; nothing links a fork to its source, so
   deleting either leaves the other. A fork is made off the window thread (`fork::make`): the source
-  is locked only while it is copied, the rest (going back to the point, mending lost calls, Quick's
-  replies marked as another thread's) is done on the copy, it is saved, and the window opens it at
-  its next frame (`App::open_made`), so a long conversation's fork never stops the window
-  (`forking_a_long_saved_quick_conversation_is_quick`).
+  is locked only while it is copied, its messages as a snapshot (`Messages::snapshot`: those held
+  are copied, and its file is only opened, to be read once the lock is let go; a save writes a new
+  file into place, so the one opened keeps them as they were,
+  `a_snapshot_reads_the_messages_as_they_were`). The rest (going back to the point, mending lost
+  calls, Quick's replies marked as another thread's) is done on the copy, it is saved, and the
+  window opens it at its next frame (`App::open_made`), so a long conversation's fork never stops
+  the window (`forking_a_long_saved_quick_conversation_is_quick`). If making it fails (a panic), the
+  user is told in a toast, the source's lock is taken back, and a side chat can be asked for again
+  (`a_fork_that_panics_says_so_and_can_be_tried_again`).
 - Rewrites (`src/rewrites.rs`): a plugin's rewriter (`Rewriter`; Unslop, a private plugin)
   has replies, and optionally thinking and notes, rewritten for the user; the model's context
   keeps its own text. Oak keeps the rewrites in their blocks (under the rewriter's key, which

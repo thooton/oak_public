@@ -23,10 +23,13 @@ pub(crate) const CHAT_FORK_MESSAGE: &str = "The conversation was forked to be pl
 /// the fork sends as it was, the fork instruction after it.
 #[cfg(test)]
 pub(crate) fn fork(source: &Conversation, id: String, now: i64) -> Conversation {
-    finish(copy(source, id, now))
+    let mut c = copy(source, id, now);
+    c.messages = source.messages.clone();
+    finish(c)
 }
 
-/// What a side chat takes of `source`: the part made while it is locked.
+/// What a side chat takes of `source` but its messages
+/// (`Messages::snapshot`): the part made while it is locked.
 fn copy(source: &Conversation, id: String, now: i64) -> Conversation {
     Conversation {
         id,
@@ -41,7 +44,6 @@ fn copy(source: &Conversation, id: String, now: i64) -> Conversation {
         chat: source.chat,
         code_mode: source.code_mode,
         mix: source.mix.clone(),
-        messages: source.messages.clone(),
         format: source.format,
         rolling: source.rolling.clone(),
         prefix: source.prefix.clone(),
@@ -93,7 +95,7 @@ impl App {
         }
         let now = api::now_ms();
         let id = format!("side-{now}-{:016x}", rand::random::<u64>());
-        crate::fork::make(conv, source.to_string(), ctx, move |s| copy(s, id, now), |c| Some(crate::fork::Made::Side(finish(c))));
+        crate::fork::make(conv, source.to_string(), "side chat", ctx, move |s| copy(s, id, now), |c| Some(crate::fork::Made::Side(finish(c))));
         self.open_made(ctx);
     }
 
