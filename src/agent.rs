@@ -2348,6 +2348,18 @@ impl Worker {
     /// A Quick recovery is part of the same turn: neither the user nor a
     /// parent agent gets a premature final reply. Back off without a cap on
     /// attempts, but keep pause, interrupt and model changes working.
+    /// Waits for a summary being written in the background (`after_reply`)
+    /// to land, unless the turn is interrupted or paused meanwhile.
+    fn wait_for_summary(&self) {
+        while self.live.lock().unwrap().compacting {
+            if self.interrupted() || self.paused.load(Ordering::SeqCst) {
+                return;
+            }
+            self.set(|l| l.status = "Waiting for the context summary".into());
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn retry_quick(&self, attempts: &mut u32, why: &str) -> bool {
         *attempts = attempts.saturating_add(1);
         let wait = api::retry_wait(*attempts);
@@ -2544,6 +2556,15 @@ impl Worker {
             let partial = !blocks.is_empty();
             let calls = self.keep_reply(blocks);
             let (reason, detail) = stop.split_once('\n').unwrap_or((&stop, ""));
+            // Oak ended Quick's reply after a tool result, grown past its
+            // share of the context (`reply::quick_should_yield`): once the
+            // summary that made room for is in, Quick goes on.
+            if reason == recovery::YIELD {
+                if batch.finish(&[], oak::stop::COMPLETE) { return; }
+                quick_retry = Some(recovery::YIELD_RETRY);
+                self.wait_for_summary();
+                continue;
+            }
             // A rate limit that came as a session error (`recovery::rate_limited`).
             let reason = if reason == recovery::ERROR && recovery::rate_limited(detail) { recovery::RATE } else { reason };
             // The account's content filter (`recovery::content_filtered`).
@@ -3436,7 +3457,7 @@ fn is_quick_recovery(b: &Value) -> bool {
     b["_oak_context"] == true
         && (b.get(recovery::FRESH_KEY).is_some()
             || b["text"].as_str().is_some_and(|t| {
-                [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::LIMIT_FRESH, recovery::RATE_FRESH, recovery::FILTER_FRESH, recovery::DEVICE_FRESH].contains(&t)
+                [recovery::DEVICE_RETRY, recovery::ERROR_RETRY, recovery::YIELD_RETRY, recovery::LIMIT_FRESH, recovery::RATE_FRESH, recovery::FILTER_FRESH, recovery::DEVICE_FRESH].contains(&t)
             }))
 }
 

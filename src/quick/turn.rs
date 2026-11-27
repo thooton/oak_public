@@ -135,6 +135,9 @@ pub(crate) enum StopKind {
 pub(crate) struct TurnCtl {
     abort: Mutex<Option<StopKind>>,
     pause_queued: AtomicBool,
+    /// The reply outgrew its share of the context (`agent::reply`): it ends
+    /// after the next result Oak gives Quick (`recovery::YIELD`).
+    yield_queued: AtomicBool,
     done: (Mutex<bool>, Condvar),
 }
 
@@ -145,6 +148,10 @@ impl TurnCtl {
 
     pub(crate) fn pause_requested(&self) -> bool {
         self.pause_queued.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn yield_requested(&self) -> bool {
+        self.yield_queued.load(Ordering::SeqCst)
     }
 
     pub(crate) fn set_abort(&self, kind: StopKind) {
@@ -237,6 +244,19 @@ pub(crate) fn set_pause(thread: &str, on: bool) {
         .cloned()
     {
         ctl.pause_queued.store(on, Ordering::SeqCst);
+    }
+}
+
+/// Tells the active Quick turn on `thread` to end after the next result Oak
+/// gives Quick, so a summary can come in before it goes on (`recovery::YIELD`).
+pub(crate) fn set_yield(thread: &str) {
+    if let Some(ctl) = CTLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(thread)
+        .cloned()
+    {
+        ctl.yield_queued.store(true, Ordering::SeqCst);
     }
 }
 
@@ -1335,6 +1355,11 @@ fn pump(
                 }
                 if ctl.pause_requested() {
                     return finish_stop(sock, turn, tx, stop::TOOL_CALLS, true);
+                }
+                // Grown past its share of the context: the reply ends here,
+                // every call answered, and goes on once a summary is in.
+                if ctl.yield_requested() && !foreign {
+                    return finish_stop(sock, turn, tx, recovery::YIELD, false);
                 }
                 send_steers(sock, turn.local(), &turn.thread, say)?;
                 // Quick carries the turn on in a new message once it has the

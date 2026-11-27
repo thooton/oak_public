@@ -743,6 +743,14 @@ shown agent's Blender, independently of WINDOW's current app; subagent views wor
   averaged with the one before), and the next summary keeps what makes its thread start at about
   the keep: the keep over the ratio, less the summary, between a tenth of the keep and the keep
   (`quick_keep_follows_the_counted_start`). Until one is counted, the share applies.
+  A summary only comes in between replies, and Quick's agent may run one reply for an hour and
+  hundreds of calls, its thread far past the trigger. So Oak follows Quick's count as the reply
+  runs and ends it after the next result Oak gives Quick (`recovery::YIELD`, every call answered)
+  once it has grown half the room between the keep and the trigger (at least 20k), or a quarter
+  of that past the trigger unless a summary is being written or just failed
+  (`reply::quick_should_yield`, `a_long_quick_reply_ends_for_the_summary`); the turn waits for the
+  summary, then Quick is told to go on (`recovery::YIELD_RETRY`, a recovery message no other
+  model is sent).
   Quick writes the summary on a throwaway thread of its own, without this device's tools, sent
   exactly the part it replaces, then the instruction (`agent::summary_request_for`); only the
   text after its last call is the summary (`oak::text_after_calls`). Once a summary is in, made

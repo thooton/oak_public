@@ -850,6 +850,15 @@ impl Worker {
         let mut rate = crate::token_rate::TokenRate::default();
         let mut bench = BenchReply::default();
         let mut quick_stop: Option<(crate::quick::turn::StopKind, Instant)> = None;
+        // Quick's reply grows its thread for as long as it runs, and a
+        // summary only comes in between replies: one that grew too much ends
+        // after its next tool result (`quick_should_yield`).
+        let roll = quick.as_ref().and_then(|_| {
+            let c = self.conv.lock().unwrap();
+            (rolling::applies(api::Provider::Quick) && !c.rolling.off).then(|| rolling::config_for(&c.model))
+        });
+        let mut grew_from: Option<u64> = None;
+        let mut yielding = false;
         loop {
             if let Some(t) = &quick {
                 let queued = self.live.lock().unwrap().pause_queued;
@@ -933,6 +942,20 @@ impl Worker {
                 // Through OpenRouter, what the reply cost goes on the session's spend.
                 Event::Cost(usd) => self.conv.lock().unwrap().spent += usd,
                 Event::ServedBy(p) => self.conv.lock().unwrap().served_by = p.clone(),
+                Event::Usage(u) if !yielding && quick_stop.is_none() => {
+                    if let (Some(t), Some(cfg)) = (&quick, roll) {
+                        let now = u.input + u.cache_read + u.write + u.output;
+                        let start = *grew_from.get_or_insert(now);
+                        let blocked = {
+                            let l = self.live.lock().unwrap();
+                            l.compacting || l.rolling_failed.is_some_and(|(at, _, wait)| at.elapsed() < wait)
+                        };
+                        if quick_should_yield(start, now, cfg, blocked) {
+                            crate::quick::turn::set_yield(t);
+                            yielding = true;
+                        }
+                    }
+                }
                 _ => {}
             }
             rate.observe(&ev, Instant::now());
@@ -1234,6 +1257,45 @@ impl Worker {
                 .clone()
                 .unwrap_or_default())
         }
+    }
+}
+
+/// How far a Quick reply may grow its thread (tokens) before it ends after
+/// its next tool result: half the room between the keep and the trigger, so
+/// a long reply leaves turns a summary can cut at.
+fn quick_step(cfg: rolling::Config) -> u64 {
+    (cfg.trigger.saturating_sub(cfg.keep) / 2).max(20_000)
+}
+
+/// Whether a Quick reply whose thread was `start` tokens at its first count
+/// and is `now` ends after its next tool result (`quick::recovery::YIELD`),
+/// for the summary only a reply's end lets in: once it grew a step
+/// (`quick_step`), or a quarter of one past the trigger, unless a summary is
+/// already being written or just failed (`blocked`).
+pub(super) fn quick_should_yield(start: u64, now: u64, cfg: rolling::Config, blocked: bool) -> bool {
+    let grown = now.saturating_sub(start);
+    let step = quick_step(cfg);
+    grown >= step || (!blocked && now >= cfg.trigger && grown >= step / 4)
+}
+
+#[cfg(test)]
+mod quick_yield {
+    use super::*;
+
+    /// A long Quick reply ends every step it grows, and soon after it
+    /// passes the trigger; a short one, or one just begun past it, goes on.
+    #[test]
+    fn a_long_quick_reply_ends_for_the_summary() {
+        let cfg = rolling::Config { trigger: 300_000, keep: 175_000 };
+        assert_eq!(quick_step(cfg), 62_500);
+        assert!(!quick_should_yield(5_000, 60_000, cfg, false));
+        assert!(quick_should_yield(5_000, 68_000, cfg, false), "a step grown");
+        assert!(!quick_should_yield(290_000, 305_000, cfg, false), "just begun past the trigger");
+        assert!(quick_should_yield(280_000, 300_000, cfg, false), "past the trigger");
+        assert!(!quick_should_yield(280_000, 300_000, cfg, true), "a summary is on its way");
+        assert!(quick_should_yield(280_000, 343_000, cfg, true), "a step, all the same");
+        let small = rolling::Config { trigger: 40_000, keep: 30_000 };
+        assert_eq!(quick_step(small), 20_000);
     }
 }
 

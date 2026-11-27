@@ -16,6 +16,12 @@ pub(crate) const RATE: &str = "quick_rate_limit";
 /// The account's content filter stopped the reply (`content_filtered`).
 pub(crate) const FILTER: &str = "quick_content_filter";
 pub(crate) const ERROR: &str = "quick_error";
+/// Oak ended Quick's reply after a tool result, as it had grown past its
+/// share of the context (`agent::reply::quick_should_yield`): Oak's summary
+/// can only come in between replies, and one of Quick's replies may run for
+/// an hour and hundreds of calls. It goes on with `YIELD_RETRY`.
+pub(crate) const YIELD: &str = "quick_yield";
+pub(crate) const YIELD_RETRY: &str = "[Oak] Oak ended your previous reply after a tool result so that older context could be summarized; nothing went wrong, and the results of your calls are in. Continue the existing task from where you left off, respecting its constraints. Do not repeat work already done.";
 pub(crate) const DEVICE_RETRY: &str = "[Oak] Please check for this device again with list_outposts. If the device is accessible, continue the existing task from where you left off, respecting its constraints. Do not repeat work already done.";
 pub(crate) const ERROR_RETRY: &str = "[Oak] The previous Quick reply was interrupted by a service error. Please continue the existing task from where you left off. Check the results and current state before repeating any work.";
 /// What a fresh thread is sent after the conversation so far when the last
