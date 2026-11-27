@@ -92,12 +92,35 @@ pub(crate) fn compacted_session(conv: &str, current: Option<&Session>) -> Option
 }
 
 /// The thread a summary of conversation `conv` is written on: a throwaway
-/// one on the account its thread is on, so the summary is Quick's own and
-/// the conversation's thread is left as it is. None with no account.
+/// one, so the summary is Quick's own and the conversation's thread is left
+/// as it is, on the account its thread is on. When that account can't run
+/// or others of the conversation's family (`rotation::family`: its swarm,
+/// its subagents) are active on it, on the usable account they take least:
+/// a summary opened beside a swarm's sockets on one account is dropped with
+/// them. None with no account.
 pub(crate) fn summary_session(conv: &str, current: Option<&Session>) -> Option<Session> {
-    let account = current
+    let now = api::now_ms();
+    let cands = candidates(now);
+    let usable: Vec<_> = cands.iter().filter(|c| c.usable).cloned().collect();
+    let key = format!("{conv}#summary");
+    let here = current
         .map(|q| q.account.clone())
         .filter(|a| !a.is_empty())
+        .or_else(|| crate::rotation::seat(api::Provider::Quick, conv));
+    // (An account that isn't a login here is left to the request to sort out, as before.)
+    let crowded = here.as_ref().is_some_and(|a| {
+        cands.iter().any(|c| &c.id == a)
+            && (!usable.iter().any(|c| &c.id == a)
+                || crate::rotation::kin_on(api::Provider::Quick, conv, a, now) > 0)
+    });
+    let picked = if crowded { crate::rotation::preview(api::Provider::Quick, &key, &usable, now) } else { None };
+    // It counts on its account (`rotation::ACTIVE_MS`), so the family's
+    // other summaries, written at the same moment, go elsewhere.
+    if let Some(a) = &picked {
+        crate::rotation::used(api::Provider::Quick, &key, a, 0, now);
+    }
+    let account = picked
+        .or_else(|| current.map(|q| q.account.clone()).filter(|a| !a.is_empty()))
         .or_else(|| crate::rotation::seat(api::Provider::Quick, conv))
         .or_else(|| login::all().first().map(|l| l.id.clone()))?;
     Some(Session { account, thread: hex_uuid(), ..Default::default() })

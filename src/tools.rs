@@ -1050,7 +1050,7 @@ mod tests {
         let out: String = (0..2100).map(|i| format!("line {i:05} of the output\n")).collect();
         assert!(too_large(&out) && !too_large(&out[..PERSIST_CHARS]));
         assert!(!too_large(&"é".repeat(PERSIST_CHARS)), "counts characters, not bytes");
-        let dir = std::env::temp_dir().join(format!("oak-persist-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-persist-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let results = dir.join("tool_results");
         std::fs::create_dir_all(&results).unwrap();
@@ -1069,7 +1069,7 @@ mod tests {
     }
 
     fn scratch(name: &str, bytes: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join("oak-tools-test");
+        let dir = crate::temp_dir().join("oak-tools-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
@@ -1135,7 +1135,7 @@ mod tests {
     /// Agents editing one file at once each keep their change.
     #[test]
     fn edits_of_one_file_take_turns() {
-        let dir = std::env::temp_dir().join(format!("oak-edit-lock-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-edit-lock-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.txt"), "END\n".to_string() + &"filler line\n".repeat(20_000)).unwrap();
         // Named two ways, as one file.

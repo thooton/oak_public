@@ -147,7 +147,7 @@ fn quick_live_turn() {
         Err(_) => std::env::var("OAK_QUICK_PROMPT").unwrap_or_else(|_| "Reply with exactly: PROBE-OK".into()),
     };
     let (text, err) = live_turn(&prompt, &model());
-    let _ = std::fs::write(std::env::temp_dir().join("oak_quick_text.txt"), &text);
+    let _ = std::fs::write(crate::temp_dir().join("oak_quick_text.txt"), &text);
     assert!(err.is_none(), "{err:?}");
 }
 

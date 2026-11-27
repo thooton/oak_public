@@ -376,7 +376,7 @@ static LOG: Mutex<Option<Log>> = Mutex::new(None);
 
 fn path() -> PathBuf {
     #[cfg(test)]
-    return std::env::temp_dir().join(format!("oak-test-usage-{}.jsonl", std::process::id()));
+    return crate::temp_dir().join(format!("oak-test-usage-{}.jsonl", std::process::id()));
     #[cfg(not(test))]
     crate::store::dir().join("usage.jsonl")
 }
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn legacy_ids_survive_restart_and_remote_stays_separate() {
-        let file = std::env::temp_dir().join(format!("oak-usage-migration-{}.jsonl", new_id()));
+        let file = crate::temp_dir().join(format!("oak-usage-migration-{}.jsonl", new_id()));
         let now = crate::api::now_ms();
         let a = req(now, 10.0, 100);
         std::fs::write(&file, format!("{}\n", serde_json::to_string(&a).unwrap())).unwrap();
@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn reset_purges_local_disk_and_poll_deduplication() {
-        let file = std::env::temp_dir().join(format!("oak-usage-reset-{}.jsonl", new_id()));
+        let file = crate::temp_dir().join(format!("oak-usage-reset-{}.jsonl", new_id()));
         let now = crate::api::now_ms();
         let old = Rec { id: "old".into(), ..req(now - 1000, 10.0, 100) };
         let fresh = Rec { id: "new".into(), ..req(now + 1, 11.0, 200) };

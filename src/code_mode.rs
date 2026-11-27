@@ -175,7 +175,7 @@ pub fn snapshot_path(conv: &str) -> PathBuf {
 
 fn snapshots_dir() -> PathBuf {
     #[cfg(test)]
-    let d = std::env::temp_dir().join(format!("oak-test-code-mode-{}", std::process::id()));
+    let d = crate::temp_dir().join(format!("oak-test-code-mode-{}", std::process::id()));
     #[cfg(not(test))]
     let d = crate::store::dir().join("code-mode");
     let _ = std::fs::create_dir_all(&d);
@@ -345,9 +345,20 @@ pub fn drop_host(conv: &str, h: &Arc<Host>) {
 const START_WAIT: Duration = Duration::from_secs(60);
 
 fn start(node: &Path, snapshot: &Path) -> Result<Host, String> {
-    let script = std::env::temp_dir().join(format!("oak-code-mode-host-{}.js", std::process::id()));
+    // Named by its content, not the process: one file for every Oak that
+    // runs this host, instead of one left behind by each run.
+    let script = crate::temp_dir().join(format!("oak-code-mode-host-{:016x}.js", crate::hash_of(HOST_JS)));
     if std::fs::read_to_string(&script).ok().as_deref() != Some(HOST_JS) {
-        std::fs::write(&script, HOST_JS).map_err(|e| format!("Couldn't write the REPL's host to {}: {e}", script.display()))?;
+        // Written beside it and moved in, so another Oak starting the host
+        // at the same time never reads it half-written.
+        let part = script.with_extension(format!("{}.part", std::process::id()));
+        let wrote = std::fs::write(&part, HOST_JS).and_then(|()| std::fs::rename(&part, &script));
+        if let Err(e) = wrote {
+            let _ = std::fs::remove_file(&part);
+            if std::fs::read_to_string(&script).ok().as_deref() != Some(HOST_JS) {
+                return Err(format!("Couldn't write the REPL's host to {}: {e}", script.display()));
+            }
+        }
     }
     let mut cmd = Command::new(node);
     crate::oom::isolate(&mut cmd);

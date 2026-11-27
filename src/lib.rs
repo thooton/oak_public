@@ -1295,6 +1295,47 @@ fn read_conversations() -> Preloaded {
     (conversations, tasks)
 }
 
+/// The temp folder, for everything Oak puts there. Under test, the run's
+/// own folder inside it (`oak-tests/<pid>`), since test runs leave theirs
+/// behind (a run has no end to clean up at): the first call of a run
+/// removes those of runs older than `STALE_TEST_RUN`.
+pub(crate) fn temp_dir() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let root = std::env::temp_dir().join("oak-tests");
+            sweep_test_runs(&root);
+            let d = root.join(std::process::id().to_string());
+            let _ = std::fs::create_dir_all(&d);
+            d
+        })
+        .clone()
+    }
+    #[cfg(not(test))]
+    std::env::temp_dir()
+}
+
+/// How old a test run's folder must be before a later run removes it; no
+/// run takes nearly this long.
+#[cfg(test)]
+const STALE_TEST_RUN: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// Removes the folders under `root` of test runs older than
+/// `STALE_TEST_RUN`, this run's PID's too (it's from an earlier run, as this
+/// one hasn't made it yet). Only folders named by a PID.
+#[cfg(test)]
+fn sweep_test_runs(root: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for e in entries.flatten() {
+        let named_by_pid = e.file_name().to_str().is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let stale = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > STALE_TEST_RUN);
+        if named_by_pid && stale && e.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod app_hover_test;
 #[cfg(test)]

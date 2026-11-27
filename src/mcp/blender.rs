@@ -498,7 +498,7 @@ fn polyhaven_search(kind: &str, categories: Option<&str>) -> Result<String, Stri
 /// into the .blend is the user's choice).
 fn download_dir(id: &str, res: &str) -> PathBuf {
     let safe = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect::<String>();
-    std::env::temp_dir().join("oak-polyhaven").join(format!("{}_{}", safe(id), safe(res)))
+    crate::temp_dir().join("oak-polyhaven").join(format!("{}_{}", safe(id), safe(res)))
 }
 
 fn download(client: &reqwest::blocking::Client, url: &str, to: &Path) -> Result<(), String> {
@@ -901,7 +901,7 @@ pub fn addon_outdated() -> bool {
 /// otherwise it goes into every Blender settings folder there is, to be
 /// switched on in Preferences. Says what it did.
 pub fn install_addon() -> Result<String, String> {
-    let src = std::env::temp_dir().join(format!("{ADDON_MODULE}.py"));
+    let src = crate::temp_dir().join(format!("{ADDON_MODULE}.py"));
     std::fs::write(&src, ADDON).map_err(|e| format!("Couldn't write {}: {e}", src.display()))?;
     let mut tried = vec![];
     for exe in find_blender() {
@@ -1041,7 +1041,7 @@ mod tests {
         let t = std::time::Instant::now();
         let f = frame_on(address().1, 720).expect("a frame");
         println!("frame {}x{} in {:?}", f.width(), f.height(), t.elapsed());
-        f.save(std::env::temp_dir().join("oak_blender_frame.png")).unwrap();
+        f.save(crate::temp_dir().join("oak_blender_frame.png")).unwrap();
         let none = call("get_object_info", &json!({"object_name": "suz"}));
         assert_eq!(none["isError"], true);
         println!("{}", none["content"][0]["text"].as_str().unwrap());
@@ -1073,7 +1073,7 @@ mod tests {
         println!("{}", text(&r));
         let r = call("execute_blender_code", &json!({"code": "import bpy\nfor a in bpy.context.screen.areas:\n    if a.type == 'VIEW_3D': a.spaces[0].shading.type = 'MATERIAL'\nbpy.ops.object.select_all(action='DESELECT')"}));
         assert_eq!(r["isError"], false, "{r}");
-        frame_on(address().1, 1200).unwrap().save(std::env::temp_dir().join("oak_blender_frame2.png")).unwrap();
+        frame_on(address().1, 1200).unwrap().save(crate::temp_dir().join("oak_blender_frame2.png")).unwrap();
     }
 
     #[test]

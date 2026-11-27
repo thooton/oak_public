@@ -77,9 +77,29 @@ const MOVE_GAIN: f64 = 20.0;
 /// the next pick (percent), for spreading conversations out.
 const LOAD: f64 = 8.0;
 
+/// What an active conversation of the same family (`family`: a swarm's
+/// lead and agents, a session and its subagents) on an account weighs
+/// against it, on top of `LOAD`. A family's conversations run at the same
+/// moments (a swarm's agents wake on one board post), and several sockets
+/// opened at once on one Quick account get dropped mid-reply, so they go to
+/// separate accounts unless the others have far less left.
+const SIBLING: f64 = 50.0;
+
 /// A conversation counts as active on its account for this long after its
 /// last request, whatever its cache's lifetime.
 const ACTIVE_MS: i64 = 10 * 60 * 1000;
+
+/// The family conversation `conv` belongs to: its id without a `#...` part
+/// (a request made on its behalf, such as its summary) or a trailing
+/// `-agent<N>` (a subagent's or swarm agent's), so a swarm's lead and its
+/// agents share one.
+pub(crate) fn family(conv: &str) -> &str {
+    let conv = conv.split('#').next().unwrap_or(conv);
+    match conv.rfind("-agent") {
+        Some(i) if i > 0 && conv[i + 6..].chars().all(|c| c.is_ascii_digit()) && conv.len() > i + 6 => &conv[..i],
+        _ => conv,
+    }
+}
 
 /// The account conversation `conv` goes through now: its seat's, or a new
 /// one (taken as its seat). None when no account can make requests. `fixed`
@@ -125,12 +145,23 @@ fn wants_move(c: &Candidate, cands: &[Candidate]) -> bool {
 }
 
 /// The account a conversation without a usable seat takes: the most left
-/// after the other active conversations' expected use, a preferred one
-/// when any can make requests; between equals, the one that resets first.
+/// after the other active conversations' expected use, its own family's
+/// weighing far more (`SIBLING`), a preferred one when any can make
+/// requests; between equals, the one that resets first.
 fn best(seats: &HashMap<String, Seat>, conv: &str, cands: &[Candidate], now: i64) -> Option<String> {
     let preferred = cands.iter().any(|c| c.usable && c.preferred);
-    let load = |id: &str| seats.iter().filter(|(k, s)| k.as_str() != conv && s.account == id && now - s.used_at < ACTIVE_MS.max(s.ttl_ms)).count() as f64;
-    let score = |c: &Candidate| c.left - LOAD * load(&c.id);
+    let kin = family(conv);
+    // (Other active conversations on account `id`; only its family's, when `kin_only`.)
+    let active = |id: &str, kin_only: bool| {
+        seats
+            .iter()
+            .filter(|(k, s)| k.as_str() != conv && s.account == id && now - s.used_at < ACTIVE_MS.max(s.ttl_ms))
+            .filter(|(k, _)| !kin_only || family(k) == kin)
+            .count() as f64
+    };
+    let load = |id: &str| active(id, false);
+    let siblings = |id: &str| active(id, true);
+    let score = |c: &Candidate| c.left - LOAD * load(&c.id) - SIBLING * siblings(&c.id);
     cands
         .iter()
         .filter(|c| c.usable && (c.preferred || !preferred))
@@ -174,6 +205,24 @@ pub fn active(kind: Kind, now: i64) -> HashMap<String, usize> {
             }
         }
         out
+    })
+}
+
+/// How many other conversations of `conv`'s family (`family`) are active on
+/// `account`, besides `conv` and requests made on its behalf.
+pub(crate) fn kin_on(kind: Kind, conv: &str, account: &str, now: i64) -> usize {
+    let kin = family(conv);
+    with(|s| {
+        s.by.get(kind.id()).map_or(0, |m| {
+            m.iter()
+                .filter(|(k, seat)| {
+                    k.split('#').next() != Some(conv)
+                        && family(k) == kin
+                        && seat.account == account
+                        && now - seat.used_at < ACTIVE_MS.max(seat.ttl_ms)
+                })
+                .count()
+        })
     })
 }
 
@@ -229,6 +278,36 @@ mod tests {
         // The new seat isn't warm: it doesn't hold a conversation on a used-up account.
         let cands = [Candidate { usable: false, ..cand(&first, 0.0) }, cand(&second, 50.0)];
         assert_eq!(pick(Kind::OpenRouter, "rot-1", &cands, T + 2, false), Some(second));
+    }
+
+    #[test]
+    fn a_family_is_its_id_without_an_agent_or_request_suffix() {
+        assert_eq!(family("fork-1-ab"), "fork-1-ab");
+        assert_eq!(family("fork-1-ab-agent3"), "fork-1-ab");
+        assert_eq!(family("fork-1-ab-agent12#summary"), "fork-1-ab");
+        assert_eq!(family("1795-agent"), "1795-agent", "no number: not an agent");
+        assert_eq!(family("my-agentx"), "my-agentx");
+        assert_eq!(family("1795756505455"), "1795756505455");
+    }
+
+    /// A swarm's agents go to separate accounts even when one has much more
+    /// left, and share one only when nothing else is close.
+    #[test]
+    fn a_swarm_spreads_over_accounts() {
+        let mut seats = HashMap::new();
+        seats.insert("fork-s".to_string(), seat("a", 0, 0));
+        seats.insert("fork-s-agent1".to_string(), seat("b", 0, 0));
+        seats.insert("other".to_string(), seat("c", 0, 0));
+        let cands = [cand("a", 95.0), cand("b", 90.0), cand("c", 60.0), cand("d", 55.0)];
+        // Without family, "a" would win (95 - 8 = 87).
+        assert_eq!(best(&seats, "fork-s-agent2", &cands, MIN).as_deref(), Some("d"));
+        // An unrelated conversation still takes the fullest.
+        assert_eq!(best(&seats, "new", &cands, MIN).as_deref(), Some("a"));
+        // Its summary avoids the account it and its siblings are on.
+        assert_eq!(best(&seats, "fork-s#summary", &cands, MIN).as_deref(), Some("d"));
+        // Every other account nearly empty: it shares.
+        let cands = [cand("a", 95.0), cand("b", 90.0), cand("c", 5.0), cand("d", 5.0)];
+        assert_eq!(best(&seats, "fork-s-agent2", &cands, MIN).as_deref(), Some("a"));
     }
 
     #[test]

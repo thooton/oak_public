@@ -23,7 +23,7 @@ fn refused_conversation() -> serde_json::Value {
     serde_json::json!({
         "id": "1700000000001",
         "title": "Cyber work",
-        "folder": std::env::temp_dir().join("oak-handoff-folder"),
+        "folder": crate::temp_dir().join("oak-handoff-folder"),
         "provider": "claude",
         "model": "claude-opus-5-5",
         "effort": "high",
@@ -44,7 +44,7 @@ fn frames(n: usize, h: &mut Headless, app: &mut App) {
 #[test]
 #[ignore]
 fn handoff_in_a_whole_app() {
-    let folder = std::env::temp_dir().join("oak-handoff-folder");
+    let folder = crate::temp_dir().join("oak-handoff-folder");
     std::fs::create_dir_all(&folder).unwrap();
     let (dir, mut h, mut app) = Headless::start("handoff", &[refused_conversation()]);
     // The plugins in `OAK_PLUGINS` (the private repository's), this one

@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn rg_is_written_once_and_replaced_when_it_differs() {
-        let dir = std::env::temp_dir().join(format!("oak-toolbin-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-toolbin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let rg = dir.join(exe_name());
         install(&dir, b"one").unwrap();

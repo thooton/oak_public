@@ -365,7 +365,7 @@ fn agent_messages_round_trip() {
 /// it has one.
 fn unit_conv(name: &str, conv: Conversation) -> Conversation {
     let folder = if conv.folder.as_os_str().is_empty() {
-        std::env::temp_dir()
+        crate::temp_dir()
     } else {
         conv.folder
     };
@@ -1359,7 +1359,7 @@ fn task_waits_left_open_to_carry_on() {
     let tasks = Tasks::open("");
     tasks.add(
         1,
-        tasks::spawn("echo hi", &std::env::temp_dir()).unwrap(),
+        tasks::spawn("echo hi", &crate::temp_dir()).unwrap(),
         "x",
     );
     let wait = |id: &str, task: u64| json!({"type": "tool_call", "id": id, "name": "TASK", "input": {"action": "wait", "id": task, "timeout": 60}});
@@ -1756,7 +1756,7 @@ fn quick_cards_are_asked_at_once_only_during_a_goal() {
 /// folder the cache has.
 #[test]
 fn cd_switches_the_working_folder() {
-    let root = std::env::temp_dir().join(format!("oak-cd-{}", api::now_ms()));
+    let root = crate::temp_dir().join(format!("oak-cd-{}", api::now_ms()));
     let sub = root.join("proj");
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(sub.join("CLAUDE.md"), "Use tabs.").unwrap();
@@ -1847,7 +1847,7 @@ fn cd_switches_the_working_folder() {
 /// reply is in it, then come in the calls' order.
 #[test]
 fn calls_start_while_the_reply_streams() {
-    let dir = std::env::temp_dir().join(format!("oak-early-calls-{}", api::now_ms()));
+    let dir = crate::temp_dir().join(format!("oak-early-calls-{}", api::now_ms()));
     std::fs::create_dir_all(&dir).unwrap();
     let (w, s) = idle_worker(
         "early",
@@ -1943,7 +1943,7 @@ fn calls_start_while_the_reply_streams() {
 /// outside Oak afterwards is.
 #[test]
 fn own_commands_changes_are_not_reported() {
-    let dir = std::env::temp_dir().join(format!("oak-own-changes-{}", api::now_ms()));
+    let dir = crate::temp_dir().join(format!("oak-own-changes-{}", api::now_ms()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
     let (w, s) = idle_worker(
@@ -1996,7 +1996,7 @@ fn own_commands_changes_are_not_reported() {
 /// waiting for it.
 #[test]
 fn a_quick_snippets_call_reaches_the_turn_waiting_for_it() {
-    let dir = std::env::temp_dir().join(format!("oak-quick-oak-call-{}", api::now_ms()));
+    let dir = crate::temp_dir().join(format!("oak-quick-oak-call-{}", api::now_ms()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.txt"), "hello from oak\n").unwrap();
     let (w, s) = idle_worker(
@@ -2392,7 +2392,7 @@ fn live_rolling() {
         messages.push(json!({"role": "user", "content": [{"type": "text", "text": text}]}));
         messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": format!("Noted log batch {turn}.")}]}));
     }
-    let folder = std::env::temp_dir().join("oak-live-rolling");
+    let folder = crate::temp_dir().join("oak-live-rolling");
     std::fs::create_dir_all(&folder).unwrap();
     let conv = Conversation {
         id: format!("live-test-{}", api::now_ms()),
@@ -2504,7 +2504,7 @@ fn a_model_change_ends_a_limit_wait() {
 /// folder and no scratchpad; goals and Freebuff never reach it.
 #[test]
 fn a_chat_runs_no_file_command_or_agent_tool() {
-    let dir = std::env::temp_dir().join(format!("oak-chat-test-{}", api::now_ms()));
+    let dir = crate::temp_dir().join(format!("oak-chat-test-{}", api::now_ms()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("secret.txt"), "hidden").unwrap();
     let (w, s) = idle_worker(
@@ -2734,7 +2734,7 @@ fn super_agents_coordinate_and_their_agents_work() {
 /// a message from the user still moves a running one to the background.
 #[test]
 fn execute_returns_when_its_command_exits() {
-    let dir = std::env::temp_dir();
+    let dir = crate::temp_dir();
     let (w, _s) = idle_worker(
         "exec-exit",
         Conversation {
@@ -3035,7 +3035,7 @@ fn prefix_only_grows_once(
     other_model: &str,
     sent: fn(&oak::Request) -> Sent,
 ) {
-    let folder = std::env::temp_dir().join(format!("oak-prefix-{name}-{}", api::now_ms()));
+    let folder = crate::temp_dir().join(format!("oak-prefix-{name}-{}", api::now_ms()));
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("AGENTS.md"), "Rule one.").unwrap();
     let (w, s) = idle_worker(
@@ -3973,7 +3973,7 @@ fn code_mode_runs_tools_from_a_persistent_repl() {
         eprintln!("skipped: no Node.js");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("oak-code-mode-test-{}", api::now_ms()));
+    let dir = crate::temp_dir().join(format!("oak-code-mode-test-{}", api::now_ms()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.txt"), "hello world\n").unwrap();
     let (w, s) = idle_worker(
@@ -4151,7 +4151,7 @@ fn code_mode_conversations_keep_their_own_variables() {
     }
     let conv = || Conversation {
         code_mode: true,
-        folder: std::env::temp_dir(),
+        folder: crate::temp_dir(),
         model: "claude-opus-5-5".into(),
         effort: "high".into(),
         ..Default::default()

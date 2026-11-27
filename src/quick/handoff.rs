@@ -28,7 +28,7 @@ const KEEP_FOR: Duration = Duration::from_secs(3 * 24 * 3600);
 /// Where the copies go: `quick-handoff` in Oak's own folder.
 pub(crate) fn dir() -> std::path::PathBuf {
     if cfg!(test) {
-        return std::env::temp_dir().join(format!("oak-quick-handoff-{}", std::process::id()));
+        return crate::temp_dir().join(format!("oak-quick-handoff-{}", std::process::id()));
     }
     crate::store::dir().join("quick-handoff")
 }

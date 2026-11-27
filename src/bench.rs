@@ -112,7 +112,7 @@ mod tests {
             );
         }
 
-        let folder = std::env::temp_dir().join(format!("oak-bench-files-{}", std::process::id()));
+        let folder = crate::temp_dir().join(format!("oak-bench-files-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let mut tracked = crate::changes::Tracked::default();
         for i in 0..200 {

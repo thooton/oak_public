@@ -2871,7 +2871,7 @@ mod tests {
     /// and nothing but reads of it runs until every line of it was read.
     #[test]
     fn the_briefing_is_a_file_read_before_anything_runs() {
-        let dir = std::env::temp_dir().join(format!("oak-briefing-{}", crate::api::now_ms()));
+        let dir = crate::temp_dir().join(format!("oak-briefing-{}", crate::api::now_ms()));
         let scratch = dir.join(".oak/tmp/temp9");
         std::fs::create_dir_all(&scratch).unwrap();
         let mut b = body();

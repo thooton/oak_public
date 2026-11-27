@@ -86,7 +86,7 @@ pub fn expand_home(path: &str, home: &Path) -> PathBuf {
 /// Where `~/.claude/CLAUDE.md` is looked for (tests use an empty folder,
 /// so the user's own file stays out of them).
 pub fn home() -> PathBuf {
-    if cfg!(test) { std::env::temp_dir().join("oak-test-home") } else { user_home() }
+    if cfg!(test) { crate::temp_dir().join("oak-test-home") } else { user_home() }
 }
 
 fn kind_of(name: &str) -> Kind {
@@ -332,7 +332,7 @@ mod tests {
     }
 
     fn tree(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("oak-instructions-{name}-{}", std::process::id()));
+        let root = crate::temp_dir().join(format!("oak-instructions-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root

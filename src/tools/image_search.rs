@@ -699,7 +699,7 @@ mod tests {
     use super::*;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("oak-images-test-{}-{name}", std::process::id()));
+        let d = crate::temp_dir().join(format!("oak-images-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

@@ -735,7 +735,7 @@ mod tests {
             for (what, messages) in &ends {
                 let (ctx, _) = test_ctx(true, true);
                 crate::theme::apply_theme(&ctx, &t);
-                let conv = Conversation { id: format!("unit-test-status-{theme}-{}-{}", what.len(), api::now_ms()), folder: std::env::temp_dir(), messages: messages.clone().into(), ..Default::default() };
+                let conv = Conversation { id: format!("unit-test-status-{theme}-{}-{}", what.len(), api::now_ms()), folder: crate::temp_dir(), messages: messages.clone().into(), ..Default::default() };
                 let id = conv.id.clone();
                 let s = agent::Session::start(conv, ctx.clone());
                 let mut list = vlist::List::default();

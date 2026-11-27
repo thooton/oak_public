@@ -248,7 +248,7 @@ mod tests {
     /// scratchpad young, and one in use or empty is never due.
     #[test]
     fn scratchpads_due_for_clearing() {
-        let folder = std::env::temp_dir().join(format!("oak-scratch-test-{}", std::process::id()));
+        let folder = crate::temp_dir().join(format!("oak-scratch-test-{}", std::process::id()));
         let root = folder.join(crate::agent::SCRATCH_ROOT);
         for (dir, file) in [("temp0", "a.txt"), ("temp1", "b.txt"), ("temp2", "c.txt"), ("other", "d.txt")] {
             std::fs::create_dir_all(root.join(dir)).unwrap();

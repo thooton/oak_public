@@ -4219,6 +4219,8 @@ fn summary_messages(c: &Conversation, provider: api::Provider, n: usize, cut: us
     while view.last().is_some_and(|m| m["role"] == "system") {
         view.pop();
     }
+    // Cut at a tool result: the calls it answers end the part.
+    rolling::answer_kept_calls(&mut view);
     view
 }
 

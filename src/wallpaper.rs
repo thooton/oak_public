@@ -254,7 +254,7 @@ mod tests {
     /// gives one frame and the thread ends.
     #[test]
     fn frames_play_and_loop() {
-        let dir = std::env::temp_dir().join(format!("oak-wallpaper-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-wallpaper-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let gif = dir.join("two.gif");
         {

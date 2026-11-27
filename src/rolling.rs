@@ -711,11 +711,55 @@ pub fn view_with(messages: &[Value], summary: Option<&Summary>, cold: Option<&Cl
             if messages[s.cut]["role"] == "user" {
                 v.push(json!({"role": "assistant", "content": [{"type": "text", "text": ACK}]}));
             }
+            let at = v.len();
             v.extend(messages[s.cut..].iter().map(copy));
+            detach_results(&mut v[at]);
             v
         }
     };
     strip_oak(v)
+}
+
+/// Says before a tool result whose call a summary took in (`detach_results`).
+const DETACHED: &str = "(The result of a call made before the summary above:)";
+
+/// A cut at a tool result (`plan_within`) leaves results whose calls are in
+/// the summary: in the first kept message `m` they go as text, so every
+/// provider takes the request (a result must answer a call just before it).
+pub fn detach_results(m: &mut Value) {
+    let Some(blocks) = m["content"].as_array().filter(|b| b.iter().any(|b| b["type"] == "tool_result")) else { return };
+    let mut out = vec![];
+    for b in blocks {
+        if b["type"] != "tool_result" {
+            out.push(b.clone());
+            continue;
+        }
+        out.push(json!({"type": "text", "text": DETACHED}));
+        match &b["content"] {
+            Value::Array(a) => out.extend(a.iter().cloned()),
+            Value::String(s) if !s.trim().is_empty() => out.push(json!({"type": "text", "text": s})),
+            Value::Null | Value::String(_) => {}
+            other => out.push(json!({"type": "text", "text": other.to_string()})),
+        }
+    }
+    m["content"] = Value::Array(out);
+}
+
+/// The placeholder result a summary request gives a call whose result the
+/// part kept verbatim holds (a cut at a tool result: `answer_kept_calls`).
+const KEPT_RESULT: &str = "(Its result comes after this part of the conversation, kept verbatim.)";
+
+/// A summary's part ending with calls whose results are past the cut (it
+/// cut at a tool result) gets each a placeholder result, so the request is
+/// valid on every provider.
+pub fn answer_kept_calls(view: &mut Vec<Value>) {
+    let Some(last) = view.last().filter(|m| m["role"] == "assistant") else { return };
+    let ids: Vec<Value> = last["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_call").map(|b| b["id"].clone()).collect();
+    if ids.is_empty() {
+        return;
+    }
+    let results: Vec<Value> = ids.iter().map(|id| crate::oak::tool_result(id, json!(KEPT_RESULT), false)).collect();
+    view.push(json!({"role": "user", "content": results}));
 }
 
 /// Takes OAK's own keys out of `v` (`oak::clean`: say, how long a thinking
@@ -847,18 +891,18 @@ pub fn plan_within(messages: &[Value], base: usize, cleared: usize, total: u64, 
         full[k] = tails[k] + estimate(back);
         gone[k] = estimate(more);
     }
-    let candidates: Vec<usize> = (base + 1..n)
-        .rev()
-        .filter(|&k| full[k] >= keep && (messages[k]["role"] == "assistant" || !has_tool_result(&messages[k])))
-        .collect();
+    // Any message is a boundary, tool results too (their calls go in the
+    // summary, and the view sends the results as text: `detach_results`),
+    // so one huge call or result right after the last cut never leaves no
+    // cut that keeps enough.
+    let candidates: Vec<usize> = (base + 1..n).rev().filter(|&k| full[k] >= keep).collect();
     // The start of a turn reads best, if one keeps no more than half again as much.
-    let cut = candidates.iter().copied().find(|&k| messages[k]["role"] == "user" && full[k] <= keep * 3 / 2).or(candidates.first().copied())?;
+    let turn = |k: usize| messages[k]["role"] == "user" && !has_tool_result(&messages[k]);
+    let cut = candidates.iter().copied().find(|&k| turn(k) && full[k] <= keep * 3 / 2).or(candidates.first().copied())?;
     // Too much before it for one summary request: the latest boundary
     // before it that fits.
     let cut = if total - tails[cut] > cap {
-        (base + 1..cut)
-            .rev()
-            .find(|&k| total - tails[k] <= cap && (messages[k]["role"] == "assistant" || !has_tool_result(&messages[k])))?
+        (base + 1..cut).rev().find(|&k| total - tails[k] <= cap)?
     } else {
         cut
     };
@@ -1057,6 +1101,22 @@ fn summarize_with(mut req: Request) -> Result<(String, Cost), String> {
             std::thread::sleep(std::time::Duration::from_secs(api::retry_wait(refusals)));
             continue;
         }
+        // Quick's socket dropped or its service failed mid-reply (not a
+        // limit or its content filter): tried twice more, each on a fresh
+        // throwaway thread, as the old one may hold the request already.
+        if stop == crate::quick::recovery::ERROR && failures < 2 {
+            let detail = reply.detail.as_deref().unwrap_or("");
+            if !crate::quick::recovery::rate_limited(detail)
+                && !crate::quick::recovery::content_filtered(detail)
+            {
+                failures += 1;
+                if let Some(s) = req.quick_session.as_mut() {
+                    s.thread = crate::quick::hex_uuid();
+                }
+                std::thread::sleep(std::time::Duration::from_secs(10 * failures));
+                continue;
+            }
+        }
         // Quick stopped for its own reasons (a usage or rate limit, a service
         // error, the device): what it wrote, its notice too, isn't a summary.
         if stop.starts_with("quick_") {
@@ -1176,6 +1236,11 @@ mod tests {
                     b["content"] = json!(CLEARED);
                 }
             }
+            // A cut at a tool result sends its results as text.
+            if let Some(s) = in_use(&messages, summary.as_ref()) {
+                let at = if messages[s.cut]["role"] == "user" { 2 } else { 1 };
+                detach_results(&mut copied[at]);
+            }
             assert_eq!(view_with(&messages, summary.as_ref(), cold.as_ref()), strip_oak(copied), "round {round}");
         }
     }
@@ -1246,18 +1311,51 @@ mod tests {
         assert_eq!(capped(DEFAULT, 900_000), DEFAULT);
     }
 
-    /// The kept part is a valid transcript at any boundary, and a cut at a
-    /// user message gets the acknowledgement in between.
+    /// The kept part is a valid transcript at any cut, tool results too
+    /// (they go as text), and a cut at a user message gets the
+    /// acknowledgement in between.
     #[test]
     fn view_keeps_roles_and_tool_pairs() {
         let m = transcript();
         for cut in 1..m.len() {
-            if m[cut]["role"] == "assistant" || m[cut]["content"][0]["type"] != "tool_result" {
-                let s = Summary { cut, text: "earlier".into(), made_at: 0, ..Default::default() };
-                assert!(valid(&view(&m, Some(&s))), "cut {cut}");
+            let s = Summary { cut, text: "earlier".into(), made_at: 0, ..Default::default() };
+            let v = view(&m, Some(&s));
+            assert!(valid(&v), "cut {cut}");
+            if has_tool_result(&m[cut]) {
+                assert_eq!(v[2]["content"][0]["text"], DETACHED, "cut {cut}");
+                assert_eq!(v[2]["content"][1]["text"], m[cut]["content"][0]["content"], "the result's text stays");
             }
         }
         assert_eq!(view(&m, None), m);
+    }
+
+    /// A huge call and its result right after the last cut, then little:
+    /// the only cut that keeps enough is at the result, which is taken
+    /// (it used to make no plan at all, so the context never compacted).
+    #[test]
+    fn plan_cuts_at_a_tool_result_when_nothing_else_keeps_enough() {
+        let x = |n: usize| "x".repeat(n * 7 / 2); // about n tokens
+        let mut m = vec![user("go")];
+        m.push(json!({"role": "assistant", "content": [{"type": "tool_call", "id": "big", "name": "WRITE", "input": {"content": x(60_000)}}]}));
+        m.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": "big", "content": x(50_000)}]}));
+        for i in 0..4 {
+            m.push(json!({"role": "assistant", "content": [{"type": "tool_call", "id": format!("t{i}"), "name": "EXECUTE", "input": {}}]}));
+            m.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": format!("t{i}"), "content": x(5_000)}]}));
+        }
+        let total = estimate(m.iter().map(chars).sum());
+        let p = plan(&m, 0, 0, total, &[], 60_000, 10_000, false).expect("a plan");
+        assert_eq!(p.cut, 2, "{p:?}");
+        let s = Summary { cut: p.cut, text: "s".into(), made_at: 0, ..Default::default() };
+        assert!(valid(&view(&m, Some(&s))));
+        // The summary's part ends with the call; it gets a placeholder result.
+        let mut part = m[..p.cut].to_vec();
+        answer_kept_calls(&mut part);
+        assert_eq!(part.last().unwrap()["content"][0]["call_id"], "big");
+        assert_eq!(part.last().unwrap()["content"][0]["content"], KEPT_RESULT);
+        // A part that ends with results is left alone.
+        let mut whole = m.clone();
+        answer_kept_calls(&mut whole);
+        assert_eq!(whole.len(), m.len());
     }
 
     /// The refusal's category and explanation are kept, for the error.

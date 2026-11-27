@@ -1010,7 +1010,7 @@ mod tests {
     /// (ring, zstd) with MinGW, which MSVC's linker can't link.
     fn built_c_example() -> PathBuf {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let out = std::env::temp_dir().join(format!("oak-hello-c-{}", std::process::id()));
+        let out = crate::temp_dir().join(format!("oak-hello-c-{}", std::process::id()));
         std::fs::create_dir_all(&out).unwrap();
         let lib = out.join(format!("liboak_hello_c.{}", std::env::consts::DLL_EXTENSION));
         compile_c(&root.join("plugins/hello-c/hello.c"), &lib);
@@ -1045,7 +1045,7 @@ mod tests {
     /// `OAK_PLUGIN_SEED` names a folder whose files are copied there first
     /// (a connection to a test server).
     fn scratch_folder(name: &str) {
-        let dir = std::env::temp_dir().join(format!("oak-{name}-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-{name}-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         if let Some(seed) = std::env::var_os("OAK_PLUGIN_SEED") {
             for file in std::fs::read_dir(&seed).unwrap_or_else(|e| panic!("OAK_PLUGIN_SEED can't be read: {e}")).flatten().filter(|f| f.path().is_file()) {
@@ -1278,7 +1278,7 @@ mod tests {
     fn reloading_picks_up_what_changed() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(root.join("plugins/hello-c/hello.c")).unwrap();
-        let work = std::env::temp_dir().join(format!("oak-reload-test-src-{}", std::process::id()));
+        let work = crate::temp_dir().join(format!("oak-reload-test-src-{}", std::process::id()));
         let folder = work.join("plugins");
         std::fs::create_dir_all(&folder).unwrap();
         let lib = |name: &str| folder.join(format!("{name}.{}", std::env::consts::DLL_EXTENSION));

@@ -30,6 +30,9 @@ pub(crate) struct Socket {
     heard_at: std::time::Instant,
     /// Bytes read off the socket that don't make a whole message yet.
     inbuf: Vec<u8>,
+    /// How the socket ended, once it has (`close_reason`): Quick's close
+    /// frame's code and reason, the read error, or the idle limit.
+    why_closed: Option<String>,
     /// A turn's socket holds its login's outpost (`keeper`): when it goes
     /// while another turn's still runs, a keeper keeps the outpost ONLINE.
     /// (Last, so it lets go after the connection has closed.)
@@ -319,6 +322,7 @@ impl Socket {
             acked_at: std::time::Instant::now(),
             heard_at: std::time::Instant::now(),
             inbuf: Vec::new(),
+            why_closed: None,
             _hold: None,
         };
         let key = base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 16]>());
@@ -452,6 +456,12 @@ impl Socket {
         }
     }
 
+    /// How the socket ended, once it has: Quick's close code and reason, the
+    /// read error, or the idle limit. None while it is open.
+    pub(crate) fn close_reason(&self) -> Option<&str> {
+        self.why_closed.as_deref()
+    }
+
     /// Takes any frames that have already arrived on the socket without
     /// waiting for more.
     pub(crate) fn drain_pending(&mut self) -> Vec<Value> {
@@ -512,6 +522,10 @@ impl Socket {
                                 "Quick's socket said nothing for {}s; Oak gave up on it",
                                 IDLE_LIMIT.as_secs()
                             );
+                            self.why_closed = Some(format!(
+                                "nothing came on it for {}s",
+                                IDLE_LIMIT.as_secs()
+                            ));
                             self.closed.store(true, Ordering::SeqCst);
                             return Fill::Ended(self.end());
                         }
@@ -519,7 +533,14 @@ impl Socket {
                             return Fill::Nothing;
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        self.why_closed.get_or_insert_with(|| {
+                            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                                "it ended without a close frame".to_string()
+                            } else {
+                                format!("the connection dropped: {e}")
+                            }
+                        });
                         self.closed.store(true, Ordering::SeqCst);
                         return Fill::Ended(self.end());
                     }
@@ -535,6 +556,12 @@ impl Socket {
                         .unwrap_or(0);
                     let why = String::from_utf8_lossy(payload.get(2..).unwrap_or(&[])).to_string();
                     eprintln!("Quick closed the socket: {code} {why}");
+                    let why = why.trim();
+                    self.why_closed = Some(if why.is_empty() {
+                        format!("close code {code}")
+                    } else {
+                        format!("close code {code}: {why}")
+                    });
                     self.closed.store(true, Ordering::SeqCst);
                     return Fill::Ended(self.end());
                 }

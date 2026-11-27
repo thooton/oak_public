@@ -280,7 +280,7 @@ fn instant_at(ms: i64) -> Instant {
 /// can't remove `task-output` under a running command.
 fn output_dir() -> PathBuf {
     #[cfg(test)]
-    let d = std::env::temp_dir().join(format!("oak-test-task-output-{}", std::process::id()));
+    let d = crate::temp_dir().join(format!("oak-test-task-output-{}", std::process::id()));
     #[cfg(not(test))]
     let d = crate::store::dir().join("task-output");
     let _ = std::fs::create_dir_all(&d);
@@ -304,7 +304,7 @@ pub fn spawn(command: &str, cwd: &Path) -> Result<Arc<Proc>, String> {
     let n = SCRIPTS.fetch_add(1, Ordering::SeqCst);
     let name = format!("oak-cmd-{}-{n}", run_stamp());
     let out_dir = output_dir();
-    let files = Files { log: out_dir.join(format!("{name}.log")), exit: out_dir.join(format!("{name}.exit")), script: std::env::temp_dir().join(format!("{name}.sh")) };
+    let files = Files { log: out_dir.join(format!("{name}.log")), exit: out_dir.join(format!("{name}.exit")), script: crate::temp_dir().join(format!("{name}.sh")) };
     std::fs::write(&files.script, format!("trap 'echo $? > \"$OAK_EXIT_FILE\"' EXIT\n{command}\n"))
         .map_err(|e| format!("Couldn't write the command to {}: {e}", files.script.display()))?;
     // The output goes to a file, not a pipe: a task left running when Oak
@@ -1452,7 +1452,7 @@ mod tests {
     /// Interrupting still reaches the command when bash runs a script file.
     #[test]
     fn interrupt_stops_a_running_command() {
-        let p = spawn("echo started; sleep 30; echo not reached", &std::env::temp_dir()).unwrap();
+        let p = spawn("echo started; sleep 30; echo not reached", &crate::temp_dir()).unwrap();
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(p.stop(), "stopped after SIGINT");
         assert_eq!(p.exit(), Some(130));
@@ -1483,7 +1483,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_exit_is_seen_as_soon_as_bash_exits() {
-        let dir = std::env::temp_dir();
+        let dir = crate::temp_dir();
         let oak = quickest(10, || {
             let p = spawn("echo out", &dir).unwrap();
             assert_eq!(p.wait_exit(Duration::from_secs(20)), Some(0));
@@ -1501,7 +1501,7 @@ mod tests {
     /// A wait for the exit ends at its timeout while the command runs on.
     #[test]
     fn a_wait_for_the_exit_times_out() {
-        let p = spawn("sleep 5", &std::env::temp_dir()).unwrap();
+        let p = spawn("sleep 5", &crate::temp_dir()).unwrap();
         let t = Instant::now();
         assert_eq!(p.wait_exit(Duration::from_millis(100)), None);
         assert!(t.elapsed() >= Duration::from_millis(100) && t.elapsed() < Duration::from_secs(3));
@@ -1514,14 +1514,14 @@ mod tests {
     /// is found again, read on, and waited for.
     #[test]
     fn tasks_are_kept_across_restarts() {
-        let dir = std::env::temp_dir().join(format!("oak-tasks-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-tasks-test-{}", std::process::id()));
         let file = dir.join("conv.json");
         let t = Arc::new(Tasks::load(Some(file.clone())));
-        let done = spawn("echo one; echo two >&2; exit 4", &std::env::temp_dir()).unwrap();
+        let done = spawn("echo one; echo two >&2; exit 4", &crate::temp_dir()).unwrap();
         t.add(1, done.clone(), "prints two lines");
         wait_exit(&done);
         assert_eq!(done.take_new(4).0, "one\n");
-        let left = spawn("echo before; sleep 2; echo after; exit 3", &std::env::temp_dir()).unwrap();
+        let left = spawn("echo before; sleep 2; echo after; exit 3", &crate::temp_dir()).unwrap();
         t.add(2, left.clone(), "");
         std::thread::sleep(Duration::from_millis(500));
         left.detach();
@@ -1552,10 +1552,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_task_left_running_keeps_its_job_for_the_next_oak() {
-        let dir = std::env::temp_dir().join(format!("oak-tasks-held-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-tasks-held-{}", std::process::id()));
         let file = dir.join("conv.json");
         let t = Arc::new(Tasks::load(Some(file.clone())));
-        let p = spawn("sleep 20", &std::env::temp_dir()).unwrap();
+        let p = spawn("sleep 20", &crate::temp_dir()).unwrap();
         t.add(1, p.clone(), "");
         p.detach();
         p.held.store(give_job(p.pid, p.job), Ordering::SeqCst);

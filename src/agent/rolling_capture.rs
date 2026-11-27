@@ -104,7 +104,7 @@ fn rolling_capture() {
         ]
     };
     let conv = |name: &str, messages: Vec<Value>| -> Conversation {
-        let folder = std::env::temp_dir().join(format!("oak-rolling-capture-{name}"));
+        let folder = crate::temp_dir().join(format!("oak-rolling-capture-{name}"));
         std::fs::create_dir_all(&folder).unwrap();
         Conversation {
             id: format!("rolling-capture-{name}-{}", api::now_ms()),

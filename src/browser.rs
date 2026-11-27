@@ -3040,7 +3040,7 @@ mod tests {
             eprintln!("no browser: skipped");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("oak-browser-viewport-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-browser-viewport-test-{}", std::process::id()));
         let ctx = egui::Context::default();
         let conv = format!("viewport-test-{}", std::process::id());
         let inst = open_with(&conv, &ctx, dir.join("profile"), None, Default::default()).unwrap();
@@ -3109,7 +3109,7 @@ mod tests {
             eprintln!("no browser: skipped");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("oak-browser-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-browser-test-{}", std::process::id()));
         let ctx = egui::Context::default();
         let conv = format!("test-{}", std::process::id());
         let inst = open_with(&conv, &ctx, dir.join("profile"), None, Default::default()).unwrap();
@@ -3210,7 +3210,7 @@ mod tests {
             eprintln!("no browser: skipped");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("oak-browser-actions-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-browser-actions-test-{}", std::process::id()));
         let ctx = egui::Context::default();
         let conv = format!("actions-test-{}", std::process::id());
         let inst = open_with(&conv, &ctx, dir.join("profile"), None, Default::default()).unwrap();

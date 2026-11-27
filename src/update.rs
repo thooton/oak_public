@@ -617,7 +617,7 @@ mod tests {
         let r = latest().expect("the look works").expect("a newer release");
         assert_eq!((r.version.as_str(), r.asset, r.sum), ("99.0.0", 7, Some(8)));
 
-        let dir = std::env::temp_dir().join(format!("oak-update-flow-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-update-flow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join(if cfg!(windows) { "oak.exe" } else { "oak" });
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn replacing_the_executable_leaves_only_the_new_one() {
-        let dir = std::env::temp_dir().join(format!("oak-update-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-update-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join(if cfg!(windows) { "oak.exe" } else { "oak" });

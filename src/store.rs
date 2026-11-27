@@ -143,7 +143,7 @@ pub fn make_private() {
 pub fn conversations_dir() -> PathBuf {
     #[cfg(test)]
     {
-        let d = std::env::temp_dir().join(format!("oak-test-conversations-{}", std::process::id()));
+        let d = crate::temp_dir().join(format!("oak-test-conversations-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&d);
         d
     }
@@ -2779,7 +2779,7 @@ mod tests {
 
     #[test]
     fn atomic_writes_replace_whole_and_leave_nothing_behind() {
-        let d = std::env::temp_dir().join(format!("oak-atomic-{}", std::process::id()));
+        let d = crate::temp_dir().join(format!("oak-atomic-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let p = d.join("settings.json");
         write_atomic(&p, b"old").unwrap();

@@ -497,7 +497,7 @@ mod tests {
                 Conversation {
                     id: source.clone(),
                     title: "Original".into(),
-                    folder: std::env::temp_dir(),
+                    folder: crate::temp_dir(),
                     ..Default::default()
                 },
                 ctx.clone(),
@@ -664,7 +664,7 @@ mod tests {
                 Conversation {
                     id: source.clone(),
                     title: "Original".into(),
-                    folder: std::env::temp_dir(),
+                    folder: crate::temp_dir(),
                     ..Default::default()
                 },
                 ctx.clone(),

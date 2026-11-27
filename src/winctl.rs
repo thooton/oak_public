@@ -1339,7 +1339,7 @@ mod tests {
             (GetForegroundWindow() as usize, p)
         };
         let before = here();
-        let dir = std::env::temp_dir().join("oak-winctl-test");
+        let dir = crate::temp_dir().join("oak-winctl-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("conversations")).unwrap();
         std::fs::write(dir.join("auth.json"), r#"{"type":"api_key","key":"not-a-real-key"}"#).unwrap();

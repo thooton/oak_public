@@ -359,7 +359,7 @@ fn find_in_a_conversation() {
     let filler: String = (0..60).map(|i| format!("Paragraph {i} of filler.\n\n")).collect();
     let conv = store::Conversation {
         id: format!("unit-test-find-{}", api::now_ms()),
-        folder: std::env::temp_dir(),
+        folder: crate::temp_dir(),
         messages: vec![
             json!({"role": "user", "content": [{"type": "text", "text": "Where is the Needle?"}]}),
             json!({"role": "assistant", "content": [{"type": "text", "text": format!("{filler}Here is a **needle** at last.")}]}),
@@ -429,7 +429,7 @@ fn cleared_tool_output_line_at_the_boundary() {
         messages.push(json!({"role": "user", "content": [{"type": "tool_result", "call_id": format!("t{i}"), "content": big}]}));
     }
     messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": "All rounds done."}]}));
-    let mut conv = store::Conversation { id: format!("unit-test-cleared-line-{}", api::now_ms()), folder: std::env::temp_dir(), messages: messages.into(), ..Default::default() };
+    let mut conv = store::Conversation { id: format!("unit-test-cleared-line-{}", api::now_ms()), folder: crate::temp_dir(), messages: messages.into(), ..Default::default() };
     let all = conv.messages.to_vec();
     assert!(conv.rolling.clear_cold(&all));
     let cleared = conv.rolling.cleared_calls(&all);

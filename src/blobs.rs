@@ -22,7 +22,7 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// (as `store::conversations_dir`).
 pub fn dir() -> PathBuf {
     #[cfg(test)]
-    let d = std::env::temp_dir().join(format!("oak-test-images-{}", std::process::id()));
+    let d = crate::temp_dir().join(format!("oak-test-images-{}", std::process::id()));
     #[cfg(not(test))]
     let d = crate::store::dir().join("images");
     static MADE: std::sync::Once = std::sync::Once::new();

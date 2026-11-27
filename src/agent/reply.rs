@@ -1257,7 +1257,7 @@ mod status_line {
     /// own calls (Quick's) are running from when they are made.
     #[test]
     fn the_status_line_follows_the_reply_and_its_calls() {
-        let dir = std::env::temp_dir().join(format!("oak-status-line-{}", api::now_ms()));
+        let dir = crate::temp_dir().join(format!("oak-status-line-{}", api::now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let (w, s) = idle_worker(
             "status-line",

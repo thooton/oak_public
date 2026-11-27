@@ -43,7 +43,7 @@ fn bench_tool_turnaround() {
     let mut folders = vec![];
     for r in 0..runs {
         for sc in env("OAK_TOOLBENCH_SCENARIOS", "exec,read,write,par4").split(',') {
-            let folder = std::env::temp_dir().join(format!("oak-toolbench-{}-{r}-{sc}", std::process::id()));
+            let folder = crate::temp_dir().join(format!("oak-toolbench-{}-{r}-{sc}", std::process::id()));
             std::fs::create_dir_all(&folder).unwrap();
             std::fs::write(folder.join("fixture.txt"), &filler).unwrap();
             folders.push(folder.clone());

@@ -39,7 +39,7 @@ pub(crate) fn long_conversation(id: &str, turns: usize) -> serde_json::Value {
 #[test]
 #[ignore]
 fn bench_frames() {
-    let dir = std::env::temp_dir().join(format!("oak-frame-bench-{}", std::process::id()));
+    let dir = crate::temp_dir().join(format!("oak-frame-bench-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("auth.json"), r#"{"type":"api_key","key":"not-a-real-key"}"#).unwrap();
@@ -256,7 +256,7 @@ fn bench_transcript_steps() {
 #[test]
 #[ignore]
 fn bench_streaming_reply() {
-    let dir = std::env::temp_dir().join(format!("oak-stream-bench-{}", std::process::id()));
+    let dir = crate::temp_dir().join(format!("oak-stream-bench-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("auth.json"), r#"{"type":"api_key","key":"not-a-real-key"}"#).unwrap();

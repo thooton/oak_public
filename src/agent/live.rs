@@ -15,7 +15,7 @@ fn live_images() {
         ColorImage::from_rgba_unmultiplied([64, 64], &px)
     };
     let model = api::latest_models().unwrap().into_iter().find(|m| m.id.contains("sonnet")).expect("a Sonnet model").id;
-    let folder = std::env::temp_dir().join("oak-live-images");
+    let folder = crate::temp_dir().join("oak-live-images");
     std::fs::create_dir_all(&folder).unwrap();
     let blue = crate::images::from_color_image(&square([20, 60, 230])).unwrap();
     std::fs::write(folder.join("square.png"), base64::engine::general_purpose::STANDARD.decode(&blue.data).unwrap()).unwrap();
@@ -62,7 +62,7 @@ fn live_agents() {
     assert!(api::load_auth(), "sign in to Oak first");
     let model = api::latest_models().unwrap().into_iter().find(|m| m.id.contains("haiku")).expect("a Haiku model").id;
     let id = format!("live-agents-{}", api::now_ms());
-    let folder = std::env::temp_dir().join(&id);
+    let folder = crate::temp_dir().join(&id);
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("secret.txt"), "The password is: periwinkle-42\n").unwrap();
     let conv = Conversation { id: id.clone(), folder: folder.clone(), model, effort: "low".into(), ..Default::default() };
@@ -136,7 +136,7 @@ fn live_openrouter() {
                 let mut ok = 0;
                 for run in 0..runs {
                     let id = format!("live-or-{}-{run}-{}", model.replace(['/', ':', '.'], "-"), api::now_ms());
-                    let folder = std::env::temp_dir().join(&id);
+                    let folder = crate::temp_dir().join(&id);
                     std::fs::create_dir_all(&folder).unwrap();
                     let nums: Vec<u64> = (0..12).map(|i| (i * 37 + run as u64 * 11) % 97 + 3).collect();
                     let sum: u64 = nums.iter().sum();
@@ -223,7 +223,7 @@ fn live_freebuff() {
     let id = format!("live-freebuff-{}", api::now_ms());
     let conv = Conversation {
         id: id.clone(),
-        folder: std::env::var("OAK_TEST_FOLDER").map(Into::into).unwrap_or_else(|_| std::env::temp_dir()),
+        folder: std::env::var("OAK_TEST_FOLDER").map(Into::into).unwrap_or_else(|_| crate::temp_dir()),
         model: "deepseek/deepseek-v4-flash".into(),
         effort: "low".into(),
         ..Default::default()

@@ -97,7 +97,7 @@ static RUNS: AtomicUsize = AtomicUsize::new(0);
 pub fn run(command: &str, folder: &Path, timeout: Duration, wanted: impl Fn() -> bool) -> Option<Result<Reading, String>> {
     // Stderr goes to a file of its own, so the last line is stdout's.
     let n = RUNS.fetch_add(1, Ordering::SeqCst);
-    let err = std::env::temp_dir().join(format!("oak-meter-{}-{n}.err", std::process::id()));
+    let err = crate::temp_dir().join(format!("oak-meter-{}-{n}.err", std::process::id()));
     let quoted = format!("'{}'", err.display().to_string().replace('\\', "/").replace('\'', r"'\''"));
     let p = match crate::tasks::spawn(&format!("{{\n{command}\n}} 2>{quoted}"), folder) {
         Ok(p) => p,

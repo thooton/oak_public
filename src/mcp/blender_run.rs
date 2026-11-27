@@ -503,7 +503,7 @@ fn launch(owner: &str, port: u16, settings: PathBuf, file: Option<PathBuf>, exe:
 /// A picture of the window of the Blender Oak runs on `port`, as Blender
 /// draws it (None: it didn't answer within a few seconds).
 pub fn window_frame(port: u16) -> Option<image::RgbaImage> {
-    let path = std::env::temp_dir().join(format!("oak-blender-window-{port}-{}.png", std::process::id()));
+    let path = crate::temp_dir().join(format!("oak-blender-window-{port}-{}.png", std::process::id()));
     super::blender::send_to(port, "window_frame", json!({"path": path.to_string_lossy()}), std::time::Duration::from_secs(5)).ok()?;
     let img = image::open(&path).ok()?.to_rgba8();
     let _ = std::fs::remove_file(&path);

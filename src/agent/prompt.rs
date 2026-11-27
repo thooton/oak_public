@@ -249,7 +249,7 @@ pub(crate) fn scratchpad(c: &mut Conversation) -> PathBuf {
         std::fs::create_dir_all(root.join(&c.scratch))
     };
     if made.is_err() {
-        let fallback = std::env::temp_dir().join("oak").join(&c.id);
+        let fallback = crate::temp_dir().join("oak").join(&c.id);
         let _ = std::fs::create_dir_all(&fallback);
         return fallback;
     }

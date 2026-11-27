@@ -1217,7 +1217,7 @@ mod tests {
 
     #[test]
     fn the_last_line_is_what_a_carriage_return_left() {
-        let dir = std::env::temp_dir().join(format!("oak-tray-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-tray-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("t.log");
         std::fs::write(&log, "first\nCompiling 1/3\rCompiling 2/3\rCompiling 3/3\n\n  \n").unwrap();
@@ -1243,7 +1243,7 @@ mod tests {
     #[test]
     #[ignore]
     fn snapshot() {
-        let out = std::env::var("OAK_TRAY_SNAPSHOT").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+        let out = std::env::var("OAK_TRAY_SNAPSHOT").map(PathBuf::from).unwrap_or_else(|_| crate::temp_dir());
         for (n, size) in [(3, 16u32), (12, 16), (3, 24), (12, 24), (12, 32)] {
             let px = number_pixels(n, size, 0xffffff);
             let mut rgba = vec![];

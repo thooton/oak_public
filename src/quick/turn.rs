@@ -1149,7 +1149,8 @@ fn pump(
             PollFrame::Frame(f) => f,
             PollFrame::Idle => continue,
             PollFrame::Closed => {
-                return Err("Quick closed the connection before completing the reply.".into());
+                let why = sock.close_reason().map(|r| format!(" ({r})")).unwrap_or_default();
+                return Err(format!("Quick closed the connection before completing the reply{why}."));
             }
         };
         // Messages typed meanwhile go between Quick's frames: Quick takes
@@ -3056,7 +3057,7 @@ mod tests {
     /// one by name and by path's tail.
     #[test]
     fn file_matches_finds_what_is_there() {
-        let dir = std::env::temp_dir().join(format!("oak-quick-matches-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-quick-matches-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src/quick")).unwrap();
         std::fs::write(dir.join("src/quick/turn.rs"), b"x").unwrap();
@@ -3245,7 +3246,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_snippet_opens_no_console_window() {
-        let dir = std::env::temp_dir().join(format!("oak-quick-console-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-quick-console-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let code = "import ctypes, subprocess, sys\nk, u = ctypes.windll.kernel32, ctypes.windll.user32\nw = k.GetConsoleWindow()\nprint('shown' if w and u.IsWindowVisible(w) else 'hidden')\nprint(subprocess.run([sys.executable, '-c', 'print(42)'], capture_output=True, text=True).stdout.strip())";
         let out = run_python(&json!({"code": code}), &dir);
@@ -3266,7 +3267,7 @@ mod tests {
     /// size as a number.
     #[test]
     fn a_real_folder_is_listed() {
-        let dir = std::env::temp_dir().join(format!("oak-quick-ls-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-quick-ls-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.txt"), b"hello").unwrap();
@@ -3336,7 +3337,7 @@ mod tests {
             timeout_of(&json!({"timeout": 1_000_000}), 120),
             crate::tools::EXECUTE_TIMEOUT_MAX
         );
-        let dir = std::env::temp_dir().join(format!("oak-quick-timeout-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-quick-timeout-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // (Printed first, and with time to spare: Python can take seconds to
         // start on a busy machine, CI's included.)
@@ -3375,7 +3376,7 @@ mod tests {
     /// the paths the call names. Its `fdfind` reads fd's arguments.
     #[test]
     fn search_tools_run_oaks_ripgrep() {
-        let dir = std::env::temp_dir().join(format!("oak-quick-rg-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-quick-rg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("other")).unwrap();
@@ -3431,7 +3432,7 @@ mod tests {
 
     #[test]
     fn a_running_tool_stops_at_once_on_interrupt_or_ultrapause() {
-        let dir = std::env::temp_dir().join(format!("oak-quick-abort-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-quick-abort-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for (kind, expected) in [
             (StopKind::Interrupt, "the user interrupted the turn"),
@@ -3478,7 +3479,7 @@ mod tests {
     /// run here, at once, a file's in order, and Quick gets each result.
     #[test]
     fn a_snippet_runs_oaks_calls_here_when_no_agent_reads_the_turn() {
-        let dir = std::env::temp_dir().join(format!("oak-quick-snippet-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-quick-snippet-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let code = "WRITE(path='a.txt', content='one\\ntwo\\n')\nREAD(path='a.txt')\nREAD('missing.txt')";
         let out = run_tool("run_python_outpost_local", &json!({"code": code}), &dir).unwrap();

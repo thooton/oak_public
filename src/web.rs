@@ -399,7 +399,7 @@ fn playwright() -> Option<PathBuf> {
 /// it printed. `shot` is the screenshot file it should write, if any.
 fn chrome(extra: &[String], url: &str, shot: Option<&Path>) -> Result<Vec<u8>, String> {
     let exe = browser().ok_or("No Chrome found (looked for Chrome, Chromium, Brave and Edge).")?;
-    let profile = std::env::temp_dir().join(format!("oak-chrome-{}-{}", std::process::id(), crate::api::now_ms()));
+    let profile = crate::temp_dir().join(format!("oak-chrome-{}-{}", std::process::id(), crate::api::now_ms()));
     let mut cmd = Command::new(&exe);
     crate::oom::isolate(&mut cmd);
     cmd.args([
@@ -461,7 +461,7 @@ pub fn screenshot(input: &Value, save: Option<PathBuf>) -> Result<Vec<Value>, St
     let w = input["width"].as_u64().unwrap_or(1280).clamp(320, 3840);
     let h = input["height"].as_u64().unwrap_or(800).clamp(200, 8000);
     let wait = input["wait_ms"].as_u64().unwrap_or(2000).min(20_000);
-    let file = std::env::temp_dir().join(format!("oak-shot-{}-{}.png", std::process::id(), crate::api::now_ms()));
+    let file = crate::temp_dir().join(format!("oak-shot-{}-{}.png", std::process::id(), crate::api::now_ms()));
     let args = [format!("--window-size={w},{h}"), format!("--virtual-time-budget={wait}"), format!("--screenshot={}", file.display())];
     chrome(&args, url, Some(&file))?;
     let result = crate::images::read_for_model(&file);

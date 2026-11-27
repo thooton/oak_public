@@ -82,7 +82,7 @@ static SWARMS: LazyLock<Mutex<HashMap<String, Arc<Mutex<Swarm>>>>> = LazyLock::n
 /// run's own, as their conversations are (`store::conversations_dir`).
 fn dir(id: &str) -> PathBuf {
     #[cfg(test)]
-    let root = std::env::temp_dir().join(format!("oak-test-swarms-{}", std::process::id()));
+    let root = crate::temp_dir().join(format!("oak-test-swarms-{}", std::process::id()));
     #[cfg(not(test))]
     let root = crate::store::dir().join("swarms");
     root.join(id)

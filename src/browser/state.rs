@@ -1237,7 +1237,7 @@ mod tests {
         }
         let port = serve();
         let site = format!("http://127.0.0.1:{port}");
-        let dir = std::env::temp_dir().join(format!("oak-browser-state-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-browser-state-test-{}", std::process::id()));
         let ctx = eframe::egui::Context::default();
         let conv = format!("state-test-{}", std::process::id());
         let profile = dir.join("profile");

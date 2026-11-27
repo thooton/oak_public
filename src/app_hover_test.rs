@@ -22,7 +22,7 @@ impl Headless {
     /// Starts the app in a scratch OAK folder named for `name`, signed in
     /// (with an API key), with the conversations `convs`; and the folder.
     pub(crate) fn start(name: &str, convs: &[serde_json::Value]) -> (std::path::PathBuf, Headless, App) {
-        let dir = std::env::temp_dir().join(format!("oak-{name}-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-{name}-test-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("conversations")).unwrap();
         std::fs::write(dir.join("auth.json"), r#"{"type":"api_key","key":"not-a-real-key"}"#).unwrap();
         for c in convs {

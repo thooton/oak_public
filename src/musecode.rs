@@ -681,7 +681,7 @@ mod tests {
         // Requests through keys of their own (a file in a scratch folder),
         // the refused one first: it is set aside, and the good one takes
         // the conversation.
-        let dir = std::env::temp_dir().join(format!("oak-musecode-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-musecode-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file: &'static str = Box::leak(dir.join("keys.json").to_string_lossy().into_owned().into_boxed_str());
         let keys = provider::Keys::<Stats>::new(provider::KeyCfg { name: "Muse Code", kind: api::Provider::MuseCode, file, env: "OAK_MUSECODE_TEST_NO_KEY", vault: "musecode" });

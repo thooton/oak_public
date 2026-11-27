@@ -126,7 +126,7 @@ mod tests {
     /// changes nothing.
     #[test]
     fn prefs_are_kept_per_plugin() {
-        let dir = std::env::temp_dir().join(format!("oak-prefs-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-prefs-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("plugin-prefs.json");
         let mut s = Store::new(path.clone());

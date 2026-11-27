@@ -474,7 +474,7 @@ fn close_button(ui: &Ui, rect: egui::Rect, style: &ViewerStyle) -> bool {
 fn open_externally(block: &Value) {
     let Some(bytes) = crate::blobs::bytes_of(block) else { return };
     let ext = ext_of(block);
-    let path = std::env::temp_dir().join(format!("oak-image-{:x}.{ext}", crate::hash_of(&bytes)));
+    let path = crate::temp_dir().join(format!("oak-image-{:x}.{ext}", crate::hash_of(&bytes)));
     if std::fs::write(&path, &bytes).is_ok() {
         let _ = open::that(&path);
     }
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn image_copies_are_saved_noted_and_deleted() {
-        let dir = std::env::temp_dir().join(format!("oak-copies-test-{}", std::process::id()));
+        let dir = crate::temp_dir().join(format!("oak-copies-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let life = std::time::Duration::from_millis(300);
         let img = from_bytes(&png(4, 4)).unwrap().block();

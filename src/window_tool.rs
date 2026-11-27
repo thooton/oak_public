@@ -653,7 +653,7 @@ mod tests {
         use std::os::windows::process::CommandExt;
         let folder = std::env::current_dir().unwrap();
         let scratch = std::env::var_os("OAK_WINDOW_TEST_DIR").map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("oak-window-close-{}", std::process::id())));
+            .unwrap_or_else(|| crate::temp_dir().join(format!("oak-window-close-{}", std::process::id())));
         std::fs::create_dir_all(&scratch).unwrap();
         let python = std::env::var("OAK_TEST_PYTHON").unwrap_or_else(|_| {
             let out = std::process::Command::new("python").args(["-c", "import sys; print(sys.executable)"])
@@ -716,7 +716,7 @@ root.mainloop()
     #[test]
     #[ignore]
     fn drives_an_app() {
-        let scratch = std::env::temp_dir().join("oak-window-tool-test");
+        let scratch = crate::temp_dir().join("oak-window-tool-test");
         let folder = std::env::current_dir().unwrap();
         // current_exe is the test binary here: launch through the built Oak.
         let oak = folder.join("target/debug/oak.exe");
