@@ -4211,6 +4211,20 @@ fn request_messages(c: &Conversation, messages: &[Value]) -> Vec<Value> {
     )
 }
 
+/// The messages the latest request of `c` sent, rebuilt from its saved
+/// state as `request_body` builds them (`oak --transcript --sent`): the
+/// rolling view, the context block, the prefix's folds and its messages.
+/// Oak's own keys are still on them.
+pub(crate) fn sent_messages(c: &Conversation) -> Vec<Value> {
+    let (n, cut) = (c.messages.len(), c.rolling.base());
+    let mut messages = request_messages(c, &c.messages);
+    if let Some(mode) = crate::prefix::mode(c.provider(), &c.model) {
+        c.prefix.fold(&mut messages, cut, n);
+        messages = c.prefix.inject(mode, messages, cut, n);
+    }
+    messages
+}
+
 /// What a summary of the transcript before `cut` is sent: those messages
 /// exactly as the request that sent the first `n` (`n` > `cut`) gave them to
 /// the model (the summary in use, tool output cleared as it was there, the

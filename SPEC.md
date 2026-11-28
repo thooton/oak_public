@@ -66,6 +66,18 @@ rebuild is compiling the one `oak` crate.
 `oak --no-plugins` starts without any, `oak --mcp blender` serves Oak's Blender MCP server over
 stdio (for Claude Code, Codex or any MCP client) and exits when stdin closes.
 
+`oak --transcript` (`src/transcript_dump.rs`) is for debugging Oak: with no argument it lists the
+newest conversation files (id, size, title, model); given an id, a file or a unique part of a file
+name, it prints that conversation as readable text: every message and block (reasoning, tool
+calls with their inputs one key a line, results, pictures and documents as their names), Oak's
+own `_oak_` keys, and the transcript's lines with what was sent along with them. `--sent` prints
+what the latest request sent instead, rebuilt by the agent's own code (`agent::sent_messages`):
+the pinned system prompt and session memory, the tools, and the messages after the summary,
+clearing, context block and prefix messages, in the Oak format. `--json`, `--from`/`--to`,
+`--full` (blocks are otherwise cut at 3000 characters) and `--tools` (whole definitions) adjust
+it. It only reads the file, so it is safe on a running Oak's conversations; on Windows its output
+shows when piped or redirected (Git Bash does), as the app has no console of its own.
+
 Ignored tests, run with `cargo test [--release] <name> -- --ignored --nocapture`:
 
 - Benchmarks, at no cost: `bench_frames`, `bench_between_turns` (frames idle, scrolling and with

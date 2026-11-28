@@ -67,6 +67,7 @@ mod tasks;
 mod time;
 mod token_rate;
 mod toolbin;
+mod transcript_dump;
 mod tools;
 #[cfg(windows)]
 mod tray;
@@ -1114,6 +1115,10 @@ pub fn main() -> eframe::Result {
     if args.len() > 1 && args[1] == "--version" {
         println!("oak {} ({})", update::VERSION, update::COMMIT);
         return Ok(());
+    }
+    // A conversation file as readable text, for debugging Oak.
+    if args.len() > 1 && args[1] == "--transcript" {
+        std::process::exit(transcript_dump::main(&args[2..]));
     }
     #[cfg(windows)]
     if args.len() > 2 && args[1] == "--ctrl-c" {
